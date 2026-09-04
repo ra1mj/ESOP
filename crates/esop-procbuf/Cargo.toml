@@ -1,0 +1,15 @@
+[package]
+name = "esop-procbuf"
+version = "0.1.0"
+description = "Fixed-layout no-std real-time command and state buffer for ESOP"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "esop_procbuf"
+path = "src/lib.rs"
+
+[dev-dependencies]
+esop-lifecycle-guard = { path = "../esop-lifecycle-guard" }
+esop-profile-cia402 = { path = "../esop-profile-cia402" }

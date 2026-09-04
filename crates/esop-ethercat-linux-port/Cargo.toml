@@ -1,0 +1,17 @@
+[package]
+name = "esop-ethercat-linux-port"
+version = "0.1.0"
+description = "Linux AF_PACKET EtherCAT port for ESOP development and HIL"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+esop-ethercat-core = { path = "../esop-ethercat-core" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.189"
+
+[lib]
+name = "esop_ethercat_linux_port"
+path = "src/lib.rs"

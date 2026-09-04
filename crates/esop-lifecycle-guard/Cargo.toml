@@ -1,0 +1,15 @@
+[package]
+name = "esop-lifecycle-guard"
+version = "0.1.0"
+description = "Fail-closed motion lifecycle guard for ESOP"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+std = []
+
+[lib]
+name = "esop_lifecycle_guard"
+path = "src/lib.rs"

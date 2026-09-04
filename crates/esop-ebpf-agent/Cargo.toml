@@ -1,0 +1,17 @@
+[package]
+name = "esop-ebpf-agent"
+version = "0.1.0"
+description = "Bounded runtime evidence ABI and incident correlator for ESOP Linux observation"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+esop-lifecycle-guard = { path = "../esop-lifecycle-guard" }
+
+[lib]
+name = "esop_ebpf_agent"
+path = "src/lib.rs"

@@ -1,0 +1,14 @@
+[package]
+name = "esop-profile-cia402"
+version = "0.1.0"
+description = "Allocation-free CiA 402 drive profile state machine for ESOP"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+
+[lib]
+name = "esop_profile_cia402"
+path = "src/lib.rs"

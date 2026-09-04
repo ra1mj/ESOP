@@ -1,0 +1,15 @@
+[package]
+name = "esop-ethercat-core"
+version = "0.1.0"
+description = "Allocation-free EtherCAT frame and cycle core for ESOP"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+std = []
+
+[lib]
+name = "esop_ethercat_core"
+path = "src/lib.rs"

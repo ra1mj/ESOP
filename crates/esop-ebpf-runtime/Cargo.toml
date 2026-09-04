@@ -1,0 +1,15 @@
+[package]
+name = "esop-ebpf-runtime"
+version = "0.1.0"
+description = "Linux CO-RE eBPF loader and ring-buffer bridge for ESOP runtime evidence"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aya = "0.13.1"
+esop-ebpf-agent = { path = "../esop-ebpf-agent" }
+
+[lib]
+name = "esop_ebpf_runtime"
+path = "src/lib.rs"

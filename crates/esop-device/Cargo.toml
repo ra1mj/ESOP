@@ -1,0 +1,11 @@
+[package]
+name = "esop-device"
+version = "0.1.0"
+description = "Fixed-capacity device lifecycle contract for ESOP profiles and peripherals"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "esop_device"
+path = "src/lib.rs"
