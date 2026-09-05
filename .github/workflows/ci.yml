@@ -26,6 +26,9 @@ jobs:
       - name: Install eBPF build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang bpftool
+          sudo apt-get install -y clang linux-tools-common linux-tools-generic
+          bpftool_dir="$(dirname "$(find /usr/lib/linux-tools -type f -name bpftool -print -quit)")"
+          test -x "$bpftool_dir/bpftool"
+          echo "$bpftool_dir" >> "$GITHUB_PATH"
       - name: Build CO-RE BPF object
         run: make bpf
