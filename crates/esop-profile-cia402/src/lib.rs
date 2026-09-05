@@ -475,6 +475,27 @@ impl<const AXES: usize> Cia402AxisBank<AXES> {
         })
     }
 
+    /// Apply a configured stop request to every axis without a current
+    /// lifecycle permit. This keeps the stop decision outside the profile
+    /// while preventing a stale Enable request from reaching an axis.
+    pub fn step_with_stop(
+        &mut self,
+        statuswords: [u16; AXES],
+        requests: [DriveRequest; AXES],
+        motion_mask: u32,
+        stop_request: DriveRequest,
+    ) -> [Cia402Output; AXES] {
+        core::array::from_fn(|index| {
+            let permitted = index < 32 && motion_mask & (1u32 << index) != 0;
+            let request = if permitted {
+                requests[index]
+            } else {
+                stop_request
+            };
+            self.controllers[index].step(statuswords[index], request, permitted)
+        })
+    }
+
     pub const fn controller(&self, index: usize) -> Option<&Cia402Controller> {
         if index < AXES {
             Some(&self.controllers[index])
@@ -575,6 +596,20 @@ mod tests {
         assert!(outputs[0].motion_allowed);
         assert!(!outputs[1].motion_allowed);
         assert_eq!(outputs[1].controlword, CONTROLWORD_DISABLE_VOLTAGE);
+    }
+
+    #[test]
+    fn axis_bank_applies_stop_request_to_denied_axes() {
+        let mut bank = Cia402AxisBank::<2>::new();
+        let outputs = bank.step_with_stop(
+            [0x0027, 0x0027],
+            [DriveRequest::Enable, DriveRequest::Enable],
+            0b01,
+            DriveRequest::QuickStop,
+        );
+        assert_eq!(outputs[0].controlword, CONTROLWORD_ENABLE_OPERATION);
+        assert_eq!(outputs[1].controlword, CONTROLWORD_QUICK_STOP);
+        assert!(!outputs[1].motion_allowed);
     }
 
     #[test]
