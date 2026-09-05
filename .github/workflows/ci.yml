@@ -26,11 +26,9 @@ jobs:
       - name: Install eBPF build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang linux-tools-common linux-tools-generic
-          bpftool_path="$(find /usr/lib/linux-tools -type f -name bpftool -print -quit)"
-          test -n "$bpftool_path" || bpftool_path="$(command -v bpftool)"
-          test -x "$bpftool_path"
-          sudo ln -sf "$bpftool_path" /usr/local/bin/bpftool
-          /usr/local/bin/bpftool version
+          sudo apt-get install -y clang
       - name: Build CO-RE BPF object
-        run: make bpf
+        run: |
+          mkdir -p bpf/build
+          cp bpf/vmlinux.h bpf/build/vmlinux.h
+          make -C bpf
