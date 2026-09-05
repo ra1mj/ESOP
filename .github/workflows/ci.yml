@@ -27,9 +27,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang linux-tools-common linux-tools-generic
-          bpftool_path="$(command -v bpftool || find /usr/lib/linux-tools -name bpftool -print -quit)"
+          bpftool_path="$(find /usr/lib/linux-tools -type f -name bpftool -print -quit)"
+          test -n "$bpftool_path" || bpftool_path="$(command -v bpftool)"
           test -x "$bpftool_path"
-          bpftool_dir="$(dirname "$bpftool_path")"
-          echo "$bpftool_dir" >> "$GITHUB_PATH"
+          sudo ln -sf "$bpftool_path" /usr/local/bin/bpftool
+          /usr/local/bin/bpftool version
       - name: Build CO-RE BPF object
         run: make bpf
