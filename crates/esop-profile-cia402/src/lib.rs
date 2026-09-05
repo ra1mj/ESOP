@@ -446,6 +446,50 @@ impl Default for Cia402Controller {
     }
 }
 
+/// Fixed-capacity multi-axis wrapper for robot controllers. Each axis keeps
+/// its own PDS edge state while the caller supplies an explicit per-axis
+/// lifecycle permission mask.
+pub struct Cia402AxisBank<const AXES: usize> {
+    controllers: [Cia402Controller; AXES],
+}
+
+impl<const AXES: usize> Cia402AxisBank<AXES> {
+    pub const fn new() -> Self {
+        Self {
+            controllers: [const { Cia402Controller::new() }; AXES],
+        }
+    }
+
+    pub fn step(
+        &mut self,
+        statuswords: [u16; AXES],
+        requests: [DriveRequest; AXES],
+        motion_mask: u32,
+    ) -> [Cia402Output; AXES] {
+        core::array::from_fn(|index| {
+            self.controllers[index].step(
+                statuswords[index],
+                requests[index],
+                index < 32 && motion_mask & (1u32 << index) != 0,
+            )
+        })
+    }
+
+    pub const fn controller(&self, index: usize) -> Option<&Cia402Controller> {
+        if index < AXES {
+            Some(&self.controllers[index])
+        } else {
+            None
+        }
+    }
+}
+
+impl<const AXES: usize> Default for Cia402AxisBank<AXES> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 const fn enable_controlword(state: DriveState) -> u16 {
     match state {
         DriveState::SwitchOnDisabled => CONTROLWORD_SHUTDOWN,
@@ -518,6 +562,19 @@ mod tests {
         let output = controller.step(0x0027, DriveRequest::Enable, false);
         assert_eq!(output.controlword, CONTROLWORD_DISABLE_VOLTAGE);
         assert!(!output.motion_allowed);
+    }
+
+    #[test]
+    fn axis_bank_keeps_permissions_and_faults_independent() {
+        let mut bank = Cia402AxisBank::<2>::new();
+        let outputs = bank.step(
+            [0x0027, 0x0008],
+            [DriveRequest::Enable, DriveRequest::Enable],
+            0b01,
+        );
+        assert!(outputs[0].motion_allowed);
+        assert!(!outputs[1].motion_allowed);
+        assert_eq!(outputs[1].controlword, CONTROLWORD_DISABLE_VOLTAGE);
     }
 
     #[test]
