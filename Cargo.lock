@@ -115,6 +115,8 @@ name = "esop-ethercat-linux-port"
 version = "0.1.0"
 dependencies = [
  "esop-ethercat-core",
+ "esop-lifecycle-guard",
+ "esop-profile-cia402",
  "libc",
 ]
 
@@ -133,6 +135,9 @@ dependencies = [
 [[package]]
 name = "esop-profile-cia402"
 version = "0.1.0"
+dependencies = [
+ "esop-ethercat-core",
+]
 
 [[package]]
 name = "foldhash"

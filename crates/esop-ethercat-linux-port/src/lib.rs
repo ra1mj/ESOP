@@ -11,6 +11,7 @@ use std::time::Instant;
 
 mod sim;
 
+pub use sim::Cia402DriveSimulator;
 pub use sim::SimulatedPort;
 
 pub struct LinuxRawPort {

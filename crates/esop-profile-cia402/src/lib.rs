@@ -7,6 +7,12 @@
 //! The output is deliberately safe to apply every cycle: an unknown or
 //! invalid Statusword never produces an operation-enable Controlword.
 
+#[cfg(feature = "ethercat")]
+mod pdo;
+
+#[cfg(feature = "ethercat")]
+pub use pdo::*;
+
 pub const CONTROLWORD_DISABLE_VOLTAGE: u16 = 0x0000;
 pub const CONTROLWORD_SHUTDOWN: u16 = 0x0006;
 pub const CONTROLWORD_SWITCH_ON: u16 = 0x0007;

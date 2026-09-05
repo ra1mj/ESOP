@@ -8,6 +8,10 @@ rust-version.workspace = true
 
 [features]
 default = []
+ethercat = ["dep:esop-ethercat-core"]
+
+[dependencies]
+esop-ethercat-core = { path = "../esop-ethercat-core", optional = true }
 
 [lib]
 name = "esop_profile_cia402"

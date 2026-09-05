@@ -3,7 +3,12 @@ use esop_ethercat_core::{
     DatagramPlan, DmaDescriptorRing, DmaOwner, EthercatMaster, FramePlan, MasterConfig,
     NoopDmaCache, RxSlotState,
 };
-use esop_ethercat_linux_port::SimulatedPort;
+use esop_ethercat_linux_port::{Cia402DriveSimulator, SimulatedPort};
+use esop_lifecycle_guard::{GuardPolicy, LifecycleGuard, MotionPermit};
+use esop_profile_cia402::{
+    CONTROLWORD_ENABLE_OPERATION, Cia402MotionGate, Cia402PdoCommand, Cia402PdoField, Cia402PdoMap,
+    Cia402Target, OperatingMode,
+};
 
 #[test]
 fn public_simulator_runs_a_preplanned_multi_datagram_cycle() {
@@ -88,4 +93,130 @@ fn public_simulator_runs_the_dma_tx_hot_path() {
     ring.tx_complete(handle, &mut cache).unwrap();
     ring.tx_reclaim(handle).unwrap();
     assert_eq!(ring.tx_owner(handle), Ok(DmaOwner::Free));
+}
+
+#[test]
+fn cia402_drive_simulator_closes_the_cyclic_feedback_loop() {
+    let map = Cia402PdoMap::new()
+        .with_entry(
+            Cia402PdoField::Controlword,
+            entry(Cia402PdoField::Controlword, 0),
+        )
+        .with_entry(
+            Cia402PdoField::ModeOfOperation,
+            entry(Cia402PdoField::ModeOfOperation, 16),
+        )
+        .with_entry(
+            Cia402PdoField::TargetPosition,
+            entry(Cia402PdoField::TargetPosition, 24),
+        )
+        .with_entry(
+            Cia402PdoField::Statusword,
+            entry(Cia402PdoField::Statusword, 128),
+        )
+        .with_entry(
+            Cia402PdoField::ModeDisplay,
+            entry(Cia402PdoField::ModeDisplay, 144),
+        )
+        .with_entry(
+            Cia402PdoField::ErrorCode,
+            entry(Cia402PdoField::ErrorCode, 152),
+        )
+        .with_entry(
+            Cia402PdoField::ActualPosition,
+            entry(Cia402PdoField::ActualPosition, 168),
+        );
+    let mut drive = Cia402DriveSimulator::new(map);
+    let inputs = drive
+        .step(
+            Cia402PdoCommand {
+                controlword: CONTROLWORD_ENABLE_OPERATION,
+                mode: OperatingMode::Csp,
+                target: Cia402Target::Position(42),
+            },
+            Cia402MotionGate {
+                lifecycle_permit: true,
+                mode_confirmed: true,
+                operation_enabled: true,
+                setpoint_valid: true,
+            },
+        )
+        .unwrap();
+    assert_eq!(inputs.actual_position, Some(42));
+    assert_eq!(inputs.actual_mode, OperatingMode::Csp);
+    assert_eq!(inputs.statusword, 0x0027);
+}
+
+#[test]
+fn lifecycle_guard_denial_cannot_reach_cyclic_output() {
+    let map = Cia402PdoMap::new()
+        .with_entry(
+            Cia402PdoField::Controlword,
+            entry(Cia402PdoField::Controlword, 0),
+        )
+        .with_entry(
+            Cia402PdoField::ModeOfOperation,
+            entry(Cia402PdoField::ModeOfOperation, 16),
+        )
+        .with_entry(
+            Cia402PdoField::TargetPosition,
+            entry(Cia402PdoField::TargetPosition, 24),
+        )
+        .with_entry(
+            Cia402PdoField::Statusword,
+            entry(Cia402PdoField::Statusword, 128),
+        )
+        .with_entry(
+            Cia402PdoField::ModeDisplay,
+            entry(Cia402PdoField::ModeDisplay, 144),
+        )
+        .with_entry(
+            Cia402PdoField::ErrorCode,
+            entry(Cia402PdoField::ErrorCode, 152),
+        )
+        .with_entry(
+            Cia402PdoField::ActualPosition,
+            entry(Cia402PdoField::ActualPosition, 168),
+        );
+    let mut drive = Cia402DriveSimulator::new(map);
+    let mut guard = LifecycleGuard::new(0, 7, GuardPolicy::conservative());
+    guard
+        .accept_permit(
+            MotionPermit {
+                boot_id: 7,
+                permit_epoch: 1,
+                sequence: 1,
+                axis_mask: 1,
+                expires_at_ns: 100,
+            },
+            0,
+        )
+        .unwrap();
+    let command = Cia402PdoCommand {
+        controlword: CONTROLWORD_ENABLE_OPERATION,
+        mode: OperatingMode::Csp,
+        target: Cia402Target::Position(42),
+    };
+    assert_eq!(
+        drive.step_with_lifecycle(&mut guard, 1, 101, command),
+        Err(esop_profile_cia402::Cia402PdoError::MotionNotAllowed)
+    );
+}
+
+fn entry(field: Cia402PdoField, bit_offset: usize) -> esop_ethercat_core::PdoEntry {
+    let (bit_length, signed) = match field {
+        Cia402PdoField::Controlword | Cia402PdoField::Statusword | Cia402PdoField::ErrorCode => {
+            (16, false)
+        }
+        Cia402PdoField::ModeOfOperation | Cia402PdoField::ModeDisplay => (8, true),
+        _ => (32, true),
+    };
+    esop_ethercat_core::PdoEntry {
+        index: field.object_index(),
+        subindex: 0,
+        bit_offset,
+        bit_length,
+        signed,
+        direction: field.direction(),
+    }
 }

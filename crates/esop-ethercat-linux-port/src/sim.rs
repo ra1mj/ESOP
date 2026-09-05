@@ -12,6 +12,101 @@ use esop_ethercat_core::wire::{
 use esop_ethercat_core::{
     DmaTxHandle, EthercatDmaTxPort, EthercatPort, LinkState, PortError, RxPoll,
 };
+use esop_lifecycle_guard::{LifecycleAction, LifecycleGuard};
+use esop_profile_cia402::{
+    Cia402MotionGate, Cia402PdoCommand, Cia402PdoError, Cia402PdoField, Cia402PdoInputs,
+    Cia402PdoMap, Cia402Target,
+};
+
+/// Deterministic one-drive CiA 402 model for host-side cyclic integration.
+/// It uses the production PDO adapter and keeps its process image inline.
+#[derive(Debug)]
+pub struct Cia402DriveSimulator {
+    map: Cia402PdoMap,
+    image: [u8; 64],
+}
+
+impl Cia402DriveSimulator {
+    pub const fn new(map: Cia402PdoMap) -> Self {
+        Self {
+            map,
+            image: [0; 64],
+        }
+    }
+
+    pub const fn map(&self) -> Cia402PdoMap {
+        self.map
+    }
+
+    pub fn step(
+        &mut self,
+        command: Cia402PdoCommand,
+        gate: Cia402MotionGate,
+    ) -> Result<Cia402PdoInputs, Cia402PdoError> {
+        self.map.write_cyclic(&mut self.image, command, gate)?;
+        self.map
+            .entry(Cia402PdoField::Statusword)
+            .ok_or(Cia402PdoError::MissingField(Cia402PdoField::Statusword))?
+            .write_unsigned(&mut self.image, 0x0027)
+            .map_err(Cia402PdoError::Pdo)?;
+        self.map
+            .entry(Cia402PdoField::ModeDisplay)
+            .ok_or(Cia402PdoError::MissingField(Cia402PdoField::ModeDisplay))?
+            .write_signed(&mut self.image, command.mode.raw() as i64)
+            .map_err(Cia402PdoError::Pdo)?;
+        self.map
+            .entry(Cia402PdoField::ErrorCode)
+            .ok_or(Cia402PdoError::MissingField(Cia402PdoField::ErrorCode))?
+            .write_unsigned(&mut self.image, 0)
+            .map_err(Cia402PdoError::Pdo)?;
+        match command.target {
+            Cia402Target::Position(value) => {
+                self.write_actual_i32(Cia402PdoField::ActualPosition, value)?
+            }
+            Cia402Target::Velocity(value) => {
+                self.write_actual_i32(Cia402PdoField::ActualVelocity, value)?
+            }
+            Cia402Target::Torque(value) => self
+                .map
+                .entry(Cia402PdoField::ActualTorque)
+                .ok_or(Cia402PdoError::MissingField(Cia402PdoField::ActualTorque))?
+                .write_signed(&mut self.image, value as i64)
+                .map_err(Cia402PdoError::Pdo)?,
+        }
+        self.map.read_inputs_for(&self.image, command.mode)
+    }
+
+    /// Run the lifecycle decision and apply motion only when the guard grants
+    /// it in this exact cycle. Any stop or hold action is fail-closed.
+    pub fn step_with_lifecycle(
+        &mut self,
+        guard: &mut LifecycleGuard,
+        cycle: u64,
+        now_ns: u64,
+        command: Cia402PdoCommand,
+    ) -> Result<Cia402PdoInputs, Cia402PdoError> {
+        let action = guard.cycle(cycle, now_ns);
+        let gate = Cia402MotionGate {
+            lifecycle_permit: matches!(action, LifecycleAction::EnableAllowed),
+            mode_confirmed: true,
+            operation_enabled: true,
+            setpoint_valid: true,
+        };
+        self.step(command, gate)
+    }
+
+    fn write_actual_i32(
+        &mut self,
+        field: Cia402PdoField,
+        value: i32,
+    ) -> Result<(), Cia402PdoError> {
+        self.map
+            .entry(field)
+            .ok_or(Cia402PdoError::MissingField(field))?
+            .write_signed(&mut self.image, value as i64)
+            .map_err(Cia402PdoError::Pdo)
+    }
+}
 
 #[derive(Debug)]
 pub struct SimulatedPort {

@@ -34,6 +34,14 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
 - CiA 402 mode confirmation is not sufficient for motion: cyclic output must
   also require `OperationEnabled`, MLG permission, and a seeded/limited first
   setpoint.
+- Keep the CiA 402 EtherCAT adapter behind the profile `ethercat` feature and
+  reuse `esop_ethercat_core::PdoEntry` for bit access. Validate standard object
+  identity, direction, width, signedness, and overlap before activation; keep
+  control/mode handshaking separate from cyclic target writes.
+- A typed CiA 402 cyclic write must require all four motion gates
+  (lifecycle permit, confirmed mode, Operation Enabled, and valid setpoint) and
+  an Operation Enabled Controlword. Preflight every destination field before
+  mutating the caller-owned image so rejected writes are atomic.
 - Device lifecycle transitions must remain explicit and bounded. A faulted
   device cannot jump directly to `Active` or `Cyclic`; recovery must create a
   new generation and pass configuration phases again.
@@ -59,7 +67,9 @@ Run `make ci` before handing off a change. Run `make test-hil` when modifying
 the Linux port or simulator. New DMA behavior must cover ownership, cache
 ordering, stale handles, invalid lengths, error rollback, and at least one
 end-to-end simulator path. New eBPF ABI fields must have fixed-size decode and
-invalid-discriminant tests.
+invalid-discriminant tests. New CiA 402 PDO fields must have public API tests
+for all supported modes and a failure-path test proving the output image is
+unchanged.
 
 ## Code Review Checklist
 

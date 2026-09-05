@@ -23,11 +23,11 @@
 9. CiA 402 驱动状态机、CSP/CSV/CST、对象绑定、模式切换和故障策略。
 10. 配置生成器、诊断、恢复、HIL、性能资格和一致性声明管理。
 
-**当前状态：仓库已包含 Rust `no_std` EtherCAT 核心、Linux AF_PACKET 开发/HIL 端口、固定 SPSC ring、固定诊断事件环、控制请求闭环、单 Domain PDO 接收提交路径、扫描/SII/AL 基础状态机、SII SyncManager/RxPDO/TxPDO category 只读解析及事务式固定容量配置候选、SM/FMMU 写入读回配置 FSM、固定容量 CoE PDO assignment/mapping 写序列、独立生命周期守卫、Mailbox 轮询 FSM、有限预算重试与协议错帧恢复、可配置 Status Bit 轮询、CoE SDO expedited/segmented codec/事务 FSM、异步 CoE Emergency 固定事件环，以及 DC SYNC0/SYNC1 配置 FSM、FRMW reference-clock 周期同步槽和 offset/jitter 监测器。固定容量 `DomainRegistry` 已支持多 Domain/PDO/datagram、SII 字节对齐 segment 的 `LWR`/`LRD` 绑定、按 MTU 拆帧和原子激活。另有独立 `esop-profile-cia402` crate，已实现 Statusword FSA 解码、基础 Controlword 使能序列、生命周期拒绝和 Fault reset 单脉冲。仍未形成完整主站、完整 SII/ESI 自动发现、真实从站 PDO 互操作、DC 拓扑传播延迟/全从站运行时同步、CiA 402 模式/CSP-CSV-CST、MCU DMA 端口。**现有内容是架构与验收基线，不是 ETG 认证证据。
+**当前状态：仓库已包含 Rust `no_std` EtherCAT 核心、Linux AF_PACKET 开发/HIL 端口、固定 SPSC ring、固定诊断事件环、控制请求闭环、单 Domain PDO 接收提交路径、扫描/SII/AL 基础状态机、SII SyncManager/RxPDO/TxPDO category 只读解析及事务式固定容量配置候选、SM/FMMU 写入读回配置 FSM、固定容量 CoE PDO assignment/mapping 写序列、独立生命周期守卫、Mailbox 轮询 FSM、有限预算重试与协议错帧恢复、可配置 Status Bit 轮询、CoE SDO expedited/segmented codec/事务 FSM、异步 CoE Emergency 固定事件环，以及 DC SYNC0/SYNC1 配置 FSM、FRMW reference-clock 周期同步槽和 offset/jitter 监测器。固定容量 `DomainRegistry` 已支持多 Domain/PDO/datagram、SII 字节对齐 segment 的 `LWR`/`LRD` 绑定、按 MTU 拆帧和原子激活。另有独立 `esop-profile-cia402` crate，已实现 Statusword FSA 解码、基础 Controlword 使能序列、生命周期拒绝、Fault reset 单脉冲、CSP/CSV/CST 模式监督、标准周期 PDO typed raw binding 和四项运动门槛。仍未形成完整主站、完整 SII/ESI 自动发现、真实从站 PDO 互操作、DC 拓扑传播延迟/全从站运行时同步、厂商缩放/quirk、MCU DMA 端口和真实设备 HIL。**现有内容是架构与验收基线，不是 ETG 认证证据。
 
 ProcBuf 的固定 ABI、双页 Command/State 快照、Quality/Lifecycle/Runtime observation 和事件环已在 `esop-procbuf` crate 落地；它尚未替代 shared-memory/RPMsg/UDS IPC 或真实 MCU 端口。
 
-CiA 402 profile 已增加 CSP/CSV/CST 的模式切换监督、实际模式确认、Operation Enabled 门槛和周期设定值首目标/限幅守卫；完整 PDO 对象绑定、厂商 quirk 和真实驱动互操作仍需 HIL 证据，不能据此宣称三种模式已完成互操作资格。
+CiA 402 profile 已增加 CSP/CSV/CST 的模式切换监督、实际模式确认、Operation Enabled 门槛、周期设定值首目标/限幅守卫，以及复用核心 `PdoEntry` 的标准对象绑定/typed raw codec（通过 `ethercat` feature 启用）。完整 PDO 对象绑定的厂商 quirk、单位/缩放和真实驱动互操作仍需 HIL 证据，不能据此宣称三种模式已完成互操作资格。
 
 ## 2. 规范边界
 
@@ -487,7 +487,7 @@ absolute timer release
 | M0 | `esop_queue`、wire codec、arena、Linux simulation port、测试框架 | 部分实现：wire codec、调用方固定 arena、固定帧池、SPSC ring、Linux AF_PACKET port、固定容量确定性 `SimulatedPort`、通用 DMA descriptor ownership/cache 契约和测试基础已具备；STM32/HPMicro 具体 DMA 端口仍未实现 |
 | M1 | scan/SII/AL/SM/FMMU、单 Domain PDO、WKC、诊断 | 部分实现：scan/ESC、SII 身份读取、固定容量 EEPROM 分块读取、SyncManager/RxPDO/TxPDO category 只读解析、事务式固定容量配置候选、按 PDO 类别分段的多 SyncManager FMMU 逻辑地址分配、AL 单步转换、PDO 位域、SM/FMMU 校验与写入读回 FSM、固定容量 CoE PDO assignment/mapping 写序列、启动控制面闭环、单 Domain Frame Plan/WKC 提交、固定容量多 Domain/PDO/datagram 注册、SII segment datagram 绑定、MTU 拆帧与多速率激活编排、固定事件诊断和 Linux HIL 端口已具备；完整 SII/ESI 自动发现、真实从站 PDO 互操作和真实总线 HIL 未实现 |
 | M2 | Mailbox resilient/polling、CoE SDO/Emergency、DC | 部分实现：固定容量 Mailbox 发送/轮询 FSM、有限预算重试、协议/计数器/长度异常恢复、可配置 Status Bit 轮询、CoE SDO expedited/segmented upload/download、abort、Emergency payload 解码及固定事件环接入、DC SYNC0/SYNC1 配置 FSM、FRMW reference-clock 周期同步槽、offset/jitter 锁定监测和主站控制请求闭环已具备；Status Bit 的 ESI/SII 自动发现、DC 拓扑传播延迟/全从站运行时同步和真实从站互操作仍未实现 |
-| M3 | CiA 402 FSA、CSP/CSV/CST、两厂商驱动 HIL | 部分实现：独立 profile 已具备 Statusword FSA 解码、基础 Controlword 使能序列、生命周期拒绝、Fault reset 单脉冲、模式切换监督、实际模式确认、Operation Enabled 门槛和周期设定值首目标/限幅守卫；完整 PDO 对象绑定、厂商 quirk、三模式对象互操作和两厂商驱动 HIL 未实现 |
+| M3 | CiA 402 FSA、CSP/CSV/CST、两厂商驱动 HIL | 部分实现：独立 profile 已具备 Statusword FSA 解码、基础 Controlword 使能序列、生命周期拒绝、Fault reset 单脉冲、模式切换监督、实际模式确认、Operation Enabled 门槛、周期设定值首目标/限幅守卫，以及基于核心 `PdoEntry` 的标准 `0x6040/0x6060/0x6041/0x6061/0x603F` 与 CSP/CSV/CST 目标/实际值 typed binding；厂商 quirk、单位/缩放、三模式真实对象互操作和两厂商驱动 HIL 仍未实现 |
 | M4 | STM32/HPM port、500 us 资格、完整 capability manifest | 未实现 |
 | M5 | ETG 官方一致性/互操作流程、Class A 差距评估 | 未开始 |
 
