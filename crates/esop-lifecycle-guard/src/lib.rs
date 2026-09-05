@@ -74,6 +74,18 @@ pub struct GuardPolicy {
     pub stop_action: StopAction,
 }
 
+/// Cross-layer quality facts collected by the cycle owner. Each field is an
+/// observation only; the guard remains the sole authority for motion enable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CyclicQuality {
+    pub coe_ready: bool,
+    pub distributed_clock_locked: bool,
+    pub drive_ready: bool,
+    pub domain_valid: bool,
+    pub wkc_valid: bool,
+    pub cycle_within_budget: bool,
+}
+
 impl GuardPolicy {
     pub const fn conservative() -> Self {
         Self {
@@ -259,6 +271,27 @@ impl LifecycleGuard {
                 }
             }
         }
+    }
+
+    /// Project the cycle owner's quality snapshot into the corresponding
+    /// lifecycle gates using stable fault-code namespaces.
+    pub fn update_cyclic_quality(&mut self, quality: CyclicQuality, cycle: u64) {
+        self.update_gate(GateId::Configuration, quality.coe_ready, cycle, 0x434F_0001);
+        self.update_gate(
+            GateId::DistributedClock,
+            quality.distributed_clock_locked,
+            cycle,
+            0x4443_0001,
+        );
+        self.update_gate(GateId::Drive, quality.drive_ready, cycle, 0x4452_0001);
+        self.update_gate(GateId::Domain, quality.domain_valid, cycle, 0x444F_0001);
+        self.update_gate(GateId::Link, quality.wkc_valid, cycle, 0x574B_0001);
+        self.update_gate(
+            GateId::Budget,
+            quality.cycle_within_budget,
+            cycle,
+            0x4255_0001,
+        );
     }
 
     /// Accept one fixed-size Linux/eBPF observation heartbeat and project it
@@ -497,6 +530,59 @@ const fn host_observation_error_code(error: HostObservationError) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cyclic_quality_projects_runtime_gates() {
+        let required = GateId::Configuration.bit()
+            | GateId::DistributedClock.bit()
+            | GateId::Drive.bit()
+            | GateId::Domain.bit()
+            | GateId::Link.bit()
+            | GateId::Budget.bit();
+        let policy = GuardPolicy {
+            enter_good_cycles: 1,
+            exit_bad_cycles: 1,
+            max_age_cycles: 1,
+            stop_action: StopAction::QuickStop,
+        };
+        let mut guard = LifecycleGuard::new(required, 1, policy);
+        guard.update_cyclic_quality(
+            CyclicQuality {
+                coe_ready: true,
+                distributed_clock_locked: true,
+                drive_ready: true,
+                domain_valid: true,
+                wkc_valid: true,
+                cycle_within_budget: true,
+            },
+            1,
+        );
+        guard
+            .accept_permit(
+                MotionPermit {
+                    boot_id: 1,
+                    permit_epoch: 1,
+                    sequence: 1,
+                    axis_mask: 1,
+                    expires_at_ns: 100,
+                },
+                1,
+            )
+            .unwrap();
+        assert_eq!(guard.cycle(1, 1), LifecycleAction::Hold);
+        guard.update_cyclic_quality(
+            CyclicQuality {
+                coe_ready: true,
+                distributed_clock_locked: true,
+                drive_ready: true,
+                domain_valid: true,
+                wkc_valid: false,
+                cycle_within_budget: true,
+            },
+            2,
+        );
+        assert_eq!(guard.gate(GateId::Link).fault_code, 0x574B_0001);
+    }
 
     const POLICY: GuardPolicy = GuardPolicy {
         enter_good_cycles: 2,
