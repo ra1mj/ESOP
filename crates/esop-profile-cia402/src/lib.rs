@@ -490,7 +490,10 @@ impl<const AXES: usize> Cia402AxisBank<AXES> {
             let request = if permitted {
                 requests[index]
             } else {
-                stop_request
+                match stop_request {
+                    DriveRequest::QuickStop | DriveRequest::Disable => stop_request,
+                    DriveRequest::Enable | DriveRequest::FaultReset => DriveRequest::Disable,
+                }
             };
             self.controllers[index].step(statuswords[index], request, permitted)
         })
@@ -610,6 +613,19 @@ mod tests {
         assert_eq!(outputs[0].controlword, CONTROLWORD_ENABLE_OPERATION);
         assert_eq!(outputs[1].controlword, CONTROLWORD_QUICK_STOP);
         assert!(!outputs[1].motion_allowed);
+    }
+
+    #[test]
+    fn axis_bank_sanitizes_non_stop_request_for_denied_axis() {
+        let mut bank = Cia402AxisBank::<1>::new();
+        let output = bank.step_with_stop(
+            [0x0027],
+            [DriveRequest::Enable],
+            0,
+            DriveRequest::FaultReset,
+        )[0];
+        assert_eq!(output.controlword, CONTROLWORD_DISABLE_VOLTAGE);
+        assert!(!output.fault_reset_pulse);
     }
 
     #[test]
