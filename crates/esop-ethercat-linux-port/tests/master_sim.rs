@@ -184,6 +184,8 @@ fn cia402_drive_simulator_closes_the_cyclic_feedback_loop() {
     assert_eq!(fault.error_code, 0x2310);
     assert_eq!(fault.statusword, 0x0027);
     assert_eq!(drive.statusword(), 0x0027);
+    drive.clear_fault();
+    assert_eq!(drive.error_code(), 0);
 }
 
 #[test]

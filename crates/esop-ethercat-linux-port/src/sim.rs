@@ -69,6 +69,13 @@ impl Cia402DriveSimulator {
         self.error_code = error_code;
     }
 
+    /// Clear the simulated drive fault explicitly. This does not grant any
+    /// lifecycle permit; the caller must still complete the recovery flow.
+    pub fn clear_fault(&mut self) {
+        self.statusword = 0x0027;
+        self.error_code = 0;
+    }
+
     pub fn step(
         &mut self,
         command: Cia402PdoCommand,
