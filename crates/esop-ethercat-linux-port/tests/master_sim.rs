@@ -283,14 +283,37 @@ fn lifecycle_guard_denial_cannot_reach_cyclic_output() {
             0,
         )
         .unwrap();
+    guard
+        .request_rearm(
+            MotionPermit {
+                boot_id: 7,
+                permit_epoch: 1,
+                sequence: 2,
+                axis_mask: 1,
+                expires_at_ns: 100,
+            },
+            1,
+            1,
+        )
+        .unwrap();
     let command = Cia402PdoCommand {
         controlword: CONTROLWORD_ENABLE_OPERATION,
         mode: OperatingMode::Csp,
         target: Cia402Target::Position(42),
     };
+    drive
+        .step_with_lifecycle(&mut guard, 1, 1, command)
+        .unwrap();
+    drive
+        .step_with_lifecycle(&mut guard, 2, 101, command)
+        .unwrap();
     assert_eq!(
-        drive.step_with_lifecycle(&mut guard, 1, 101, command),
-        Err(esop_profile_cia402::Cia402PdoError::MotionNotAllowed)
+        drive
+            .map()
+            .entry(Cia402PdoField::Controlword)
+            .unwrap()
+            .read_unsigned(drive.process_image()),
+        Ok(esop_profile_cia402::CONTROLWORD_QUICK_STOP as u64)
     );
 }
 

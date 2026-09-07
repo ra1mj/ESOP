@@ -14,8 +14,9 @@ use esop_ethercat_core::{
 };
 use esop_lifecycle_guard::{LifecycleAction, LifecycleGuard};
 use esop_profile_cia402::{
-    Cia402MotionGate, Cia402PdoCommand, Cia402PdoError, Cia402PdoField, Cia402PdoInputs,
-    Cia402PdoMap, Cia402Target, DriveState, OperatingMode,
+    CONTROLWORD_DISABLE_VOLTAGE, CONTROLWORD_QUICK_STOP, Cia402MotionGate, Cia402PdoCommand,
+    Cia402PdoError, Cia402PdoField, Cia402PdoInputs, Cia402PdoMap, Cia402Target, DriveState,
+    OperatingMode,
 };
 
 /// Deterministic one-drive CiA 402 model for host-side cyclic integration.
@@ -119,13 +120,30 @@ impl Cia402DriveSimulator {
         command: Cia402PdoCommand,
     ) -> Result<Cia402PdoInputs, Cia402PdoError> {
         let action = guard.cycle(cycle, now_ns);
-        let gate = Cia402MotionGate {
-            lifecycle_permit: matches!(action, LifecycleAction::EnableAllowed),
-            mode_confirmed: true,
-            operation_enabled: true,
-            setpoint_valid: true,
-        };
-        self.step(command, gate)
+        match action {
+            LifecycleAction::EnableAllowed => self.step(
+                command,
+                Cia402MotionGate {
+                    lifecycle_permit: true,
+                    mode_confirmed: true,
+                    operation_enabled: true,
+                    setpoint_valid: true,
+                },
+            ),
+            LifecycleAction::Stop(esop_lifecycle_guard::StopAction::QuickStop) => {
+                self.map
+                    .write_control(&mut self.image, command.mode, CONTROLWORD_QUICK_STOP)?;
+                self.map.read_inputs_for(&self.image, command.mode)
+            }
+            LifecycleAction::Hold | LifecycleAction::Stop(_) | LifecycleAction::FaultLatched => {
+                self.map.write_control(
+                    &mut self.image,
+                    command.mode,
+                    CONTROLWORD_DISABLE_VOLTAGE,
+                )?;
+                self.map.read_inputs_for(&self.image, command.mode)
+            }
+        }
     }
 
     fn write_actual_i32(
