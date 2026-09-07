@@ -638,6 +638,50 @@ mod tests {
     }
 
     #[test]
+    fn stopped_motion_requires_explicit_rearm_and_new_permit() {
+        let mut guard = LifecycleGuard::new(
+            GateId::Link.bit(),
+            10,
+            GuardPolicy {
+                enter_good_cycles: 1,
+                exit_bad_cycles: 1,
+                max_age_cycles: 1,
+                stop_action: StopAction::QuickStop,
+            },
+        );
+        guard.update_gate(GateId::Link, true, 1, 0);
+        guard.accept_permit(permit(1, 100), 1).unwrap();
+        assert_eq!(
+            guard.request_rearm(permit(2, 100), 1, 1),
+            Ok(LifecycleAction::EnableAllowed)
+        );
+        guard.update_gate(GateId::Link, false, 2, 0xCAFE);
+        assert_eq!(
+            guard.cycle(2, 2),
+            LifecycleAction::Stop(StopAction::QuickStop)
+        );
+        guard.update_gate(GateId::Link, true, 3, 0);
+        assert_eq!(
+            guard.cycle(3, 3),
+            LifecycleAction::Stop(StopAction::QuickStop)
+        );
+        assert_eq!(guard.acknowledge_stopped(3), Ok(()));
+        assert_eq!(guard.cycle(4, 4), LifecycleAction::Hold);
+        assert_eq!(
+            guard.request_rearm(
+                MotionPermit {
+                    permit_epoch: 2,
+                    ..permit(3, 100)
+                },
+                4,
+                4,
+            ),
+            Ok(LifecycleAction::EnableAllowed)
+        );
+        assert_eq!(guard.cycle(4, 4), LifecycleAction::EnableAllowed);
+    }
+
+    #[test]
     fn active_guard_stops_after_bad_window_and_never_auto_rearms() {
         let mut guard = LifecycleGuard::new(GateId::Link.bit(), 10, POLICY);
         guard.update_gate(GateId::Link, true, 1, 0);
