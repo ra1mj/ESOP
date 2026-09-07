@@ -2,7 +2,7 @@
 
 - 文档版本：1.0
 - 日期：2026-09-03
-- 状态：设计基线；HostObservation 运行时契约已实现
+- 状态：设计基线；HostObservation、固定转换审计和 ProcBuf lifecycle history 已实现
 - 上游需求：[ESOP 软件产品需求文档](esop-software-prd.md) FR-039 至 FR-046、NFR-017
 
 ## 1. 目的与安全边界
@@ -240,6 +240,7 @@ ProcBuf 应包含固定大小的 lifecycle 区域：
 | `permit_epoch` / `permit_expiry_ns` | RT snapshot | 已绑定 permit 的审计摘要。 |
 | `stop_action_requested` / `stop_action_observed` | RT | 每轴或设备组停止请求与结果。 |
 | `transition_seq` / `transition_time_ns` | RT | 用于事件与状态的因果关联。 |
+| `transition_history[]` | RT State page | 固定容量、按时间顺序的最近状态转换、周期时间和故障码。 |
 
 所有固定事件记录必须带 lifecycle state、gate/fault code、axis/device、transition sequence 和 monotonic timestamp。
 

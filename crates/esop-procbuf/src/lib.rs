@@ -402,6 +402,7 @@ pub struct LifecycleSummary {
     pub first_blocking_code: u32,
     pub latched_fault_code: u32,
     pub transition_sequence: u64,
+    pub transition_time_ns: u64,
     pub recovery_count: u64,
 }
 
@@ -416,8 +417,83 @@ impl LifecycleSummary {
         first_blocking_code: 0,
         latched_fault_code: 0,
         transition_sequence: 0,
+        transition_time_ns: 0,
         recovery_count: 0,
     };
+}
+
+pub const LIFECYCLE_HISTORY_CAPACITY: usize = 8;
+
+/// Raw lifecycle transition record embedded in a ProcBuf state snapshot.
+/// State values use the MLG `LifecycleState` discriminants without coupling
+/// this ABI crate to the lifecycle guard implementation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct LifecycleTransitionRecord {
+    pub sequence: u64,
+    pub timestamp_ns: u64,
+    pub from_state: u8,
+    pub to_state: u8,
+    pub reserved: u16,
+    pub fault_code: u32,
+}
+
+impl LifecycleTransitionRecord {
+    pub const EMPTY: Self = Self {
+        sequence: 0,
+        timestamp_ns: 0,
+        from_state: 0,
+        to_state: 0,
+        reserved: 0,
+        fault_code: 0,
+    };
+}
+
+/// Fixed-capacity chronological history carried by each State page.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct LifecycleHistory {
+    records: [LifecycleTransitionRecord; LIFECYCLE_HISTORY_CAPACITY],
+    head: u8,
+    count: u8,
+    reserved: [u8; 6],
+}
+
+impl LifecycleHistory {
+    pub const EMPTY: Self = Self {
+        records: [LifecycleTransitionRecord::EMPTY; LIFECYCLE_HISTORY_CAPACITY],
+        head: 0,
+        count: 0,
+        reserved: [0; 6],
+    };
+
+    pub fn push(&mut self, record: LifecycleTransitionRecord) {
+        let index = self.head as usize;
+        self.records[index] = record;
+        self.head = ((index + 1) % LIFECYCLE_HISTORY_CAPACITY) as u8;
+        self.count = self
+            .count
+            .saturating_add(1)
+            .min(LIFECYCLE_HISTORY_CAPACITY as u8);
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count as usize
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Return records from oldest to newest, hiding the circular storage.
+    pub fn get(&self, index: usize) -> Option<LifecycleTransitionRecord> {
+        if index >= self.len() {
+            return None;
+        }
+        let oldest = (self.head as usize + LIFECYCLE_HISTORY_CAPACITY - self.len())
+            % LIFECYCLE_HISTORY_CAPACITY;
+        Some(self.records[(oldest + index) % LIFECYCLE_HISTORY_CAPACITY])
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -457,6 +533,7 @@ pub struct StatePage<const AXES: usize, const IO: usize, const DOMAINS: usize> {
     pub io: [IoState; IO],
     pub quality: QualityPage<DOMAINS>,
     pub lifecycle: LifecycleSummary,
+    pub lifecycle_history: LifecycleHistory,
     pub runtime_observation: RuntimeObservation,
 }
 
@@ -471,6 +548,7 @@ impl<const AXES: usize, const IO: usize, const DOMAINS: usize> StatePage<AXES, I
             io: [IoState::EMPTY; IO],
             quality: QualityPage::new(),
             lifecycle: LifecycleSummary::EMPTY,
+            lifecycle_history: LifecycleHistory::EMPTY,
             runtime_observation: RuntimeObservation::EMPTY,
         }
     }
@@ -934,11 +1012,34 @@ mod tests {
         state.monotonic_time_ns = 1234;
         state.quality.link_up = 1;
         state.quality.domains[0].expected_wkc = 4;
+        state.lifecycle.transition_sequence = 3;
+        state.lifecycle.transition_time_ns = 3_000;
+        state.lifecycle_history.push(LifecycleTransitionRecord {
+            sequence: 3,
+            timestamp_ns: 3_000,
+            from_state: 2,
+            to_state: 3,
+            reserved: 0,
+            fault_code: 0xCAFE,
+        });
         assert_eq!(buffer.publish_state(state), Ok(1));
         let snapshot = buffer.read_state().unwrap();
         assert_eq!(snapshot.publish_sequence, 1);
         assert_eq!(snapshot.state.sequence, 11);
         assert_eq!(snapshot.state.quality.domains[0].expected_wkc, 4);
+        assert_eq!(snapshot.state.lifecycle.transition_sequence, 3);
+        assert_eq!(snapshot.state.lifecycle.transition_time_ns, 3_000);
+        assert_eq!(
+            snapshot.state.lifecycle_history.get(0),
+            Some(LifecycleTransitionRecord {
+                sequence: 3,
+                timestamp_ns: 3_000,
+                from_state: 2,
+                to_state: 3,
+                reserved: 0,
+                fault_code: 0xCAFE,
+            })
+        );
         assert_eq!(
             buffer.publish_state(StatePage::new(8)),
             Err(StatePublishError::BootMismatch)
@@ -947,6 +1048,33 @@ mod tests {
             buffer.publish_state(StatePage::new(9)),
             Err(StatePublishError::ZeroSequence)
         );
+    }
+
+    #[test]
+    fn lifecycle_history_is_bounded_and_chronological() {
+        let mut history = LifecycleHistory::EMPTY;
+        for sequence in 1..=(LIFECYCLE_HISTORY_CAPACITY as u64 + 2) {
+            history.push(LifecycleTransitionRecord {
+                sequence,
+                timestamp_ns: sequence * 10,
+                from_state: 1,
+                to_state: 2,
+                reserved: 0,
+                fault_code: sequence as u32,
+            });
+        }
+
+        assert!(!history.is_empty());
+        assert_eq!(history.len(), LIFECYCLE_HISTORY_CAPACITY);
+        assert_eq!(history.get(0).unwrap().sequence, 3);
+        assert_eq!(
+            history
+                .get(LIFECYCLE_HISTORY_CAPACITY - 1)
+                .unwrap()
+                .sequence,
+            10
+        );
+        assert_eq!(history.get(LIFECYCLE_HISTORY_CAPACITY), None);
     }
 
     #[test]

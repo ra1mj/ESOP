@@ -1,6 +1,7 @@
 #![no_std]
 
 pub const MAX_GATES: usize = 16;
+pub const MAX_TRANSITIONS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -125,6 +126,32 @@ pub enum LifecycleState {
     Maintenance = 5,
 }
 
+/// A fixed-size audit record for one lifecycle state transition.
+///
+/// Records are returned in chronological order by [`LifecycleGuard::transition_at`].
+/// `cycle` is the RT cycle sequence, which is the guard's monotonic time base.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct LifecycleTransition {
+    pub sequence: u64,
+    pub cycle: u64,
+    pub from: LifecycleState,
+    pub to: LifecycleState,
+    pub fault_code: u32,
+    pub reserved: u32,
+}
+
+impl LifecycleTransition {
+    pub const EMPTY: Self = Self {
+        sequence: 0,
+        cycle: 0,
+        from: LifecycleState::Qualifying,
+        to: LifecycleState::Qualifying,
+        fault_code: 0,
+        reserved: 0,
+    };
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecycleAction {
     Hold,
@@ -190,6 +217,10 @@ pub struct LifecycleGuard {
     state: LifecycleState,
     state_since_cycle: u64,
     first_fault_code: u32,
+    transitions: [LifecycleTransition; MAX_TRANSITIONS],
+    transition_head: usize,
+    transition_count: usize,
+    transition_sequence: u64,
     host_observation: Option<HostObservation>,
     host_observation_epoch: u64,
     host_heartbeat_seq: u64,
@@ -208,6 +239,10 @@ impl LifecycleGuard {
             state: LifecycleState::Qualifying,
             state_since_cycle: 0,
             first_fault_code: 0,
+            transitions: [LifecycleTransition::EMPTY; MAX_TRANSITIONS],
+            transition_head: 0,
+            transition_count: 0,
+            transition_sequence: 0,
             host_observation: None,
             host_observation_epoch: 0,
             host_heartbeat_seq: 0,
@@ -228,6 +263,24 @@ impl LifecycleGuard {
 
     pub const fn first_fault_code(&self) -> u32 {
         self.first_fault_code
+    }
+
+    pub const fn transition_sequence(&self) -> u64 {
+        self.transition_sequence
+    }
+
+    pub const fn transition_count(&self) -> usize {
+        self.transition_count
+    }
+
+    /// Return a transition from oldest to newest, without exposing ring slots.
+    pub fn transition_at(&self, index: usize) -> Option<LifecycleTransition> {
+        if index >= self.transition_count {
+            return None;
+        }
+        let oldest =
+            (self.transition_head + MAX_TRANSITIONS - self.transition_count) % MAX_TRANSITIONS;
+        Some(self.transitions[(oldest + index) % MAX_TRANSITIONS])
     }
 
     pub const fn host_observation(&self) -> Option<HostObservation> {
@@ -401,8 +454,9 @@ impl LifecycleGuard {
         if self.state != LifecycleState::FaultLatched {
             return Err(LifecycleError::InvalidState);
         }
+        let fault_code = self.first_fault_code;
         self.first_fault_code = 0;
-        self.transition(LifecycleState::Qualifying, cycle);
+        self.transition_with_fault(LifecycleState::Qualifying, cycle, fault_code);
         Ok(())
     }
 
@@ -496,9 +550,26 @@ impl LifecycleGuard {
     }
 
     fn transition(&mut self, state: LifecycleState, cycle: u64) {
+        self.transition_with_fault(state, cycle, self.first_fault_code);
+    }
+
+    fn transition_with_fault(&mut self, state: LifecycleState, cycle: u64, fault_code: u32) {
         if self.state != state {
+            let sequence = self.transition_sequence.saturating_add(1);
+            let previous = self.state;
             self.state = state;
             self.state_since_cycle = cycle;
+            self.transition_sequence = sequence;
+            self.transitions[self.transition_head] = LifecycleTransition {
+                sequence,
+                cycle,
+                from: previous,
+                to: state,
+                fault_code,
+                reserved: 0,
+            };
+            self.transition_head = (self.transition_head + 1) % MAX_TRANSITIONS;
+            self.transition_count = (self.transition_count + 1).min(MAX_TRANSITIONS);
         }
     }
 
@@ -679,6 +750,84 @@ mod tests {
             Ok(LifecycleAction::EnableAllowed)
         );
         assert_eq!(guard.cycle(4, 4), LifecycleAction::EnableAllowed);
+    }
+
+    #[test]
+    fn transition_history_captures_order_and_fault_reason() {
+        let mut guard = LifecycleGuard::new(
+            GateId::Link.bit(),
+            10,
+            GuardPolicy {
+                enter_good_cycles: 1,
+                exit_bad_cycles: 1,
+                max_age_cycles: 1,
+                stop_action: StopAction::QuickStop,
+            },
+        );
+        guard.update_gate(GateId::Link, true, 1, 0);
+        guard.accept_permit(permit(1, 100), 1).unwrap();
+        assert_eq!(guard.cycle(1, 1), LifecycleAction::Hold);
+        assert_eq!(
+            guard.request_rearm(permit(2, 100), 1, 1),
+            Ok(LifecycleAction::EnableAllowed)
+        );
+
+        guard.update_gate(GateId::Link, false, 2, 0xCAFE);
+        assert_eq!(
+            guard.cycle(2, 2),
+            LifecycleAction::Stop(StopAction::QuickStop)
+        );
+
+        assert_eq!(guard.transition_sequence(), 3);
+        assert_eq!(guard.transition_count(), 3);
+        assert_eq!(
+            guard.transition_at(0),
+            Some(LifecycleTransition {
+                sequence: 1,
+                cycle: 1,
+                from: LifecycleState::Qualifying,
+                to: LifecycleState::Ready,
+                fault_code: 0,
+                reserved: 0,
+            })
+        );
+        assert_eq!(
+            guard.transition_at(1).map(|transition| transition.to),
+            Some(LifecycleState::Active)
+        );
+        assert_eq!(
+            guard.transition_at(2),
+            Some(LifecycleTransition {
+                sequence: 3,
+                cycle: 2,
+                from: LifecycleState::Active,
+                to: LifecycleState::Stopping,
+                fault_code: 0xCAFE,
+                reserved: 0,
+            })
+        );
+        assert_eq!(guard.transition_at(3), None);
+    }
+
+    #[test]
+    fn transition_history_overwrites_oldest_record_at_fixed_capacity() {
+        let mut guard = LifecycleGuard::new(0, 10, GuardPolicy::conservative());
+        for cycle in 0..(MAX_TRANSITIONS + 2) {
+            guard.set_maintenance(true, (cycle * 2 + 1) as u64);
+            guard.set_maintenance(false, (cycle * 2 + 2) as u64);
+        }
+
+        let total = ((MAX_TRANSITIONS + 2) * 2) as u64;
+        assert_eq!(guard.transition_count(), MAX_TRANSITIONS);
+        assert_eq!(guard.transition_sequence(), total);
+        assert_eq!(
+            guard.transition_at(0).unwrap().sequence,
+            total - MAX_TRANSITIONS as u64 + 1
+        );
+        assert_eq!(
+            guard.transition_at(MAX_TRANSITIONS - 1).unwrap().sequence,
+            total
+        );
     }
 
     #[test]

@@ -1,7 +1,9 @@
 use esop_lifecycle_guard::{
     GateId, GuardPolicy, LifecycleAction, LifecycleGuard, MotionPermit, StopAction,
 };
-use esop_procbuf::{CommandPage, ControlMode, JointCommand, ProcBuf};
+use esop_procbuf::{
+    CommandPage, ControlMode, JointCommand, LifecycleTransitionRecord, ProcBuf, StatePage,
+};
 use esop_profile_cia402::{Cia402Controller, DriveRequest, ModeSupervisor, OperatingMode};
 
 type Buffer = ProcBuf<2, 0, 1, 2>;
@@ -98,4 +100,34 @@ fn procbuf_command_expiry_stops_mlg_and_blocks_cia402_enable() {
     );
     let blocked = cia402.step(0x0027, DriveRequest::Enable, false);
     assert!(!blocked.motion_allowed);
+
+    let mut state = StatePage::new(7);
+    state.sequence = 3;
+    state.lifecycle.state = guard.state() as u8;
+    state.lifecycle.first_blocking_code = guard.first_fault_code();
+    state.lifecycle.transition_sequence = guard.transition_sequence();
+    for index in 0..guard.transition_count() {
+        let transition = guard.transition_at(index).unwrap();
+        state.lifecycle.transition_time_ns = transition.cycle * 1_000_000;
+        state.lifecycle_history.push(LifecycleTransitionRecord {
+            sequence: transition.sequence,
+            timestamp_ns: transition.cycle * 1_000_000,
+            from_state: transition.from as u8,
+            to_state: transition.to as u8,
+            reserved: 0,
+            fault_code: transition.fault_code,
+        });
+    }
+    buffer.publish_state(state).unwrap();
+    let published = buffer.read_state().unwrap().state;
+    assert_eq!(published.lifecycle.state, guard.state() as u8);
+    assert_eq!(
+        published.lifecycle.transition_sequence,
+        guard.transition_sequence()
+    );
+    assert_eq!(published.lifecycle_history.len(), guard.transition_count());
+    assert_eq!(
+        published.lifecycle_history.get(1).unwrap().to_state,
+        guard.transition_at(1).unwrap().to as u8
+    );
 }
