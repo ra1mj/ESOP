@@ -186,6 +186,7 @@ const fn entry_spec(field: Cia402PdoField) -> EntrySpec {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Cia402PdoError {
+    CapacityExceeded,
     InvalidMode,
     MissingField(Cia402PdoField),
     DuplicateField(Cia402PdoField),
@@ -298,10 +299,16 @@ impl Cia402PdoMap {
         let mut entries = [PdoEntry::EMPTY; FIELD_COUNT * 2];
         let mut count = 0;
         for entry in projection.rx_layout().entries() {
+            if count == entries.len() {
+                return Err(Cia402PdoError::CapacityExceeded);
+            }
             entries[count] = *entry;
             count += 1;
         }
         for entry in projection.tx_layout().entries() {
+            if count == entries.len() {
+                return Err(Cia402PdoError::CapacityExceeded);
+            }
             let offset = projection
                 .domain_bit_offset(PdoDirection::Tx, entry.bit_offset)
                 .map_err(|_| Cia402PdoError::DomainOffsetOverflow)?;
