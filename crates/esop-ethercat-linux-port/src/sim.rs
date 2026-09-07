@@ -24,6 +24,8 @@ use esop_profile_cia402::{
 pub struct Cia402DriveSimulator {
     map: Cia402PdoMap,
     image: [u8; 64],
+    statusword: u16,
+    error_code: u16,
 }
 
 impl Cia402DriveSimulator {
@@ -31,6 +33,8 @@ impl Cia402DriveSimulator {
         Self {
             map,
             image: [0; 64],
+            statusword: 0x0027,
+            error_code: 0,
         }
     }
 
@@ -48,6 +52,22 @@ impl Cia402DriveSimulator {
         self.map.read_inputs_for(&self.image, mode)
     }
 
+    pub const fn statusword(&self) -> u16 {
+        self.statusword
+    }
+
+    pub const fn error_code(&self) -> u16 {
+        self.error_code
+    }
+
+    pub fn set_statusword(&mut self, statusword: u16) {
+        self.statusword = statusword;
+    }
+
+    pub fn set_error_code(&mut self, error_code: u16) {
+        self.error_code = error_code;
+    }
+
     pub fn step(
         &mut self,
         command: Cia402PdoCommand,
@@ -57,7 +77,7 @@ impl Cia402DriveSimulator {
         self.map
             .entry(Cia402PdoField::Statusword)
             .ok_or(Cia402PdoError::MissingField(Cia402PdoField::Statusword))?
-            .write_unsigned(&mut self.image, 0x0027)
+            .write_unsigned(&mut self.image, self.statusword as u64)
             .map_err(Cia402PdoError::Pdo)?;
         self.map
             .entry(Cia402PdoField::ModeDisplay)
@@ -67,7 +87,7 @@ impl Cia402DriveSimulator {
         self.map
             .entry(Cia402PdoField::ErrorCode)
             .ok_or(Cia402PdoError::MissingField(Cia402PdoField::ErrorCode))?
-            .write_unsigned(&mut self.image, 0)
+            .write_unsigned(&mut self.image, self.error_code as u64)
             .map_err(Cia402PdoError::Pdo)?;
         match command.target {
             Cia402Target::Position(value) => {

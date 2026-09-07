@@ -147,6 +147,25 @@ fn cia402_drive_simulator_closes_the_cyclic_feedback_loop() {
     assert_eq!(inputs.statusword, 0x0027);
     assert_eq!(drive.process_image().len(), 64);
     assert_eq!(drive.read_inputs(OperatingMode::Csp).unwrap(), inputs);
+    drive.set_error_code(0x2310);
+    drive.set_statusword(0x0008);
+    let fault = drive
+        .step(
+            Cia402PdoCommand {
+                controlword: CONTROLWORD_ENABLE_OPERATION,
+                mode: OperatingMode::Csp,
+                target: Cia402Target::Position(43),
+            },
+            Cia402MotionGate {
+                lifecycle_permit: true,
+                mode_confirmed: true,
+                operation_enabled: true,
+                setpoint_valid: true,
+            },
+        )
+        .unwrap();
+    assert_eq!(fault.error_code, 0x2310);
+    assert_eq!(drive.statusword(), 0x0008);
 }
 
 #[test]
