@@ -149,6 +149,23 @@ fn cia402_drive_simulator_closes_the_cyclic_feedback_loop() {
     assert_eq!(drive.read_inputs(OperatingMode::Csp).unwrap(), inputs);
     drive.set_error_code(0x2310);
     drive.set_statusword(0x0008);
+    assert_eq!(
+        drive.step(
+            Cia402PdoCommand {
+                controlword: CONTROLWORD_ENABLE_OPERATION,
+                mode: OperatingMode::Csp,
+                target: Cia402Target::Position(43),
+            },
+            Cia402MotionGate {
+                lifecycle_permit: true,
+                mode_confirmed: true,
+                operation_enabled: true,
+                setpoint_valid: true,
+            },
+        ),
+        Err(esop_profile_cia402::Cia402PdoError::MotionNotAllowed)
+    );
+    drive.set_statusword(0x0027);
     let fault = drive
         .step(
             Cia402PdoCommand {
@@ -165,7 +182,60 @@ fn cia402_drive_simulator_closes_the_cyclic_feedback_loop() {
         )
         .unwrap();
     assert_eq!(fault.error_code, 0x2310);
-    assert_eq!(drive.statusword(), 0x0008);
+    assert_eq!(fault.statusword, 0x0027);
+    assert_eq!(drive.statusword(), 0x0027);
+}
+
+#[test]
+fn cia402_fault_injection_blocks_cyclic_output() {
+    let map = Cia402PdoMap::new()
+        .with_entry(
+            Cia402PdoField::Controlword,
+            entry(Cia402PdoField::Controlword, 0),
+        )
+        .with_entry(
+            Cia402PdoField::ModeOfOperation,
+            entry(Cia402PdoField::ModeOfOperation, 16),
+        )
+        .with_entry(
+            Cia402PdoField::TargetPosition,
+            entry(Cia402PdoField::TargetPosition, 24),
+        )
+        .with_entry(
+            Cia402PdoField::Statusword,
+            entry(Cia402PdoField::Statusword, 128),
+        )
+        .with_entry(
+            Cia402PdoField::ModeDisplay,
+            entry(Cia402PdoField::ModeDisplay, 144),
+        )
+        .with_entry(
+            Cia402PdoField::ErrorCode,
+            entry(Cia402PdoField::ErrorCode, 152),
+        )
+        .with_entry(
+            Cia402PdoField::ActualPosition,
+            entry(Cia402PdoField::ActualPosition, 168),
+        );
+    let mut drive = Cia402DriveSimulator::new(map);
+    drive.set_statusword(0x0008);
+    let result = drive.step(
+        Cia402PdoCommand {
+            controlword: CONTROLWORD_ENABLE_OPERATION,
+            mode: OperatingMode::Csp,
+            target: Cia402Target::Position(1),
+        },
+        Cia402MotionGate {
+            lifecycle_permit: true,
+            mode_confirmed: true,
+            operation_enabled: true,
+            setpoint_valid: true,
+        },
+    );
+    assert_eq!(
+        result,
+        Err(esop_profile_cia402::Cia402PdoError::MotionNotAllowed)
+    );
 }
 
 #[test]

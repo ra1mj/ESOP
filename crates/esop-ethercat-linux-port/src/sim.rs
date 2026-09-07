@@ -15,7 +15,7 @@ use esop_ethercat_core::{
 use esop_lifecycle_guard::{LifecycleAction, LifecycleGuard};
 use esop_profile_cia402::{
     Cia402MotionGate, Cia402PdoCommand, Cia402PdoError, Cia402PdoField, Cia402PdoInputs,
-    Cia402PdoMap, Cia402Target, OperatingMode,
+    Cia402PdoMap, Cia402Target, DriveState, OperatingMode,
 };
 
 /// Deterministic one-drive CiA 402 model for host-side cyclic integration.
@@ -73,6 +73,9 @@ impl Cia402DriveSimulator {
         command: Cia402PdoCommand,
         gate: Cia402MotionGate,
     ) -> Result<Cia402PdoInputs, Cia402PdoError> {
+        if DriveState::from_statusword(self.statusword).is_fault() {
+            return Err(Cia402PdoError::MotionNotAllowed);
+        }
         self.map.write_cyclic(&mut self.image, command, gate)?;
         self.map
             .entry(Cia402PdoField::Statusword)
