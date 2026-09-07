@@ -4,7 +4,7 @@
 //! enabled with the `ethercat` feature and only translates frozen
 //! [`esop_ethercat_core::PdoEntry`] values to and from caller-owned images.
 
-use esop_ethercat_core::{PdoDirection, PdoEntry, PdoError, PdoLayout};
+use esop_ethercat_core::{PdoDirection, PdoEntry, PdoError, PdoLayout, SiiDomainProjection};
 
 use crate::{CONTROLWORD_ENABLE_OPERATION, OperatingMode};
 
@@ -194,6 +194,7 @@ pub enum Cia402PdoError {
     MotionNotAllowed,
     ControlwordNotOperationEnabled,
     TargetModeMismatch,
+    DomainOffsetOverflow,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -281,6 +282,36 @@ impl Cia402PdoMap {
         }
         map.validate_present_entries()?;
         Ok(map)
+    }
+
+    /// Build directly from a validated SII domain projection. Rx entries are
+    /// already Domain-relative; Tx entries are translated from their
+    /// direction-local offsets before the profile map is validated.
+    pub fn from_sii_projection<
+        const SMS: usize,
+        const FMMUS: usize,
+        const RX_ENTRIES: usize,
+        const TX_ENTRIES: usize,
+    >(
+        projection: &SiiDomainProjection<SMS, FMMUS, RX_ENTRIES, TX_ENTRIES>,
+    ) -> Result<Self, Cia402PdoError> {
+        let mut entries = [PdoEntry::EMPTY; FIELD_COUNT * 2];
+        let mut count = 0;
+        for entry in projection.rx_layout().entries() {
+            entries[count] = *entry;
+            count += 1;
+        }
+        for entry in projection.tx_layout().entries() {
+            let offset = projection
+                .domain_bit_offset(PdoDirection::Tx, entry.bit_offset)
+                .map_err(|_| Cia402PdoError::DomainOffsetOverflow)?;
+            entries[count] = PdoEntry {
+                bit_offset: offset,
+                ..*entry
+            };
+            count += 1;
+        }
+        Self::from_pdo_entries(&entries[..count])
     }
 
     pub const fn with_entry(mut self, field: Cia402PdoField, entry: PdoEntry) -> Self {
