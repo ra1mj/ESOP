@@ -145,6 +145,8 @@ fn cia402_drive_simulator_closes_the_cyclic_feedback_loop() {
     assert_eq!(inputs.actual_position, Some(42));
     assert_eq!(inputs.actual_mode, OperatingMode::Csp);
     assert_eq!(inputs.statusword, 0x0027);
+    assert_eq!(drive.process_image().len(), 64);
+    assert_eq!(drive.read_inputs(OperatingMode::Csp).unwrap(), inputs);
 }
 
 #[test]

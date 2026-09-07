@@ -15,7 +15,7 @@ use esop_ethercat_core::{
 use esop_lifecycle_guard::{LifecycleAction, LifecycleGuard};
 use esop_profile_cia402::{
     Cia402MotionGate, Cia402PdoCommand, Cia402PdoError, Cia402PdoField, Cia402PdoInputs,
-    Cia402PdoMap, Cia402Target,
+    Cia402PdoMap, Cia402Target, OperatingMode,
 };
 
 /// Deterministic one-drive CiA 402 model for host-side cyclic integration.
@@ -36,6 +36,16 @@ impl Cia402DriveSimulator {
 
     pub const fn map(&self) -> Cia402PdoMap {
         self.map
+    }
+
+    /// Return the current unified Domain image for Frame Plan/Domain tests.
+    /// Mutation remains available only through the typed cycle methods.
+    pub fn process_image(&self) -> &[u8] {
+        &self.image
+    }
+
+    pub fn read_inputs(&self, mode: OperatingMode) -> Result<Cia402PdoInputs, Cia402PdoError> {
+        self.map.read_inputs_for(&self.image, mode)
     }
 
     pub fn step(
