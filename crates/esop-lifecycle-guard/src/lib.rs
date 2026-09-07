@@ -87,6 +87,25 @@ pub struct CyclicQuality {
     pub cycle_within_budget: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LifecycleSnapshot {
+    pub state: LifecycleState,
+    pub stop_action: StopAction,
+    pub state_since_cycle: u64,
+    pub required_gate_mask: u16,
+    pub valid_gate_mask: u16,
+    pub qualified_gate_mask: u16,
+    pub ready_gate_mask: u16,
+    pub first_blocking_code: u32,
+    pub latched_fault_code: u32,
+    pub motion_permit_current: bool,
+    pub permit_epoch: u64,
+    pub permit_expires_at_ns: u64,
+    pub transition_sequence: u64,
+    pub transition_cycle: u64,
+    pub recovery_count: u64,
+}
+
 impl GuardPolicy {
     pub const fn conservative() -> Self {
         Self {
@@ -217,6 +236,8 @@ pub struct LifecycleGuard {
     state: LifecycleState,
     state_since_cycle: u64,
     first_fault_code: u32,
+    latched_fault_code: u32,
+    recovery_count: u64,
     transitions: [LifecycleTransition; MAX_TRANSITIONS],
     transition_head: usize,
     transition_count: usize,
@@ -239,6 +260,8 @@ impl LifecycleGuard {
             state: LifecycleState::Qualifying,
             state_since_cycle: 0,
             first_fault_code: 0,
+            latched_fault_code: 0,
+            recovery_count: 0,
             transitions: [LifecycleTransition::EMPTY; MAX_TRANSITIONS],
             transition_head: 0,
             transition_count: 0,
@@ -265,12 +288,82 @@ impl LifecycleGuard {
         self.first_fault_code
     }
 
+    pub const fn latched_fault_code(&self) -> u32 {
+        self.latched_fault_code
+    }
+
+    pub const fn recovery_count(&self) -> u64 {
+        self.recovery_count
+    }
+
     pub const fn transition_sequence(&self) -> u64 {
         self.transition_sequence
     }
 
     pub const fn transition_count(&self) -> usize {
         self.transition_count
+    }
+
+    pub const fn permit(&self) -> Option<MotionPermit> {
+        self.permit
+    }
+
+    pub fn valid_gate_mask(&self) -> u16 {
+        let mut mask = 0;
+        for index in 0..MAX_GATES {
+            if self.gates[index].valid {
+                mask |= 1u16 << index;
+            }
+        }
+        mask
+    }
+
+    pub fn qualified_gate_mask(&self) -> u16 {
+        let mut mask = 0;
+        for index in 0..MAX_GATES {
+            if self.gates[index].qualified {
+                mask |= 1u16 << index;
+            }
+        }
+        mask
+    }
+
+    pub fn ready_gate_mask(&self, cycle: u64) -> u16 {
+        let mut mask = 0;
+        for index in 0..MAX_GATES {
+            if self.gate_ready(self.gates[index], cycle) {
+                mask |= 1u16 << index;
+            }
+        }
+        mask
+    }
+
+    pub fn snapshot(&self, cycle: u64, now_ns: u64) -> LifecycleSnapshot {
+        let latest = self.transition_at(self.transition_count.saturating_sub(1));
+        let permit = self.permit.unwrap_or(MotionPermit {
+            boot_id: self.boot_id,
+            permit_epoch: self.permit_epoch,
+            sequence: 0,
+            axis_mask: 0,
+            expires_at_ns: 0,
+        });
+        LifecycleSnapshot {
+            state: self.state,
+            stop_action: self.policy.stop_action,
+            state_since_cycle: self.state_since_cycle,
+            required_gate_mask: self.required_mask,
+            valid_gate_mask: self.valid_gate_mask(),
+            qualified_gate_mask: self.qualified_gate_mask(),
+            ready_gate_mask: self.ready_gate_mask(cycle),
+            first_blocking_code: self.first_fault_code,
+            latched_fault_code: self.latched_fault_code,
+            motion_permit_current: self.permit_current(now_ns),
+            permit_epoch: permit.permit_epoch,
+            permit_expires_at_ns: permit.expires_at_ns,
+            transition_sequence: self.transition_sequence,
+            transition_cycle: latest.map(|transition| transition.cycle).unwrap_or(0),
+            recovery_count: self.recovery_count,
+        }
     }
 
     /// Return a transition from oldest to newest, without exposing ring slots.
@@ -447,6 +540,7 @@ impl LifecycleGuard {
     pub fn latch_fault(&mut self, code: u32, cycle: u64) {
         self.revoke_permit();
         self.first_fault_code = code;
+        self.latched_fault_code = code;
         self.transition(LifecycleState::FaultLatched, cycle);
     }
 
@@ -456,6 +550,7 @@ impl LifecycleGuard {
         }
         let fault_code = self.first_fault_code;
         self.first_fault_code = 0;
+        self.latched_fault_code = 0;
         self.transition_with_fault(LifecycleState::Qualifying, cycle, fault_code);
         Ok(())
     }
@@ -478,6 +573,7 @@ impl LifecycleGuard {
             return Err(LifecycleError::NotReady);
         }
         self.transition(LifecycleState::Active, cycle);
+        self.recovery_count = self.recovery_count.saturating_add(1);
         Ok(LifecycleAction::EnableAllowed)
     }
 
@@ -706,6 +802,62 @@ mod tests {
             Ok(LifecycleAction::EnableAllowed)
         );
         assert_eq!(guard.state(), LifecycleState::Active);
+    }
+
+    #[test]
+    fn snapshot_exposes_current_gate_permit_and_transition_state() {
+        let mut guard = LifecycleGuard::new(
+            GateId::Link.bit() | GateId::Drive.bit(),
+            10,
+            GuardPolicy {
+                enter_good_cycles: 1,
+                exit_bad_cycles: 1,
+                max_age_cycles: 1,
+                stop_action: StopAction::QuickStop,
+            },
+        );
+        guard.update_gate(GateId::Link, true, 4, 0);
+        guard.update_gate(GateId::Drive, true, 4, 0);
+        guard.accept_permit(permit(1, 100), 50).unwrap();
+        assert_eq!(
+            guard.request_rearm(permit(2, 100), 4, 50),
+            Ok(LifecycleAction::EnableAllowed)
+        );
+
+        let snapshot = guard.snapshot(4, 50);
+        assert_eq!(snapshot.state, LifecycleState::Active);
+        assert_eq!(snapshot.state_since_cycle, 4);
+        assert_eq!(
+            snapshot.required_gate_mask,
+            GateId::Link.bit() | GateId::Drive.bit()
+        );
+        assert_eq!(
+            snapshot.valid_gate_mask,
+            GateId::Link.bit() | GateId::Drive.bit()
+        );
+        assert_eq!(
+            snapshot.qualified_gate_mask,
+            GateId::Link.bit() | GateId::Drive.bit()
+        );
+        assert_eq!(
+            snapshot.ready_gate_mask,
+            GateId::Link.bit() | GateId::Drive.bit()
+        );
+        assert!(snapshot.motion_permit_current);
+        assert_eq!(snapshot.permit_epoch, 1);
+        assert_eq!(snapshot.permit_expires_at_ns, 100);
+        assert_eq!(snapshot.transition_sequence, 1);
+        assert_eq!(snapshot.transition_cycle, 4);
+        assert_eq!(snapshot.recovery_count, 1);
+        assert_eq!(guard.latched_fault_code(), 0);
+
+        guard.latch_fault(0xDEAD, 5);
+        let fault_snapshot = guard.snapshot(5, 50);
+        assert_eq!(fault_snapshot.latched_fault_code, 0xDEAD);
+        assert!(!fault_snapshot.motion_permit_current);
+        assert_eq!(fault_snapshot.permit_epoch, 2);
+        assert_eq!(fault_snapshot.transition_sequence, 2);
+        assert_eq!(fault_snapshot.transition_cycle, 5);
     }
 
     #[test]

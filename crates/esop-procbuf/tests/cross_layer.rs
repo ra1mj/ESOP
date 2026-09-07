@@ -101,14 +101,22 @@ fn procbuf_command_expiry_stops_mlg_and_blocks_cia402_enable() {
     let blocked = cia402.step(0x0027, DriveRequest::Enable, false);
     assert!(!blocked.motion_allowed);
 
+    let snapshot = guard.snapshot(3, 10);
     let mut state = StatePage::new(7);
     state.sequence = 3;
-    state.lifecycle.state = guard.state() as u8;
-    state.lifecycle.first_blocking_code = guard.first_fault_code();
-    state.lifecycle.transition_sequence = guard.transition_sequence();
+    state.lifecycle.state = snapshot.state as u8;
+    state.lifecycle.stop_action = snapshot.stop_action as u8;
+    state.lifecycle.gates_ready = (snapshot.ready_gate_mask & snapshot.required_gate_mask
+        == snapshot.required_gate_mask) as u8;
+    state.lifecycle.motion_permit = snapshot.motion_permit_current as u8;
+    state.lifecycle.gate_mask = snapshot.ready_gate_mask;
+    state.lifecycle.first_blocking_code = snapshot.first_blocking_code;
+    state.lifecycle.latched_fault_code = snapshot.latched_fault_code;
+    state.lifecycle.transition_sequence = snapshot.transition_sequence;
+    state.lifecycle.transition_time_ns = snapshot.transition_cycle * 1_000_000;
+    state.lifecycle.recovery_count = snapshot.recovery_count;
     for index in 0..guard.transition_count() {
         let transition = guard.transition_at(index).unwrap();
-        state.lifecycle.transition_time_ns = transition.cycle * 1_000_000;
         state.lifecycle_history.push(LifecycleTransitionRecord {
             sequence: transition.sequence,
             timestamp_ns: transition.cycle * 1_000_000,
@@ -120,10 +128,11 @@ fn procbuf_command_expiry_stops_mlg_and_blocks_cia402_enable() {
     }
     buffer.publish_state(state).unwrap();
     let published = buffer.read_state().unwrap().state;
-    assert_eq!(published.lifecycle.state, guard.state() as u8);
+    assert_eq!(published.lifecycle.state, snapshot.state as u8);
+    assert_eq!(published.lifecycle.stop_action, snapshot.stop_action as u8);
     assert_eq!(
         published.lifecycle.transition_sequence,
-        guard.transition_sequence()
+        snapshot.transition_sequence
     );
     assert_eq!(published.lifecycle_history.len(), guard.transition_count());
     assert_eq!(
