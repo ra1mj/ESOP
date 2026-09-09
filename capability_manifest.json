@@ -89,7 +89,7 @@
         "crates/esop-zenoh-gateway/tests/routes.rs",
         "docs/esop-zenoh-gateway.md"
       ],
-      "limitation": "Transport security and reconnect integration remain open"
+      "limitation": "Runtime security admission exists, but remote ACL, certificate lifecycle and reconnect integration remain open"
     },
     {
       "id": "zenoh_runtime_adapter",
@@ -101,7 +101,7 @@
         "scripts/test-zenoh.sh",
         "docs/esop-zenoh-gateway.md"
       ],
-      "limitation": "Authentication and production topology still require environment-level tests"
+      "limitation": "Remote ACL, certificate lifecycle and production topology still require environment-level tests"
     },
     {
       "id": "ebpf_observation",

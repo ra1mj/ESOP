@@ -2,7 +2,7 @@
 
 - 文档版本：1.0
 - 日期：2026-09-09
-- 状态：固定 key namespace、方向策略、payload contract、可选 Zenoh Session 适配器、v1 命令准入桥接、host QoS 策略和 loopback router 验证已实现
+- 状态：固定 key namespace、方向策略、payload contract、可选 Zenoh Session 适配器、v1 命令准入桥接、host QoS 策略、生产安全配置准入和 loopback router 验证已实现
 - 上游需求：PRD FR-031、FR-030、FR-045、FR-051
 
 ## 1. Key namespace
@@ -31,7 +31,7 @@ esop/<fleet>/<robot_id>/{state,event,diagnostic,cmd,query}
 
 Zenoh session、router、发现、重连、QoS 和 transport security 均属于 Linux 监督域。它们不可进入 EtherCAT 周期、MLG 决策或 ProcBuf 的必要执行链。断连时，实时域继续按已有命令/permit 的 deadline 和 MLG 策略运行；过期后停止，不因重连自动恢复运动。
 
-当前单元测试覆盖 robot 隔离、发布/订阅方向、payload contract、非法 key、固定 key buffer 和 payload 边界；`make test-zenoh` 会为每个测试动态申请 loopback 端口并启动本地 `zenohd 1.10.1`，验证 state/event/incident publish、command subscribe/准入审计、query reply、router 重启恢复、close 后的断连状态和 state publication 的实际 QoS。ACL、schema compatibility 和生产拓扑测试仍是后续阶段。
+当前单元测试覆盖 robot 隔离、发布/订阅方向、payload contract、非法 key、固定 key buffer 和 payload 边界；`make test-zenoh` 会为每个测试动态申请 loopback 端口并启动本地 `zenohd 1.10.1`，验证 state/event/incident publish、command subscribe/准入审计、query reply、router 重启恢复、close 后的断连状态和 state publication 的实际 QoS。安全配置单元测试验证生产策略拒绝默认/明文配置，并要求 TLS、名称校验、mTLS 客户端材料和认证材料。远程 ACL、证书颁发/轮换、schema compatibility 和生产拓扑测试仍是后续阶段。
 
 ## 4. Real Zenoh adapter
 
@@ -45,6 +45,7 @@ Zenoh session、router、发现、重连、QoS 和 transport security 均属于 
 - `serve_queries`：在固定 `query` key 上注册后台 queryable；
 - `TransportHealth`：记录连接状态、发布失败数和 handler 注册数。
 - `PublishQos`：state 使用可丢弃的 data 队列，event/diagnostic 使用可丢弃的高优先级队列；不会因 Zenoh 背压阻塞监督域任务。
+- `TransportSecurityPolicy` / `open_secure`：在建立 Session 前检查传输协议、TLS 根证书、名称校验、mTLS 客户端证书/私钥和公钥或用户名密码认证材料；生产调用方应使用 `TransportSecurityPolicy::production()`，开发/HIL 可显式使用 `open` 或 `development()`。
 - `decode_command` / `admit_command`：解码 `esop.v1.MotionCommand`，校验 robot ID，并转交 `CommandIngress` 执行来源、权限、TTL、epoch、序号、轴掩码、限流和审计。
 
 示例编译检查：
@@ -60,7 +61,7 @@ cargo install zenohd --version 1.10.1 --locked
 make test-zenoh
 ```
 
-测试脚本只监听动态分配的 loopback TCP 端口，退出时自动关闭 router；它不是实时周期依赖，也不代表生产环境已经完成认证、ACL 或重连配置。
+测试脚本只监听动态分配的 loopback TCP 端口，退出时自动关闭 router；它不是实时周期依赖，也不代表生产环境已经完成认证、远程 ACL、证书生命周期或重连配置。
 
 callback 运行在 Zenoh host runtime：命令 callback 应只把数据投递到有界命令队列，query callback 可完成查询应答，但两者都不能直接操作 EtherCAT 周期或绕过 `esop-command-gateway`。会话关闭或传输失败会将状态标为 `Disconnected` 或 `Degraded`；重连不会自动恢复运动许可。
 

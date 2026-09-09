@@ -44,6 +44,52 @@ pub struct PublishQos {
     pub express: bool,
 }
 
+/// Explicit security requirements for a supervision-domain Zenoh session.
+///
+/// The development [`ZenohGateway::open`] entry point remains permissive so
+/// loopback/HIL configurations can use plain TCP. Production code should use
+/// [`ZenohGateway::open_secure`] with [`TransportSecurityPolicy::production`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransportSecurityPolicy {
+    pub require_tls: bool,
+    pub require_mtls: bool,
+    pub require_authentication: bool,
+}
+
+impl TransportSecurityPolicy {
+    pub const fn production() -> Self {
+        Self {
+            require_tls: true,
+            require_mtls: true,
+            require_authentication: true,
+        }
+    }
+
+    pub const fn development() -> Self {
+        Self {
+            require_tls: false,
+            require_mtls: false,
+            require_authentication: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SecurityConfigError {
+    MissingTransportProtocols,
+    InsecureTransportProtocol,
+    MissingConnectEndpoint,
+    InsecureConnectEndpoint,
+    MissingTlsConfiguration,
+    MissingRootCertificate,
+    NameVerificationDisabled,
+    MtlsDisabled,
+    MissingClientCertificate,
+    MissingClientPrivateKey,
+    MissingAuthentication,
+    InvalidConfigValue,
+}
+
 impl PublishQos {
     pub const fn for_route(kind: RouteKind) -> Self {
         match kind {
@@ -135,6 +181,7 @@ pub enum RuntimeError {
     Route(RouteError),
     InvalidKeyEncoding,
     RobotMismatch,
+    Security(SecurityConfigError),
     Zenoh(zenoh::Error),
 }
 
@@ -208,6 +255,20 @@ impl ZenohGateway {
         };
         gateway.refresh_health().await;
         Ok(gateway)
+    }
+
+    /// Open a session only after the supplied security requirements have been
+    /// validated. This check is a host-domain admission boundary; it is not a
+    /// replacement for certificate authority operations or remote ACL policy.
+    pub async fn open_secure(
+        key_space: KeySpace,
+        config: zenoh::Config,
+        policy: TransportSecurityPolicy,
+    ) -> Result<Self, RuntimeError> {
+        validate_security_config(&config, policy).map_err(RuntimeError::Security)?;
+        Self::open(key_space, config)
+            .await
+            .map_err(RuntimeError::Zenoh)
     }
 
     pub fn health(&self) -> TransportHealth {
@@ -417,6 +478,132 @@ impl ZenohGateway {
     }
 }
 
+/// Validate the security-relevant portions of a Zenoh configuration without
+/// opening a session or contacting the network. Secrets are never returned or
+/// included in the error value.
+pub fn validate_security_config(
+    config: &zenoh::Config,
+    policy: TransportSecurityPolicy,
+) -> Result<(), SecurityConfigError> {
+    if !policy.require_tls && !policy.require_mtls && !policy.require_authentication {
+        return Ok(());
+    }
+
+    let protocols = config_value(config, "transport/link/protocols")?;
+    let protocols = protocols
+        .as_array()
+        .ok_or(SecurityConfigError::MissingTransportProtocols)?;
+    if protocols.is_empty() {
+        return Err(SecurityConfigError::MissingTransportProtocols);
+    }
+    if protocols.iter().any(|protocol| protocol.as_str().is_none()) {
+        return Err(SecurityConfigError::InvalidConfigValue);
+    }
+    if policy.require_tls
+        && protocols
+            .iter()
+            .any(|protocol| protocol.as_str() != Some("tls"))
+    {
+        return Err(SecurityConfigError::InsecureTransportProtocol);
+    }
+
+    let endpoints = config_value(config, "connect/endpoints")?;
+    let mut endpoint_count = 0;
+    let mut endpoint_is_insecure = false;
+    collect_endpoint_protocols(&endpoints, &mut endpoint_count, &mut endpoint_is_insecure);
+    if endpoint_count == 0 {
+        return Err(SecurityConfigError::MissingConnectEndpoint);
+    }
+    if policy.require_tls && endpoint_is_insecure {
+        return Err(SecurityConfigError::InsecureConnectEndpoint);
+    }
+
+    if policy.require_tls || policy.require_mtls {
+        let tls = config_value(config, "transport/link/tls")?;
+        let tls = tls
+            .as_object()
+            .ok_or(SecurityConfigError::MissingTlsConfiguration)?;
+        if !has_nonempty_string(tls, "root_ca_certificate") {
+            return Err(SecurityConfigError::MissingRootCertificate);
+        }
+        if tls.get("verify_name_on_connect").and_then(Value::as_bool) != Some(true) {
+            return Err(SecurityConfigError::NameVerificationDisabled);
+        }
+        if policy.require_mtls {
+            if tls.get("enable_mtls").and_then(Value::as_bool) != Some(true) {
+                return Err(SecurityConfigError::MtlsDisabled);
+            }
+            if !has_nonempty_string(tls, "connect_certificate") {
+                return Err(SecurityConfigError::MissingClientCertificate);
+            }
+            if !has_nonempty_string(tls, "connect_private_key") {
+                return Err(SecurityConfigError::MissingClientPrivateKey);
+            }
+        }
+    }
+
+    if policy.require_authentication {
+        let auth = config_value(config, "transport/auth")?;
+        let auth = auth
+            .as_object()
+            .ok_or(SecurityConfigError::MissingAuthentication)?;
+        let pubkey = auth.get("pubkey").and_then(Value::as_object);
+        let pubkey_configured = pubkey.is_some_and(|value| {
+            (has_nonempty_string(value, "public_key_file")
+                || has_nonempty_string(value, "public_key_pem"))
+                && (has_nonempty_string(value, "private_key_file")
+                    || has_nonempty_string(value, "private_key_pem"))
+        });
+        let usrpwd = auth.get("usrpwd").and_then(Value::as_object);
+        let usrpwd_configured = usrpwd.is_some_and(|value| {
+            has_nonempty_string(value, "user") && has_nonempty_string(value, "password")
+        });
+        if !pubkey_configured && !usrpwd_configured {
+            return Err(SecurityConfigError::MissingAuthentication);
+        }
+    }
+
+    Ok(())
+}
+
+use serde_json::Value;
+
+fn config_value(config: &zenoh::Config, path: &str) -> Result<Value, SecurityConfigError> {
+    let json = config
+        .get_json(path)
+        .map_err(|_| SecurityConfigError::InvalidConfigValue)?;
+    serde_json::from_str(&json).map_err(|_| SecurityConfigError::InvalidConfigValue)
+}
+
+fn has_nonempty_string(object: &serde_json::Map<String, Value>, key: &str) -> bool {
+    object
+        .get(key)
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+fn collect_endpoint_protocols(value: &Value, count: &mut usize, insecure: &mut bool) {
+    match value {
+        Value::String(endpoint) => {
+            *count += 1;
+            if !endpoint.starts_with("tls/") {
+                *insecure = true;
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_endpoint_protocols(value, count, insecure);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                collect_endpoint_protocols(value, count, insecure);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
 impl Drop for ZenohGateway {
     fn drop(&mut self) {
         self.health.close();
@@ -470,6 +657,90 @@ mod tests {
         assert_eq!(event.congestion_control, CongestionControl::Drop);
         assert!(event.express);
         assert_eq!(event, PublishQos::for_route(RouteKind::Diagnostic));
+    }
+
+    fn production_config() -> zenoh::Config {
+        let mut config = zenoh::Config::default();
+        config
+            .insert_json5("connect/endpoints", r#"["tls/router.example:7447"]"#)
+            .unwrap();
+        config
+            .insert_json5("transport/link/protocols", r#"["tls"]"#)
+            .unwrap();
+        config
+            .insert_json5(
+                "transport/link/tls",
+                r#"{
+                    root_ca_certificate: "ca.pem",
+                    enable_mtls: true,
+                    connect_certificate: "client.pem",
+                    connect_private_key: "client.key",
+                    verify_name_on_connect: true,
+                }"#,
+            )
+            .unwrap();
+        config
+            .insert_json5(
+                "transport/auth",
+                r#"{
+                    pubkey: {
+                        public_key_file: "client.pub",
+                        private_key_file: "client.key",
+                        known_keys_file: "known.keys",
+                    },
+                }"#,
+            )
+            .unwrap();
+        config
+    }
+
+    #[test]
+    fn production_security_policy_accepts_tls_mtls_and_pubkey_config() {
+        assert_eq!(
+            validate_security_config(&production_config(), TransportSecurityPolicy::production()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn production_security_policy_rejects_default_and_plaintext_config() {
+        assert_eq!(
+            validate_security_config(
+                &zenoh::Config::default(),
+                TransportSecurityPolicy::production()
+            ),
+            Err(SecurityConfigError::MissingTransportProtocols)
+        );
+
+        let mut config = production_config();
+        config
+            .insert_json5("transport/link/protocols", r#"["tcp"]"#)
+            .unwrap();
+        assert_eq!(
+            validate_security_config(&config, TransportSecurityPolicy::production()),
+            Err(SecurityConfigError::InsecureTransportProtocol)
+        );
+    }
+
+    #[test]
+    fn production_security_policy_rejects_weak_tls_settings() {
+        let mut config = production_config();
+        config
+            .insert_json5("transport/link/tls/verify_name_on_connect", "false")
+            .unwrap();
+        assert_eq!(
+            validate_security_config(&config, TransportSecurityPolicy::production()),
+            Err(SecurityConfigError::NameVerificationDisabled)
+        );
+
+        let mut config = production_config();
+        config
+            .insert_json5("transport/link/tls/connect_private_key", "null")
+            .unwrap();
+        assert_eq!(
+            validate_security_config(&config, TransportSecurityPolicy::production()),
+            Err(SecurityConfigError::MissingClientPrivateKey)
+        );
     }
 
     #[test]
