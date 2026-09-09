@@ -8,9 +8,17 @@ rust-version.workspace = true
 
 [features]
 default = []
-zenoh = ["dep:zenoh"]
+zenoh = [
+    "dep:esop-command-gateway",
+    "dep:esop-lifecycle-guard",
+    "dep:esop-proto",
+    "dep:zenoh",
+]
 
 [dependencies]
+esop-command-gateway = { path = "../esop-command-gateway", optional = true }
+esop-lifecycle-guard = { path = "../esop-lifecycle-guard", optional = true }
+esop-proto = { path = "../esop-proto", optional = true }
 zenoh = { version = "1.10.1", optional = true }
 
 [lib]

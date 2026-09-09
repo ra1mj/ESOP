@@ -2,7 +2,7 @@
 
 - 文档版本：1.0
 - 日期：2026-09-09
-- 状态：schema 源与结构校验已实现；生成绑定和传输适配待集成
+- 状态：schema 源、结构校验、Rust 生成绑定和 Zenoh 命令解码适配已实现；跨版本运行时矩阵待集成
 - 上游需求：PRD FR-030、FR-031、FR-045、FR-049、FR-051
 
 ## 1. 边界
@@ -26,4 +26,4 @@
 
 ## 3. CI 校验
 
-`make proto-schema` 会在没有安装 protobuf runtime 的开发机上检查 `proto/esop/v1/*.proto` 的 proto3/package 声明、消息字段号和字段名唯一性、reserved 不复用及 enum 未定义零值。生成 bindings、旧/新 reader-writer 兼容组合和真实 Zenoh payload round-trip 是下一阶段的独立验收项。
+`make proto-schema` 会在没有安装 protobuf runtime 的开发机上检查 `proto/esop/v1/*.proto` 的 proto3/package 声明、消息字段号和字段名唯一性、reserved 不复用及 enum 未定义零值。`crates/esop-proto/` 使用 vendored `protoc` 生成 Rust bindings，并通过 encode/decode 单测验证 v1 消息；`esop-zenoh-gateway` 会校验 robot ID 后再把 `MotionCommand` 转交固定容量 `CommandIngress`。旧/新 reader-writer 兼容组合、认证身份、实时 router payload round-trip 和真实部署仍是后续验收项。

@@ -8,6 +8,11 @@ use core::str;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
+use esop_command_gateway::{CommandIngress, ExternalMotionCommand, IngressError};
+use esop_lifecycle_guard::MotionPermit;
+use esop_proto::Message;
+use esop_proto::v1::MotionCommand;
+
 use crate::{KeySpace, MAX_ZENOH_KEY_BYTES, RouteDirection, RouteError, RouteKind};
 
 const STATE_CONNECTING: u8 = 0;
@@ -82,6 +87,50 @@ pub enum RuntimeError {
     Zenoh(zenoh::Error),
 }
 
+/// Errors raised while converting a versioned Protobuf command at the host
+/// boundary. Policy errors remain the original fixed-capacity ingress errors.
+#[derive(Debug)]
+pub enum CommandAdapterError {
+    Payload(RouteError),
+    Decode(esop_proto::DecodeError),
+    RobotMismatch,
+    AuthorityOutOfRange,
+    Policy(IngressError),
+}
+
+impl From<esop_proto::DecodeError> for CommandAdapterError {
+    fn from(error: esop_proto::DecodeError) -> Self {
+        Self::Decode(error)
+    }
+}
+
+/// Decode a v1 command and map its policy fields into the fixed command shape.
+/// This pure host-domain function is also usable by a callback that has not
+/// retained a `ZenohGateway` handle.
+pub fn decode_command_payload(
+    key_space: KeySpace,
+    payload: &[u8],
+) -> Result<ExternalMotionCommand, CommandAdapterError> {
+    KeySpace::validate_payload(payload).map_err(CommandAdapterError::Payload)?;
+    let command = MotionCommand::decode(payload)?;
+    if command.robot_id.as_bytes() != key_space.robot() {
+        return Err(CommandAdapterError::RobotMismatch);
+    }
+    let authority =
+        u8::try_from(command.authority).map_err(|_| CommandAdapterError::AuthorityOutOfRange)?;
+    Ok(ExternalMotionCommand {
+        boot_id: command.boot_id,
+        source_id: command.source_id,
+        permit_epoch: command.permit_epoch,
+        sequence: command.sequence,
+        deadline_ns: command.deadline_ns,
+        axis_mask: command.axis_mask,
+        authority,
+        reserved: [0; 3],
+        policy_version: command.policy_version,
+    })
+}
+
 impl From<RouteError> for RuntimeError {
     fn from(error: RouteError) -> Self {
         Self::Route(error)
@@ -114,6 +163,30 @@ impl ZenohGateway {
 
     pub fn key_space(&self) -> KeySpace {
         self.key_space
+    }
+
+    /// Decode a v1 command and map only its fixed policy fields into the
+    /// RT-facing command shape. Motion targets remain outside this policy
+    /// boundary and are handled by the profile/ProcBuf path after admission.
+    pub fn decode_command(
+        &self,
+        payload: &[u8],
+    ) -> Result<ExternalMotionCommand, CommandAdapterError> {
+        decode_command_payload(self.key_space, payload)
+    }
+
+    /// Decode and submit a command to the existing fixed-capacity ingress
+    /// policy. This method does not publish or touch the EtherCAT cycle.
+    pub fn admit_command(
+        &self,
+        ingress: &mut CommandIngress,
+        payload: &[u8],
+        now_ns: u64,
+    ) -> Result<MotionPermit, CommandAdapterError> {
+        let command = self.decode_command(payload)?;
+        ingress
+            .admit(command, now_ns)
+            .map_err(CommandAdapterError::Policy)
     }
 
     /// Publish a contract-checked payload on a state, event, diagnostic, or
@@ -224,6 +297,7 @@ impl ZenohGateway {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use esop_command_gateway::IngressPolicy;
 
     #[test]
     fn health_is_bounded_and_transitions_are_explicit() {
@@ -234,5 +308,64 @@ mod tests {
         health.publish_failures.fetch_add(1, Ordering::Relaxed);
         assert_eq!(health.publish_failures(), 1);
         assert_eq!(health.callback_registrations(), 0);
+    }
+
+    fn encoded_command(robot_id: &str, authority: u32) -> Vec<u8> {
+        MotionCommand {
+            robot_id: robot_id.to_owned(),
+            boot_id: 7,
+            source_id: 42,
+            permit_epoch: 1,
+            sequence: 1,
+            deadline_ns: 100,
+            axis_mask: 0x03,
+            authority,
+            policy_version: 9,
+            ..MotionCommand::default()
+        }
+        .encode_to_vec()
+    }
+
+    #[test]
+    fn command_payload_enters_fixed_ingress_and_becomes_audited_permit() {
+        let key_space = KeySpace::new(b"fleet_a", b"robot_01").unwrap();
+        let mut ingress = CommandIngress::new(
+            7,
+            IngressPolicy {
+                authorized_sources: [42, 0, 0, 0],
+                authorized_source_count: 1,
+                minimum_authority: 2,
+                reserved: [0; 2],
+                permit_policy_version: 9,
+                allowed_axis_mask: 0x03,
+                max_ttl_ns: 100,
+                rate_window_ns: 1_000,
+                max_commands_per_window: 2,
+                reserved_tail: [0; 6],
+            },
+        );
+        let permit = decode_command_payload(key_space, encoded_command("robot_01", 2).as_slice())
+            .and_then(|command| {
+                ingress
+                    .admit(command, 1)
+                    .map_err(CommandAdapterError::Policy)
+            })
+            .unwrap();
+        assert_eq!(permit.source_id, 42);
+        assert_eq!(permit.sequence, 1);
+        assert_eq!(ingress.audit_count(), 1);
+    }
+
+    #[test]
+    fn command_payload_rejects_robot_mismatch_and_authority_truncation() {
+        let key_space = KeySpace::new(b"fleet_a", b"robot_01").unwrap();
+        assert!(matches!(
+            decode_command_payload(key_space, encoded_command("robot_02", 2).as_slice()),
+            Err(CommandAdapterError::RobotMismatch)
+        ));
+        assert!(matches!(
+            decode_command_payload(key_space, encoded_command("robot_01", 256).as_slice()),
+            Err(CommandAdapterError::AuthorityOutOfRange)
+        ));
     }
 }

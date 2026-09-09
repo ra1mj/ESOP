@@ -71,13 +71,14 @@
     {
       "id": "protobuf_v1_contract",
       "status": "partial",
-      "scope": "Versioned esop.v1 state, command, diagnostic and runtime-incident contract",
+      "scope": "Versioned esop.v1 state, command, diagnostic and runtime-incident contract with generated Rust bindings",
       "evidence": [
         "proto/esop/v1/esop.proto",
         "scripts/validate-proto-schema.py",
-        "docs/esop-protobuf-v1.md"
+        "docs/esop-protobuf-v1.md",
+        "crates/esop-proto/src/lib.rs"
       ],
-      "limitation": "Generated bindings, old/new reader compatibility matrix and live transport integration remain open"
+      "limitation": "Old/new reader compatibility matrix, authentication and live transport round-trip remain open"
     },
     {
       "id": "zenoh_route_policy",
@@ -98,7 +99,7 @@
         "crates/esop-zenoh-gateway/src/runtime.rs",
         "docs/esop-zenoh-gateway.md"
       ],
-      "limitation": "Live router, authentication, QoS, reconnect and generated Protobuf payload integration still require environment-level tests"
+      "limitation": "Live router, authentication, QoS, reconnect and state/event/incident payload mapping still require environment-level tests"
     },
     {
       "id": "ebpf_observation",

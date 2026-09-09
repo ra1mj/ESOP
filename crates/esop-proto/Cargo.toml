@@ -1,0 +1,19 @@
+[package]
+name = "esop-proto"
+version = "0.1.0"
+description = "Generated ESOP versioned Protobuf bindings for the supervision domain"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[dependencies]
+prost = "0.14.4"
+
+[build-dependencies]
+prost-build = "0.14.4"
+protoc-bin-vendored = "3.2.0"
+
+[lib]
+name = "esop_proto"
+path = "src/lib.rs"

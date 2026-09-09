@@ -2,7 +2,7 @@
 
 - 文档版本：1.0
 - 日期：2026-09-09
-- 状态：固定 key namespace、方向策略、payload contract 和可选 Zenoh Session 适配器已实现；现场 router 验证待集成
+- 状态：固定 key namespace、方向策略、payload contract、可选 Zenoh Session 适配器和 v1 命令准入桥接已实现；现场 router 验证待集成
 - 上游需求：PRD FR-031、FR-030、FR-045、FR-051
 
 ## 1. Key namespace
@@ -42,6 +42,7 @@ Zenoh session、router、发现、重连、QoS 和 transport security 均属于 
 - `subscribe_commands`：在固定 `cmd` key 上注册后台 subscriber；
 - `serve_queries`：在固定 `query` key 上注册后台 queryable；
 - `TransportHealth`：记录连接状态、发布失败数和 handler 注册数。
+- `decode_command` / `admit_command`：解码 `esop.v1.MotionCommand`，校验 robot ID，并转交 `CommandIngress` 执行来源、权限、TTL、epoch、序号、轴掩码、限流和审计。
 
 示例编译检查：
 

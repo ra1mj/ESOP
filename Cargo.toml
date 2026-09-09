@@ -10,6 +10,7 @@ members = [
     "crates/esop-ebpf-agent",
     "crates/esop-ebpf-runtime",
     "crates/esop-command-gateway",
+    "crates/esop-proto",
     "crates/esop-zenoh-gateway",
 ]
 
