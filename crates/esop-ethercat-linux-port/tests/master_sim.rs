@@ -277,10 +277,14 @@ fn lifecycle_guard_denial_cannot_reach_cyclic_output() {
         .accept_permit(
             MotionPermit {
                 boot_id: 7,
+                source_id: 1,
                 permit_epoch: 1,
                 sequence: 1,
                 axis_mask: 1,
                 expires_at_ns: 100,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
             },
             0,
         )
@@ -289,10 +293,14 @@ fn lifecycle_guard_denial_cannot_reach_cyclic_output() {
         .request_rearm(
             MotionPermit {
                 boot_id: 7,
+                source_id: 1,
                 permit_epoch: 1,
                 sequence: 2,
                 axis_mask: 1,
                 expires_at_ns: 100,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
             },
             1,
             1,

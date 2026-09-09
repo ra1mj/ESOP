@@ -2,6 +2,7 @@
 
 pub const MAX_GATES: usize = 16;
 pub const MAX_TRANSITIONS: usize = 16;
+pub const MAX_PERMIT_AUDITS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -73,6 +74,9 @@ pub struct GuardPolicy {
     pub exit_bad_cycles: u16,
     pub max_age_cycles: u64,
     pub stop_action: StopAction,
+    pub authorized_source_id: u64,
+    pub minimum_authority: u8,
+    pub permit_policy_version: u32,
 }
 
 /// Cross-layer quality facts collected by the cycle owner. Each field is an
@@ -118,6 +122,9 @@ impl GuardPolicy {
             exit_bad_cycles: 2,
             max_age_cycles: 1,
             stop_action: StopAction::QuickStop,
+            authorized_source_id: 1,
+            minimum_authority: 1,
+            permit_policy_version: 1,
         }
     }
 
@@ -135,6 +142,9 @@ impl GuardPolicy {
             },
             max_age_cycles: self.max_age_cycles,
             stop_action: self.stop_action,
+            authorized_source_id: self.authorized_source_id,
+            minimum_authority: self.minimum_authority,
+            permit_policy_version: self.permit_policy_version,
         }
     }
 }
@@ -206,21 +216,54 @@ impl GateStatus {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
 pub struct MotionPermit {
     pub boot_id: u64,
+    pub source_id: u64,
     pub permit_epoch: u64,
     pub sequence: u64,
-    pub axis_mask: u32,
     pub expires_at_ns: u64,
+    pub axis_mask: u32,
+    pub authority: u8,
+    pub reserved: [u8; 3],
+    pub policy_version: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
 pub enum PermitError {
     BootMismatch,
+    SourceUnauthorized,
+    AuthorityInsufficient,
+    PolicyVersionMismatch,
     Expired,
     EmptyAxisMask,
     EpochReplayed,
     SequenceReplayed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct PermitAudit {
+    pub sequence: u64,
+    pub timestamp_ns: u64,
+    pub source_id: u64,
+    pub permit_epoch: u64,
+    pub permit_sequence: u64,
+    pub error: PermitError,
+    pub reserved: [u8; 7],
+}
+
+impl PermitAudit {
+    pub const EMPTY: Self = Self {
+        sequence: 0,
+        timestamp_ns: 0,
+        source_id: 0,
+        permit_epoch: 0,
+        permit_sequence: 0,
+        error: PermitError::BootMismatch,
+        reserved: [0; 7],
+    };
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -250,6 +293,10 @@ pub struct LifecycleGuard {
     host_observation: Option<HostObservation>,
     host_observation_epoch: u64,
     host_heartbeat_seq: u64,
+    permit_audits: [PermitAudit; MAX_PERMIT_AUDITS],
+    permit_audit_head: usize,
+    permit_audit_count: usize,
+    permit_audit_sequence: u64,
 }
 
 impl LifecycleGuard {
@@ -274,6 +321,10 @@ impl LifecycleGuard {
             host_observation: None,
             host_observation_epoch: 0,
             host_heartbeat_seq: 0,
+            permit_audits: [PermitAudit::EMPTY; MAX_PERMIT_AUDITS],
+            permit_audit_head: 0,
+            permit_audit_count: 0,
+            permit_audit_sequence: 0,
         }
     }
 
@@ -313,6 +364,20 @@ impl LifecycleGuard {
         self.permit
     }
 
+    pub const fn permit_audit_count(&self) -> usize {
+        self.permit_audit_count
+    }
+
+    /// Return permit rejections from oldest to newest.
+    pub fn permit_audit_at(&self, index: usize) -> Option<PermitAudit> {
+        if index >= self.permit_audit_count {
+            return None;
+        }
+        let oldest = (self.permit_audit_head + MAX_PERMIT_AUDITS - self.permit_audit_count)
+            % MAX_PERMIT_AUDITS;
+        Some(self.permit_audits[(oldest + index) % MAX_PERMIT_AUDITS])
+    }
+
     pub fn valid_gate_mask(&self) -> u16 {
         let mut mask = 0;
         for index in 0..MAX_GATES {
@@ -347,10 +412,14 @@ impl LifecycleGuard {
         let latest = self.transition_at(self.transition_count.saturating_sub(1));
         let permit = self.permit.unwrap_or(MotionPermit {
             boot_id: self.boot_id,
+            source_id: 0,
             permit_epoch: self.permit_epoch,
             sequence: 0,
             axis_mask: 0,
             expires_at_ns: 0,
+            authority: 0,
+            reserved: [0; 3],
+            policy_version: 0,
         });
         LifecycleSnapshot {
             state: self.state,
@@ -512,20 +581,29 @@ impl LifecycleGuard {
 
     pub fn accept_permit(&mut self, permit: MotionPermit, now_ns: u64) -> Result<(), PermitError> {
         if permit.boot_id != self.boot_id {
-            return Err(PermitError::BootMismatch);
+            return self.reject_permit(permit, now_ns, PermitError::BootMismatch);
+        }
+        if permit.source_id != self.policy.authorized_source_id {
+            return self.reject_permit(permit, now_ns, PermitError::SourceUnauthorized);
+        }
+        if permit.authority < self.policy.minimum_authority {
+            return self.reject_permit(permit, now_ns, PermitError::AuthorityInsufficient);
+        }
+        if permit.policy_version != self.policy.permit_policy_version {
+            return self.reject_permit(permit, now_ns, PermitError::PolicyVersionMismatch);
         }
         if permit.expires_at_ns <= now_ns {
-            return Err(PermitError::Expired);
+            return self.reject_permit(permit, now_ns, PermitError::Expired);
         }
         if permit.axis_mask == 0 {
-            return Err(PermitError::EmptyAxisMask);
+            return self.reject_permit(permit, now_ns, PermitError::EmptyAxisMask);
         }
         if permit.permit_epoch < self.permit_epoch {
-            return Err(PermitError::EpochReplayed);
+            return self.reject_permit(permit, now_ns, PermitError::EpochReplayed);
         }
         if permit.permit_epoch == self.permit_epoch && permit.sequence <= self.last_permit_sequence
         {
-            return Err(PermitError::SequenceReplayed);
+            return self.reject_permit(permit, now_ns, PermitError::SequenceReplayed);
         }
         self.permit_epoch = permit.permit_epoch;
         self.last_permit_sequence = permit.sequence;
@@ -702,6 +780,27 @@ impl LifecycleGuard {
         );
         Err(error)
     }
+
+    fn reject_permit(
+        &mut self,
+        permit: MotionPermit,
+        now_ns: u64,
+        error: PermitError,
+    ) -> Result<(), PermitError> {
+        self.permit_audit_sequence = self.permit_audit_sequence.saturating_add(1);
+        self.permit_audits[self.permit_audit_head] = PermitAudit {
+            sequence: self.permit_audit_sequence,
+            timestamp_ns: now_ns,
+            source_id: permit.source_id,
+            permit_epoch: permit.permit_epoch,
+            permit_sequence: permit.sequence,
+            error,
+            reserved: [0; 7],
+        };
+        self.permit_audit_head = (self.permit_audit_head + 1) % MAX_PERMIT_AUDITS;
+        self.permit_audit_count = (self.permit_audit_count + 1).min(MAX_PERMIT_AUDITS);
+        Err(error)
+    }
 }
 
 const fn host_observation_error_code(error: HostObservationError) -> u32 {
@@ -736,6 +835,9 @@ mod tests {
             exit_bad_cycles: 1,
             max_age_cycles: 1,
             stop_action: StopAction::QuickStop,
+            authorized_source_id: 1,
+            minimum_authority: 1,
+            permit_policy_version: 1,
         };
         let mut guard = LifecycleGuard::new(required, 1, policy);
         guard.update_cyclic_quality(
@@ -758,10 +860,14 @@ mod tests {
             .accept_permit(
                 MotionPermit {
                     boot_id: 1,
+                    source_id: 1,
                     permit_epoch: 1,
                     sequence: 1,
                     axis_mask: 1,
                     expires_at_ns: 100,
+                    authority: 1,
+                    reserved: [0; 3],
+                    policy_version: 1,
                 },
                 1,
             )
@@ -800,6 +906,9 @@ mod tests {
                 exit_bad_cycles: 1,
                 max_age_cycles: 1,
                 stop_action: StopAction::QuickStop,
+                authorized_source_id: 1,
+                minimum_authority: 1,
+                permit_policy_version: 1,
             },
         );
         guard.update_cyclic_quality(
@@ -831,15 +940,22 @@ mod tests {
         exit_bad_cycles: 2,
         max_age_cycles: 1,
         stop_action: StopAction::QuickStop,
+        authorized_source_id: 1,
+        minimum_authority: 1,
+        permit_policy_version: 1,
     };
 
     fn permit(sequence: u64, expires_at_ns: u64) -> MotionPermit {
         MotionPermit {
             boot_id: 10,
+            source_id: 1,
             permit_epoch: 1,
             sequence,
             axis_mask: 0x03,
             expires_at_ns,
+            authority: 1,
+            reserved: [0; 3],
+            policy_version: 1,
         }
     }
 
@@ -889,6 +1005,9 @@ mod tests {
                 exit_bad_cycles: 1,
                 max_age_cycles: 1,
                 stop_action: StopAction::QuickStop,
+                authorized_source_id: 1,
+                minimum_authority: 1,
+                permit_policy_version: 1,
             },
         );
         guard.update_gate(GateId::Link, true, 4, 0);
@@ -945,6 +1064,9 @@ mod tests {
                 exit_bad_cycles: 1,
                 max_age_cycles: 1,
                 stop_action: StopAction::QuickStop,
+                authorized_source_id: 1,
+                minimum_authority: 1,
+                permit_policy_version: 1,
             },
         );
         guard.update_gate(GateId::Link, true, 1, 0);
@@ -989,6 +1111,9 @@ mod tests {
                 exit_bad_cycles: 1,
                 max_age_cycles: 1,
                 stop_action: StopAction::QuickStop,
+                authorized_source_id: 1,
+                minimum_authority: 1,
+                permit_policy_version: 1,
             },
         );
         guard.update_gate(GateId::Link, true, 1, 0);
@@ -1089,6 +1214,80 @@ mod tests {
             Err(PermitError::Expired)
         );
         assert_eq!(guard.accept_permit(permit(2, 10), 9), Ok(()));
+    }
+
+    #[test]
+    fn permit_policy_rejections_are_fixed_capacity_audits() {
+        let policy = GuardPolicy {
+            enter_good_cycles: 1,
+            exit_bad_cycles: 1,
+            max_age_cycles: 1,
+            stop_action: StopAction::QuickStop,
+            authorized_source_id: 42,
+            minimum_authority: 2,
+            permit_policy_version: 9,
+        };
+        let mut guard = LifecycleGuard::new(0, 10, policy);
+
+        let mut unauthorized = permit(1, 100);
+        unauthorized.source_id = 7;
+        assert_eq!(
+            guard.accept_permit(unauthorized, 11),
+            Err(PermitError::SourceUnauthorized)
+        );
+        let mut insufficient = permit(2, 100);
+        insufficient.source_id = 42;
+        insufficient.authority = 1;
+        assert_eq!(
+            guard.accept_permit(insufficient, 12),
+            Err(PermitError::AuthorityInsufficient)
+        );
+        let mut stale_policy = permit(3, 100);
+        stale_policy.source_id = 42;
+        stale_policy.authority = 2;
+        stale_policy.policy_version = 8;
+        assert_eq!(
+            guard.accept_permit(stale_policy, 13),
+            Err(PermitError::PolicyVersionMismatch)
+        );
+
+        assert_eq!(guard.permit_audit_count(), 3);
+        assert_eq!(
+            guard.permit_audit_at(0),
+            Some(PermitAudit {
+                sequence: 1,
+                timestamp_ns: 11,
+                source_id: 7,
+                permit_epoch: 1,
+                permit_sequence: 1,
+                error: PermitError::SourceUnauthorized,
+                reserved: [0; 7],
+            })
+        );
+        assert_eq!(
+            guard.permit_audit_at(2).map(|audit| audit.error),
+            Some(PermitError::PolicyVersionMismatch)
+        );
+
+        for sequence in 4..=(MAX_PERMIT_AUDITS as u64 + 3) {
+            let mut rejected = permit(sequence, 100);
+            rejected.source_id = 42;
+            rejected.authority = 2;
+            rejected.policy_version = 8;
+            assert_eq!(
+                guard.accept_permit(rejected, sequence),
+                Err(PermitError::PolicyVersionMismatch)
+            );
+        }
+        assert_eq!(guard.permit_audit_count(), MAX_PERMIT_AUDITS);
+        assert_eq!(guard.permit_audit_at(0).unwrap().sequence, 4);
+        assert_eq!(
+            guard
+                .permit_audit_at(MAX_PERMIT_AUDITS - 1)
+                .unwrap()
+                .sequence,
+            MAX_PERMIT_AUDITS as u64 + 3
+        );
     }
 
     #[test]

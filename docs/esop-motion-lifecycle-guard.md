@@ -2,7 +2,7 @@
 
 - 文档版本：1.0
 - 日期：2026-09-03
-- 状态：设计基线；HostObservation、固定转换审计、LifecycleSnapshot 和 ProcBuf lifecycle history 已实现
+- 状态：设计基线；HostObservation、固定转换审计、LifecycleSnapshot、ProcBuf lifecycle history 和 permit 拒绝审计已实现
 - 上游需求：[ESOP 软件产品需求文档](esop-software-prd.md) FR-039 至 FR-046、NFR-017
 
 ## 1. 目的与安全边界
@@ -193,7 +193,7 @@ issued_monotonic_ns
 expires_monotonic_ns
 ```
 
-实时域校验：robot/boot ID 相同、策略版本已激活、source 被本地配置允许、epoch 单调不回退、轴掩码不越权、命令序号未重放、未超过 expiry、permit 未在当前故障后失效。认证、签名、用户会话和 ACL 的复杂校验发生在网关或可信监督域；实时域不等待其结果。
+实时域校验：boot ID 相同、策略版本已激活、source 被本地配置允许、authority 达到策略下限、epoch 单调不回退、轴掩码不为空、序号未重放且未超过 expiry。每次拒绝写入固定容量 `PermitAudit` 环，记录拒绝序号、单调时间、来源、epoch、permit 序号和拒绝原因；认证、签名、用户会话和 ACL 的复杂校验发生在网关或可信监督域，实时域不等待其结果。
 
 ### 7.3 恢复协议
 
@@ -270,7 +270,7 @@ MLG 配置与 EtherCAT/ProcBuf 配置一起冻结。变更 policy hash、门槛�
 
 实时域只更新结构化计数与固定事件。文本、JSON、Protobuf、告警通知和历史记录由非实时域从快照异步生成。
 
-`LifecycleGuard::snapshot(cycle, now_ns)` 提供发布所需的固定字段：当前状态、required/valid/qualified/ready 门槛位图、首个阻塞码、锁存故障码、permit epoch/expiry/current、转换序号/周期和恢复计数。ProcBuf 写者负责将该快照映射到 `LifecycleSummary`，并将 `transition_at` 记录映射到 `LifecycleHistory` 的单调时间戳字段。
+`LifecycleGuard::snapshot(cycle, now_ns)` 提供发布所需的固定字段：当前状态、required/valid/qualified/ready 门槛位图、首个阻塞码、锁存故障码、permit epoch/expiry/current、转换序号/周期和恢复计数。`permit_audit_at` 以时间顺序读取固定容量的许可拒绝审计；ProcBuf 写者负责将快照映射到 `LifecycleSummary`，并将 `transition_at` 记录映射到 `LifecycleHistory` 的单调时间戳字段。
 
 `CyclicQuality` 现在覆盖 platform、configuration/CoE、topology、DC、drive、Domain、WKC/link、command、supervisor、external safety 和 cycle budget；每项使用独立故障码投影到对应门槛，任一必需项失效都会按 MLG 策略阻止或停止运动。
 

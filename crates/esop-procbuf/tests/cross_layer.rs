@@ -35,6 +35,9 @@ fn procbuf_command_expiry_stops_mlg_and_blocks_cia402_enable() {
         exit_bad_cycles: 1,
         max_age_cycles: 1,
         stop_action: StopAction::QuickStop,
+        authorized_source_id: 11,
+        minimum_authority: 1,
+        permit_policy_version: 1,
     };
     let required = GateId::Platform.bit() | GateId::Link.bit() | GateId::Command.bit();
     let mut guard = LifecycleGuard::new(required, 7, policy);
@@ -45,10 +48,14 @@ fn procbuf_command_expiry_stops_mlg_and_blocks_cia402_enable() {
         .accept_permit(
             MotionPermit {
                 boot_id: 7,
+                source_id: 11,
                 permit_epoch: 1,
                 sequence: 1,
                 axis_mask: 0x03,
                 expires_at_ns: 100,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
             },
             1,
         )
@@ -62,10 +69,14 @@ fn procbuf_command_expiry_stops_mlg_and_blocks_cia402_enable() {
         guard.request_rearm(
             MotionPermit {
                 boot_id: 7,
+                source_id: 11,
                 permit_epoch: 1,
                 sequence: 2,
                 axis_mask: 0x03,
                 expires_at_ns: 100,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
             },
             1,
             2,
@@ -149,6 +160,9 @@ fn ebpf_health_heartbeat_can_qualify_then_stop_motion() {
         exit_bad_cycles: 1,
         max_age_cycles: 1,
         stop_action: StopAction::QuickStop,
+        authorized_source_id: 1,
+        minimum_authority: 1,
+        permit_policy_version: 1,
     };
     let mut guard = LifecycleGuard::new(GateId::HostObservation.bit(), 7, policy);
     let mut agent = RuntimeAgent::<2>::new(7, 1, 1_000);
@@ -162,10 +176,14 @@ fn ebpf_health_heartbeat_can_qualify_then_stop_motion() {
         .accept_permit(
             MotionPermit {
                 boot_id: 7,
+                source_id: 1,
                 permit_epoch: 1,
                 sequence: 1,
                 axis_mask: 1,
                 expires_at_ns: 1_000,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
             },
             100,
         )
@@ -175,10 +193,14 @@ fn ebpf_health_heartbeat_can_qualify_then_stop_motion() {
         guard.request_rearm(
             MotionPermit {
                 boot_id: 7,
+                source_id: 1,
                 permit_epoch: 1,
                 sequence: 2,
                 axis_mask: 1,
                 expires_at_ns: 1_000,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
             },
             1,
             100,
