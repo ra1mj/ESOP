@@ -16,6 +16,15 @@ FIELD = re.compile(
     r"([a-z][a-z0-9_]*)\s*=\s*(\d+)\s*(?:\[[^]]*\])?;$"
 )
 ENUM_VALUE = re.compile(r"^([A-Z][A-Z0-9_]*)\s*=\s*(-?\d+)\s*;$")
+TOP_LEVEL_MESSAGES = {
+    "RobotState",
+    "DiagnosticEvent",
+    "MotionCommand",
+    "CommandReply",
+    "RuntimeIncident",
+    "QueryRequest",
+    "QueryReply",
+}
 
 
 def fail(message: str) -> None:
@@ -99,6 +108,8 @@ def validate_message(name: str, body: list[str]) -> None:
     name_overlap = field_names & reserved_names
     if name_overlap:
         fail(f"{name}: reserved field name reused: {sorted(name_overlap)}")
+    if name in TOP_LEVEL_MESSAGES and "schema_version" not in field_names:
+        fail(f"{name}: missing schema_version field")
 
 
 def validate_enum(name: str, body: list[str]) -> None:

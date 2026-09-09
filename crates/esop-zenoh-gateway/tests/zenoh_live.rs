@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use esop_command_gateway::{CommandIngress, IngressPolicy};
 use esop_lifecycle_guard::{GateId, GuardPolicy, LifecycleAction, LifecycleGuard, StopAction};
-use esop_proto::Message;
 use esop_proto::v1::{DiagnosticEvent, MotionCommand, RobotState, RuntimeIncident};
+use esop_proto::{CURRENT_SCHEMA_VERSION, Message};
 use esop_zenoh_gateway::runtime::{ConnectionState, ZenohGateway, decode_command_payload};
 use esop_zenoh_gateway::{KeySpace, RouteKind};
 use support::{Router, client_config};
@@ -32,6 +32,7 @@ fn command_payload_with_epoch(sequence: u64, deadline_ns: u64, permit_epoch: u64
     MotionCommand {
         robot_id: "robot_01".to_owned(),
         boot_id: 7,
+        schema_version: CURRENT_SCHEMA_VERSION,
         source_id: 42,
         permit_epoch,
         sequence,
@@ -115,6 +116,7 @@ fn router_round_trip_covers_gateway_contracts() {
                     .publish_state(&RobotState {
                         robot_id: "robot_01".to_owned(),
                         boot_id: 7,
+                        schema_version: CURRENT_SCHEMA_VERSION,
                         sequence: 1,
                         ..RobotState::default()
                     })
@@ -159,6 +161,7 @@ fn router_round_trip_covers_gateway_contracts() {
                     sequence: 2,
                     timestamp_ns: 2_000,
                     code: 0x1001,
+                    schema_version: CURRENT_SCHEMA_VERSION,
                     ..DiagnosticEvent::default()
                 })
                 .await
@@ -167,6 +170,7 @@ fn router_round_trip_covers_gateway_contracts() {
                 .publish_incident(&RuntimeIncident {
                     incident_id: "inc-1".to_owned(),
                     reason_code: 0x2001,
+                    schema_version: CURRENT_SCHEMA_VERSION,
                     ..RuntimeIncident::default()
                 })
                 .await
@@ -251,6 +255,7 @@ fn router_round_trip_covers_gateway_contracts() {
                 gateway
                     .publish_event(&DiagnosticEvent {
                         sequence: 3,
+                        schema_version: CURRENT_SCHEMA_VERSION,
                         ..DiagnosticEvent::default()
                     })
                     .await,

@@ -78,7 +78,7 @@
         "docs/esop-protobuf-v1.md",
         "crates/esop-proto/src/lib.rs"
       ],
-      "limitation": "Old/new reader compatibility matrix and authentication remain open"
+      "limitation": "Only v1 is admitted at runtime; old/new reader compatibility matrix and authentication remain open"
     },
     {
       "id": "zenoh_route_policy",

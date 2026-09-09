@@ -22,7 +22,7 @@ Linux 观测适配器位于 `crates/esop-ebpf-runtime/`：它使用 Rust/Aya 加
 
 `crates/esop-procbuf/` 提供固定布局的 ProcBuf ABI：Header/layout hash、Command/State 双页快照、Quality/Lifecycle/Runtime observation 数据、固定容量生命周期转换历史和固定容量事件环。它只解决实时域内的固定数据交接，不等同于 shared-memory/RPMsg/UDS IPC，也不引入 Protobuf、Zenoh 或 ROS 2。
 
-`crates/esop-command-gateway/` 提供 Linux/监督域与实时域之间的固定命令准入策略：来源 ACL、权限级别、策略版本、TTL、轴掩码、epoch/序号防重放和固定窗口限流。通过的外部命令只转换为 `MotionPermit`，拒绝与接受结果写入固定容量审计环；`crates/esop-proto/` 从 `proto/esop/v1/esop.proto` 生成 Rust bindings，`crates/esop-zenoh-gateway/` 已提供固定路由策略、可选真实 Zenoh Session 适配器和 `MotionCommand` 到 `CommandIngress` 的受控桥接，签名认证和具体 IPC 传输仍位于后续监督域集成范围。
+`crates/esop-command-gateway/` 提供 Linux/监督域与实时域之间的固定命令准入策略：来源 ACL、权限级别、策略版本、TTL、轴掩码、epoch/序号防重放和固定窗口限流。通过的外部命令只转换为 `MotionPermit`，拒绝与接受结果写入固定容量审计环；`crates/esop-proto/` 从 `proto/esop/v1/esop.proto` 生成 Rust bindings，并对顶层消息执行 v1 `schema_version` 约束；`crates/esop-zenoh-gateway/` 已提供固定路由策略、可选真实 Zenoh Session 适配器和 `MotionCommand` 到 `CommandIngress` 的受控桥接，签名认证和具体 IPC 传输仍位于后续监督域集成范围。
 
 `crates/esop-profile-cia402/` 现已增加 CSP/CSV/CST 模式切换监督、实际模式确认、Operation Enabled 门槛、周期设定值首目标/限幅守卫、固定容量多轴控制与显式停止/恢复约束，以及 `--features ethercat` 下复用核心 `PdoEntry` 的标准对象绑定。`write_control` 与 `write_cyclic` 分离；后者同时要求生命周期许可、模式确认、Operation Enabled 和 setpoint 有效。厂商 quirk 和真实驱动互操作仍需 HIL 验证。
 

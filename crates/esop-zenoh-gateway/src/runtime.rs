@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use esop_command_gateway::{CommandIngress, ExternalMotionCommand, IngressError};
 use esop_lifecycle_guard::MotionPermit;
-use esop_proto::Message;
 use esop_proto::v1::{DiagnosticEvent, MotionCommand, RobotState, RuntimeIncident};
+use esop_proto::{Message, SchemaCompatibilityError, validate_schema_version};
 use zenoh::qos::{CongestionControl, Priority};
 
 use crate::{KeySpace, MAX_ZENOH_KEY_BYTES, RouteDirection, RouteError, RouteKind};
@@ -181,6 +181,7 @@ pub enum RuntimeError {
     Route(RouteError),
     InvalidKeyEncoding,
     RobotMismatch,
+    Schema(SchemaCompatibilityError),
     Security(SecurityConfigError),
     Zenoh(zenoh::Error),
 }
@@ -192,6 +193,7 @@ pub enum CommandAdapterError {
     Payload(RouteError),
     Decode(esop_proto::DecodeError),
     RobotMismatch,
+    Schema(SchemaCompatibilityError),
     AuthorityOutOfRange,
     IdentityMismatch,
     Policy(IngressError),
@@ -212,6 +214,7 @@ pub fn decode_command_payload(
 ) -> Result<ExternalMotionCommand, CommandAdapterError> {
     KeySpace::validate_payload(payload).map_err(CommandAdapterError::Payload)?;
     let command = MotionCommand::decode(payload)?;
+    validate_schema_version(command.schema_version).map_err(CommandAdapterError::Schema)?;
     if command.robot_id.as_bytes() != key_space.robot() {
         return Err(CommandAdapterError::RobotMismatch);
     }
@@ -383,16 +386,19 @@ impl ZenohGateway {
     /// a valid protobuf cannot be published under the wrong robot key.
     pub async fn publish_state(&self, state: &RobotState) -> Result<(), RuntimeError> {
         validate_robot_id(self.key_space, &state.robot_id)?;
+        validate_schema_version(state.schema_version).map_err(RuntimeError::Schema)?;
         self.publish(RouteKind::State, &state.encode_to_vec()).await
     }
 
     /// Encode and publish a diagnostic event on the fixed event route.
     pub async fn publish_event(&self, event: &DiagnosticEvent) -> Result<(), RuntimeError> {
+        validate_schema_version(event.schema_version).map_err(RuntimeError::Schema)?;
         self.publish(RouteKind::Event, &event.encode_to_vec()).await
     }
 
     /// Encode and publish a correlated runtime incident on the diagnostic route.
     pub async fn publish_incident(&self, incident: &RuntimeIncident) -> Result<(), RuntimeError> {
+        validate_schema_version(incident.schema_version).map_err(RuntimeError::Schema)?;
         self.publish(RouteKind::Diagnostic, &incident.encode_to_vec())
             .await
     }
@@ -633,6 +639,7 @@ fn validate_authenticated_source(
 mod tests {
     use super::*;
     use esop_command_gateway::IngressPolicy;
+    use esop_proto::CURRENT_SCHEMA_VERSION;
 
     #[test]
     fn health_is_bounded_and_transitions_are_explicit() {
@@ -763,6 +770,7 @@ mod tests {
         MotionCommand {
             robot_id: robot_id.to_owned(),
             boot_id: 7,
+            schema_version: CURRENT_SCHEMA_VERSION,
             source_id: 42,
             permit_epoch: 1,
             sequence: 1,
@@ -815,6 +823,35 @@ mod tests {
         assert!(matches!(
             decode_command_payload(key_space, encoded_command("robot_01", 256).as_slice()),
             Err(CommandAdapterError::AuthorityOutOfRange)
+        ));
+    }
+
+    #[test]
+    fn command_payload_rejects_missing_or_unknown_schema_versions() {
+        let key_space = KeySpace::new(b"fleet_a", b"robot_01").unwrap();
+        let missing = MotionCommand {
+            robot_id: "robot_01".to_owned(),
+            ..MotionCommand::default()
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            decode_command_payload(key_space, &missing),
+            Err(CommandAdapterError::Schema(
+                SchemaCompatibilityError::Missing
+            ))
+        ));
+
+        let unknown = MotionCommand {
+            robot_id: "robot_01".to_owned(),
+            schema_version: 2,
+            ..MotionCommand::default()
+        }
+        .encode_to_vec();
+        assert!(matches!(
+            decode_command_payload(key_space, &unknown),
+            Err(CommandAdapterError::Schema(
+                SchemaCompatibilityError::Unsupported(2)
+            ))
         ));
     }
 

@@ -58,6 +58,7 @@ message RobotState {
 
   reserved 11, 12;
   reserved "runtime_observation";
+  uint32 schema_version = 13;
 }
 
 message LifecycleSummary {
@@ -131,6 +132,7 @@ message DiagnosticEvent {
 
   reserved 10;
   reserved "message";
+  uint32 schema_version = 11;
 }
 
 message MotionCommand {
@@ -148,6 +150,7 @@ message MotionCommand {
 
   reserved 12, 13;
   reserved "signature";
+  uint32 schema_version = 14;
 }
 
 message JointTarget {
@@ -170,6 +173,7 @@ message CommandReply {
 
   reserved 8;
   reserved "error_text";
+  uint32 schema_version = 9;
 }
 
 message RuntimeIncident {
@@ -187,6 +191,7 @@ message RuntimeIncident {
 
   reserved 12, 13;
   reserved "raw_log";
+  uint32 schema_version = 14;
 }
 
 message RuntimeEvidence {
@@ -209,6 +214,7 @@ message QueryRequest {
 
   reserved 5;
   reserved "filter_expression";
+  uint32 schema_version = 6;
 }
 
 message QueryReply {
@@ -217,4 +223,5 @@ message QueryReply {
   repeated RobotState states = 3;
   repeated RuntimeIncident incidents = 4;
   bool truncated = 5;
+  uint32 schema_version = 6;
 }

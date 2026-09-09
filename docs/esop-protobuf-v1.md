@@ -2,7 +2,7 @@
 
 - 文档版本：1.0
 - 日期：2026-09-09
-- 状态：schema 源、结构校验、Rust 生成绑定、Zenoh 命令解码适配和 loopback transport round-trip 已实现；跨版本运行时矩阵待集成
+- 状态：schema 源、结构校验、Rust 生成绑定、v1 版本准入、Zenoh 命令解码适配和 loopback transport round-trip 已实现；跨版本运行时矩阵待集成
 - 上游需求：PRD FR-030、FR-031、FR-045、FR-049、FR-051
 
 ## 1. 边界
@@ -22,10 +22,12 @@
 2. 已发布字段号和字段名不得复用；删除字段必须同时保留 `reserved` 字段号和名称。
 3. 每个 enum 的零值必须是带 `_UNSPECIFIED` 后缀的显式未知值；未知枚举不能被解释为正常状态。
 4. 状态、事件、命令和 incident 都携带可关联的 robot/boot/sequence/time 字段，网关不得从 key 名称推断消息语义。
-5. 生成代码、Protobuf 编解码和 Zenoh payload 只在监督域使用；实时节点只接收已经转换并校验过的固定命令/permit。
+5. 所有顶层消息携带 `schema_version`；当前唯一接受值为 `1`，缺失或未知版本必须在网关边界拒绝。
+6. 已知字段之外的 Protobuf 字段可由 reader 保留并忽略，但不能绕过 `schema_version` 准入；破坏性变更必须创建新的版本包。
+7. 生成代码、Protobuf 编解码和 Zenoh payload 只在监督域使用；实时节点只接收已经转换并校验过的固定命令/permit。
 
 ## 3. CI 校验
 
-`make proto-schema` 会在没有安装 protobuf runtime 的开发机上检查 `proto/esop/v1/*.proto` 的 proto3/package 声明、消息字段号和字段名唯一性、reserved 不复用及 enum 未定义零值。`crates/esop-proto/` 使用 vendored `protoc` 生成 Rust bindings，并通过 encode/decode 单测验证 v1 消息；`esop-zenoh-gateway` 会校验 robot ID 后再把 `MotionCommand` 转交固定容量 `CommandIngress`。`make test-zenoh` 进一步验证 v1 state/event/incident payload、command payload 经真实 loopback router 到达 subscriber，并验证 query reply 与 router 重启后的旧命令拒绝。旧/新 reader-writer 兼容组合、认证身份和生产部署仍是后续验收项。
+`make proto-schema` 会在没有安装 protobuf runtime 的开发机上检查 `proto/esop/v1/*.proto` 的 proto3/package 声明、顶层消息的 `schema_version`、消息字段号和字段名唯一性、reserved 不复用及 enum 未定义零值。`crates/esop-proto/` 使用 vendored `protoc` 生成 Rust bindings，并通过 encode/decode 单测验证 v1 消息与未知字段兼容性；`esop-zenoh-gateway` 会先校验 schema version 和 robot ID，再把 `MotionCommand` 转交固定容量 `CommandIngress`。`make test-zenoh` 进一步验证 v1 state/event/incident payload、command payload 经真实 loopback router 到达 subscriber，并验证 query reply 与 router 重启后的旧命令拒绝。旧/新 reader-writer 兼容组合、认证身份和生产部署仍是后续验收项。
 
 Live router 测试还验证 v1 的 state、event、incident payload，以及 router 重启后旧命令的 TTL/代际拒绝；认证身份绑定与生产部署仍由监督域认证服务负责。
