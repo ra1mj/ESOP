@@ -91,6 +91,16 @@
       "limitation": "Zenoh session/router, QoS, transport security and reconnect integration remain open"
     },
     {
+      "id": "zenoh_runtime_adapter",
+      "status": "partial",
+      "scope": "Optional host-domain Zenoh session adapter with bounded health state, publish, command subscription and queryable registration",
+      "evidence": [
+        "crates/esop-zenoh-gateway/src/runtime.rs",
+        "docs/esop-zenoh-gateway.md"
+      ],
+      "limitation": "Live router, authentication, QoS, reconnect and generated Protobuf payload integration still require environment-level tests"
+    },
+    {
       "id": "ebpf_observation",
       "status": "partial",
       "scope": "Linux CO-RE loader, tracepoint attach, fixed event decode and incident correlation",

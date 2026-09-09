@@ -1,4 +1,7 @@
-#![no_std]
+#![cfg_attr(not(feature = "zenoh"), no_std)]
+
+#[cfg(feature = "zenoh")]
+pub mod runtime;
 
 pub const MAX_FLEET_ID_BYTES: usize = 32;
 pub const MAX_ROBOT_ID_BYTES: usize = 64;

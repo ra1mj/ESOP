@@ -4,7 +4,7 @@ CARGO ?= cargo
 RUSTUP ?= rustup
 RUST_TARGET ?= aarch64-unknown-none
 
-.PHONY: test test-hil check fmt-check lint release no-std bpf-syntax bpf capability-manifest proto-schema build-report performance-report setup-rust ci
+.PHONY: test test-hil check fmt-check lint release no-std bpf-syntax bpf capability-manifest proto-schema build-report performance-report zenoh-check setup-rust ci
 
 test:
 	$(CARGO) test --workspace --all-features
@@ -54,7 +54,10 @@ performance-report:
 	python3 scripts/generate-performance-report.py --output build/performance_report.json
 	python3 scripts/validate-performance-report.py build/performance_report.json
 
+zenoh-check:
+	$(CARGO) check -p esop-zenoh-gateway --features zenoh
+
 setup-rust:
 	$(RUSTUP) target add $(RUST_TARGET)
 
-ci: fmt-check check test lint release no-std bpf-syntax capability-manifest proto-schema build-report performance-report
+ci: fmt-check check test lint release no-std bpf-syntax capability-manifest proto-schema build-report performance-report zenoh-check
