@@ -4,13 +4,16 @@ CARGO ?= cargo
 RUSTUP ?= rustup
 RUST_TARGET ?= aarch64-unknown-none
 
-.PHONY: test test-hil check fmt-check lint release no-std bpf-syntax bpf capability-manifest proto-schema build-report performance-report zenoh-check setup-rust ci
+.PHONY: test test-hil test-zenoh check fmt-check lint release no-std bpf-syntax bpf capability-manifest proto-schema build-report performance-report zenoh-check setup-rust ci
 
 test:
 	$(CARGO) test --workspace --all-features
 
 test-hil:
 	$(CARGO) test -p esop-ethercat-linux-port --all-features
+
+test-zenoh:
+	./scripts/test-zenoh.sh
 
 check:
 	$(CARGO) check --workspace --all-features

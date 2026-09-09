@@ -711,6 +711,7 @@ dependencies = [
  "esop-command-gateway",
  "esop-lifecycle-guard",
  "esop-proto",
+ "tokio",
  "zenoh",
 ]
 
