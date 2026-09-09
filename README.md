@@ -33,3 +33,5 @@ Linux 观测适配器位于 `crates/esop-ebpf-runtime/`：它使用 Rust/Aya 加
 `capability_manifest.json` 是当前能力声明基线，每项能力都绑定仓库内源码、测试或设计证据，并明确实现状态和限制。`make capability-manifest` 会校验 JSON 结构、状态枚举、重复 ID 和证据路径；该校验已纳入 `make ci`。
 
 `make build-report` 会生成 `build/robot_build_report.json`，记录当前 commit、配置 hash、编译器、平台、过程数据、资源字段和资格限制；CI 会校验并上传该报告作为构建证据。
+
+`make performance-report` 会生成完整字段的 `build/performance_report.json`，覆盖周期、延迟分位数、错误计数、拷贝和资源测量；未提供目标板测量时报告保持 `passed: false`，CI 会校验并上传它。
