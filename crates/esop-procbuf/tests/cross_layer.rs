@@ -1,3 +1,4 @@
+use esop_ebpf_agent::{CAPABILITY_BTF, RuntimeAgent};
 use esop_lifecycle_guard::{
     GateId, GuardPolicy, LifecycleAction, LifecycleGuard, MotionPermit, StopAction,
 };
@@ -138,5 +139,62 @@ fn procbuf_command_expiry_stops_mlg_and_blocks_cia402_enable() {
     assert_eq!(
         published.lifecycle_history.get(1).unwrap().to_state,
         guard.transition_at(1).unwrap().to as u8
+    );
+}
+
+#[test]
+fn ebpf_health_heartbeat_can_qualify_then_stop_motion() {
+    let policy = GuardPolicy {
+        enter_good_cycles: 1,
+        exit_bad_cycles: 1,
+        max_age_cycles: 1,
+        stop_action: StopAction::QuickStop,
+    };
+    let mut guard = LifecycleGuard::new(GateId::HostObservation.bit(), 7, policy);
+    let mut agent = RuntimeAgent::<2>::new(7, 1, 1_000);
+    agent
+        .health_mut()
+        .set_capabilities(CAPABILITY_BTF, CAPABILITY_BTF, true);
+
+    let healthy = agent.heartbeat(100);
+    guard.update_host_observation(healthy, 1, 100, 10).unwrap();
+    guard
+        .accept_permit(
+            MotionPermit {
+                boot_id: 7,
+                permit_epoch: 1,
+                sequence: 1,
+                axis_mask: 1,
+                expires_at_ns: 1_000,
+            },
+            100,
+        )
+        .unwrap();
+    assert_eq!(guard.cycle(1, 100), LifecycleAction::Hold);
+    assert_eq!(
+        guard.request_rearm(
+            MotionPermit {
+                boot_id: 7,
+                permit_epoch: 1,
+                sequence: 2,
+                axis_mask: 1,
+                expires_at_ns: 1_000,
+            },
+            1,
+            100,
+        ),
+        Ok(LifecycleAction::EnableAllowed)
+    );
+
+    agent.health_mut().set_capabilities(0, CAPABILITY_BTF, true);
+    let degraded = agent.heartbeat(101);
+    assert_eq!(
+        degraded.state,
+        esop_lifecycle_guard::ObservationState::Degraded
+    );
+    guard.update_host_observation(degraded, 2, 101, 10).unwrap();
+    assert_eq!(
+        guard.cycle(2, 101),
+        LifecycleAction::Stop(StopAction::QuickStop)
     );
 }

@@ -64,7 +64,8 @@
       "evidence": [
         "crates/esop-ebpf-agent/src/lib.rs",
         "crates/esop-ebpf-runtime/src/linux.rs",
-        "bpf/esop_runtime.bpf.c"
+        "bpf/esop_runtime.bpf.c",
+        "crates/esop-procbuf/tests/cross_layer.rs"
       ],
       "limitation": "Target-kernel permissions, verifier and production hook qualification remain open"
     },

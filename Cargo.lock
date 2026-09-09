@@ -128,6 +128,7 @@ version = "0.1.0"
 name = "esop-procbuf"
 version = "0.1.0"
 dependencies = [
+ "esop-ebpf-agent",
  "esop-lifecycle-guard",
  "esop-profile-cia402",
 ]

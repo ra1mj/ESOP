@@ -11,5 +11,6 @@ name = "esop_procbuf"
 path = "src/lib.rs"
 
 [dev-dependencies]
+esop-ebpf-agent = { path = "../esop-ebpf-agent" }
 esop-lifecycle-guard = { path = "../esop-lifecycle-guard" }
 esop-profile-cia402 = { path = "../esop-profile-cia402" }
