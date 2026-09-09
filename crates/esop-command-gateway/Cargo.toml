@@ -1,0 +1,10 @@
+[package]
+name = "esop-command-gateway"
+version = "0.1.0"
+description = "Fixed-capacity external command admission and permit gateway for ESOP"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+esop-lifecycle-guard = { path = "../esop-lifecycle-guard" }

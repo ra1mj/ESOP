@@ -9,6 +9,7 @@ members = [
     "crates/esop-device",
     "crates/esop-ebpf-agent",
     "crates/esop-ebpf-runtime",
+    "crates/esop-command-gateway",
 ]
 
 [workspace.package]

@@ -58,6 +58,17 @@
       "limitation": "Shared-memory, RPMsg and UDS transport integrations are separate scope"
     },
     {
+      "id": "command_gateway_policy",
+      "status": "partial",
+      "scope": "Fixed-capacity external command ACL, TTL, replay, rate-limit and permit conversion",
+      "evidence": [
+        "crates/esop-command-gateway/src/lib.rs",
+        "crates/esop-command-gateway/tests/gateway.rs",
+        "docs/esop-command-gateway.md"
+      ],
+      "limitation": "Zenoh/Protobuf transport, cryptographic identity and deployment ACL integration remain open"
+    },
+    {
       "id": "ebpf_observation",
       "status": "partial",
       "scope": "Linux CO-RE loader, tracepoint attach, fixed event decode and incident correlation",
