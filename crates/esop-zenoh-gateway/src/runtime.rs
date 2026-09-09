@@ -19,6 +19,7 @@ const STATE_CONNECTING: u8 = 0;
 const STATE_CONNECTED: u8 = 1;
 const STATE_DEGRADED: u8 = 2;
 const STATE_DISCONNECTED: u8 = 3;
+const STATE_CLOSED: u8 = 4;
 
 /// Current health of the supervision-domain Zenoh transport.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,7 +36,7 @@ impl ConnectionState {
         match value {
             STATE_CONNECTED => Self::Connected,
             STATE_DEGRADED => Self::Degraded,
-            STATE_DISCONNECTED => Self::Disconnected,
+            STATE_DISCONNECTED | STATE_CLOSED => Self::Disconnected,
             _ => Self::Connecting,
         }
     }
@@ -58,7 +59,8 @@ impl TransportHealth {
         }
     }
 
-    /// Return the latest transport state without blocking.
+    /// Return the last observed transport state without blocking. The host
+    /// supervisor must call `ZenohGateway::refresh_health` while idle.
     pub fn state(&self) -> ConnectionState {
         ConnectionState::from_u8(self.state.load(Ordering::Acquire))
     }
@@ -74,7 +76,25 @@ impl TransportHealth {
     }
 
     fn set(&self, state: ConnectionState) {
-        self.state.store(state as u8, Ordering::Release);
+        // A refresh racing with close must not resurrect a terminal session.
+        let _ = self
+            .state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current != STATE_CLOSED).then_some(state as u8)
+            });
+    }
+
+    fn close(&self) {
+        self.state.store(STATE_CLOSED, Ordering::Release);
+    }
+
+    fn degrade(&self) {
+        let _ = self.state.compare_exchange(
+            STATE_CONNECTED,
+            STATE_DEGRADED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 }
 
@@ -151,16 +171,42 @@ impl ZenohGateway {
     pub async fn open(key_space: KeySpace, config: zenoh::Config) -> Result<Self, zenoh::Error> {
         let health = TransportHealth::connecting();
         let session = zenoh::open(config).await?;
-        health.set(ConnectionState::Connected);
-        Ok(Self {
+        let gateway = Self {
             session,
             key_space,
             health,
-        })
+        };
+        gateway.refresh_health().await;
+        Ok(gateway)
     }
 
     pub fn health(&self) -> TransportHealth {
         self.health.clone()
+    }
+
+    /// Observe current upstream router/peer connectivity using local Zenoh
+    /// session information. Call periodically from the host supervisor, never
+    /// from the EtherCAT cycle. This is not an application-level heartbeat or
+    /// a delivery acknowledgement, and it does not grant a motion permit.
+    pub async fn refresh_health(&self) -> ConnectionState {
+        if self.session.is_closed() {
+            self.health.close();
+        } else {
+            let info = self.session.info();
+            let own_id = info.zid().await;
+            let connected = info.routers_zid().await.any(|id| id != own_id)
+                || info.peers_zid().await.any(|id| id != own_id);
+            if self.session.is_closed() {
+                self.health.close();
+            } else {
+                self.health.set(if connected {
+                    ConnectionState::Connected
+                } else {
+                    ConnectionState::Disconnected
+                });
+            }
+        }
+        self.health.state()
     }
 
     pub fn key_space(&self) -> KeySpace {
@@ -222,17 +268,12 @@ impl ZenohGateway {
 
         match self.session.put(key, payload).await {
             Ok(()) => {
-                self.health.set(ConnectionState::Connected);
+                self.refresh_health().await;
                 Ok(())
             }
             Err(error) => {
                 self.health.publish_failures.fetch_add(1, Ordering::Relaxed);
-                self.health.set(if self.session.is_closed() {
-                    ConnectionState::Disconnected
-                } else {
-                    ConnectionState::Degraded
-                });
-                Err(RuntimeError::Zenoh(error))
+                Err(self.record_transport_error(error).await)
             }
         }
     }
@@ -274,23 +315,26 @@ impl ZenohGateway {
     {
         let (key, length) = self.key(RouteKind::Query, RouteDirection::Subscribe)?;
         let key = str::from_utf8(&key[..length]).map_err(|_| RuntimeError::InvalidKeyEncoding)?;
-        self.session
+        if let Err(error) = self
+            .session
             .declare_queryable(key)
             .callback(callback)
             .background()
             .await
-            .map_err(|error| self.record_registration_error(error))?;
+        {
+            return Err(self.record_transport_error(error).await);
+        }
         self.health
             .callback_registrations
             .fetch_add(1, Ordering::Relaxed);
-        self.health.set(ConnectionState::Connected);
+        self.refresh_health().await;
         Ok(())
     }
 
     /// Close the session and make the disconnection visible to the supervisor.
     pub async fn close(&self) -> Result<(), RuntimeError> {
         self.session.close().await.map_err(RuntimeError::Zenoh)?;
-        self.health.set(ConnectionState::Disconnected);
+        self.health.close();
         Ok(())
     }
 
@@ -300,16 +344,19 @@ impl ZenohGateway {
     {
         let (key, length) = self.key(kind, RouteDirection::Subscribe)?;
         let key = str::from_utf8(&key[..length]).map_err(|_| RuntimeError::InvalidKeyEncoding)?;
-        self.session
+        if let Err(error) = self
+            .session
             .declare_subscriber(key)
             .callback(callback)
             .background()
             .await
-            .map_err(|error| self.record_registration_error(error))?;
+        {
+            return Err(self.record_transport_error(error).await);
+        }
         self.health
             .callback_registrations
             .fetch_add(1, Ordering::Relaxed);
-        self.health.set(ConnectionState::Connected);
+        self.refresh_health().await;
         Ok(())
     }
 
@@ -325,13 +372,16 @@ impl ZenohGateway {
         Ok((key, length))
     }
 
-    fn record_registration_error(&self, error: zenoh::Error) -> RuntimeError {
-        self.health.set(if self.session.is_closed() {
-            ConnectionState::Disconnected
-        } else {
-            ConnectionState::Degraded
-        });
+    async fn record_transport_error(&self, error: zenoh::Error) -> RuntimeError {
+        self.refresh_health().await;
+        self.health.degrade();
         RuntimeError::Zenoh(error)
+    }
+}
+
+impl Drop for ZenohGateway {
+    fn drop(&mut self) {
+        self.health.close();
     }
 }
 
@@ -368,6 +418,22 @@ mod tests {
         health.publish_failures.fetch_add(1, Ordering::Relaxed);
         assert_eq!(health.publish_failures(), 1);
         assert_eq!(health.callback_registrations(), 0);
+    }
+
+    #[test]
+    fn terminal_health_cannot_be_overwritten_by_a_late_refresh_or_error() {
+        let health = TransportHealth::connecting();
+        health.set(ConnectionState::Connected);
+        health.degrade();
+        assert_eq!(health.state(), ConnectionState::Degraded);
+        health.set(ConnectionState::Disconnected);
+        health.degrade();
+        assert_eq!(health.state(), ConnectionState::Disconnected);
+        health.set(ConnectionState::Connected);
+        health.close();
+        health.set(ConnectionState::Connected);
+        health.degrade();
+        assert_eq!(health.state(), ConnectionState::Disconnected);
     }
 
     fn encoded_command(robot_id: &str, authority: u32) -> Vec<u8> {

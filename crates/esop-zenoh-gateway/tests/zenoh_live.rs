@@ -1,23 +1,18 @@
 #![cfg(feature = "zenoh")]
 
+mod support;
+
 use std::sync::mpsc;
 use std::time::Duration;
 
 use esop_command_gateway::{CommandIngress, IngressPolicy};
+use esop_lifecycle_guard::{GateId, GuardPolicy, LifecycleAction, LifecycleGuard, StopAction};
 use esop_proto::Message;
 use esop_proto::v1::{DiagnosticEvent, MotionCommand, RobotState, RuntimeIncident};
 use esop_zenoh_gateway::runtime::{ConnectionState, ZenohGateway, decode_command_payload};
 use esop_zenoh_gateway::{KeySpace, RouteKind};
+use support::{Router, client_config};
 use zenoh::Wait;
-
-const ROUTER_ENDPOINT: &str = "tcp/127.0.0.1:17447";
-
-fn client_config() -> zenoh::Config {
-    zenoh::Config::from_json5(&format!(
-        r#"{{mode: "client", connect: {{endpoints: ["{ROUTER_ENDPOINT}"]}}}}"#
-    ))
-    .expect("valid Zenoh client configuration")
-}
 
 fn route_key(space: KeySpace, kind: RouteKind) -> String {
     let mut buffer = [0; esop_zenoh_gateway::MAX_ZENOH_KEY_BYTES];
@@ -26,19 +21,45 @@ fn route_key(space: KeySpace, kind: RouteKind) -> String {
 }
 
 fn command_payload() -> Vec<u8> {
+    command_payload_with(1, 10_000)
+}
+
+fn command_payload_with(sequence: u64, deadline_ns: u64) -> Vec<u8> {
+    command_payload_with_epoch(sequence, deadline_ns, 1)
+}
+
+fn command_payload_with_epoch(sequence: u64, deadline_ns: u64, permit_epoch: u64) -> Vec<u8> {
     MotionCommand {
         robot_id: "robot_01".to_owned(),
         boot_id: 7,
         source_id: 42,
-        permit_epoch: 1,
-        sequence: 1,
-        deadline_ns: 10_000,
+        permit_epoch,
+        sequence,
+        deadline_ns,
         axis_mask: 0x03,
         authority: 2,
         policy_version: 9,
         ..MotionCommand::default()
     }
     .encode_to_vec()
+}
+
+fn wait_for_command(
+    observer: &zenoh::Session,
+    key: &str,
+    payload: &[u8],
+    receiver: &mpsc::Receiver<Vec<u8>>,
+) -> Vec<u8> {
+    for _ in 0..20 {
+        observer
+            .put(key, payload.to_vec())
+            .wait()
+            .expect("command publishes through router");
+        if let Ok(received) = receiver.recv_timeout(Duration::from_millis(500)) {
+            return received;
+        }
+    }
+    panic!("command did not reach gateway");
 }
 
 fn ingress() -> CommandIngress {
@@ -60,16 +81,17 @@ fn ingress() -> CommandIngress {
 }
 
 #[test]
-#[ignore = "requires zenohd on tcp/127.0.0.1:17447; run make test-zenoh"]
+#[ignore = "requires zenohd 1.10.1; run make test-zenoh"]
 fn router_round_trip_covers_gateway_contracts() {
     tokio::runtime::Runtime::new()
         .expect("Tokio runtime starts")
         .block_on(async {
+            let router = Router::new();
             let space = KeySpace::new(b"fleet_a", b"robot_01").expect("valid key space");
-            let gateway = ZenohGateway::open(space, client_config())
+            let gateway = ZenohGateway::open(space, client_config(&router.endpoint()))
                 .await
                 .expect("gateway session opens");
-            let observer = zenoh::open(client_config())
+            let observer = zenoh::open(client_config(&router.endpoint()))
                 .await
                 .expect("observer session opens");
 
@@ -172,18 +194,12 @@ fn router_round_trip_covers_gateway_contracts() {
                 .expect("command subscriber declares");
             std::thread::sleep(Duration::from_millis(250));
             let command = command_payload();
-            let mut payload = None;
-            for _ in 0..10 {
-                observer
-                    .put(route_key(space, RouteKind::Command), command.clone())
-                    .await
-                    .expect("command publishes through router");
-                if let Ok(received) = command_rx.recv_timeout(Duration::from_millis(500)) {
-                    payload = Some(received);
-                    break;
-                }
-            }
-            let payload = payload.expect("command reaches gateway");
+            let payload = wait_for_command(
+                &observer,
+                &route_key(space, RouteKind::Command),
+                &command,
+                &command_rx,
+            );
             let mut ingress = ingress();
             let permit = gateway
                 .admit_authenticated_command(&mut ingress, &payload, 42, 1_000)
@@ -232,6 +248,116 @@ fn router_round_trip_covers_gateway_contracts() {
                 Err(esop_zenoh_gateway::runtime::RuntimeError::Zenoh(_))
             ));
             assert_eq!(gateway.health().state(), ConnectionState::Disconnected);
+            observer.close().await.expect("observer closes");
+        });
+}
+
+#[test]
+#[ignore = "requires zenohd 1.10.1; run make test-zenoh"]
+fn router_restart_is_observable_and_cannot_rearm_motion() {
+    tokio::runtime::Runtime::new()
+        .expect("Tokio runtime starts")
+        .block_on(async {
+            let mut router = Router::new();
+            let space = KeySpace::new(b"fleet_a", b"robot_01").expect("valid key space");
+            let gateway = ZenohGateway::open(space, client_config(&router.endpoint()))
+                .await
+                .expect("gateway session opens");
+            let observer = zenoh::open(client_config(&router.endpoint()))
+                .await
+                .expect("observer session opens");
+            let (command_tx, command_rx) = mpsc::channel();
+            gateway
+                .subscribe_commands(move |sample| {
+                    let _ = command_tx.send(sample.payload().to_bytes().into_owned());
+                })
+                .await
+                .expect("command subscriber declares");
+            std::thread::sleep(Duration::from_millis(250));
+
+            let command_key = route_key(space, RouteKind::Command);
+            let old_command = command_payload();
+            let received = wait_for_command(&observer, &command_key, &old_command, &command_rx);
+            let mut ingress = ingress();
+            let permit = gateway
+                .admit_authenticated_command(&mut ingress, &received, 42, 1_000)
+                .expect("initial command is admitted");
+
+            let mut guard = LifecycleGuard::new(
+                GateId::Link.bit(),
+                7,
+                GuardPolicy {
+                    enter_good_cycles: 1,
+                    exit_bad_cycles: 1,
+                    max_age_cycles: 1,
+                    stop_action: StopAction::QuickStop,
+                    authorized_source_id: 42,
+                    minimum_authority: 2,
+                    permit_policy_version: 9,
+                },
+            );
+            guard.update_gate(GateId::Link, true, 1, 0);
+            assert_eq!(
+                guard.request_rearm(permit, 1, 1_000),
+                Ok(LifecycleAction::EnableAllowed)
+            );
+
+            router.stop();
+            let disconnected = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if gateway.refresh_health().await == ConnectionState::Disconnected {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+            .await;
+            assert!(disconnected.is_ok(), "router loss becomes observable");
+            assert_eq!(
+                guard.cycle(2, 10_001),
+                LifecycleAction::Stop(StopAction::QuickStop)
+            );
+
+            router.start();
+            let connected = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if gateway.refresh_health().await == ConnectionState::Connected {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+            .await;
+            assert!(connected.is_ok(), "router recovery becomes observable");
+
+            let replayed = wait_for_command(&observer, &command_key, &old_command, &command_rx);
+            assert!(matches!(
+                gateway.admit_authenticated_command(&mut ingress, &replayed, 42, 20_000),
+                Err(esop_zenoh_gateway::runtime::CommandAdapterError::Policy(
+                    esop_command_gateway::IngressError::DeadlineExpired
+                ))
+            ));
+            assert_eq!(
+                guard.cycle(3, 20_001),
+                LifecycleAction::Stop(StopAction::QuickStop)
+            );
+
+            let renewed = command_payload_with_epoch(2, 30_000, 2);
+            let renewed_payload = wait_for_command(&observer, &command_key, &renewed, &command_rx);
+            let renewed_permit = gateway
+                .admit_authenticated_command(&mut ingress, &renewed_payload, 42, 20_000)
+                .expect("new command is admitted after recovery");
+            assert_eq!(
+                guard.cycle(4, 20_001),
+                LifecycleAction::Stop(StopAction::QuickStop)
+            );
+            guard.acknowledge_stopped(4).expect("stop is acknowledged");
+            guard.update_gate(GateId::Link, true, 5, 0);
+            assert_eq!(
+                guard.request_rearm(renewed_permit, 5, 20_000),
+                Ok(LifecycleAction::EnableAllowed)
+            );
+            gateway.close().await.expect("gateway closes");
             observer.close().await.expect("observer closes");
         });
 }

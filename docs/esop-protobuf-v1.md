@@ -26,4 +26,6 @@
 
 ## 3. CI 校验
 
-`make proto-schema` 会在没有安装 protobuf runtime 的开发机上检查 `proto/esop/v1/*.proto` 的 proto3/package 声明、消息字段号和字段名唯一性、reserved 不复用及 enum 未定义零值。`crates/esop-proto/` 使用 vendored `protoc` 生成 Rust bindings，并通过 encode/decode 单测验证 v1 消息；`esop-zenoh-gateway` 会校验 robot ID 后再把 `MotionCommand` 转交固定容量 `CommandIngress`。`make test-zenoh` 进一步验证 v1 command payload 经真实 loopback router 到达 subscriber，并验证 query reply。旧/新 reader-writer 兼容组合、认证身份和生产部署仍是后续验收项。
+`make proto-schema` 会在没有安装 protobuf runtime 的开发机上检查 `proto/esop/v1/*.proto` 的 proto3/package 声明、消息字段号和字段名唯一性、reserved 不复用及 enum 未定义零值。`crates/esop-proto/` 使用 vendored `protoc` 生成 Rust bindings，并通过 encode/decode 单测验证 v1 消息；`esop-zenoh-gateway` 会校验 robot ID 后再把 `MotionCommand` 转交固定容量 `CommandIngress`。`make test-zenoh` 进一步验证 v1 state/event/incident payload、command payload 经真实 loopback router 到达 subscriber，并验证 query reply 与 router 重启后的旧命令拒绝。旧/新 reader-writer 兼容组合、认证身份和生产部署仍是后续验收项。
+
+Live router 测试还验证 v1 的 state、event、incident payload，以及 router 重启后旧命令的 TTL/代际拒绝；认证身份绑定与生产部署仍由监督域认证服务负责。

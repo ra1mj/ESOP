@@ -101,7 +101,7 @@
         "scripts/test-zenoh.sh",
         "docs/esop-zenoh-gateway.md"
       ],
-      "limitation": "Authentication, QoS, reconnect and state/event/incident payload mapping still require environment-level tests"
+      "limitation": "Authentication, QoS and production topology still require environment-level tests"
     },
     {
       "id": "ebpf_observation",

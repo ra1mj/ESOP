@@ -31,7 +31,7 @@ esop/<fleet>/<robot_id>/{state,event,diagnostic,cmd,query}
 
 Zenoh session、router、发现、重连、QoS 和 transport security 均属于 Linux 监督域。它们不可进入 EtherCAT 周期、MLG 决策或 ProcBuf 的必要执行链。断连时，实时域继续按已有命令/permit 的 deadline 和 MLG 策略运行；过期后停止，不因重连自动恢复运动。
 
-当前单元测试覆盖 robot 隔离、发布/订阅方向、payload contract、非法 key、固定 key buffer 和 payload 边界；`make test-zenoh` 会启动本地 `zenohd 1.10.1`，验证 state publish、command subscribe/准入审计、query reply 和 close 后的断连状态。ACL、断连重连、schema compatibility 和 QoS 测试仍是后续阶段。
+当前单元测试覆盖 robot 隔离、发布/订阅方向、payload contract、非法 key、固定 key buffer 和 payload 边界；`make test-zenoh` 会为每个测试动态申请 loopback 端口并启动本地 `zenohd 1.10.1`，验证 state/event/incident publish、command subscribe/准入审计、query reply、router 重启恢复和 close 后的断连状态。ACL、schema compatibility、QoS 和生产拓扑测试仍是后续阶段。
 
 ## 4. Real Zenoh adapter
 
@@ -62,3 +62,5 @@ make test-zenoh
 测试脚本只监听 loopback `tcp/127.0.0.1:17447`，退出时自动关闭 router；它不是实时周期依赖，也不代表生产环境已经完成认证、ACL 或重连配置。
 
 callback 运行在 Zenoh host runtime：命令 callback 应只把数据投递到有界命令队列，query callback 可完成查询应答，但两者都不能直接操作 EtherCAT 周期或绕过 `esop-command-gateway`。会话关闭或传输失败会将状态标为 `Disconnected` 或 `Degraded`；重连不会自动恢复运动许可。
+
+补充验证：测试进程为每个场景动态申请 loopback 临时端口并独占 zenohd，覆盖 state/event/incident 的 v1 payload、router 重启后的 health recovery、旧命令 TTL/代际拒绝，以及恢复必须经过新 permit 和显式 rearm。ZenohGateway::refresh_health 使用 session 的 router/peer 连接快照；它属于 host supervisor 观察，不是 motion permit 或应用层投递确认。[Zenoh SessionInfo API](https://docs.rs/zenoh/1.10.1/zenoh/session/struct.SessionInfo.html)

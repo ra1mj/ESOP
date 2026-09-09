@@ -18,6 +18,10 @@ jobs:
           components: rustfmt, clippy
       - name: Run Rust quality gate
         run: make ci
+      - name: Install Zenoh router
+        run: cargo install zenohd --version 1.10.1 --locked
+      - name: Run Zenoh router integration tests
+        run: make test-zenoh
       - name: Upload build evidence
         uses: actions/upload-artifact@v4
         with:
