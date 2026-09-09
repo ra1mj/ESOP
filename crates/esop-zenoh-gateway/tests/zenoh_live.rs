@@ -99,7 +99,12 @@ fn router_round_trip_covers_gateway_contracts() {
             observer
                 .declare_subscriber(route_key(space, RouteKind::State))
                 .callback(move |sample| {
-                    let _ = state_tx.send(sample.payload().to_bytes().into_owned());
+                    let _ = state_tx.send((
+                        sample.payload().to_bytes().into_owned(),
+                        sample.priority(),
+                        sample.congestion_control(),
+                        sample.express(),
+                    ));
                 })
                 .background()
                 .await
@@ -120,11 +125,15 @@ fn router_round_trip_covers_gateway_contracts() {
                     break;
                 }
             }
+            let (state_bytes, state_priority, state_congestion, state_express) =
+                state_received.expect("state reaches observer");
             let state_payload =
-                RobotState::decode(state_received.expect("state reaches observer").as_slice())
-                    .expect("state payload decodes");
+                RobotState::decode(state_bytes.as_slice()).expect("state payload decodes");
             assert_eq!(state_payload.robot_id, "robot_01");
             assert_eq!(state_payload.sequence, 1);
+            assert_eq!(state_priority, zenoh::qos::Priority::Data);
+            assert_eq!(state_congestion, zenoh::qos::CongestionControl::Drop);
+            assert!(!state_express);
 
             let (event_tx, event_rx) = mpsc::channel();
             observer

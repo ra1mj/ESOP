@@ -12,6 +12,7 @@ use esop_command_gateway::{CommandIngress, ExternalMotionCommand, IngressError};
 use esop_lifecycle_guard::MotionPermit;
 use esop_proto::Message;
 use esop_proto::v1::{DiagnosticEvent, MotionCommand, RobotState, RuntimeIncident};
+use zenoh::qos::{CongestionControl, Priority};
 
 use crate::{KeySpace, MAX_ZENOH_KEY_BYTES, RouteDirection, RouteError, RouteKind};
 
@@ -29,6 +30,35 @@ pub enum ConnectionState {
     Connected = STATE_CONNECTED,
     Degraded = STATE_DEGRADED,
     Disconnected = STATE_DISCONNECTED,
+}
+
+/// Host-domain QoS policy for an ESOP publication route.
+///
+/// All routes use non-blocking congestion handling: an unavailable transport
+/// queue must not make a supervision task wait indefinitely. These settings
+/// affect only the Zenoh host adapter and are not EtherCAT or safety guarantees.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PublishQos {
+    pub priority: Priority,
+    pub congestion_control: CongestionControl,
+    pub express: bool,
+}
+
+impl PublishQos {
+    pub const fn for_route(kind: RouteKind) -> Self {
+        match kind {
+            RouteKind::Event | RouteKind::Diagnostic => Self {
+                priority: Priority::InteractiveHigh,
+                congestion_control: CongestionControl::Drop,
+                express: true,
+            },
+            RouteKind::State | RouteKind::Command | RouteKind::Query => Self {
+                priority: Priority::Data,
+                congestion_control: CongestionControl::Drop,
+                express: false,
+            },
+        }
+    }
 }
 
 impl ConnectionState {
@@ -266,7 +296,15 @@ impl ZenohGateway {
         KeySpace::validate_payload(payload)?;
         let key = str::from_utf8(&key[..length]).map_err(|_| RuntimeError::InvalidKeyEncoding)?;
 
-        match self.session.put(key, payload).await {
+        let qos = PublishQos::for_route(kind);
+        match self
+            .session
+            .put(key, payload)
+            .priority(qos.priority)
+            .congestion_control(qos.congestion_control)
+            .express(qos.express)
+            .await
+        {
             Ok(()) => {
                 self.refresh_health().await;
                 Ok(())
@@ -418,6 +456,20 @@ mod tests {
         health.publish_failures.fetch_add(1, Ordering::Relaxed);
         assert_eq!(health.publish_failures(), 1);
         assert_eq!(health.callback_registrations(), 0);
+    }
+
+    #[test]
+    fn publication_qos_keeps_state_loss_tolerant_and_diagnostics_prompt() {
+        let state = PublishQos::for_route(RouteKind::State);
+        assert_eq!(state.priority, Priority::Data);
+        assert_eq!(state.congestion_control, CongestionControl::Drop);
+        assert!(!state.express);
+
+        let event = PublishQos::for_route(RouteKind::Event);
+        assert_eq!(event.priority, Priority::InteractiveHigh);
+        assert_eq!(event.congestion_control, CongestionControl::Drop);
+        assert!(event.express);
+        assert_eq!(event, PublishQos::for_route(RouteKind::Diagnostic));
     }
 
     #[test]
