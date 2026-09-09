@@ -80,6 +80,17 @@
       "limitation": "Generated bindings, old/new reader compatibility matrix and live transport integration remain open"
     },
     {
+      "id": "zenoh_route_policy",
+      "status": "partial",
+      "scope": "Fixed ESOP Zenoh key namespace, route direction and v1 payload contract policy",
+      "evidence": [
+        "crates/esop-zenoh-gateway/src/lib.rs",
+        "crates/esop-zenoh-gateway/tests/routes.rs",
+        "docs/esop-zenoh-gateway.md"
+      ],
+      "limitation": "Zenoh session/router, QoS, transport security and reconnect integration remain open"
+    },
+    {
       "id": "ebpf_observation",
       "status": "partial",
       "scope": "Linux CO-RE loader, tracepoint attach, fixed event decode and incident correlation",

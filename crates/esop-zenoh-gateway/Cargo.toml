@@ -1,0 +1,13 @@
+[package]
+name = "esop-zenoh-gateway"
+version = "0.1.0"
+description = "Allocation-free Zenoh namespace and route policy for ESOP supervision"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[lib]
+name = "esop_zenoh_gateway"
+path = "src/lib.rs"
