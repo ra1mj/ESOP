@@ -4,7 +4,7 @@ CARGO ?= cargo
 RUSTUP ?= rustup
 RUST_TARGET ?= aarch64-unknown-none
 
-.PHONY: test test-hil check fmt-check lint release no-std bpf-syntax bpf setup-rust ci
+.PHONY: test test-hil check fmt-check lint release no-std bpf-syntax bpf capability-manifest setup-rust ci
 
 test:
 	$(CARGO) test --workspace --all-features
@@ -40,7 +40,10 @@ bpf-syntax:
 bpf:
 	$(MAKE) -C bpf
 
+capability-manifest:
+	python3 scripts/validate-capability-manifest.py
+
 setup-rust:
 	$(RUSTUP) target add $(RUST_TARGET)
 
-ci: fmt-check check test lint release no-std bpf-syntax
+ci: fmt-check check test lint release no-std bpf-syntax capability-manifest

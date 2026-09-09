@@ -308,7 +308,7 @@ ProcBuf 是实时数据 ABI，而不是通用消息总线。它必须是固定�
 | --- | --- | --- |
 | R0：契约与仿真基线 | ProcBuf ABI、MLG 状态/permit 契约、Protobuf v1、设备模型、配置生成、wire/unit、PCAP/虚拟从站。 | 同一配置可生成 C layout、YAML、descriptor 和静态配置；MLG 状态模型/属性测试及 ABI/schema 兼容检查通过。 |
 | R1：最小 EtherCAT 实时节点 | 端口、扫描、AL、静态 PDO、单 Domain、WKC、基本诊断。 | 1/8/32 从站达到 SAFEOP/OP；1 小时无内存增长。 |
-| R2：伺服与实时资格 | CoE、DC、ProcBuf、MLG、CiA 402 单轴/双轴和 IO、故障策略。 | 两种驱动 + IO 完成 HIL；Q1/Q2、无动态分配、MLG 状态机和故障矩阵证据通过。当前已具备跨层质量门投影、LifecycleSnapshot、双轴独立许可、配置停止动作、新 permit epoch 恢复和固定生命周期转换历史发布测试。 |
+| R2：伺服与实时资格 | CoE、DC、ProcBuf、MLG、CiA 402 单轴/双轴和 IO、故障策略。 | 两种驱动 + IO 完成 HIL；Q1/Q2、无动态分配、MLG 状态机和故障矩阵证据通过。当前已具备跨层质量门投影、LifecycleSnapshot、双轴独立许可、配置停止动作、新 permit epoch 恢复、固定生命周期转换历史发布和证据绑定能力清单校验测试。 |
 | R3：产品化集成 | 多设备、外设模型、事件、配置报告、Zenoh/Protobuf 网关、ACL、Linux eBPF 运行时观测。 | 网络断连不阻塞周期；命令鉴权/TTL/审计、eBPF 观测健康和 schema 升级测试通过。 |
 | R4：机器人软件集成 | `ros2_control`、ROS bridge、URDF/配置生成、双轴轨迹演示。 | `read/update/write` 不绕过 ProcBuf；仿真与实机 HIL 演示及兼容矩阵完成。 |
 | R5：扩展与专项 | FoE、其他协议、冗余、FSoE 项目对接、官方流程。 | 每个扩展有独立开关、资源/周期影响报告与专项证据。 |

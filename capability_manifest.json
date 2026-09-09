@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "product": "ESOP",
+  "manifest_kind": "capability",
+  "claim_policy": "evidence_bound",
+  "capabilities": [
+    {
+      "id": "ethercat_core",
+      "status": "partial",
+      "scope": "Allocation-free wire, frame, PDO, mailbox, DC and cycle primitives",
+      "evidence": [
+        "crates/esop-ethercat-core/src/lib.rs",
+        "crates/esop-ethercat-core/tests/cycle.rs"
+      ],
+      "limitation": "Real slave interoperability, target MAC ports and long-duration HIL remain open"
+    },
+    {
+      "id": "linux_raw_port",
+      "status": "development_hil",
+      "scope": "Linux AF_PACKET port and deterministic simulator",
+      "evidence": [
+        "crates/esop-ethercat-linux-port/src/lib.rs",
+        "crates/esop-ethercat-linux-port/src/sim.rs",
+        "crates/esop-ethercat-linux-port/tests/master_sim.rs"
+      ],
+      "limitation": "Development and HIL use; no production real-time qualification claim"
+    },
+    {
+      "id": "cia402_profile",
+      "status": "partial",
+      "scope": "CiA 402 FSA, CSP/CSV/CST supervision and typed cyclic PDO binding",
+      "evidence": [
+        "crates/esop-profile-cia402/src/lib.rs",
+        "crates/esop-profile-cia402/src/pdo.rs",
+        "crates/esop-profile-cia402/tests/pdo.rs"
+      ],
+      "limitation": "Vendor quirks, scaling and two-vendor real-drive HIL remain open"
+    },
+    {
+      "id": "motion_lifecycle_guard",
+      "status": "partial",
+      "scope": "Fail-closed gate qualification, motion permits, recovery and lifecycle audit",
+      "evidence": [
+        "crates/esop-lifecycle-guard/src/lib.rs",
+        "crates/esop-procbuf/tests/cross_layer.rs",
+        "docs/esop-motion-lifecycle-guard.md"
+      ],
+      "limitation": "Ordinary control safeguard; it is not a certified functional-safety component"
+    },
+    {
+      "id": "procbuf_abi",
+      "status": "implemented",
+      "scope": "Fixed-layout command/state pages, quality, lifecycle history and event ring",
+      "evidence": [
+        "crates/esop-procbuf/src/lib.rs",
+        "crates/esop-procbuf/tests/cross_layer.rs"
+      ],
+      "limitation": "Shared-memory, RPMsg and UDS transport integrations are separate scope"
+    },
+    {
+      "id": "ebpf_observation",
+      "status": "partial",
+      "scope": "Linux CO-RE loader, tracepoint attach, fixed event decode and incident correlation",
+      "evidence": [
+        "crates/esop-ebpf-agent/src/lib.rs",
+        "crates/esop-ebpf-runtime/src/linux.rs",
+        "bpf/esop_runtime.bpf.c"
+      ],
+      "limitation": "Target-kernel permissions, verifier and production hook qualification remain open"
+    },
+    {
+      "id": "stm32_hpmicro_ports",
+      "status": "planned",
+      "scope": "STM32 and HPMicro vendor MAC/DMA ports",
+      "evidence": [
+        "crates/esop-ethercat-core/src/port.rs",
+        "docs/esop-etg-cia402-master-requirements.md"
+      ],
+      "limitation": "No vendor HAL, board bring-up or target hardware evidence is included"
+    },
+    {
+      "id": "real_slave_interoperability",
+      "status": "planned",
+      "scope": "Real EtherCAT slave and two-vendor CiA 402 interoperability",
+      "evidence": [
+        "docs/esop-etg-cia402-master-requirements.md",
+        "docs/esop-software-prd.md"
+      ],
+      "limitation": "Simulator and unit tests do not establish real-device interoperability"
+    }
+  ]
+}
