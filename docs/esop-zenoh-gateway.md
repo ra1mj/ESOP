@@ -39,6 +39,7 @@ Zenoh session、router、发现、重连、QoS 和 transport security 均属于 
 后，`runtime::ZenohGateway::open` 创建真实 `zenoh::Session`，并提供：
 
 - `publish`：先复用 `KeySpace` 的方向、payload contract 和 4096-byte 上限校验，再执行 Session put；
+- `publish_state` / `publish_event` / `publish_incident`：使用生成的 `esop.v1` 类型编码后发布，状态快照额外校验 `robot_id` 与 namespace 一致；
 - `subscribe_commands`：在固定 `cmd` key 上注册后台 subscriber；
 - `serve_queries`：在固定 `query` key 上注册后台 queryable；
 - `TransportHealth`：记录连接状态、发布失败数和 handler 注册数。

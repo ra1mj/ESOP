@@ -94,7 +94,7 @@
     {
       "id": "zenoh_runtime_adapter",
       "status": "partial",
-      "scope": "Optional host-domain Zenoh session adapter with bounded health state, publish, command subscription and queryable registration",
+      "scope": "Optional host-domain Zenoh session adapter with bounded health state, typed v1 state/event/incident publishing, command subscription and queryable registration",
       "evidence": [
         "crates/esop-zenoh-gateway/src/runtime.rs",
         "crates/esop-zenoh-gateway/tests/zenoh_live.rs",

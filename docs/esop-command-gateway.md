@@ -2,7 +2,7 @@
 
 - 文档版本：1.0
 - 日期：2026-09-09
-- 状态：固定策略与 permit 转换已实现；Zenoh/Protobuf 传输待集成
+- 状态：固定策略、permit 转换和 Zenoh/Protobuf 命令桥接已实现；加密身份与远程 ACL 部署待集成
 - 上游需求：PRD FR-031、FR-044、FR-045、NFR-014
 
 ## 1. 边界
@@ -52,4 +52,4 @@ MLG 自身还保留 `PermitAudit`，记录实时边界再次拒绝的许可。�
 2. 未授权来源、权限不足、策略版本错误、序号重放和限流拒绝。
 3. 固定容量审计环的时间顺序与覆盖边界。
 
-尚未声明完成的部分包括 Zenoh session/router、Protobuf 生成绑定、加密身份、具体 IPC、远程 ACL 配置和断连重连系统测试。`proto/esop/v1/esop.proto` 与 `esop-zenoh-gateway` 只作为版本化契约和路由边界，不改变本准入层的固定结构。
+尚未声明完成的部分包括加密身份、具体 IPC、远程 ACL 配置和生产断连重连测试。`proto/esop/v1/esop.proto` 与 `esop-zenoh-gateway` 已提供版本化契约、真实 loopback router 验证和受控命令入口，不改变本准入层的固定结构。

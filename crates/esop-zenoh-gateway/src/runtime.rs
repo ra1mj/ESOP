@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use esop_command_gateway::{CommandIngress, ExternalMotionCommand, IngressError};
 use esop_lifecycle_guard::MotionPermit;
 use esop_proto::Message;
-use esop_proto::v1::MotionCommand;
+use esop_proto::v1::{DiagnosticEvent, MotionCommand, RobotState, RuntimeIncident};
 
 use crate::{KeySpace, MAX_ZENOH_KEY_BYTES, RouteDirection, RouteError, RouteKind};
 
@@ -84,6 +84,7 @@ impl TransportHealth {
 pub enum RuntimeError {
     Route(RouteError),
     InvalidKeyEncoding,
+    RobotMismatch,
     Zenoh(zenoh::Error),
 }
 
@@ -216,6 +217,26 @@ impl ZenohGateway {
         }
     }
 
+    /// Encode and publish a state snapshot on the fixed state route.
+    ///
+    /// The robot ID is checked against the namespace before serialization so
+    /// a valid protobuf cannot be published under the wrong robot key.
+    pub async fn publish_state(&self, state: &RobotState) -> Result<(), RuntimeError> {
+        validate_robot_id(self.key_space, &state.robot_id)?;
+        self.publish(RouteKind::State, &state.encode_to_vec()).await
+    }
+
+    /// Encode and publish a diagnostic event on the fixed event route.
+    pub async fn publish_event(&self, event: &DiagnosticEvent) -> Result<(), RuntimeError> {
+        self.publish(RouteKind::Event, &event.encode_to_vec()).await
+    }
+
+    /// Encode and publish a correlated runtime incident on the diagnostic route.
+    pub async fn publish_incident(&self, incident: &RuntimeIncident) -> Result<(), RuntimeError> {
+        self.publish(RouteKind::Diagnostic, &incident.encode_to_vec())
+            .await
+    }
+
     /// Register a background command subscriber. The callback should enqueue a
     /// bounded host-domain command for policy validation and must not touch the
     /// EtherCAT cycle directly.
@@ -294,6 +315,14 @@ impl ZenohGateway {
     }
 }
 
+fn validate_robot_id(key_space: KeySpace, robot_id: &str) -> Result<(), RuntimeError> {
+    if robot_id.as_bytes() == key_space.robot() {
+        Ok(())
+    } else {
+        Err(RuntimeError::RobotMismatch)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,5 +396,15 @@ mod tests {
             decode_command_payload(key_space, encoded_command("robot_01", 256).as_slice()),
             Err(CommandAdapterError::AuthorityOutOfRange)
         ));
+    }
+
+    #[test]
+    fn typed_state_validation_rejects_a_cross_robot_snapshot() {
+        let key_space = KeySpace::new(b"fleet_a", b"robot_01").unwrap();
+        assert!(matches!(
+            validate_robot_id(key_space, "robot_02"),
+            Err(RuntimeError::RobotMismatch)
+        ));
+        assert!(validate_robot_id(key_space, "robot_01").is_ok());
     }
 }
