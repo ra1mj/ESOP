@@ -96,6 +96,7 @@ pub enum CommandAdapterError {
     Decode(esop_proto::DecodeError),
     RobotMismatch,
     AuthorityOutOfRange,
+    IdentityMismatch,
     Policy(IngressError),
 }
 
@@ -185,6 +186,25 @@ impl ZenohGateway {
         now_ns: u64,
     ) -> Result<MotionPermit, CommandAdapterError> {
         let command = self.decode_command(payload)?;
+        ingress
+            .admit(command, now_ns)
+            .map_err(CommandAdapterError::Policy)
+    }
+
+    /// Admit a command only after a trusted host identity has been resolved.
+    ///
+    /// The transport/authentication service owns the mapping from its
+    /// authenticated principal to the fixed `source_id`; this comparison
+    /// prevents a payload from claiming a different authorized source.
+    pub fn admit_authenticated_command(
+        &self,
+        ingress: &mut CommandIngress,
+        payload: &[u8],
+        authenticated_source_id: u64,
+        now_ns: u64,
+    ) -> Result<MotionPermit, CommandAdapterError> {
+        let command = self.decode_command(payload)?;
+        let command = validate_authenticated_source(command, authenticated_source_id)?;
         ingress
             .admit(command, now_ns)
             .map_err(CommandAdapterError::Policy)
@@ -323,6 +343,17 @@ fn validate_robot_id(key_space: KeySpace, robot_id: &str) -> Result<(), RuntimeE
     }
 }
 
+fn validate_authenticated_source(
+    command: ExternalMotionCommand,
+    authenticated_source_id: u64,
+) -> Result<ExternalMotionCommand, CommandAdapterError> {
+    if command.source_id == authenticated_source_id {
+        Ok(command)
+    } else {
+        Err(CommandAdapterError::IdentityMismatch)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +427,33 @@ mod tests {
             decode_command_payload(key_space, encoded_command("robot_01", 256).as_slice()),
             Err(CommandAdapterError::AuthorityOutOfRange)
         ));
+    }
+
+    #[test]
+    fn authenticated_source_must_match_the_command_identity() {
+        let key_space = KeySpace::new(b"fleet_a", b"robot_01").unwrap();
+        let ingress = CommandIngress::new(
+            7,
+            IngressPolicy {
+                authorized_sources: [42, 0, 0, 0],
+                authorized_source_count: 1,
+                minimum_authority: 2,
+                reserved: [0; 2],
+                permit_policy_version: 9,
+                allowed_axis_mask: 0x03,
+                max_ttl_ns: 100,
+                rate_window_ns: 1_000,
+                max_commands_per_window: 2,
+                reserved_tail: [0; 6],
+            },
+        );
+        let command = encoded_command("robot_01", 2);
+        assert!(matches!(
+            decode_command_payload(key_space, &command)
+                .and_then(|decoded| validate_authenticated_source(decoded, 43)),
+            Err(CommandAdapterError::IdentityMismatch)
+        ));
+        assert_eq!(ingress.audit_count(), 0);
     }
 
     #[test]

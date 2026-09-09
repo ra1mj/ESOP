@@ -41,6 +41,7 @@ Zenoh session、router、发现、重连、QoS 和 transport security 均属于 
 - `publish`：先复用 `KeySpace` 的方向、payload contract 和 4096-byte 上限校验，再执行 Session put；
 - `publish_state` / `publish_event` / `publish_incident`：使用生成的 `esop.v1` 类型编码后发布，状态快照额外校验 `robot_id` 与 namespace 一致；
 - `subscribe_commands`：在固定 `cmd` key 上注册后台 subscriber；
+- `admit_authenticated_command`：要求可信监督服务先将认证主体映射为固定 `source_id`，再比较 transport identity 与 payload identity；不匹配时不会进入实时准入；
 - `serve_queries`：在固定 `query` key 上注册后台 queryable；
 - `TransportHealth`：记录连接状态、发布失败数和 handler 注册数。
 - `decode_command` / `admit_command`：解码 `esop.v1.MotionCommand`，校验 robot ID，并转交 `CommandIngress` 执行来源、权限、TTL、epoch、序号、轴掩码、限流和审计。

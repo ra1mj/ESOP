@@ -20,6 +20,8 @@ external transport
 
 网关策略不执行 TLS、签名或用户会话认证。那些操作由具体的 Linux 传输适配器和可信监督服务完成；准入层只接受已经映射为固定身份、权限和策略版本的命令。
 
+Zenoh 适配器的 `admit_authenticated_command` 会比较可信监督服务提供的认证主体映射与 Protobuf 中的 `source_id`。映射不一致的命令在固定准入前拒绝；这只是身份绑定边界，不替代 TLS、签名、密钥轮换或远程 ACL。
+
 ## 2. 固定命令契约
 
 `ExternalMotionCommand` 包含：

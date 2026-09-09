@@ -186,7 +186,7 @@ fn router_round_trip_covers_gateway_contracts() {
             let payload = payload.expect("command reaches gateway");
             let mut ingress = ingress();
             let permit = gateway
-                .admit_command(&mut ingress, &payload, 1_000)
+                .admit_authenticated_command(&mut ingress, &payload, 42, 1_000)
                 .expect("received command passes fixed ingress");
             assert_eq!(permit.source_id, 42);
             assert_eq!(ingress.audit_count(), 1);
