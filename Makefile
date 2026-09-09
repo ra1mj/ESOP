@@ -4,7 +4,7 @@ CARGO ?= cargo
 RUSTUP ?= rustup
 RUST_TARGET ?= aarch64-unknown-none
 
-.PHONY: test test-hil check fmt-check lint release no-std bpf-syntax bpf capability-manifest build-report performance-report setup-rust ci
+.PHONY: test test-hil check fmt-check lint release no-std bpf-syntax bpf capability-manifest proto-schema build-report performance-report setup-rust ci
 
 test:
 	$(CARGO) test --workspace --all-features
@@ -43,6 +43,9 @@ bpf:
 capability-manifest:
 	python3 scripts/validate-capability-manifest.py
 
+proto-schema:
+	python3 scripts/validate-proto-schema.py
+
 build-report:
 	python3 scripts/generate-robot-build-report.py --output build/robot_build_report.json
 	python3 scripts/validate-robot-build-report.py build/robot_build_report.json
@@ -54,4 +57,4 @@ performance-report:
 setup-rust:
 	$(RUSTUP) target add $(RUST_TARGET)
 
-ci: fmt-check check test lint release no-std bpf-syntax capability-manifest build-report performance-report
+ci: fmt-check check test lint release no-std bpf-syntax capability-manifest proto-schema build-report performance-report

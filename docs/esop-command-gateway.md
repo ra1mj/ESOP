@@ -52,4 +52,4 @@ MLG 自身还保留 `PermitAudit`，记录实时边界再次拒绝的许可。�
 2. 未授权来源、权限不足、策略版本错误、序号重放和限流拒绝。
 3. 固定容量审计环的时间顺序与覆盖边界。
 
-尚未声明完成的部分包括 Zenoh key namespace、Protobuf schema、加密身份、具体 IPC、远程 ACL 配置和断连重连系统测试。
+尚未声明完成的部分包括 Zenoh key namespace、Protobuf 生成绑定、加密身份、具体 IPC、远程 ACL 配置和断连重连系统测试。当前 `proto/esop/v1/esop.proto` 只作为版本化契约源，不改变本准入层的固定结构。

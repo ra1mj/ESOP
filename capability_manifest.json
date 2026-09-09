@@ -69,6 +69,17 @@
       "limitation": "Zenoh/Protobuf transport, cryptographic identity and deployment ACL integration remain open"
     },
     {
+      "id": "protobuf_v1_contract",
+      "status": "partial",
+      "scope": "Versioned esop.v1 state, command, diagnostic and runtime-incident contract",
+      "evidence": [
+        "proto/esop/v1/esop.proto",
+        "scripts/validate-proto-schema.py",
+        "docs/esop-protobuf-v1.md"
+      ],
+      "limitation": "Generated bindings, old/new reader compatibility matrix and live transport integration remain open"
+    },
+    {
       "id": "ebpf_observation",
       "status": "partial",
       "scope": "Linux CO-RE loader, tracepoint attach, fixed event decode and incident correlation",

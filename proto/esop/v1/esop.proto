@@ -1,0 +1,220 @@
+syntax = "proto3";
+
+package esop.v1;
+
+option optimize_for = SPEED;
+
+enum LifecycleState {
+  LIFECYCLE_STATE_UNSPECIFIED = 0;
+  LIFECYCLE_STATE_QUALIFYING = 1;
+  LIFECYCLE_STATE_READY = 2;
+  LIFECYCLE_STATE_ACTIVE = 3;
+  LIFECYCLE_STATE_STOPPING = 4;
+  LIFECYCLE_STATE_FAULT_LATCHED = 5;
+  LIFECYCLE_STATE_MAINTENANCE = 6;
+}
+
+enum StopAction {
+  STOP_ACTION_UNSPECIFIED = 0;
+  STOP_ACTION_HOLD = 1;
+  STOP_ACTION_RAMP_TO_ZERO = 2;
+  STOP_ACTION_QUICK_STOP = 3;
+  STOP_ACTION_DISABLE = 4;
+}
+
+enum EventSeverity {
+  EVENT_SEVERITY_UNSPECIFIED = 0;
+  EVENT_SEVERITY_INFO = 1;
+  EVENT_SEVERITY_WARNING = 2;
+  EVENT_SEVERITY_ERROR = 3;
+  EVENT_SEVERITY_CRITICAL = 4;
+}
+
+enum IncidentSeverity {
+  INCIDENT_SEVERITY_UNSPECIFIED = 0;
+  INCIDENT_SEVERITY_INFO = 1;
+  INCIDENT_SEVERITY_WARNING = 2;
+  INCIDENT_SEVERITY_ERROR = 3;
+  INCIDENT_SEVERITY_CRITICAL = 4;
+}
+
+enum CommandDecision {
+  COMMAND_DECISION_UNSPECIFIED = 0;
+  COMMAND_DECISION_ACCEPTED = 1;
+  COMMAND_DECISION_REJECTED = 2;
+}
+
+message RobotState {
+  string robot_id = 1;
+  uint64 boot_id = 2;
+  uint64 sequence = 3;
+  uint64 monotonic_time_ns = 4;
+  uint64 ecat_time_ns = 5;
+  LifecycleSummary lifecycle = 6;
+  QualitySummary quality = 7;
+  repeated JointState joints = 8;
+  repeated IoState io = 9;
+  repeated DiagnosticEvent events = 10;
+
+  reserved 11, 12;
+  reserved "runtime_observation";
+}
+
+message LifecycleSummary {
+  LifecycleState state = 1;
+  StopAction stop_action = 2;
+  uint32 required_gate_mask = 3;
+  uint32 valid_gate_mask = 4;
+  uint32 qualified_gate_mask = 5;
+  uint32 ready_gate_mask = 6;
+  uint32 first_blocking_code = 7;
+  uint32 latched_fault_code = 8;
+  bool motion_permit_current = 9;
+  uint64 permit_epoch = 10;
+  uint64 permit_expires_at_ns = 11;
+  uint64 transition_sequence = 12;
+  uint64 transition_cycle = 13;
+  uint64 recovery_count = 14;
+  uint64 permit_audit_sequence = 15;
+
+  reserved 16, 17;
+  reserved "gate_score";
+}
+
+message QualitySummary {
+  bool platform_ready = 1;
+  bool configuration_ready = 2;
+  bool topology_valid = 3;
+  bool distributed_clock_locked = 4;
+  bool drive_ready = 5;
+  bool domain_valid = 6;
+  bool wkc_valid = 7;
+  bool command_current = 8;
+  bool supervisor_healthy = 9;
+  bool external_safety_clear = 10;
+  bool cycle_within_budget = 11;
+  uint32 first_fault_code = 12;
+
+  reserved 13;
+  reserved "health_score";
+}
+
+message JointState {
+  uint32 axis = 1;
+  double position = 2;
+  double velocity = 3;
+  double torque = 4;
+  double following_error = 5;
+  uint32 statusword = 6;
+  uint32 controlword = 7;
+  uint32 drive_state = 8;
+  uint32 actual_mode = 9;
+  uint32 quality = 10;
+}
+
+message IoState {
+  uint32 channel = 1;
+  uint32 input_bits = 2;
+  uint32 quality = 3;
+}
+
+message DiagnosticEvent {
+  uint64 sequence = 1;
+  uint64 timestamp_ns = 2;
+  uint32 source = 3;
+  EventSeverity severity = 4;
+  uint32 code = 5;
+  uint32 axis_or_device = 6;
+  uint32 value = 7;
+  uint32 aux = 8;
+  uint64 boot_id = 9;
+
+  reserved 10;
+  reserved "message";
+}
+
+message MotionCommand {
+  string robot_id = 1;
+  uint64 boot_id = 2;
+  uint64 source_id = 3;
+  uint64 permit_epoch = 4;
+  uint64 sequence = 5;
+  uint64 deadline_ns = 6;
+  uint32 axis_mask = 7;
+  uint32 authority = 8;
+  uint32 policy_version = 9;
+  uint32 requested_mode = 10;
+  repeated JointTarget joints = 11;
+
+  reserved 12, 13;
+  reserved "signature";
+}
+
+message JointTarget {
+  uint32 axis = 1;
+  double position = 2;
+  double velocity = 3;
+  double torque = 4;
+  double max_velocity = 5;
+  double max_torque = 6;
+}
+
+message CommandReply {
+  string robot_id = 1;
+  uint64 boot_id = 2;
+  uint64 command_sequence = 3;
+  CommandDecision decision = 4;
+  uint32 reason_code = 5;
+  uint64 audit_sequence = 6;
+  uint64 accepted_at_ns = 7;
+
+  reserved 8;
+  reserved "error_text";
+}
+
+message RuntimeIncident {
+  string incident_id = 1;
+  IncidentSeverity severity = 2;
+  uint32 reason_code = 3;
+  uint64 window_start_ns = 4;
+  uint64 window_end_ns = 5;
+  uint64 cycle_sequence = 6;
+  uint64 transition_sequence = 7;
+  repeated RuntimeEvidence evidence = 8;
+  uint32 lost_event_count = 9;
+  string affected_component = 10;
+  string suggested_action = 11;
+
+  reserved 12, 13;
+  reserved "raw_log";
+}
+
+message RuntimeEvidence {
+  uint32 kind = 1;
+  uint64 timestamp_ns = 2;
+  uint64 pid = 3;
+  uint64 tid = 4;
+  uint32 cpu = 5;
+  uint32 attach_point = 6;
+  uint32 value = 7;
+  uint64 cycle_sequence = 8;
+  uint64 boot_id = 9;
+}
+
+message QueryRequest {
+  string robot_id = 1;
+  uint64 boot_id = 2;
+  uint64 after_sequence = 3;
+  uint32 limit = 4;
+
+  reserved 5;
+  reserved "filter_expression";
+}
+
+message QueryReply {
+  string robot_id = 1;
+  uint64 boot_id = 2;
+  repeated RobotState states = 3;
+  repeated RuntimeIncident incidents = 4;
+  bool truncated = 5;
+}
