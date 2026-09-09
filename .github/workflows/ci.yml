@@ -18,6 +18,12 @@ jobs:
           components: rustfmt, clippy
       - name: Run Rust quality gate
         run: make ci
+      - name: Upload build evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: robot-build-report
+          path: build/robot_build_report.json
+          if-no-files-found: error
 
   bpf:
     runs-on: ubuntu-24.04
