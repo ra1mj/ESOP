@@ -45,7 +45,7 @@
         "crates/esop-procbuf/tests/cross_layer.rs",
         "docs/esop-motion-lifecycle-guard.md"
       ],
-      "limitation": "Ordinary control safeguard; it is not a certified functional-safety component"
+      "limitation": "Ordinary control safeguard with full runtime quality projection; it is not a certified functional-safety component"
     },
     {
       "id": "procbuf_abi",

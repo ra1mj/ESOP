@@ -79,11 +79,16 @@ pub struct GuardPolicy {
 /// observation only; the guard remains the sole authority for motion enable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CyclicQuality {
+    pub platform_ready: bool,
     pub coe_ready: bool,
+    pub topology_valid: bool,
     pub distributed_clock_locked: bool,
     pub drive_ready: bool,
     pub domain_valid: bool,
     pub wkc_valid: bool,
+    pub command_current: bool,
+    pub supervisor_healthy: bool,
+    pub external_safety_clear: bool,
     pub cycle_within_budget: bool,
 }
 
@@ -422,7 +427,9 @@ impl LifecycleGuard {
     /// Project the cycle owner's quality snapshot into the corresponding
     /// lifecycle gates using stable fault-code namespaces.
     pub fn update_cyclic_quality(&mut self, quality: CyclicQuality, cycle: u64) {
+        self.update_gate(GateId::Platform, quality.platform_ready, cycle, 0x504C_0001);
         self.update_gate(GateId::Configuration, quality.coe_ready, cycle, 0x434F_0001);
+        self.update_gate(GateId::Topology, quality.topology_valid, cycle, 0x544F_0001);
         self.update_gate(
             GateId::DistributedClock,
             quality.distributed_clock_locked,
@@ -432,6 +439,19 @@ impl LifecycleGuard {
         self.update_gate(GateId::Drive, quality.drive_ready, cycle, 0x4452_0001);
         self.update_gate(GateId::Domain, quality.domain_valid, cycle, 0x444F_0001);
         self.update_gate(GateId::Link, quality.wkc_valid, cycle, 0x574B_0001);
+        self.update_gate(GateId::Command, quality.command_current, cycle, 0x434D_0001);
+        self.update_gate(
+            GateId::Supervisor,
+            quality.supervisor_healthy,
+            cycle,
+            0x5355_0001,
+        );
+        self.update_gate(
+            GateId::ExternalSafety,
+            quality.external_safety_clear,
+            cycle,
+            0x5341_0001,
+        );
         self.update_gate(
             GateId::Budget,
             quality.cycle_within_budget,
@@ -701,10 +721,15 @@ mod tests {
     #[test]
     fn cyclic_quality_projects_runtime_gates() {
         let required = GateId::Configuration.bit()
+            | GateId::Platform.bit()
+            | GateId::Topology.bit()
             | GateId::DistributedClock.bit()
             | GateId::Drive.bit()
             | GateId::Domain.bit()
             | GateId::Link.bit()
+            | GateId::Command.bit()
+            | GateId::Supervisor.bit()
+            | GateId::ExternalSafety.bit()
             | GateId::Budget.bit();
         let policy = GuardPolicy {
             enter_good_cycles: 1,
@@ -715,11 +740,16 @@ mod tests {
         let mut guard = LifecycleGuard::new(required, 1, policy);
         guard.update_cyclic_quality(
             CyclicQuality {
+                platform_ready: true,
                 coe_ready: true,
+                topology_valid: true,
                 distributed_clock_locked: true,
                 drive_ready: true,
                 domain_valid: true,
                 wkc_valid: true,
+                command_current: true,
+                supervisor_healthy: true,
+                external_safety_clear: true,
                 cycle_within_budget: true,
             },
             1,
@@ -739,16 +769,61 @@ mod tests {
         assert_eq!(guard.cycle(1, 1), LifecycleAction::Hold);
         guard.update_cyclic_quality(
             CyclicQuality {
+                platform_ready: true,
                 coe_ready: true,
+                topology_valid: true,
                 distributed_clock_locked: true,
                 drive_ready: true,
                 domain_valid: true,
                 wkc_valid: false,
+                command_current: true,
+                supervisor_healthy: true,
+                external_safety_clear: true,
                 cycle_within_budget: true,
             },
             2,
         );
         assert_eq!(guard.gate(GateId::Link).fault_code, 0x574B_0001);
+    }
+
+    #[test]
+    fn cyclic_quality_projects_each_runtime_safety_gate() {
+        let mut guard = LifecycleGuard::new(
+            GateId::Platform.bit()
+                | GateId::Topology.bit()
+                | GateId::Command.bit()
+                | GateId::Supervisor.bit()
+                | GateId::ExternalSafety.bit(),
+            1,
+            GuardPolicy {
+                enter_good_cycles: 1,
+                exit_bad_cycles: 1,
+                max_age_cycles: 1,
+                stop_action: StopAction::QuickStop,
+            },
+        );
+        guard.update_cyclic_quality(
+            CyclicQuality {
+                platform_ready: false,
+                coe_ready: true,
+                topology_valid: false,
+                distributed_clock_locked: true,
+                drive_ready: true,
+                domain_valid: true,
+                wkc_valid: true,
+                command_current: false,
+                supervisor_healthy: false,
+                external_safety_clear: false,
+                cycle_within_budget: true,
+            },
+            7,
+        );
+        assert_eq!(guard.gate(GateId::Platform).fault_code, 0x504C_0001);
+        assert_eq!(guard.gate(GateId::Topology).fault_code, 0x544F_0001);
+        assert_eq!(guard.gate(GateId::Command).fault_code, 0x434D_0001);
+        assert_eq!(guard.gate(GateId::Supervisor).fault_code, 0x5355_0001);
+        assert_eq!(guard.gate(GateId::ExternalSafety).fault_code, 0x5341_0001);
+        assert_eq!(guard.ready_gate_mask(7) & guard.required_mask(), 0);
     }
 
     const POLICY: GuardPolicy = GuardPolicy {

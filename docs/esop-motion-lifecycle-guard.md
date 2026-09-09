@@ -272,6 +272,8 @@ MLG 配置与 EtherCAT/ProcBuf 配置一起冻结。变更 policy hash、门槛�
 
 `LifecycleGuard::snapshot(cycle, now_ns)` 提供发布所需的固定字段：当前状态、required/valid/qualified/ready 门槛位图、首个阻塞码、锁存故障码、permit epoch/expiry/current、转换序号/周期和恢复计数。ProcBuf 写者负责将该快照映射到 `LifecycleSummary`，并将 `transition_at` 记录映射到 `LifecycleHistory` 的单调时间戳字段。
 
+`CyclicQuality` 现在覆盖 platform、configuration/CoE、topology、DC、drive、Domain、WKC/link、command、supervisor、external safety 和 cycle budget；每项使用独立故障码投影到对应门槛，任一必需项失效都会按 MLG 策略阻止或停止运动。
+
 ## 10. 验收与验证
 
 | ID | 类型 | 验收要求 |

@@ -28,7 +28,7 @@ Linux 观测适配器位于 `crates/esop-ebpf-runtime/`：它使用 Rust/Aya 加
 
 `DomainRegistry` 位于 `esop-ethercat-core` 内，负责在激活前登记多个 Domain、PDO entry 和 datagram，校验过程映像/逻辑地址不重叠，生成多速率 `ScheduleTable`，并在激活后锁定配置。PDO offset 在 Domain 内稳定，datagram 计划使用全局过程映像偏移；输入段可直接转换为现有 `Domain` 的 staging 描述。SII 配置候选可先冻结为 `SiiDomainProjection`，校验 Rx/Tx 分区、FMMU/SyncManager 物理映射和逻辑基址后，再由注册表一次性事务式登记；字节对齐的 SII segment 可自动生成 `LWR`/`LRD` datagram。`FramePlanSet` 在激活期按 datagram 容量和 MTU 固定拆帧，并与注册表一起原子发布，失败时不锁定配置。
 
-当前工作区另有 `crates/esop-lifecycle-guard/`，提供独立的固定门槛、motion permit 生命周期守卫、`LifecycleSnapshot` 发布快照和固定容量状态转换审计；`crates/esop-ebpf-agent/` 提供固定证据 ABI、问题相关器、健康心跳和 eBPF 能力预检结果模型。它们只负责普通控制域的 fail-closed 策略和运行时观测，不替代 STO、FSoE、安全 PLC 或认证安全通道。
+当前工作区另有 `crates/esop-lifecycle-guard/`，提供独立的固定门槛、完整运行质量投影、motion permit 生命周期守卫、`LifecycleSnapshot` 发布快照和固定容量状态转换审计；`crates/esop-ebpf-agent/` 提供固定证据 ABI、问题相关器、健康心跳和 eBPF 能力预检结果模型。它们只负责普通控制域的 fail-closed 策略和运行时观测，不替代 STO、FSoE、安全 PLC 或认证安全通道。
 
 `capability_manifest.json` 是当前能力声明基线，每项能力都绑定仓库内源码、测试或设计证据，并明确实现状态和限制。`make capability-manifest` 会校验 JSON 结构、状态枚举、重复 ID 和证据路径；该校验已纳入 `make ci`。
 
