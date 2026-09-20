@@ -291,6 +291,7 @@ pub struct LifecycleGuard {
     state: LifecycleState,
     state_since_cycle: u64,
     maintenance_stop_pending: bool,
+    pending_fault_code: Option<u32>,
     requalify_after_cycle: Option<u64>,
     first_fault_code: u32,
     latched_fault_code: u32,
@@ -321,6 +322,7 @@ impl LifecycleGuard {
             state: LifecycleState::Qualifying,
             state_since_cycle: 0,
             maintenance_stop_pending: false,
+            pending_fault_code: None,
             requalify_after_cycle: None,
             first_fault_code: 0,
             latched_fault_code: 0,
@@ -676,17 +678,37 @@ impl LifecycleGuard {
         }
         self.maintenance_stop_pending = false;
         self.revoke_permit();
-        self.transition(LifecycleState::Ready, cycle);
+        if let Some(code) = self.pending_fault_code.take() {
+            self.latched_fault_code = code;
+            self.transition_with_fault(LifecycleState::FaultLatched, cycle, code);
+        } else {
+            self.transition(LifecycleState::Ready, cycle);
+        }
         Ok(())
     }
 
     pub fn latch_fault(&mut self, code: u32, cycle: u64) {
+        if self.state == LifecycleState::FaultLatched || self.pending_fault_code.is_some() {
+            return;
+        }
         self.revoke_permit();
-        self.maintenance_stop_pending = false;
         self.invalidate_gate_qualification(cycle);
-        self.first_fault_code = code;
-        self.latched_fault_code = code;
-        self.transition(LifecycleState::FaultLatched, cycle);
+        if self.first_fault_code == 0 {
+            self.first_fault_code = code;
+        }
+        if matches!(
+            self.state,
+            LifecycleState::Active | LifecycleState::Stopping
+        ) || self.maintenance_stop_pending
+        {
+            self.pending_fault_code = Some(code);
+            if self.state != LifecycleState::Maintenance {
+                self.transition(LifecycleState::Stopping, cycle);
+            }
+        } else {
+            self.latched_fault_code = code;
+            self.transition_with_fault(LifecycleState::FaultLatched, cycle, code);
+        }
     }
 
     pub fn clear_fault(&mut self, cycle: u64) -> Result<(), LifecycleError> {
@@ -774,7 +796,11 @@ impl LifecycleGuard {
     }
 
     fn effective_stop_action(&self) -> StopAction {
-        if self.state == LifecycleState::Maintenance || self.maintenance_stop_pending {
+        if matches!(
+            self.state,
+            LifecycleState::Maintenance | LifecycleState::FaultLatched
+        ) || self.maintenance_stop_pending
+        {
             StopAction::Disable
         } else {
             self.policy.stop_action
@@ -1131,11 +1157,22 @@ mod tests {
 
         guard.latch_fault(0xDEAD, 5);
         let fault_snapshot = guard.snapshot(5, 50);
-        assert_eq!(fault_snapshot.latched_fault_code, 0xDEAD);
+        assert_eq!(fault_snapshot.state, LifecycleState::Stopping);
+        assert_eq!(fault_snapshot.stop_action, StopAction::QuickStop);
+        assert_eq!(fault_snapshot.first_blocking_code, 0xDEAD);
+        assert_eq!(fault_snapshot.latched_fault_code, 0);
         assert!(!fault_snapshot.motion_permit_current);
         assert_eq!(fault_snapshot.permit_epoch, 2);
         assert_eq!(fault_snapshot.transition_sequence, 2);
         assert_eq!(fault_snapshot.transition_cycle, 5);
+        assert_eq!(guard.clear_fault(5), Err(LifecycleError::InvalidState));
+        guard.acknowledge_stopped(6).unwrap();
+        let latched_snapshot = guard.snapshot(6, 50);
+        assert_eq!(latched_snapshot.state, LifecycleState::FaultLatched);
+        assert_eq!(latched_snapshot.latched_fault_code, 0xDEAD);
+        assert_eq!(latched_snapshot.stop_action, StopAction::Disable);
+        assert_eq!(latched_snapshot.transition_sequence, 3);
+        assert_eq!(latched_snapshot.transition_cycle, 6);
     }
 
     #[test]
@@ -1387,6 +1424,8 @@ mod tests {
         guard.request_rearm(permit(1, 100), 2, 2).unwrap();
         guard.update_gate(GateId::Link, false, 3, 0xCAFE);
         guard.latch_fault(0xCAFE, 3);
+        assert_eq!(guard.clear_fault(3), Err(LifecycleError::InvalidState));
+        guard.acknowledge_stopped(3).unwrap();
         guard.set_maintenance(true, 3);
         guard.set_maintenance(false, 3);
         assert_eq!(guard.state(), LifecycleState::FaultLatched);
@@ -1403,7 +1442,7 @@ mod tests {
         assert_eq!(
             guard.request_rearm(
                 MotionPermit {
-                    permit_epoch: 2,
+                    permit_epoch: 3,
                     ..permit(2, 100)
                 },
                 5,
@@ -1414,7 +1453,7 @@ mod tests {
         assert_eq!(
             guard.request_rearm(
                 MotionPermit {
-                    permit_epoch: 3,
+                    permit_epoch: 4,
                     ..permit(2, 100)
                 },
                 5,
@@ -1422,6 +1461,92 @@ mod tests {
             ),
             Ok(LifecycleAction::EnableAllowed)
         );
+    }
+
+    #[test]
+    fn pending_hard_fault_survives_maintenance_and_repeated_reports() {
+        let mut guard = LifecycleGuard::new(GateId::Link.bit(), 10, POLICY);
+        guard.update_gate(GateId::Link, true, 1, 0);
+        guard.update_gate(GateId::Link, true, 2, 0);
+        guard.request_rearm(permit(1, 100), 2, 2).unwrap();
+
+        guard.latch_fault(0xBEEF, 3);
+        guard.latch_fault(0xDEAD, 3);
+        assert_eq!(guard.state(), LifecycleState::Stopping);
+        assert_eq!(guard.first_fault_code(), 0xBEEF);
+        assert_eq!(guard.latched_fault_code(), 0);
+        assert_eq!(guard.cycle(3, 3), LifecycleAction::Stop(POLICY.stop_action));
+        guard.set_maintenance(true, 3);
+        assert_eq!(guard.state(), LifecycleState::Maintenance);
+        assert_eq!(
+            guard.cycle(3, 3),
+            LifecycleAction::Stop(StopAction::Disable)
+        );
+        assert_eq!(
+            guard.acknowledge_stopped(3),
+            Err(LifecycleError::InvalidState)
+        );
+        guard.set_maintenance(false, 4);
+        assert_eq!(guard.state(), LifecycleState::Stopping);
+        assert_eq!(
+            guard.cycle(4, 4),
+            LifecycleAction::Stop(StopAction::Disable)
+        );
+        assert_eq!(guard.clear_fault(4), Err(LifecycleError::InvalidState));
+        guard.acknowledge_stopped(4).unwrap();
+        assert_eq!(guard.state(), LifecycleState::FaultLatched);
+        assert_eq!(guard.latched_fault_code(), 0xBEEF);
+        assert_eq!(guard.transition_at(4).unwrap().fault_code, 0xBEEF);
+        assert_eq!(guard.cycle(4, 4), LifecycleAction::FaultLatched);
+        assert_eq!(
+            guard.request_rearm(permit(10, 100), 4, 4),
+            Err(LifecycleError::InvalidState)
+        );
+    }
+
+    #[test]
+    fn hard_fault_during_controlled_stop_preserves_initial_blocker() {
+        let mut guard = LifecycleGuard::new(GateId::Link.bit(), 10, POLICY);
+        guard.update_gate(GateId::Link, true, 1, 0);
+        guard.update_gate(GateId::Link, true, 2, 0);
+        guard.request_rearm(permit(1, 100), 2, 2).unwrap();
+        guard.update_gate(GateId::Link, false, 3, 0xCAFE);
+        assert_eq!(guard.cycle(3, 3), LifecycleAction::Stop(POLICY.stop_action));
+
+        guard.latch_fault(0xBEEF, 3);
+        assert_eq!(guard.first_fault_code(), 0xCAFE);
+        assert_eq!(guard.snapshot(3, 3).latched_fault_code, 0);
+        guard.acknowledge_stopped(4).unwrap();
+        assert_eq!(guard.state(), LifecycleState::FaultLatched);
+        assert_eq!(guard.first_fault_code(), 0xCAFE);
+        assert_eq!(guard.latched_fault_code(), 0xBEEF);
+        assert_eq!(guard.transition_at(2).unwrap().fault_code, 0xBEEF);
+    }
+
+    #[test]
+    fn zero_code_hard_fault_still_requires_stop_confirmation() {
+        let mut guard = LifecycleGuard::new(0, 10, POLICY);
+        guard.request_rearm(permit(1, 100), 1, 1).unwrap();
+        guard.latch_fault(0, 2);
+        assert_eq!(guard.state(), LifecycleState::Stopping);
+        guard.acknowledge_stopped(2).unwrap();
+        assert_eq!(guard.state(), LifecycleState::FaultLatched);
+        assert_eq!(guard.cycle(2, 2), LifecycleAction::FaultLatched);
+    }
+
+    #[test]
+    fn hard_fault_without_prior_motion_latches_immediately() {
+        let mut guard = LifecycleGuard::new(GateId::Link.bit(), 10, POLICY);
+        guard.latch_fault(0xBEEF, 1);
+        assert_eq!(guard.state(), LifecycleState::FaultLatched);
+        assert_eq!(guard.latched_fault_code(), 0xBEEF);
+        assert_eq!(
+            guard.acknowledge_stopped(1),
+            Err(LifecycleError::InvalidState)
+        );
+        guard.latch_fault(0xDEAD, 2);
+        assert_eq!(guard.latched_fault_code(), 0xBEEF);
+        assert_eq!(guard.transition_sequence(), 1);
     }
 
     #[test]

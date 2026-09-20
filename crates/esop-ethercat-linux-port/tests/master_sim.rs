@@ -4,7 +4,9 @@ use esop_ethercat_core::{
     NoopDmaCache, RxSlotState,
 };
 use esop_ethercat_linux_port::{Cia402DriveSimulator, SimulatedPort};
-use esop_lifecycle_guard::{GateId, GuardPolicy, LifecycleError, LifecycleGuard, MotionPermit};
+use esop_lifecycle_guard::{
+    GateId, GuardPolicy, LifecycleError, LifecycleGuard, LifecycleState, MotionPermit,
+};
 use esop_profile_cia402::{
     CONTROLWORD_ENABLE_OPERATION, Cia402MotionGate, Cia402PdoCommand, Cia402PdoField, Cia402PdoMap,
     Cia402Target, OperatingMode,
@@ -423,6 +425,35 @@ fn lifecycle_guard_denial_cannot_reach_cyclic_output() {
             .unwrap()
             .read_unsigned(drive.process_image()),
         Ok(CONTROLWORD_ENABLE_OPERATION as u64)
+    );
+
+    guard.latch_fault(0xBEEF, 10);
+    assert_eq!(guard.state(), LifecycleState::Stopping);
+    assert_eq!(guard.clear_fault(10), Err(LifecycleError::InvalidState));
+    drive
+        .step_with_lifecycle(&mut guard, 10, 10, command)
+        .unwrap();
+    assert_eq!(
+        drive
+            .map()
+            .entry(Cia402PdoField::Controlword)
+            .unwrap()
+            .read_unsigned(drive.process_image()),
+        Ok(esop_profile_cia402::CONTROLWORD_QUICK_STOP as u64)
+    );
+    guard.acknowledge_stopped(10).unwrap();
+    assert_eq!(guard.state(), LifecycleState::FaultLatched);
+    assert_eq!(guard.latched_fault_code(), 0xBEEF);
+    drive
+        .step_with_lifecycle(&mut guard, 11, 11, command)
+        .unwrap();
+    assert_eq!(
+        drive
+            .map()
+            .entry(Cia402PdoField::Controlword)
+            .unwrap()
+            .read_unsigned(drive.process_image()),
+        Ok(esop_profile_cia402::CONTROLWORD_DISABLE_VOLTAGE as u64)
     );
 }
 
