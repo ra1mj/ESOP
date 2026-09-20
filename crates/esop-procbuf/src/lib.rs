@@ -12,7 +12,7 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 pub const ABI_MAGIC: u32 = 0x4553_4F50;
-pub const ABI_VERSION: u16 = 1;
+pub const ABI_VERSION: u16 = 2;
 
 const PAGE_FREE: u32 = 0;
 const PAGE_WRITING: u32 = 1;
@@ -397,13 +397,19 @@ pub struct LifecycleSummary {
     pub stop_action: u8,
     pub gates_ready: u8,
     pub motion_permit: u8,
-    pub gate_mask: u16,
-    pub reserved: u16,
+    pub required_gate_mask: u16,
+    pub valid_gate_mask: u16,
+    pub qualified_gate_mask: u16,
+    pub ready_gate_mask: u16,
     pub first_blocking_code: u32,
     pub latched_fault_code: u32,
+    pub permit_epoch: u64,
+    pub permit_expires_at_ns: u64,
     pub transition_sequence: u64,
+    pub transition_cycle: u64,
     pub transition_time_ns: u64,
     pub recovery_count: u64,
+    pub permit_audit_sequence: u64,
 }
 
 impl LifecycleSummary {
@@ -412,13 +418,19 @@ impl LifecycleSummary {
         stop_action: 0,
         gates_ready: 0,
         motion_permit: 0,
-        gate_mask: 0,
-        reserved: 0,
+        required_gate_mask: 0,
+        valid_gate_mask: 0,
+        qualified_gate_mask: 0,
+        ready_gate_mask: 0,
         first_blocking_code: 0,
         latched_fault_code: 0,
+        permit_epoch: 0,
+        permit_expires_at_ns: 0,
         transition_sequence: 0,
+        transition_cycle: 0,
         transition_time_ns: 0,
         recovery_count: 0,
+        permit_audit_sequence: 0,
     };
 }
 
@@ -941,6 +953,13 @@ mod tests {
     fn header_rejects_wrong_layout_identity_and_boot() {
         let buffer = TestBuf::new(42, 9);
         assert_eq!(buffer.validate_header(42, 9), Ok(()));
+        assert_eq!(buffer.header().abi_version, ABI_VERSION);
+        let mut previous_abi = buffer.header();
+        previous_abi.abi_version = 1;
+        assert_eq!(
+            previous_abi.validate::<2, 1, 2, 2>(42, 9),
+            Err(HeaderError::AbiVersionMismatch)
+        );
         assert_eq!(
             buffer.validate_header(41, 9),
             Err(HeaderError::RobotIdMismatch)
@@ -1013,7 +1032,15 @@ mod tests {
         state.quality.link_up = 1;
         state.quality.domains[0].expected_wkc = 4;
         state.lifecycle.transition_sequence = 3;
+        state.lifecycle.required_gate_mask = 0x125;
+        state.lifecycle.valid_gate_mask = 0x025;
+        state.lifecycle.qualified_gate_mask = 0x005;
+        state.lifecycle.ready_gate_mask = 0x001;
+        state.lifecycle.permit_epoch = 4;
+        state.lifecycle.permit_expires_at_ns = 15_000;
+        state.lifecycle.transition_cycle = 27;
         state.lifecycle.transition_time_ns = 3_000;
+        state.lifecycle.permit_audit_sequence = 12;
         state.lifecycle_history.push(LifecycleTransitionRecord {
             sequence: 3,
             timestamp_ns: 3_000,
@@ -1028,7 +1055,15 @@ mod tests {
         assert_eq!(snapshot.state.sequence, 11);
         assert_eq!(snapshot.state.quality.domains[0].expected_wkc, 4);
         assert_eq!(snapshot.state.lifecycle.transition_sequence, 3);
+        assert_eq!(snapshot.state.lifecycle.required_gate_mask, 0x125);
+        assert_eq!(snapshot.state.lifecycle.valid_gate_mask, 0x025);
+        assert_eq!(snapshot.state.lifecycle.qualified_gate_mask, 0x005);
+        assert_eq!(snapshot.state.lifecycle.ready_gate_mask, 0x001);
+        assert_eq!(snapshot.state.lifecycle.permit_epoch, 4);
+        assert_eq!(snapshot.state.lifecycle.permit_expires_at_ns, 15_000);
+        assert_eq!(snapshot.state.lifecycle.transition_cycle, 27);
         assert_eq!(snapshot.state.lifecycle.transition_time_ns, 3_000);
+        assert_eq!(snapshot.state.lifecycle.permit_audit_sequence, 12);
         assert_eq!(
             snapshot.state.lifecycle_history.get(0),
             Some(LifecycleTransitionRecord {

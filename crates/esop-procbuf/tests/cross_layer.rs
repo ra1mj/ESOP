@@ -1,6 +1,7 @@
 use esop_ebpf_agent::{CAPABILITY_BTF, RuntimeAgent};
 use esop_lifecycle_guard::{
-    GateId, GuardPolicy, LifecycleAction, LifecycleGuard, MotionPermit, StopAction,
+    GateId, GuardPolicy, LifecycleAction, LifecycleGuard, MotionPermit, PermitError, StopAction,
+    procbuf::lifecycle_to_procbuf,
 };
 use esop_procbuf::{
     CommandPage, ControlMode, JointCommand, LifecycleTransitionRecord, ProcBuf, StatePage,
@@ -99,6 +100,9 @@ fn procbuf_command_expiry_stops_mlg_and_blocks_cia402_enable() {
         guard.cycle(2, 2) == LifecycleAction::EnableAllowed && mode_output.cyclic_allowed,
     );
     assert!(enabled.motion_allowed);
+    let active = lifecycle_to_procbuf(guard.snapshot(2, 2), 2_000_000);
+    assert_eq!(active.gates_ready, 1);
+    assert_eq!(active.motion_permit, 1);
 
     buffer.publish_command(command(7, 2, 10)).unwrap();
     assert_eq!(
@@ -113,20 +117,26 @@ fn procbuf_command_expiry_stops_mlg_and_blocks_cia402_enable() {
     let blocked = cia402.step(0x0027, DriveRequest::Enable, false);
     assert!(!blocked.motion_allowed);
 
+    let wrong_boot = MotionPermit {
+        boot_id: 8,
+        source_id: 11,
+        permit_epoch: 2,
+        sequence: 3,
+        axis_mask: 0x03,
+        expires_at_ns: 100,
+        authority: 1,
+        reserved: [0; 3],
+        policy_version: 1,
+    };
+    assert_eq!(
+        guard.accept_permit(wrong_boot, 10),
+        Err(PermitError::BootMismatch)
+    );
+
     let snapshot = guard.snapshot(3, 10);
     let mut state = StatePage::new(7);
     state.sequence = 3;
-    state.lifecycle.state = snapshot.state as u8;
-    state.lifecycle.stop_action = snapshot.stop_action as u8;
-    state.lifecycle.gates_ready = (snapshot.ready_gate_mask & snapshot.required_gate_mask
-        == snapshot.required_gate_mask) as u8;
-    state.lifecycle.motion_permit = snapshot.motion_permit_current as u8;
-    state.lifecycle.gate_mask = snapshot.ready_gate_mask;
-    state.lifecycle.first_blocking_code = snapshot.first_blocking_code;
-    state.lifecycle.latched_fault_code = snapshot.latched_fault_code;
-    state.lifecycle.transition_sequence = snapshot.transition_sequence;
-    state.lifecycle.transition_time_ns = snapshot.transition_cycle * 1_000_000;
-    state.lifecycle.recovery_count = snapshot.recovery_count;
+    state.lifecycle = lifecycle_to_procbuf(snapshot, snapshot.transition_cycle * 1_000_000);
     for index in 0..guard.transition_count() {
         let transition = guard.transition_at(index).unwrap();
         state.lifecycle_history.push(LifecycleTransitionRecord {
@@ -142,6 +152,32 @@ fn procbuf_command_expiry_stops_mlg_and_blocks_cia402_enable() {
     let published = buffer.read_state().unwrap().state;
     assert_eq!(published.lifecycle.state, snapshot.state as u8);
     assert_eq!(published.lifecycle.stop_action, snapshot.stop_action as u8);
+    assert_eq!(published.lifecycle.gates_ready, 0);
+    // A still-current permit is not permission to move while a gate is blocked.
+    assert_eq!(published.lifecycle.motion_permit, 1);
+    assert_eq!(published.lifecycle.required_gate_mask, required);
+    assert_eq!(
+        published.lifecycle.valid_gate_mask,
+        snapshot.valid_gate_mask
+    );
+    assert_eq!(
+        published.lifecycle.qualified_gate_mask,
+        snapshot.qualified_gate_mask
+    );
+    assert_eq!(
+        published.lifecycle.ready_gate_mask,
+        snapshot.ready_gate_mask
+    );
+    assert_eq!(published.lifecycle.permit_epoch, snapshot.permit_epoch);
+    assert_eq!(
+        published.lifecycle.permit_expires_at_ns,
+        snapshot.permit_expires_at_ns
+    );
+    assert_eq!(
+        published.lifecycle.transition_cycle,
+        snapshot.transition_cycle
+    );
+    assert_eq!(published.lifecycle.permit_audit_sequence, 1);
     assert_eq!(
         published.lifecycle.transition_sequence,
         snapshot.transition_sequence

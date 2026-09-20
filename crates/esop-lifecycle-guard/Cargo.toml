@@ -9,6 +9,10 @@ rust-version.workspace = true
 [features]
 default = []
 std = []
+procbuf = ["dep:esop-procbuf"]
+
+[dependencies]
+esop-procbuf = { path = "../esop-procbuf", optional = true }
 
 [lib]
 name = "esop_lifecycle_guard"

@@ -1,5 +1,8 @@
 #![no_std]
 
+#[cfg(feature = "procbuf")]
+pub mod procbuf;
+
 pub const MAX_GATES: usize = 16;
 pub const MAX_TRANSITIONS: usize = 16;
 pub const MAX_PERMIT_AUDITS: usize = 16;
@@ -113,6 +116,7 @@ pub struct LifecycleSnapshot {
     pub transition_sequence: u64,
     pub transition_cycle: u64,
     pub recovery_count: u64,
+    pub permit_audit_sequence: u64,
 }
 
 impl GuardPolicy {
@@ -437,6 +441,7 @@ impl LifecycleGuard {
             transition_sequence: self.transition_sequence,
             transition_cycle: latest.map(|transition| transition.cycle).unwrap_or(0),
             recovery_count: self.recovery_count,
+            permit_audit_sequence: self.permit_audit_sequence,
         }
     }
 
@@ -1043,6 +1048,7 @@ mod tests {
         assert_eq!(snapshot.transition_sequence, 1);
         assert_eq!(snapshot.transition_cycle, 4);
         assert_eq!(snapshot.recovery_count, 1);
+        assert_eq!(snapshot.permit_audit_sequence, 0);
         assert_eq!(guard.latched_fault_code(), 0);
 
         guard.latch_fault(0xDEAD, 5);

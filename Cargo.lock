@@ -678,6 +678,9 @@ dependencies = [
 [[package]]
 name = "esop-lifecycle-guard"
 version = "0.1.0"
+dependencies = [
+ "esop-procbuf",
+]
 
 [[package]]
 name = "esop-procbuf"

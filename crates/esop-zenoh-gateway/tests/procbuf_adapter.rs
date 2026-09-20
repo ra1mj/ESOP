@@ -1,6 +1,9 @@
 #![cfg(feature = "zenoh")]
 
-use esop_lifecycle_guard::{LifecycleState as GuardState, StopAction as GuardStop};
+use esop_lifecycle_guard::{
+    GateId, GuardPolicy, LifecycleGuard, LifecycleState as GuardState, MotionPermit, PermitError,
+    StopAction as GuardStop, procbuf::lifecycle_to_procbuf,
+};
 use esop_procbuf::{EventSeverity as ProcSeverity, HeaderError, ProcBuf, ProcBufEvent, StatePage};
 use esop_proto::v1::{EventSeverity, LifecycleState, StopAction};
 use esop_proto::{CURRENT_SCHEMA_VERSION, Message};
@@ -26,11 +29,18 @@ fn state(sequence: u64) -> StatePage<2, 1, 1> {
     state.io[0].quality = 2;
     state.lifecycle.state = GuardState::Stopping as u8;
     state.lifecycle.stop_action = GuardStop::QuickStop as u8;
-    state.lifecycle.gate_mask = 0x025;
+    state.lifecycle.required_gate_mask = 0x027;
+    state.lifecycle.valid_gate_mask = 0x025;
+    state.lifecycle.qualified_gate_mask = 0x005;
+    state.lifecycle.ready_gate_mask = 0x025;
     state.lifecycle.first_blocking_code = 0x102;
     state.lifecycle.latched_fault_code = 0x204;
+    state.lifecycle.permit_epoch = 3;
+    state.lifecycle.permit_expires_at_ns = 250_000;
     state.lifecycle.transition_sequence = 8;
+    state.lifecycle.transition_cycle = 7;
     state.lifecycle.recovery_count = 2;
+    state.lifecycle.permit_audit_sequence = 4;
     state
 }
 
@@ -61,6 +71,9 @@ fn maps_one_complete_procbuf_state_without_inventing_missing_quality() {
     let lifecycle = projected.lifecycle.as_ref().unwrap();
     assert_eq!(lifecycle.state, LifecycleState::Stopping as i32);
     assert_eq!(lifecycle.stop_action, StopAction::QuickStop as i32);
+    assert_eq!(lifecycle.required_gate_mask, 0x027);
+    assert_eq!(lifecycle.valid_gate_mask, 0x025);
+    assert_eq!(lifecycle.qualified_gate_mask, 0x005);
     assert_eq!(
         (lifecycle.ready_gate_mask, lifecycle.transition_sequence),
         (0x025, 8)
@@ -69,11 +82,73 @@ fn maps_one_complete_procbuf_state_without_inventing_missing_quality() {
         (lifecycle.first_blocking_code, lifecycle.latched_fault_code),
         (0x102, 0x204)
     );
+    assert_eq!(lifecycle.permit_epoch, 3);
+    assert_eq!(lifecycle.permit_expires_at_ns, 250_000);
+    assert_eq!(lifecycle.transition_cycle, 7);
     assert_eq!(lifecycle.recovery_count, 2);
+    assert_eq!(lifecycle.permit_audit_sequence, 4);
     assert!(projected.quality.is_none());
     assert!(projected.events.is_empty());
     assert!(projected.encoded_len() <= MAX_PAYLOAD_BYTES);
     assert!(projector.read_state(&buffer).unwrap().is_none());
+}
+
+#[test]
+fn guard_snapshot_flows_through_procbuf_to_protobuf_without_losing_gate_or_audit_facts() {
+    let required = GateId::Platform.bit() | GateId::ExternalSafety.bit();
+    let mut guard = LifecycleGuard::new(
+        required,
+        7,
+        GuardPolicy {
+            enter_good_cycles: 1,
+            exit_bad_cycles: 1,
+            max_age_cycles: 1,
+            stop_action: GuardStop::QuickStop,
+            authorized_source_id: 11,
+            minimum_authority: 1,
+            permit_policy_version: 1,
+        },
+    );
+    guard.update_gate(GateId::Platform, true, 4, 0);
+    guard.update_gate(GateId::ExternalSafety, false, 4, 0x5341_0001);
+    let permit = MotionPermit {
+        boot_id: 7,
+        source_id: 11,
+        permit_epoch: 3,
+        sequence: 1,
+        axis_mask: 3,
+        expires_at_ns: 250_000,
+        authority: 1,
+        reserved: [0; 3],
+        policy_version: 1,
+    };
+    guard.accept_permit(permit, 123_000).unwrap();
+    assert_eq!(
+        guard.accept_permit(permit, 123_001),
+        Err(PermitError::SequenceReplayed)
+    );
+    let snapshot = guard.snapshot(4, 123_001);
+    let buffer = TestBuf::new(42, 7);
+    let mut state = state(10);
+    state.lifecycle = lifecycle_to_procbuf(snapshot, 0);
+    buffer.publish_state(state).unwrap();
+    let projected = projector().read_state(&buffer).unwrap().unwrap();
+    let lifecycle = projected.lifecycle.unwrap();
+    assert_eq!(lifecycle.required_gate_mask, u32::from(required));
+    assert_eq!(lifecycle.valid_gate_mask, u32::from(GateId::Platform.bit()));
+    assert_eq!(
+        lifecycle.qualified_gate_mask,
+        u32::from(GateId::Platform.bit())
+    );
+    assert_eq!(lifecycle.ready_gate_mask, u32::from(GateId::Platform.bit()));
+    assert_eq!(lifecycle.first_blocking_code, 0x5341_0001);
+    assert_eq!(lifecycle.permit_epoch, 3);
+    assert_eq!(lifecycle.permit_expires_at_ns, 250_000);
+    assert_eq!(lifecycle.permit_audit_sequence, 1);
+    assert_eq!(
+        lifecycle.motion_permit_current,
+        snapshot.motion_permit_current
+    );
 }
 
 #[test]

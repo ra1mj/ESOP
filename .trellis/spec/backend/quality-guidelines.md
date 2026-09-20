@@ -31,6 +31,13 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
 - Keep ProcBuf as a standalone `no_std` ABI layer. Use its header/layout hash
   to reject robot/boot/capacity mismatches, and use the double-page ownership
   protocol rather than an unchecked sequence-only copy.
+- Bump the ProcBuf ABI version whenever the fixed record layout or field
+  semantics change. Keep lifecycle projection in the optional `no_std` guard
+  adapter; verify guard -> ProcBuf -> external schema with a public test, and
+  reject old headers rather than interpreting them as the new layout.
+- Treat `motion_permit_current` as permit freshness, not motion authorization:
+  a blocked gate can move the guard to `Stopping` while the permit remains
+  current. Only the guard's cycle action may authorize CiA 402 enable.
 - CiA 402 mode confirmation is not sufficient for motion: cyclic output must
   also require `OperationEnabled`, MLG permission, and a seeded/limited first
   setpoint.
