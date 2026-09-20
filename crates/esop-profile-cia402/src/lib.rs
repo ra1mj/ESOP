@@ -251,6 +251,7 @@ pub enum CyclicSetpointError {
 
 /// Guards the first cyclic target and every subsequent setpoint against a
 /// mode transition jump or a configured velocity/torque limit violation.
+#[derive(Clone, Copy)]
 pub struct CyclicSetpointGuard {
     seeded: bool,
     last: CyclicSetpoint,

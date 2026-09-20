@@ -87,19 +87,29 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   and unsafe axis outputs, and it must never record stop issuance. On a stop
   timeout, publish the fault-latched State before ordered transition/axis
   timeout events even when the inhibited TX fails.
-- For the optional single-Domain stop/inhibited branches, use `StopCycleContext` only
+- For the optional single-Domain lifecycle branches, use `StopCycleContext` only
   after the real master cycle has completed Domain RX. Match the report to
   both the master cycle and State sequence, and verify the frozen allowed
   axis mask fits the bank, before mutating gates; project RX quality once,
-  decide with one guard borrow, submit the next stop or Disable frame,
+  decide with one guard borrow, submit the next stop, Disable, or active frame,
   stage per-axis evidence even when TX fails, acknowledge only earlier issued
   actions with current verified feedback, then publish State before emitting
   events. A new transition uses this invocation's monotonic timestamp; an
-  older transition needs its recorded timestamp from the caller. `NotStopping`
-  now denotes Active motion only; the caller still owns its normal output and
-  State/event publication. The caller also owns final deadline facts, non-CiA 402 output
-  safety, other Domains, and the full cycle scheduler; this branch is not a
-  complete production owner or HIL qualification.
+  older transition needs its recorded timestamp from the caller. The stop-only
+  `run` rejects Active; `run_with_motion` requires caller-owned, fresh-actual
+  seeded and bounded setpoint guards. Require current verified RX and matching
+  Statusword, confirmed mode and Operation Enabled for moving targets. The
+  Switched On -> Operation Enabled edge must also carry a target equal to the
+  current actual feedback; earlier PDS handshake steps carry no target. Never
+  send Enable Operation with a stale target from the safe image. Reject target
+  and Controlword aliases even
+  against an unpermitted axis. Commit setpoint guards only after successful TX.
+  On an active validation/build/TX error, preserve the initial error, abort
+  motion and attempt a stop PDO in the same cycle; even if that stop TX also
+  fails, publish zero issued evidence, the Stopping State, and ordered events.
+  The caller still owns seed epoch freshness, final deadline facts, non-CiA 402
+  output safety, other Domains, and the full cycle scheduler; this branch is
+  not a complete production owner or HIL qualification.
 - Freeze per-axis stop selections in `AxisStopPolicy` at guard construction.
   Assemble all axis outputs from one borrowed `cycle_axes` decision, use the
   originally armed mask for stop requests, and force every other axis to

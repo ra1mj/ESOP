@@ -14,8 +14,10 @@ use esop_ethercat_core::{
 };
 #[cfg(feature = "cia402")]
 use esop_profile_cia402::{
-    CONTROLWORD_DISABLE_VOLTAGE, CONTROLWORD_QUICK_STOP, Cia402Output, Cia402PdoError,
-    Cia402PdoField, Cia402PdoMap, OperatingMode,
+    CONTROLWORD_DISABLE_VOLTAGE, CONTROLWORD_QUICK_STOP, Cia402Controller, Cia402MotionGate,
+    Cia402Output, Cia402PdoCommand, Cia402PdoError, Cia402PdoField, Cia402PdoMap, Cia402Target,
+    CyclicLimits, CyclicSetpoint, CyclicSetpointError, CyclicSetpointGuard, DriveRequest,
+    DriveState, OperatingMode,
 };
 
 /// A stopped-axis frame is prepared but does not count as issued until the
@@ -25,15 +27,205 @@ use esop_profile_cia402::{
 #[derive(Debug)]
 pub enum StopFrameError<E> {
     InvalidDecision,
+    UnverifiedInput,
     AxisCapacityExceeded,
     InvalidDeadline,
     UnsafeOutput(usize),
+    MissingTarget(usize),
+    UnexpectedTarget(usize),
+    InvalidTarget(usize, CyclicSetpointError),
     UncoveredOutput(usize, Cia402PdoField),
     OverlappingOutput(usize, usize),
     Pdo(usize, Cia402PdoError),
     FramePool(FramePoolError),
     Build(CycleError<core::convert::Infallible>),
     Transmit(CycleError<E>),
+}
+
+/// Submit an active, single-Domain cycle only after the completed receive and
+/// lifecycle decision agree. A permitted axis may handshake without a target
+/// until Switched On; the enable-operation edge must carry an actual-feedback
+/// hold target, and Operation Enabled requires a seeded, bounded target in the
+/// confirmed mode. The caller must seed each setpoint guard from fresh
+/// actual feedback on a new motion epoch and provide a safe image for all
+/// outputs not written here. Failed validation/build/TX cannot advance targets.
+#[cfg(feature = "cia402")]
+#[allow(clippy::too_many_arguments)]
+pub fn submit_active_frame<
+    P: EthercatPort,
+    const AXES: usize,
+    const BYTES: usize,
+    const SEGMENTS: usize,
+    const DATAGRAMS: usize,
+    const SLOTS: usize,
+    const MTU: usize,
+>(
+    decision: &AxisCycleDecision<'_>,
+    report: CycleReport,
+    outputs: &[Cia402Output; AXES],
+    targets: &[Option<Cia402Target>; AXES],
+    guards: &mut [CyclicSetpointGuard; AXES],
+    limits: &[CyclicLimits; AXES],
+    maps: &[Cia402PdoMap; AXES],
+    modes: &[OperatingMode; AXES],
+    safe_process_image: &[u8; BYTES],
+    domain: &Domain<BYTES, SEGMENTS>,
+    plan: &FramePlan<DATAGRAMS>,
+    master: &mut EthercatMaster<SLOTS, MTU>,
+    port: &mut P,
+    generation: u16,
+    deadline_ns: u64,
+) -> Result<usize, StopFrameError<P::Error>> {
+    let permitted = decision.permitted_axis_mask();
+    if !matches!(decision.action(), LifecycleAction::EnableAllowed)
+        || decision.stopping_axis_mask() != 0
+        || permitted == 0
+    {
+        return Err(StopFrameError::InvalidDecision);
+    }
+    if AXES > MAX_MOTION_AXES || (AXES < MAX_MOTION_AXES && permitted >> AXES != 0) {
+        return Err(StopFrameError::AxisCapacityExceeded);
+    }
+    if decision.cycle() != report.cycle
+        || report.budget_exhausted
+        || !rx_current(report)
+        || !domain_current(report, domain.quality())
+    {
+        return Err(StopFrameError::UnverifiedInput);
+    }
+    if deadline_ns <= port.now_ns() {
+        return Err(StopFrameError::InvalidDeadline);
+    }
+
+    // Even an inactive target PDO cannot alias a different axis's active
+    // target: the frame would otherwise move an unpermitted axis.
+    const OUTPUT_FIELDS: [Cia402PdoField; 5] = [
+        Cia402PdoField::Controlword,
+        Cia402PdoField::ModeOfOperation,
+        Cia402PdoField::TargetPosition,
+        Cia402PdoField::TargetVelocity,
+        Cia402PdoField::TargetTorque,
+    ];
+    for (axis, map) in maps.iter().enumerate() {
+        for (prior_axis, prior) in maps.iter().enumerate().take(axis) {
+            for field in OUTPUT_FIELDS {
+                let Some(entry) = map.entry(field) else {
+                    continue;
+                };
+                for prior_field in OUTPUT_FIELDS {
+                    if prior.entry(prior_field).is_some_and(|earlier| {
+                        entry.bit_offset
+                            < earlier
+                                .bit_offset
+                                .saturating_add(earlier.bit_length as usize)
+                            && earlier.bit_offset
+                                < entry.bit_offset.saturating_add(entry.bit_length as usize)
+                    }) {
+                        return Err(StopFrameError::OverlappingOutput(prior_axis, axis));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut image = *safe_process_image;
+    let mut accepted = *guards;
+    for axis in 0..AXES {
+        let inputs = maps[axis]
+            .read_inputs_for(domain.input(), modes[axis])
+            .map_err(|error| StopFrameError::Pdo(axis, error))?;
+        let authorized = permitted & (1u32 << axis) != 0;
+        let request = if authorized {
+            DriveRequest::Enable
+        } else {
+            DriveRequest::Disable
+        };
+        let output = outputs[axis];
+        if output != Cia402Controller::new().step(inputs.statusword, request, authorized) {
+            return Err(StopFrameError::UnsafeOutput(axis));
+        }
+        let mut fields = [
+            Cia402PdoField::Controlword,
+            Cia402PdoField::ModeOfOperation,
+            Cia402PdoField::Controlword,
+        ];
+        let mut field_count = 2;
+        match (authorized, output.state, targets[axis]) {
+            (false, _, None)
+            | (true, DriveState::SwitchOnDisabled | DriveState::ReadyToSwitchOn, None) => {
+                maps[axis]
+                    .write_control(&mut image, modes[axis], output.controlword)
+                    .map_err(|error| StopFrameError::Pdo(axis, error))?;
+            }
+            (false, _, Some(_))
+            | (true, DriveState::SwitchOnDisabled | DriveState::ReadyToSwitchOn, Some(_)) => {
+                return Err(StopFrameError::UnexpectedTarget(axis));
+            }
+            (true, DriveState::SwitchedOn | DriveState::OperationEnabled, None) => {
+                return Err(StopFrameError::MissingTarget(axis));
+            }
+            (true, DriveState::SwitchedOn | DriveState::OperationEnabled, Some(target)) => {
+                let current = accepted[axis].last();
+                let setpoint = match target {
+                    Cia402Target::Position(value) => CyclicSetpoint {
+                        position: value as f64,
+                        ..current
+                    },
+                    Cia402Target::Velocity(value) => CyclicSetpoint {
+                        velocity: value as f64,
+                        ..current
+                    },
+                    Cia402Target::Torque(value) => CyclicSetpoint {
+                        torque: value as f64,
+                        ..current
+                    },
+                };
+                let mode_ready = inputs.actual_mode == modes[axis];
+                accepted[axis]
+                    .validate_and_accept(modes[axis], mode_ready, setpoint, limits[axis])
+                    .map_err(|error| StopFrameError::InvalidTarget(axis, error))?;
+                let command = Cia402PdoCommand {
+                    controlword: output.controlword,
+                    mode: modes[axis],
+                    target,
+                };
+                if output.state == DriveState::SwitchedOn {
+                    maps[axis]
+                        .write_enable_with_actual_target(&mut image, command, inputs)
+                        .map_err(|error| StopFrameError::Pdo(axis, error))?;
+                } else {
+                    maps[axis]
+                        .write_cyclic(
+                            &mut image,
+                            command,
+                            Cia402MotionGate {
+                                lifecycle_permit: authorized,
+                                mode_confirmed: mode_ready,
+                                operation_enabled: output.operation_enabled,
+                                setpoint_valid: true,
+                            },
+                        )
+                        .map_err(|error| StopFrameError::Pdo(axis, error))?;
+                }
+                let field = match target {
+                    Cia402Target::Position(_) => Cia402PdoField::TargetPosition,
+                    Cia402Target::Velocity(_) => Cia402PdoField::TargetVelocity,
+                    Cia402Target::Torque(_) => Cia402PdoField::TargetTorque,
+                };
+                fields[2] = field;
+                field_count = 3;
+            }
+            (true, _, _) => return Err(StopFrameError::UnsafeOutput(axis)),
+        }
+        for field in fields.iter().take(field_count) {
+            if !writable_domain_field(&maps[axis], *field, domain, plan) {
+                return Err(StopFrameError::UncoveredOutput(axis, *field));
+            }
+        }
+    }
+    let length = transmit_image(&image, plan, master, port, generation, deadline_ns)?;
+    *guards = accepted;
+    Ok(length)
 }
 
 /// Submit one frozen, writable Domain plan for the current stop decision.
@@ -204,11 +396,33 @@ fn submit_safe_frame<
             .map_err(|error| StopFrameError::Pdo(axis, error))?;
     }
 
-    master.reap_expired_rx_before_tx(port.now_ns());
+    transmit_image(&image, plan, master, port, generation, deadline_ns)
+}
+
+#[cfg(feature = "cia402")]
+fn transmit_image<
+    P: EthercatPort,
+    const BYTES: usize,
+    const DATAGRAMS: usize,
+    const SLOTS: usize,
+    const MTU: usize,
+>(
+    image: &[u8; BYTES],
+    plan: &FramePlan<DATAGRAMS>,
+    master: &mut EthercatMaster<SLOTS, MTU>,
+    port: &mut P,
+    generation: u16,
+    deadline_ns: u64,
+) -> Result<usize, StopFrameError<P::Error>> {
+    let now_ns = port.now_ns();
+    if deadline_ns <= now_ns {
+        return Err(StopFrameError::InvalidDeadline);
+    }
+    master.reap_expired_rx_before_tx(now_ns);
     let frame = master
         .acquire_frame(generation, deadline_ns)
         .map_err(StopFrameError::FramePool)?;
-    let length = match master.build_and_arm_frame_from_plan(frame, plan, &image) {
+    let length = match master.build_and_arm_frame_from_plan(frame, plan, image) {
         Ok(length) => length,
         Err(error) => {
             // The nonzero deadline and pre-arm index check make a failed build

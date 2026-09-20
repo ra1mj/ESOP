@@ -912,6 +912,31 @@ impl LifecycleGuard {
         self.last_permit_sequence = 0;
     }
 
+    /// Fail closed when an active cycle could not submit its validated output.
+    /// The caller must still attempt the stop PDO and publish its TX outcome;
+    /// this transition alone is not evidence that the drive has stopped.
+    pub fn abort_active_cycle(
+        &mut self,
+        cycle: u64,
+        fault_code: u32,
+    ) -> Result<(), LifecycleError> {
+        if self.state != LifecycleState::Active
+            || self.motion_axes_mask == 0
+            || cycle < self.state_since_cycle
+            || fault_code == 0
+        {
+            return Err(LifecycleError::InvalidState);
+        }
+        if self.first_fault_code == 0 {
+            self.first_fault_code = fault_code;
+        }
+        self.revoke_permit();
+        self.stop_started_cycle = Some(cycle);
+        self.stop_issued_cycle = None;
+        self.transition(LifecycleState::Stopping, cycle);
+        Ok(())
+    }
+
     pub fn set_maintenance(&mut self, enabled: bool, cycle: u64) {
         if self.state == LifecycleState::FaultLatched {
             // A maintenance toggle must not bypass explicit fault recovery.

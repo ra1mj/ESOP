@@ -1,24 +1,29 @@
-//! Fixed-capacity stop and inhibited branches of the EtherCAT cycle owner.
+//! Fixed-capacity single-Domain EtherCAT lifecycle cycle branches.
 //!
-//! The caller owns RX, Domain completion, command admission, and the normal
-//! motion branch. These branches consume only a finished Domain and a real
-//! receive report, then publish TX and its evidence for that cycle.
+//! The caller owns RX, Domain completion, command admission, and setpoint
+//! seeding. These branches consume a finished Domain and a real receive
+//! report, then publish TX and its evidence for that cycle.
 
 use crate::cia402::step_axis_bank;
 use crate::ethercat::{
-    OtherCycleFacts, StopFrameError, submit_inhibited_frame, submit_stopping_frame,
-    verified_ethercat_stop_feedback,
+    OtherCycleFacts, StopFrameError, submit_active_frame, submit_inhibited_frame,
+    submit_stopping_frame, verified_ethercat_stop_feedback,
 };
 use crate::procbuf::{
     AxisEvidenceError, LifecycleEventCursor, LifecycleEventError, axis_stops_to_procbuf,
     ethercat_cycle_to_procbuf, lifecycle_events_to_procbuf, lifecycle_to_procbuf,
 };
-use crate::{CyclicQuality, LifecycleAction, LifecycleGuard, MAX_MOTION_AXES, StopFeedback};
+use crate::{
+    CyclicQuality, LifecycleAction, LifecycleError, LifecycleGuard, MAX_MOTION_AXES, StopFeedback,
+};
 use esop_ethercat_core::{
     CycleReport, DcCyclicSync, Domain, EthercatMaster, EthercatPort, FramePlan,
 };
 use esop_procbuf::{HeaderError, ProcBuf, StatePage, StatePublishError};
-use esop_profile_cia402::{Cia402AxisBank, Cia402PdoMap, DriveRequest, OperatingMode};
+use esop_profile_cia402::{
+    Cia402AxisBank, Cia402PdoMap, Cia402Target, CyclicLimits, CyclicSetpointGuard, DriveRequest,
+    OperatingMode,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StopCycleError {
@@ -27,15 +32,20 @@ pub enum StopCycleError {
     Header(HeaderError),
     NotStopping(LifecycleAction),
     Evidence(AxisEvidenceError),
+    Abort(LifecycleError),
 }
 
-/// Submission errors do not suppress the State page: `issued_action` stays
-/// zero for a failed TX, while a verified response to an *earlier* accepted
-/// TX may still acknowledge stopping. A failed State publication leaves the
-/// caller-owned page intact for a retry; lifecycle events remain pending.
+/// Submission errors do not suppress the State page: stop `issued_action`
+/// stays zero for a failed TX, while a verified response to an *earlier*
+/// accepted TX may still acknowledge stopping. An active TX failure triggers
+/// an immediate stop attempt and never advances the setpoint guard. A failed
+/// State publication leaves the caller-owned page intact for a retry;
+/// lifecycle events remain pending.
 #[derive(Debug)]
 pub struct StopCycleOutcome<E> {
     pub action: LifecycleAction,
+    /// Original active TX failure if a stop was attempted in its place.
+    pub active_failure: Option<StopFrameError<E>>,
     pub quality: CyclicQuality,
     pub feedback: Option<StopFeedback>,
     pub acknowledged: bool,
@@ -83,6 +93,12 @@ pub struct StopCycleContext<
     pub transition_time_ns: u64,
 }
 
+struct MotionInputs<'a, const AXES: usize> {
+    targets: &'a [Option<Cia402Target>; AXES],
+    guards: &'a mut [CyclicSetpointGuard; AXES],
+    limits: &'a [CyclicLimits; AXES],
+}
+
 impl<
     P: EthercatPort,
     const AXES: usize,
@@ -97,9 +113,32 @@ impl<
 {
     /// Project the completed RX cycle, submit a stop or inhibited frame, then
     /// publish causally matched State and transition events. `NotStopping`
-    /// means the active motion branch belongs to the caller; no frame or
-    /// State is published on that path.
+    /// means this stop-only entry needs `run_with_motion` for an active cycle;
+    /// no frame or State is published on that path.
     pub fn run(&mut self) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        self.run_inner(None)
+    }
+
+    /// Run all lifecycle branches. Seed each setpoint guard from freshly
+    /// validated actual feedback on the current permit epoch before entering
+    /// Operation Enabled; targets are accepted only after successful TX.
+    pub fn run_with_motion(
+        &mut self,
+        targets: &[Option<Cia402Target>; AXES],
+        guards: &mut [CyclicSetpointGuard; AXES],
+        limits: &[CyclicLimits; AXES],
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        self.run_inner(Some(MotionInputs {
+            targets,
+            guards,
+            limits,
+        }))
+    }
+
+    fn run_inner(
+        &mut self,
+        motion: Option<MotionInputs<'_, AXES>>,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
         if self.report.cycle == 0
             || self.state.sequence != self.report.cycle
             || self.master.cycle_number() != self.report.cycle
@@ -134,12 +173,6 @@ impl<
             self.other,
         );
         self.guard.update_cyclic_quality(quality, self.report.cycle);
-        let mut decision = self.guard.cycle_axes(self.report.cycle, self.now_ns);
-        let action = decision.action();
-        if matches!(action, LifecycleAction::EnableAllowed) {
-            return Err(StopCycleError::NotStopping(decision.action()));
-        }
-
         let statuswords = core::array::from_fn(|axis| {
             if quality.domain_valid && quality.wkc_valid {
                 self.maps[axis]
@@ -149,28 +182,108 @@ impl<
                 u16::MAX
             }
         });
-        let outputs = step_axis_bank(
-            self.bank,
-            &decision,
-            statuswords,
-            [DriveRequest::Disable; AXES],
-        );
-        let feedback = if matches!(action, LifecycleAction::Stop(_)) {
-            verified_ethercat_stop_feedback(
-                &decision,
-                self.report,
-                self.domain,
-                self.maps,
-                self.modes,
-                self.max_stationary_velocities,
+        let (mut action, mut transmission, feedback, mut stop_mask) = {
+            let mut decision = self.guard.cycle_axes(self.report.cycle, self.now_ns);
+            let action = decision.action();
+            if matches!(action, LifecycleAction::EnableAllowed) && motion.is_none() {
+                return Err(StopCycleError::NotStopping(action));
+            }
+            let requests = if matches!(action, LifecycleAction::EnableAllowed) {
+                [DriveRequest::Enable; AXES]
+            } else {
+                [DriveRequest::Disable; AXES]
+            };
+            let outputs = step_axis_bank(self.bank, &decision, statuswords, requests);
+            let feedback = if matches!(action, LifecycleAction::Stop(_)) {
+                verified_ethercat_stop_feedback(
+                    &decision,
+                    self.report,
+                    self.domain,
+                    self.maps,
+                    self.modes,
+                    self.max_stationary_velocities,
+                )
+            } else {
+                None
+            };
+            let transmission = match (action, motion) {
+                (LifecycleAction::Stop(_), _) => submit_stopping_frame(
+                    &mut decision,
+                    &outputs,
+                    self.maps,
+                    self.modes,
+                    self.safe_process_image,
+                    self.domain,
+                    self.plan,
+                    self.master,
+                    self.port,
+                    self.next_generation,
+                    self.deadline_ns,
+                ),
+                (LifecycleAction::EnableAllowed, Some(motion)) => submit_active_frame(
+                    &decision,
+                    self.report,
+                    &outputs,
+                    motion.targets,
+                    motion.guards,
+                    motion.limits,
+                    self.maps,
+                    self.modes,
+                    self.safe_process_image,
+                    self.domain,
+                    self.plan,
+                    self.master,
+                    self.port,
+                    self.next_generation,
+                    self.deadline_ns,
+                ),
+                (LifecycleAction::Hold | LifecycleAction::FaultLatched, _) => {
+                    submit_inhibited_frame(
+                        &decision,
+                        &outputs,
+                        self.maps,
+                        self.modes,
+                        self.safe_process_image,
+                        self.domain,
+                        self.plan,
+                        self.master,
+                        self.port,
+                        self.next_generation,
+                        self.deadline_ns,
+                    )
+                }
+                (LifecycleAction::EnableAllowed, None) => {
+                    return Err(StopCycleError::NotStopping(LifecycleAction::EnableAllowed));
+                }
+            };
+            if !matches!(action, LifecycleAction::EnableAllowed) || transmission.is_ok() {
+                axis_stops_to_procbuf(self.state, &decision, &outputs, feedback)
+                    .map_err(StopCycleError::Evidence)?;
+            }
+            (
+                action,
+                transmission,
+                feedback,
+                decision.stopping_axis_mask(),
             )
-        } else {
-            None
         };
-        let transmission = if matches!(action, LifecycleAction::Stop(_)) {
-            submit_stopping_frame(
-                &mut decision,
-                &outputs,
+        let mut active_failure = None;
+        if matches!(action, LifecycleAction::EnableAllowed) && transmission.is_err() {
+            active_failure = transmission.err();
+            self.guard
+                .abort_active_cycle(self.report.cycle, 0x5458_0001)
+                .map_err(StopCycleError::Abort)?;
+            let mut stop_decision = self.guard.cycle_axes(self.report.cycle, self.now_ns);
+            action = stop_decision.action();
+            let stop_outputs = step_axis_bank(
+                self.bank,
+                &stop_decision,
+                statuswords,
+                [DriveRequest::Disable; AXES],
+            );
+            let stop_transmission = submit_stopping_frame(
+                &mut stop_decision,
+                &stop_outputs,
                 self.maps,
                 self.modes,
                 self.safe_process_image,
@@ -180,26 +293,12 @@ impl<
                 self.port,
                 self.next_generation,
                 self.deadline_ns,
-            )
-        } else {
-            submit_inhibited_frame(
-                &decision,
-                &outputs,
-                self.maps,
-                self.modes,
-                self.safe_process_image,
-                self.domain,
-                self.plan,
-                self.master,
-                self.port,
-                self.next_generation,
-                self.deadline_ns,
-            )
-        };
-        axis_stops_to_procbuf(self.state, &decision, &outputs, feedback)
-            .map_err(StopCycleError::Evidence)?;
-        let stop_mask = decision.stopping_axis_mask();
-        // The borrowed decision must end before acknowledgment or snapshot.
+            );
+            axis_stops_to_procbuf(self.state, &stop_decision, &stop_outputs, None)
+                .map_err(StopCycleError::Evidence)?;
+            stop_mask = stop_decision.stopping_axis_mask();
+            transmission = stop_transmission;
+        }
         let acknowledged = feedback
             .filter(|proof| {
                 proof.observed_axis_mask & stop_mask == stop_mask
@@ -225,6 +324,7 @@ impl<
         });
         Ok(StopCycleOutcome {
             action,
+            active_failure,
             quality,
             feedback,
             acknowledged,

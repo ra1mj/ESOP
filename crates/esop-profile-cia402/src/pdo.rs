@@ -6,7 +6,7 @@
 
 use esop_ethercat_core::{PdoDirection, PdoEntry, PdoError, PdoLayout, SiiDomainProjection};
 
-use crate::{CONTROLWORD_ENABLE_OPERATION, OperatingMode};
+use crate::{CONTROLWORD_ENABLE_OPERATION, DriveState, OperatingMode};
 
 pub const CONTROLWORD_INDEX: u16 = 0x6040;
 pub const MODE_OF_OPERATION_INDEX: u16 = 0x6060;
@@ -195,6 +195,7 @@ pub enum Cia402PdoError {
     MotionNotAllowed,
     ControlwordNotOperationEnabled,
     TargetModeMismatch,
+    InitialTargetMismatch,
     DomainOffsetOverflow,
 }
 
@@ -429,6 +430,59 @@ impl Cia402PdoMap {
                 target_field,
             ],
         )?;
+        self.write_validated_command(image, command, target_field)
+    }
+
+    /// The Switched On -> Operation Enabled edge must carry an actual-position
+    /// (or velocity/torque) hold target. Otherwise the drive could immediately
+    /// execute a stale target from the process image on enabling.
+    pub fn write_enable_with_actual_target(
+        &self,
+        image: &mut [u8],
+        command: Cia402PdoCommand,
+        inputs: Cia402PdoInputs,
+    ) -> Result<(), Cia402PdoError> {
+        if !command.mode.is_cyclic() {
+            return Err(Cia402PdoError::InvalidMode);
+        }
+        if command.target.mode() != command.mode {
+            return Err(Cia402PdoError::TargetModeMismatch);
+        }
+        if command.controlword != CONTROLWORD_ENABLE_OPERATION {
+            return Err(Cia402PdoError::ControlwordNotOperationEnabled);
+        }
+        if inputs.actual_mode != command.mode
+            || DriveState::from_statusword(inputs.statusword) != DriveState::SwitchedOn
+        {
+            return Err(Cia402PdoError::MotionNotAllowed);
+        }
+        let matches_actual = match command.target {
+            Cia402Target::Position(value) => inputs.actual_position == Some(value),
+            Cia402Target::Velocity(value) => inputs.actual_velocity == Some(value),
+            Cia402Target::Torque(value) => inputs.actual_torque == Some(value),
+        };
+        if !matches_actual {
+            return Err(Cia402PdoError::InitialTargetMismatch);
+        }
+        self.validate_for(command.mode)?;
+        let target_field = target_field(command.mode);
+        self.preflight_output(
+            image,
+            &[
+                Cia402PdoField::Controlword,
+                Cia402PdoField::ModeOfOperation,
+                target_field,
+            ],
+        )?;
+        self.write_validated_command(image, command, target_field)
+    }
+
+    fn write_validated_command(
+        &self,
+        image: &mut [u8],
+        command: Cia402PdoCommand,
+        target_field: Cia402PdoField,
+    ) -> Result<(), Cia402PdoError> {
         self.write_unsigned(
             Cia402PdoField::Controlword,
             image,
@@ -898,6 +952,71 @@ mod tests {
                 gate,
             ),
             Err(Cia402PdoError::InvalidMode)
+        );
+    }
+
+    #[test]
+    fn enable_edge_requires_fresh_actual_hold_target_and_writes_atomically() {
+        let map = complete_map();
+        let mut image = [0xA5_u8; 20];
+        let before = image;
+        let inputs = Cia402PdoInputs {
+            statusword: 0x0023,
+            actual_mode: OperatingMode::Csp,
+            error_code: 0,
+            actual_position: Some(42),
+            actual_velocity: None,
+            actual_torque: None,
+            following_error: None,
+        };
+        let mut command = Cia402PdoCommand {
+            controlword: CONTROLWORD_ENABLE_OPERATION,
+            mode: OperatingMode::Csp,
+            target: Cia402Target::Position(43),
+        };
+        assert_eq!(
+            map.write_enable_with_actual_target(&mut image, command, inputs),
+            Err(Cia402PdoError::InitialTargetMismatch)
+        );
+        assert_eq!(image, before);
+        command.target = Cia402Target::Position(42);
+        assert_eq!(
+            map.write_enable_with_actual_target(
+                &mut image,
+                command,
+                Cia402PdoInputs {
+                    actual_position: None,
+                    ..inputs
+                },
+            ),
+            Err(Cia402PdoError::InitialTargetMismatch)
+        );
+        assert_eq!(image, before);
+        assert_eq!(
+            map.write_enable_with_actual_target(
+                &mut image,
+                command,
+                Cia402PdoInputs {
+                    statusword: 0x0027,
+                    ..inputs
+                },
+            ),
+            Err(Cia402PdoError::MotionNotAllowed)
+        );
+        assert_eq!(image, before);
+        map.write_enable_with_actual_target(&mut image, command, inputs)
+            .unwrap();
+        assert_eq!(
+            map.entry(Cia402PdoField::Controlword)
+                .unwrap()
+                .read_unsigned(&image),
+            Ok(u64::from(CONTROLWORD_ENABLE_OPERATION))
+        );
+        assert_eq!(
+            map.entry(Cia402PdoField::TargetPosition)
+                .unwrap()
+                .read_signed(&image),
+            Ok(42)
         );
     }
 }
