@@ -1,51 +1,26 @@
 # State Management
 
-> How state is managed in this project.
+> Not applicable: the repository has no frontend state-management layer.
 
----
+## Current Scope
 
-## Overview
-
-<!--
-Document your project's state management conventions here.
-
-Questions to answer:
-- What state management solution do you use?
-- How is local vs global state decided?
-- How do you handle server state?
-- What are the patterns for derived state?
--->
-
-(To be filled by the team)
-
----
+Runtime state is owned by typed Rust structs, fixed-capacity rings, and
+caller-owned buffers. ProcBuf is an ABI/data exchange layer, not browser or
+server state management.
 
 ## State Categories
 
-<!-- Local state, global state, server state, URL state -->
-
-(To be filled by the team)
-
----
+There are no frontend local, global, URL, or server-state categories.
 
 ## When to Use Global State
 
-<!-- Criteria for promoting state to global -->
-
-(To be filled by the team)
-
----
+Not applicable.
 
 ## Server State
 
-<!-- How server data is cached and synchronized -->
-
-(To be filled by the team)
-
----
+Not applicable.
 
 ## Common Mistakes
 
-<!-- State management mistakes your team has made -->
-
-(To be filled by the team)
+Common mistake: treating ProcBuf snapshots as an unrestricted shared-state
+store or adding an unbounded cache to the real-time path.

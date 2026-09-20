@@ -1,51 +1,25 @@
 # Hook Guidelines
 
-> How hooks are used in this project.
+> Not applicable: no frontend or hook runtime exists in this repository.
 
----
+## Current Scope
 
-## Overview
-
-<!--
-Document your project's hook conventions here.
-
-Questions to answer:
-- What custom hooks do you have?
-- How do you handle data fetching?
-- What are the naming conventions?
-- How do you share stateful logic?
--->
-
-(To be filled by the team)
-
----
+There are no custom hooks, data-fetching libraries, or browser lifecycle APIs.
+Keep future UI state integration outside the `no_std` crates.
 
 ## Custom Hook Patterns
 
-<!-- How to create and structure custom hooks -->
-
-(To be filled by the team)
-
----
+Not applicable.
 
 ## Data Fetching
 
-<!-- How data fetching is handled (React Query, SWR, etc.) -->
-
-(To be filled by the team)
-
----
+Not applicable.
 
 ## Naming Conventions
 
-<!-- Hook naming rules (use*, etc.) -->
-
-(To be filled by the team)
-
----
+Not applicable.
 
 ## Common Mistakes
 
-<!-- Hook-related mistakes your team has made -->
-
-(To be filled by the team)
+Do not introduce a hook library as an indirect dependency of protocol or
+lifecycle code.

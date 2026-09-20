@@ -45,3 +45,12 @@ domain names such as `DmaDescriptorRing`, `EthercatPort`, and
 `DmaReceiveCycle`. Keep workspace package names prefixed with `esop-`. Keep
 platform-specific dependencies behind the relevant crate or target
 configuration.
+
+## Examples
+
+- Core protocol modules: `crates/esop-ethercat-core/src/pdo.rs` and
+  `crates/esop-ethercat-core/src/domain_registry.rs`.
+- Platform code: `crates/esop-ethercat-linux-port/src/lib.rs` and
+  `crates/esop-ethercat-linux-port/src/sim.rs`.
+- Public cross-crate tests: `crates/esop-ethercat-core/tests/cycle.rs` and
+  `crates/esop-ethercat-linux-port/tests/master_sim.rs`.

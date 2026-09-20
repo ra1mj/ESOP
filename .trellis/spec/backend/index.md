@@ -6,7 +6,9 @@
 
 ## Overview
 
-This directory contains guidelines for backend development. Fill in each file with your project's specific conventions.
+This directory documents conventions for the Rust workspace. The project has
+no HTTP server, database, or conventional request/response backend; most code
+runs in `no_std` protocol, lifecycle, and profile crates.
 
 ---
 
@@ -15,14 +17,14 @@ This directory contains guidelines for backend development. Fill in each file wi
 | Guide | Description | Status |
 |-------|-------------|--------|
 | [Directory Structure](./directory-structure.md) | Module organization and file layout | Filled |
-| [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | To fill |
-| [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
+| [Database Guidelines](./database-guidelines.md) | Persistence and database scope | Not applicable |
+| [Error Handling](./error-handling.md) | Error types, handling strategies | Filled |
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | Filled |
-| [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
+| [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | Filled |
 
 ---
 
-## How to Fill These Guidelines
+## Maintenance
 
 For each guideline file:
 
@@ -31,7 +33,8 @@ For each guideline file:
 3. List **forbidden patterns** and why
 4. Add **common mistakes** your team has made
 
-The goal is to help AI assistants and new team members understand how YOUR project works.
+Keep these documents aligned with the code and update them when a new crate,
+boundary, or quality gate is introduced.
 
 ---
 

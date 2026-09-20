@@ -1,51 +1,28 @@
 # Type Safety
 
-> Type safety patterns in this project.
+> No frontend type system is present; Rust type safety is documented by the
+> backend crate conventions.
 
----
+## Current Scope
 
-## Overview
-
-<!--
-Document your project's type safety conventions here.
-
-Questions to answer:
-- What type system do you use?
-- How are types organized?
-- What validation library do you use?
-- How do you handle type inference?
--->
-
-(To be filled by the team)
-
----
+The workspace uses Rust 2024 with `rust-version = 1.85`; there is no
+TypeScript compiler or runtime validation library.
 
 ## Type Organization
 
-<!-- Where types are defined, shared types vs local types -->
-
-(To be filled by the team)
-
----
+Not applicable.
 
 ## Validation
 
-<!-- Runtime validation patterns (Zod, Yup, io-ts, etc.) -->
-
-(To be filled by the team)
-
----
+Not applicable. Rust APIs use concrete structs/enums and explicit conversion
+functions such as `OperatingMode::from_raw`.
 
 ## Common Patterns
 
-<!-- Type utilities, generics, type guards -->
-
-(To be filled by the team)
-
----
+Rust generics and const-capacity arrays are used where bounded storage matters;
+see `PdoLayout<const ENTRIES: usize>` and `FixedEventQueue`.
 
 ## Forbidden Patterns
 
-<!-- any, type assertions, etc. -->
-
-(To be filled by the team)
+Do not introduce `any` or unchecked type assertions as a substitute for a
+future frontend contract, and do not weaken Rust APIs with untyped strings.

@@ -1,51 +1,28 @@
 # Quality Guidelines
 
-> Code quality standards for frontend development.
+> Not applicable: there is no frontend package or frontend CI in this repo.
 
----
+## Current Scope
 
-## Overview
-
-<!--
-Document your project's quality standards here.
-
-Questions to answer:
-- What patterns are forbidden?
-- What linting rules do you enforce?
-- What are your testing requirements?
-- What code review standards apply?
--->
-
-(To be filled by the team)
-
----
+The canonical quality command is the Rust workspace `make ci`; it does not
+build or test a browser application.
 
 ## Forbidden Patterns
 
-<!-- Patterns that should never be used and why -->
-
-(To be filled by the team)
-
----
+Do not add frontend tooling or dependencies to the real-time crates without a
+separate package and task.
 
 ## Required Patterns
 
-<!-- Patterns that must always be used -->
-
-(To be filled by the team)
-
----
+Not applicable.
 
 ## Testing Requirements
 
-<!-- What level of testing is expected -->
-
-(To be filled by the team)
-
----
+If a frontend is introduced, define its lint, type-check, test, and
+accessibility gates in this file before implementation.
 
 ## Code Review Checklist
 
-<!-- What reviewers should check -->
-
-(To be filled by the team)
+For current changes, review `make ci`, no_std boundaries, fixed-capacity
+contracts, and public regression tests as described in the backend quality
+guidelines.

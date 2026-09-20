@@ -1,51 +1,32 @@
 # Database Guidelines
 
-> Database patterns and conventions for this project.
+> This project currently has no database or persistent backend service.
 
----
+## Current Scope
 
-## Overview
-
-<!--
-Document your project's database conventions here.
-
-Questions to answer:
-- What ORM/query library do you use?
-- How are migrations managed?
-- What are the naming conventions for tables/columns?
-- How do you handle transactions?
--->
-
-(To be filled by the team)
-
----
+There is no ORM, SQL driver, migration directory, or database package in the
+workspace. Runtime state is held in fixed-capacity Rust structs and caller-
+owned buffers such as `DomainRegistry`, `DeviceManager`, and `ProcBuf`.
+Do not add database dependencies to a `no_std` crate to persist cycle data.
 
 ## Query Patterns
 
-<!-- How should queries be written? Batch operations? -->
-
-(To be filled by the team)
-
----
+Not applicable. Read/write operations are typed methods on in-memory state;
+they return `Result` and validate before publishing changes.
 
 ## Migrations
 
-<!-- How to create and run migrations -->
-
-(To be filled by the team)
-
----
+Not applicable. A future persistence feature must be a separate package with
+an explicit design and migration policy before it is introduced.
 
 ## Naming Conventions
 
-<!-- Table names, column names, index names -->
-
-(To be filled by the team)
-
----
+There are no table or column names. Rust package names use the `esop-` prefix;
+domain fields use explicit snake_case names.
 
 ## Common Mistakes
 
-<!-- Database-related mistakes your team has made -->
-
-(To be filled by the team)
+- Treating ProcBuf or a process image as a database. They are fixed-layout
+  real-time exchange buffers, not durable storage.
+- Introducing heap-backed caches or a blocking persistence call into the
+  activated EtherCAT cycle.

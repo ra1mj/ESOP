@@ -1,51 +1,34 @@
 # Logging Guidelines
 
-> How logging is done in this project.
-
----
+> The real-time workspace has no logging dependency; diagnostics are typed
+> data and fixed-capacity event queues.
 
 ## Overview
 
-<!--
-Document your project's logging conventions here.
-
-Questions to answer:
-- What logging library do you use?
-- What are the log levels and when to use each?
-- What should be logged?
-- What should NOT be logged (PII, secrets)?
--->
-
-(To be filled by the team)
-
----
+The `no_std` crates do not use `log`, `tracing`, `println!`, or a text logger.
+Protocol and lifecycle faults are returned as enums or placed in bounded
+diagnostic/event rings (`esop-ethercat-core/src/diag.rs` and
+`esop-procbuf/src/lib.rs`).
 
 ## Log Levels
 
-<!-- When to use each level: debug, info, warn, error -->
-
-(To be filled by the team)
-
----
+Not applicable inside libraries. The Linux-only observation example uses
+`eprintln!` at the process boundary for preflight, incident, and poll reports.
 
 ## Structured Logging
 
-<!-- Log format, required fields -->
-
-(To be filled by the team)
-
----
+Use typed records with fixed fields when information must cross a boundary;
+do not format text in the activated cycle. `RuntimeEvidence` and diagnostic
+events are the reference structured forms.
 
 ## What to Log
 
-<!-- Important events to log -->
+At the outer Linux/application boundary, report operational failures and
+bounded observation summaries. Inside the core, expose a typed diagnostic
+event or error instead.
 
-(To be filled by the team)
+## What Not to Log
 
----
-
-## What NOT to Log
-
-<!-- Sensitive data, PII, secrets -->
-
-(To be filled by the team)
+- Do not add text logging, formatting, or unbounded output to cycle, DMA, PDO,
+  lifecycle, or ProcBuf paths.
+- Do not log raw process-image buffers or secrets merely for debugging.

@@ -1,51 +1,45 @@
 # Error Handling
 
-> How errors are handled in this project.
-
----
+> Errors are explicit, typed, and propagated without partial publication.
 
 ## Overview
 
-<!--
-Document your project's error handling conventions here.
-
-Questions to answer:
-- What error types do you define?
-- How are errors propagated?
-- How are errors logged?
-- How are errors returned to clients?
--->
-
-(To be filled by the team)
-
----
+Public fallible operations return `Result<T, E>` with a crate-local enum.
+Errors describe the rejected invariant (`ImageBounds`, `InvalidEntry`,
+`PermitError`, and so on) and are normally passed to the caller with `?` or
+`map_err`. Real-time code must not panic, allocate, sleep, or log to report an
+error.
 
 ## Error Types
 
-<!-- Custom error classes/types -->
-
-(To be filled by the team)
-
----
+Use `#[derive(Clone, Copy, Debug, Eq, PartialEq)]` for fixed-size error enums.
+Wrap lower-layer errors explicitly rather than erasing them. For example,
+`Cia402PdoError::Pdo(PdoError)` preserves the core PDO failure while
+`LifecycleError::Permit(...)` preserves the guard boundary.
 
 ## Error Handling Patterns
 
-<!-- Try-catch patterns, error propagation -->
+Validate all inputs before mutating caller-owned state. Transactional builders
+stage into fixed arrays and publish only after every check succeeds. A write
+path should look like:
 
-(To be filled by the team)
+```rust
+self.preflight_output(image, fields)?;
+self.write_signed(field, image, value)?;
+```
 
----
+Use `map_err` at crate boundaries, for example
+`entry.read_unsigned(image).map_err(Cia402PdoError::Pdo)`.
 
 ## API Error Responses
 
-<!-- Standard error response format -->
-
-(To be filled by the team)
-
----
+There is no HTTP/API response layer. Library callers receive the typed error
+directly; Linux examples may print it at the process boundary.
 
 ## Common Mistakes
 
-<!-- Error handling mistakes your team has made -->
-
-(To be filled by the team)
+- Mutating an image or registry entry before all bounds and capacity checks.
+- Replacing a precise lower-layer error with a string or `Box<dyn Error>` in
+  `no_std` code.
+- Using `unwrap` in production paths; existing `unwrap` calls are test/example
+  setup and assertions.

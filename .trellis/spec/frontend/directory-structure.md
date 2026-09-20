@@ -1,54 +1,29 @@
 # Directory Structure
 
-> How frontend code is organized in this project.
+> No frontend code exists in this repository.
 
----
+## Current Scope
 
-## Overview
-
-<!--
-Document your project's frontend directory structure here.
-
-Questions to answer:
-- Where do components live?
-- How are features/modules organized?
-- Where are shared utilities?
-- How are assets organized?
--->
-
-(To be filled by the team)
-
----
+The workspace contains Rust crates under `crates/`, BPF C sources under
+`bpf/`, and documentation under `docs/`. There is no web application,
+component tree, asset directory, or frontend build tool.
 
 ## Directory Layout
 
-```
-<!-- Replace with your actual structure -->
-src/
-├── ...
-└── ...
-```
-
----
+See [backend directory structure](../backend/directory-structure.md). A future
+frontend must be a separately planned package with its own build and test
+commands.
 
 ## Module Organization
 
-<!-- How should new features be organized? -->
-
-(To be filled by the team)
-
----
+Not applicable until a frontend package is introduced.
 
 ## Naming Conventions
 
-<!-- File and folder naming rules -->
-
-(To be filled by the team)
-
----
+No frontend naming convention is established. Do not infer React/Vue or
+TypeScript conventions from this Rust repository.
 
 ## Examples
 
-<!-- Link to well-organized modules as examples -->
-
-(To be filled by the team)
+There are no frontend examples. The closest user-facing boundary is the Linux
+observation executable at `crates/esop-ebpf-runtime/examples/observe.rs`.

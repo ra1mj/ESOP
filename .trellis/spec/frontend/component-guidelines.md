@@ -1,59 +1,30 @@
 # Component Guidelines
 
-> How components are built in this project.
+> Not applicable: this repository has no frontend component framework.
 
----
+## Current Scope
 
-## Overview
-
-<!--
-Document your project's component conventions here.
-
-Questions to answer:
-- What component patterns do you use?
-- How are props defined?
-- How do you handle composition?
-- What accessibility standards apply?
--->
-
-(To be filled by the team)
-
----
+No component library, props convention, styling system, or accessibility
+implementation exists today. Establish these in a frontend-specific task if a
+UI package is added; do not add UI dependencies to the Rust crates.
 
 ## Component Structure
 
-<!-- Standard structure of a component file -->
-
-(To be filled by the team)
-
----
+Not applicable.
 
 ## Props Conventions
 
-<!-- How props should be defined and typed -->
-
-(To be filled by the team)
-
----
+Not applicable.
 
 ## Styling Patterns
 
-<!-- How styles are applied (CSS modules, styled-components, Tailwind, etc.) -->
-
-(To be filled by the team)
-
----
+Not applicable.
 
 ## Accessibility
 
-<!-- A11y requirements and patterns -->
-
-(To be filled by the team)
-
----
+Not applicable.
 
 ## Common Mistakes
 
-<!-- Component-related mistakes your team has made -->
-
-(To be filled by the team)
+Common mistake: inventing React components for a repository whose current
+interfaces are Rust libraries and command-line examples.
