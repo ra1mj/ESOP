@@ -3,12 +3,16 @@
 #[cfg(feature = "ethercat")]
 pub mod ethercat;
 
+#[cfg(feature = "cia402")]
+pub mod cia402;
+
 #[cfg(feature = "procbuf")]
 pub mod procbuf;
 
 pub const MAX_GATES: usize = 16;
 pub const MAX_TRANSITIONS: usize = 16;
 pub const MAX_PERMIT_AUDITS: usize = 16;
+pub const STOP_TIMEOUT_FAULT_CODE: u32 = 0x5354_0001;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -79,6 +83,7 @@ pub struct GuardPolicy {
     pub enter_good_cycles: u16,
     pub exit_bad_cycles: u16,
     pub max_age_cycles: u64,
+    pub stop_timeout_cycles: u64,
     pub stop_action: StopAction,
     pub authorized_source_id: u64,
     pub minimum_authority: u8,
@@ -122,12 +127,46 @@ pub struct LifecycleSnapshot {
     pub permit_audit_sequence: u64,
 }
 
+/// Complete, current-cycle stop evidence from the verified input Domain.
+/// The cycle owner must only set bits for axes with fresh, validated feedback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StopFeedback {
+    pub cycle: u64,
+    pub observed_axis_mask: u32,
+    pub stationary_axis_mask: u32,
+    pub non_enabled_axis_mask: u32,
+}
+
+impl StopFeedback {
+    pub const fn empty(cycle: u64) -> Self {
+        Self {
+            cycle,
+            observed_axis_mask: 0,
+            stationary_axis_mask: 0,
+            non_enabled_axis_mask: 0,
+        }
+    }
+
+    pub const fn merge(self, other: Self) -> Option<Self> {
+        if self.cycle != other.cycle || self.observed_axis_mask & other.observed_axis_mask != 0 {
+            return None;
+        }
+        Some(Self {
+            cycle: self.cycle,
+            observed_axis_mask: self.observed_axis_mask | other.observed_axis_mask,
+            stationary_axis_mask: self.stationary_axis_mask | other.stationary_axis_mask,
+            non_enabled_axis_mask: self.non_enabled_axis_mask | other.non_enabled_axis_mask,
+        })
+    }
+}
+
 impl GuardPolicy {
     pub const fn conservative() -> Self {
         Self {
             enter_good_cycles: 3,
             exit_bad_cycles: 2,
             max_age_cycles: 1,
+            stop_timeout_cycles: 1_000,
             stop_action: StopAction::QuickStop,
             authorized_source_id: 1,
             minimum_authority: 1,
@@ -148,6 +187,11 @@ impl GuardPolicy {
                 self.exit_bad_cycles
             },
             max_age_cycles: self.max_age_cycles,
+            stop_timeout_cycles: if self.stop_timeout_cycles == 0 {
+                1
+            } else {
+                self.stop_timeout_cycles
+            },
             stop_action: self.stop_action,
             authorized_source_id: self.authorized_source_id,
             minimum_authority: self.minimum_authority,
@@ -277,6 +321,8 @@ impl PermitAudit {
 pub enum LifecycleError {
     InvalidState,
     NotReady,
+    InvalidStopFeedback,
+    StopTimedOut,
     Permit(PermitError),
 }
 
@@ -290,6 +336,9 @@ pub struct LifecycleGuard {
     last_permit_sequence: u64,
     state: LifecycleState,
     state_since_cycle: u64,
+    motion_axes_mask: u32,
+    stop_started_cycle: Option<u64>,
+    stop_issued_cycle: Option<u64>,
     maintenance_stop_pending: bool,
     pending_fault_code: Option<u32>,
     requalify_after_cycle: Option<u64>,
@@ -321,6 +370,9 @@ impl LifecycleGuard {
             last_permit_sequence: 0,
             state: LifecycleState::Qualifying,
             state_since_cycle: 0,
+            motion_axes_mask: 0,
+            stop_started_cycle: None,
+            stop_issued_cycle: None,
             maintenance_stop_pending: false,
             pending_fault_code: None,
             requalify_after_cycle: None,
@@ -652,6 +704,10 @@ impl LifecycleGuard {
             return;
         }
         if enabled {
+            if self.state == LifecycleState::Active {
+                self.stop_started_cycle = Some(cycle);
+                self.stop_issued_cycle = None;
+            }
             self.maintenance_stop_pending |= matches!(
                 self.state,
                 LifecycleState::Active | LifecycleState::Stopping
@@ -672,11 +728,32 @@ impl LifecycleGuard {
         }
     }
 
-    pub fn acknowledge_stopped(&mut self, cycle: u64) -> Result<(), LifecycleError> {
+    pub fn acknowledge_stopped(
+        &mut self,
+        cycle: u64,
+        feedback: StopFeedback,
+    ) -> Result<(), LifecycleError> {
         if self.state != LifecycleState::Stopping {
             return Err(LifecycleError::InvalidState);
         }
+        if self.stop_timed_out(cycle) {
+            self.latch_stop_timeout(cycle);
+            return Err(LifecycleError::StopTimedOut);
+        }
+        if feedback.cycle != cycle
+            || cycle <= self.state_since_cycle
+            || !self.stop_issued_cycle.is_some_and(|issued| cycle > issued)
+            || self.motion_axes_mask == 0
+            || feedback.observed_axis_mask & self.motion_axes_mask != self.motion_axes_mask
+            || feedback.stationary_axis_mask & self.motion_axes_mask != self.motion_axes_mask
+            || feedback.non_enabled_axis_mask & self.motion_axes_mask != self.motion_axes_mask
+        {
+            return Err(LifecycleError::InvalidStopFeedback);
+        }
         self.maintenance_stop_pending = false;
+        self.motion_axes_mask = 0;
+        self.stop_started_cycle = None;
+        self.stop_issued_cycle = None;
         self.revoke_permit();
         if let Some(code) = self.pending_fault_code.take() {
             self.latched_fault_code = code;
@@ -701,6 +778,10 @@ impl LifecycleGuard {
             LifecycleState::Active | LifecycleState::Stopping
         ) || self.maintenance_stop_pending
         {
+            if self.state == LifecycleState::Active {
+                self.stop_started_cycle = Some(cycle);
+                self.stop_issued_cycle = None;
+            }
             self.pending_fault_code = Some(code);
             if self.state != LifecycleState::Maintenance {
                 self.transition(LifecycleState::Stopping, cycle);
@@ -722,6 +803,9 @@ impl LifecycleGuard {
         let fault_code = self.first_fault_code;
         self.first_fault_code = 0;
         self.latched_fault_code = 0;
+        self.motion_axes_mask = 0;
+        self.stop_started_cycle = None;
+        self.stop_issued_cycle = None;
         self.transition_with_fault(LifecycleState::Qualifying, cycle, fault_code);
         Ok(())
     }
@@ -743,6 +827,9 @@ impl LifecycleGuard {
         if !self.gates_ready(cycle) {
             return Err(LifecycleError::NotReady);
         }
+        self.motion_axes_mask = permit.axis_mask;
+        self.stop_started_cycle = None;
+        self.stop_issued_cycle = None;
         self.first_fault_code = 0;
         self.transition(LifecycleState::Active, cycle);
         self.recovery_count = self.recovery_count.saturating_add(1);
@@ -750,7 +837,18 @@ impl LifecycleGuard {
     }
 
     pub fn cycle(&mut self, cycle: u64, now_ns: u64) -> LifecycleAction {
+        if matches!(
+            self.state,
+            LifecycleState::Stopping | LifecycleState::Maintenance
+        ) && self.stop_timed_out(cycle)
+        {
+            self.latch_stop_timeout(cycle);
+            return LifecycleAction::FaultLatched;
+        }
         if self.state == LifecycleState::Maintenance {
+            if self.maintenance_stop_pending && self.stop_issued_cycle.is_none() {
+                self.stop_issued_cycle = Some(cycle);
+            }
             return LifecycleAction::Stop(self.effective_stop_action());
         }
         if self.state == LifecycleState::FaultLatched {
@@ -776,11 +874,19 @@ impl LifecycleGuard {
                 if self.gates_active(cycle) && permit_current {
                     LifecycleAction::EnableAllowed
                 } else {
+                    self.revoke_permit();
+                    self.stop_started_cycle = Some(cycle);
+                    self.stop_issued_cycle = Some(cycle);
                     self.transition(LifecycleState::Stopping, cycle);
                     LifecycleAction::Stop(self.policy.stop_action)
                 }
             }
-            LifecycleState::Stopping => LifecycleAction::Stop(self.effective_stop_action()),
+            LifecycleState::Stopping => {
+                if self.stop_issued_cycle.is_none() {
+                    self.stop_issued_cycle = Some(cycle);
+                }
+                LifecycleAction::Stop(self.effective_stop_action())
+            }
             LifecycleState::Maintenance | LifecycleState::FaultLatched => unreachable!(),
         }
     }
@@ -805,6 +911,25 @@ impl LifecycleGuard {
         } else {
             self.policy.stop_action
         }
+    }
+
+    fn stop_timed_out(&self, cycle: u64) -> bool {
+        self.stop_started_cycle
+            .is_some_and(|start| cycle >= start && cycle - start >= self.policy.stop_timeout_cycles)
+    }
+
+    fn latch_stop_timeout(&mut self, cycle: u64) {
+        self.revoke_permit();
+        self.pending_fault_code = None;
+        self.maintenance_stop_pending = false;
+        self.motion_axes_mask = 0;
+        self.stop_started_cycle = None;
+        self.stop_issued_cycle = None;
+        if self.first_fault_code == 0 {
+            self.first_fault_code = STOP_TIMEOUT_FAULT_CODE;
+        }
+        self.latched_fault_code = STOP_TIMEOUT_FAULT_CODE;
+        self.transition_with_fault(LifecycleState::FaultLatched, cycle, STOP_TIMEOUT_FAULT_CODE);
     }
 
     fn gates_ready(&self, cycle: u64) -> bool {
@@ -943,6 +1068,7 @@ mod tests {
             enter_good_cycles: 1,
             exit_bad_cycles: 1,
             max_age_cycles: 1,
+            stop_timeout_cycles: 1_000,
             stop_action: StopAction::QuickStop,
             authorized_source_id: 1,
             minimum_authority: 1,
@@ -1014,6 +1140,7 @@ mod tests {
                 enter_good_cycles: 1,
                 exit_bad_cycles: 1,
                 max_age_cycles: 1,
+                stop_timeout_cycles: 1_000,
                 stop_action: StopAction::QuickStop,
                 authorized_source_id: 1,
                 minimum_authority: 1,
@@ -1048,11 +1175,21 @@ mod tests {
         enter_good_cycles: 2,
         exit_bad_cycles: 2,
         max_age_cycles: 1,
+        stop_timeout_cycles: 1_000,
         stop_action: StopAction::QuickStop,
         authorized_source_id: 1,
         minimum_authority: 1,
         permit_policy_version: 1,
     };
+
+    fn stopped(cycle: u64) -> StopFeedback {
+        StopFeedback {
+            cycle,
+            observed_axis_mask: 0b11,
+            stationary_axis_mask: 0b11,
+            non_enabled_axis_mask: 0b11,
+        }
+    }
 
     fn permit(sequence: u64, expires_at_ns: u64) -> MotionPermit {
         MotionPermit {
@@ -1113,6 +1250,7 @@ mod tests {
                 enter_good_cycles: 1,
                 exit_bad_cycles: 1,
                 max_age_cycles: 1,
+                stop_timeout_cycles: 1_000,
                 stop_action: StopAction::QuickStop,
                 authorized_source_id: 1,
                 minimum_authority: 1,
@@ -1166,7 +1304,15 @@ mod tests {
         assert_eq!(fault_snapshot.transition_sequence, 2);
         assert_eq!(fault_snapshot.transition_cycle, 5);
         assert_eq!(guard.clear_fault(5), Err(LifecycleError::InvalidState));
-        guard.acknowledge_stopped(6).unwrap();
+        assert_eq!(
+            guard.acknowledge_stopped(6, stopped(6)),
+            Err(LifecycleError::InvalidStopFeedback)
+        );
+        assert_eq!(
+            guard.cycle(5, 50),
+            LifecycleAction::Stop(StopAction::QuickStop)
+        );
+        guard.acknowledge_stopped(6, stopped(6)).unwrap();
         let latched_snapshot = guard.snapshot(6, 50);
         assert_eq!(latched_snapshot.state, LifecycleState::FaultLatched);
         assert_eq!(latched_snapshot.latched_fault_code, 0xDEAD);
@@ -1184,6 +1330,7 @@ mod tests {
                 enter_good_cycles: 1,
                 exit_bad_cycles: 1,
                 max_age_cycles: 1,
+                stop_timeout_cycles: 1_000,
                 stop_action: StopAction::QuickStop,
                 authorized_source_id: 1,
                 minimum_authority: 1,
@@ -1201,17 +1348,18 @@ mod tests {
             guard.cycle(2, 2),
             LifecycleAction::Stop(StopAction::QuickStop)
         );
+        assert!(guard.permit().is_none());
         guard.update_gate(GateId::Link, true, 3, 0);
         assert_eq!(
             guard.cycle(3, 3),
             LifecycleAction::Stop(StopAction::QuickStop)
         );
-        assert_eq!(guard.acknowledge_stopped(3), Ok(()));
+        assert_eq!(guard.acknowledge_stopped(3, stopped(3)), Ok(()));
         assert_eq!(guard.cycle(4, 4), LifecycleAction::Hold);
         assert_eq!(
             guard.request_rearm(
                 MotionPermit {
-                    permit_epoch: 2,
+                    permit_epoch: 3,
                     ..permit(3, 100)
                 },
                 4,
@@ -1233,6 +1381,7 @@ mod tests {
                 enter_good_cycles: 1,
                 exit_bad_cycles: 1,
                 max_age_cycles: 1,
+                stop_timeout_cycles: 1_000,
                 stop_action: StopAction::QuickStop,
                 authorized_source_id: 1,
                 minimum_authority: 1,
@@ -1321,13 +1470,17 @@ mod tests {
         );
         assert_eq!(guard.state(), LifecycleState::Stopping);
         assert_eq!(guard.transition_at(1).unwrap().fault_code, 0xCAFE);
-        guard.acknowledge_stopped(3).unwrap();
+        assert_eq!(
+            guard.acknowledge_stopped(3, stopped(3)),
+            Err(LifecycleError::InvalidStopFeedback)
+        );
+        guard.acknowledge_stopped(4, stopped(4)).unwrap();
         guard.update_gate(GateId::Link, true, 4, 0);
         assert_eq!(guard.ready_gate_mask(4) & GateId::Link.bit(), 0);
         assert_eq!(
             guard.request_rearm(
                 MotionPermit {
-                    permit_epoch: 2,
+                    permit_epoch: 3,
                     ..permit(2, 100)
                 },
                 4,
@@ -1341,7 +1494,7 @@ mod tests {
         assert_eq!(
             guard.request_rearm(
                 MotionPermit {
-                    permit_epoch: 2,
+                    permit_epoch: 3,
                     ..permit(3, 100)
                 },
                 5,
@@ -1385,7 +1538,7 @@ mod tests {
             ),
             Err(LifecycleError::InvalidState)
         );
-        guard.acknowledge_stopped(4).unwrap();
+        guard.acknowledge_stopped(5, stopped(5)).unwrap();
         assert_eq!(guard.snapshot(4, 4).stop_action, POLICY.stop_action);
         guard.update_gate(GateId::Link, true, 4, 0);
         assert_eq!(guard.ready_gate_mask(4) & GateId::Link.bit(), 0);
@@ -1425,7 +1578,11 @@ mod tests {
         guard.update_gate(GateId::Link, false, 3, 0xCAFE);
         guard.latch_fault(0xCAFE, 3);
         assert_eq!(guard.clear_fault(3), Err(LifecycleError::InvalidState));
-        guard.acknowledge_stopped(3).unwrap();
+        assert_eq!(
+            guard.cycle(3, 3),
+            LifecycleAction::Stop(StopAction::QuickStop)
+        );
+        guard.acknowledge_stopped(4, stopped(4)).unwrap();
         guard.set_maintenance(true, 3);
         guard.set_maintenance(false, 3);
         assert_eq!(guard.state(), LifecycleState::FaultLatched);
@@ -1483,7 +1640,7 @@ mod tests {
             LifecycleAction::Stop(StopAction::Disable)
         );
         assert_eq!(
-            guard.acknowledge_stopped(3),
+            guard.acknowledge_stopped(3, stopped(3)),
             Err(LifecycleError::InvalidState)
         );
         guard.set_maintenance(false, 4);
@@ -1493,7 +1650,7 @@ mod tests {
             LifecycleAction::Stop(StopAction::Disable)
         );
         assert_eq!(guard.clear_fault(4), Err(LifecycleError::InvalidState));
-        guard.acknowledge_stopped(4).unwrap();
+        guard.acknowledge_stopped(5, stopped(5)).unwrap();
         assert_eq!(guard.state(), LifecycleState::FaultLatched);
         assert_eq!(guard.latched_fault_code(), 0xBEEF);
         assert_eq!(guard.transition_at(4).unwrap().fault_code, 0xBEEF);
@@ -1516,7 +1673,7 @@ mod tests {
         guard.latch_fault(0xBEEF, 3);
         assert_eq!(guard.first_fault_code(), 0xCAFE);
         assert_eq!(guard.snapshot(3, 3).latched_fault_code, 0);
-        guard.acknowledge_stopped(4).unwrap();
+        guard.acknowledge_stopped(4, stopped(4)).unwrap();
         assert_eq!(guard.state(), LifecycleState::FaultLatched);
         assert_eq!(guard.first_fault_code(), 0xCAFE);
         assert_eq!(guard.latched_fault_code(), 0xBEEF);
@@ -1529,9 +1686,13 @@ mod tests {
         guard.request_rearm(permit(1, 100), 1, 1).unwrap();
         guard.latch_fault(0, 2);
         assert_eq!(guard.state(), LifecycleState::Stopping);
-        guard.acknowledge_stopped(2).unwrap();
+        assert_eq!(
+            guard.cycle(2, 2),
+            LifecycleAction::Stop(StopAction::QuickStop)
+        );
+        guard.acknowledge_stopped(3, stopped(3)).unwrap();
         assert_eq!(guard.state(), LifecycleState::FaultLatched);
-        assert_eq!(guard.cycle(2, 2), LifecycleAction::FaultLatched);
+        assert_eq!(guard.cycle(3, 3), LifecycleAction::FaultLatched);
     }
 
     #[test]
@@ -1541,12 +1702,120 @@ mod tests {
         assert_eq!(guard.state(), LifecycleState::FaultLatched);
         assert_eq!(guard.latched_fault_code(), 0xBEEF);
         assert_eq!(
-            guard.acknowledge_stopped(1),
+            guard.acknowledge_stopped(1, stopped(1)),
             Err(LifecycleError::InvalidState)
         );
         guard.latch_fault(0xDEAD, 2);
         assert_eq!(guard.latched_fault_code(), 0xBEEF);
         assert_eq!(guard.transition_sequence(), 1);
+    }
+
+    #[test]
+    fn stop_confirmation_requires_fresh_complete_feedback_for_original_axes() {
+        let mut guard = LifecycleGuard::new(0, 10, POLICY);
+        guard.request_rearm(permit(1, 100), 1, 1).unwrap();
+        guard.latch_fault(0xBEEF, 2);
+        assert_eq!(guard.permit(), None);
+        assert_eq!(
+            guard.acknowledge_stopped(3, stopped(3)),
+            Err(LifecycleError::InvalidStopFeedback)
+        );
+        assert_eq!(
+            guard.cycle(2, 2),
+            LifecycleAction::Stop(StopAction::QuickStop)
+        );
+        assert_eq!(
+            guard.acknowledge_stopped(2, stopped(2)),
+            Err(LifecycleError::InvalidStopFeedback)
+        );
+        assert_eq!(
+            guard.acknowledge_stopped(3, stopped(2)),
+            Err(LifecycleError::InvalidStopFeedback)
+        );
+
+        let mut incomplete = stopped(3);
+        incomplete.observed_axis_mask = 0b01;
+        assert_eq!(
+            guard.acknowledge_stopped(3, incomplete),
+            Err(LifecycleError::InvalidStopFeedback)
+        );
+        incomplete.observed_axis_mask = 0b11;
+        incomplete.stationary_axis_mask = 0b01;
+        assert_eq!(
+            guard.acknowledge_stopped(3, incomplete),
+            Err(LifecycleError::InvalidStopFeedback)
+        );
+        incomplete.stationary_axis_mask = 0b11;
+        incomplete.non_enabled_axis_mask = 0b01;
+        assert_eq!(
+            guard.acknowledge_stopped(3, incomplete),
+            Err(LifecycleError::InvalidStopFeedback)
+        );
+        assert_eq!(guard.state(), LifecycleState::Stopping);
+        assert_eq!(guard.acknowledge_stopped(3, stopped(3)), Ok(()));
+        assert_eq!(guard.latched_fault_code(), 0xBEEF);
+    }
+
+    #[test]
+    fn stop_feedback_aggregation_rejects_duplicates_and_mismatched_cycles() {
+        let first = StopFeedback {
+            cycle: 3,
+            observed_axis_mask: 0b01,
+            stationary_axis_mask: 0b01,
+            non_enabled_axis_mask: 0b01,
+        };
+        let second = StopFeedback {
+            cycle: 3,
+            observed_axis_mask: 0b10,
+            stationary_axis_mask: 0b10,
+            non_enabled_axis_mask: 0b10,
+        };
+        assert_eq!(first.merge(second), Some(stopped(3)));
+        assert_eq!(first.merge(first), None);
+        assert_eq!(first.merge(StopFeedback { cycle: 4, ..second }), None);
+    }
+
+    #[test]
+    fn stop_timeout_latches_fault_even_with_late_confirmation_or_maintenance() {
+        let policy = GuardPolicy {
+            stop_timeout_cycles: 2,
+            ..POLICY
+        };
+        let mut guard = LifecycleGuard::new(0, 10, policy);
+        guard.request_rearm(permit(1, 100), 1, 1).unwrap();
+        assert_eq!(
+            guard.cycle(2, 101),
+            LifecycleAction::Stop(StopAction::QuickStop)
+        );
+        assert!(guard.permit().is_none());
+        guard.set_maintenance(true, 3);
+        guard.set_maintenance(false, 3);
+        assert_eq!(
+            guard.cycle(3, 3),
+            LifecycleAction::Stop(StopAction::Disable)
+        );
+        assert_eq!(guard.cycle(4, 4), LifecycleAction::FaultLatched);
+        assert_eq!(guard.latched_fault_code(), STOP_TIMEOUT_FAULT_CODE);
+        assert_eq!(guard.first_fault_code(), STOP_TIMEOUT_FAULT_CODE);
+        assert_eq!(
+            guard.acknowledge_stopped(4, stopped(4)),
+            Err(LifecycleError::InvalidState)
+        );
+
+        let mut other = LifecycleGuard::new(0, 10, policy);
+        other.request_rearm(permit(1, 100), 1, 1).unwrap();
+        other.latch_fault(0xBEEF, 2);
+        assert_eq!(
+            other.cycle(2, 2),
+            LifecycleAction::Stop(StopAction::QuickStop)
+        );
+        assert_eq!(
+            other.acknowledge_stopped(4, stopped(4)),
+            Err(LifecycleError::StopTimedOut)
+        );
+        assert_eq!(other.state(), LifecycleState::FaultLatched);
+        assert_eq!(other.first_fault_code(), 0xBEEF);
+        assert_eq!(other.latched_fault_code(), STOP_TIMEOUT_FAULT_CODE);
     }
 
     #[test]
@@ -1624,6 +1893,7 @@ mod tests {
             enter_good_cycles: 1,
             exit_bad_cycles: 1,
             max_age_cycles: 1,
+            stop_timeout_cycles: 1_000,
             stop_action: StopAction::QuickStop,
             authorized_source_id: 42,
             minimum_authority: 2,

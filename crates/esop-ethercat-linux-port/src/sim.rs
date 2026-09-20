@@ -69,6 +69,10 @@ impl Cia402DriveSimulator {
         self.error_code = error_code;
     }
 
+    pub fn set_actual_velocity(&mut self, velocity: i32) -> Result<(), Cia402PdoError> {
+        self.write_actual_i32(Cia402PdoField::ActualVelocity, velocity)
+    }
+
     /// Clear the simulated drive fault explicitly. This does not grant any
     /// lifecycle permit; the caller must still complete the recovery flow.
     pub fn clear_fault(&mut self) {
@@ -85,21 +89,7 @@ impl Cia402DriveSimulator {
             return Err(Cia402PdoError::MotionNotAllowed);
         }
         self.map.write_cyclic(&mut self.image, command, gate)?;
-        self.map
-            .entry(Cia402PdoField::Statusword)
-            .ok_or(Cia402PdoError::MissingField(Cia402PdoField::Statusword))?
-            .write_unsigned(&mut self.image, self.statusword as u64)
-            .map_err(Cia402PdoError::Pdo)?;
-        self.map
-            .entry(Cia402PdoField::ModeDisplay)
-            .ok_or(Cia402PdoError::MissingField(Cia402PdoField::ModeDisplay))?
-            .write_signed(&mut self.image, command.mode.raw() as i64)
-            .map_err(Cia402PdoError::Pdo)?;
-        self.map
-            .entry(Cia402PdoField::ErrorCode)
-            .ok_or(Cia402PdoError::MissingField(Cia402PdoField::ErrorCode))?
-            .write_unsigned(&mut self.image, self.error_code as u64)
-            .map_err(Cia402PdoError::Pdo)?;
+        self.publish_feedback(command.mode)?;
         match command.target {
             Cia402Target::Position(value) => {
                 self.write_actual_i32(Cia402PdoField::ActualPosition, value)?
@@ -115,6 +105,25 @@ impl Cia402DriveSimulator {
                 .map_err(Cia402PdoError::Pdo)?,
         }
         self.map.read_inputs_for(&self.image, command.mode)
+    }
+
+    fn publish_feedback(&mut self, mode: OperatingMode) -> Result<(), Cia402PdoError> {
+        self.map
+            .entry(Cia402PdoField::Statusword)
+            .ok_or(Cia402PdoError::MissingField(Cia402PdoField::Statusword))?
+            .write_unsigned(&mut self.image, self.statusword as u64)
+            .map_err(Cia402PdoError::Pdo)?;
+        self.map
+            .entry(Cia402PdoField::ModeDisplay)
+            .ok_or(Cia402PdoError::MissingField(Cia402PdoField::ModeDisplay))?
+            .write_signed(&mut self.image, mode.raw() as i64)
+            .map_err(Cia402PdoError::Pdo)?;
+        self.map
+            .entry(Cia402PdoField::ErrorCode)
+            .ok_or(Cia402PdoError::MissingField(Cia402PdoField::ErrorCode))?
+            .write_unsigned(&mut self.image, self.error_code as u64)
+            .map_err(Cia402PdoError::Pdo)?;
+        Ok(())
     }
 
     /// Run the lifecycle decision and apply motion only when the guard grants
@@ -140,6 +149,7 @@ impl Cia402DriveSimulator {
             LifecycleAction::Stop(esop_lifecycle_guard::StopAction::QuickStop) => {
                 self.map
                     .write_control(&mut self.image, command.mode, CONTROLWORD_QUICK_STOP)?;
+                self.publish_feedback(command.mode)?;
                 self.map.read_inputs_for(&self.image, command.mode)
             }
             LifecycleAction::Hold | LifecycleAction::Stop(_) | LifecycleAction::FaultLatched => {
@@ -148,6 +158,7 @@ impl Cia402DriveSimulator {
                     command.mode,
                     CONTROLWORD_DISABLE_VOLTAGE,
                 )?;
+                self.publish_feedback(command.mode)?;
                 self.map.read_inputs_for(&self.image, command.mode)
             }
         }

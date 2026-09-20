@@ -682,6 +682,7 @@ version = "0.1.0"
 dependencies = [
  "esop-ethercat-core",
  "esop-procbuf",
+ "esop-profile-cia402",
 ]
 
 [[package]]

@@ -122,6 +122,7 @@ fn guard_snapshot_flows_through_procbuf_to_protobuf_without_losing_gate_or_audit
             enter_good_cycles: 1,
             exit_bad_cycles: 1,
             max_age_cycles: 1,
+            stop_timeout_cycles: 1_000,
             stop_action: GuardStop::QuickStop,
             authorized_source_id: 11,
             minimum_authority: 1,

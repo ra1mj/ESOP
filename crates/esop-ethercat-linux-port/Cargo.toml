@@ -8,7 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 esop-ethercat-core = { path = "../esop-ethercat-core" }
-esop-lifecycle-guard = { path = "../esop-lifecycle-guard" }
+esop-lifecycle-guard = { path = "../esop-lifecycle-guard", features = ["cia402"] }
 esop-profile-cia402 = { path = "../esop-profile-cia402", features = ["ethercat"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

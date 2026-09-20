@@ -55,6 +55,13 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   exiting maintenance from Active/Stopping must retain Disable until stop
   acknowledgment, and maintenance toggles must never clear a latched fault.
   Snapshot stop_action must match the action sent to the drive.
+- Revoke the motion permit in the same cycle an active guard enters Stopping.
+  Bind stop confirmation to the original armed axis mask and to a complete,
+  fresh input sample after a stop action was issued; do not infer stationary
+  motion from a disabled CiA 402 state alone. A missing velocity sample or
+  unknown drive state cannot confirm a stop. Preserve the first blocker while
+  latching an unconfirmed stop at the configured timeout, even across a
+  maintenance toggle. Simulator feedback is not HIL qualification evidence.
 - Sample EtherCAT-backed MLG facts after finishing all due Domains: require
   this cycle's complete nonzero WKC and fresh DC completion, not a retained
   Domain image or the DC monitor's previously locked state. The cycle owner

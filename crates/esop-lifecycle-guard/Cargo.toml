@@ -11,9 +11,11 @@ default = []
 std = []
 procbuf = ["dep:esop-procbuf"]
 ethercat = ["dep:esop-ethercat-core"]
+cia402 = ["dep:esop-profile-cia402"]
 
 [dependencies]
 esop-ethercat-core = { path = "../esop-ethercat-core", optional = true }
+esop-profile-cia402 = { path = "../esop-profile-cia402", features = ["ethercat"], optional = true }
 esop-procbuf = { path = "../esop-procbuf", optional = true }
 
 [lib]

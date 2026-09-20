@@ -8,7 +8,7 @@ use std::time::Duration;
 use esop_command_gateway::{CommandIngress, IngressPolicy};
 use esop_lifecycle_guard::{
     CyclicQuality, GateId, GuardPolicy, LifecycleAction, LifecycleGuard, LifecycleState,
-    StopAction, procbuf::cyclic_quality_to_procbuf,
+    StopAction, StopFeedback, procbuf::cyclic_quality_to_procbuf,
 };
 use esop_procbuf::{EventSeverity as ProcSeverity, ProcBuf, ProcBufEvent, StatePage};
 use esop_proto::v1::{
@@ -464,6 +464,7 @@ fn router_restart_is_observable_and_cannot_rearm_motion() {
                     enter_good_cycles: 1,
                     exit_bad_cycles: 1,
                     max_age_cycles: 1,
+                    stop_timeout_cycles: 1_000,
                     stop_action: StopAction::QuickStop,
                     authorized_source_id: 42,
                     minimum_authority: 2,
@@ -491,6 +492,7 @@ fn router_restart_is_observable_and_cannot_rearm_motion() {
                 guard.cycle(2, 10_001),
                 LifecycleAction::Stop(StopAction::QuickStop)
             );
+            assert!(guard.permit().is_none());
 
             router.start();
             let connected = tokio::time::timeout(Duration::from_secs(10), async {
@@ -516,7 +518,7 @@ fn router_restart_is_observable_and_cannot_rearm_motion() {
                 LifecycleAction::Stop(StopAction::QuickStop)
             );
 
-            let renewed = command_payload_with_epoch(2, 30_000, 2);
+            let renewed = command_payload_with_epoch(2, 30_000, 3);
             let renewed_payload = wait_for_command(&observer, &command_key, &renewed, &command_rx);
             let renewed_permit = gateway
                 .admit_authenticated_command(&mut ingress, &renewed_payload, 42, 20_000)
@@ -525,7 +527,19 @@ fn router_restart_is_observable_and_cannot_rearm_motion() {
                 guard.cycle(4, 20_001),
                 LifecycleAction::Stop(StopAction::QuickStop)
             );
-            guard.acknowledge_stopped(4).expect("stop is acknowledged");
+            // Network recovery alone is not drive feedback. Supply a separate
+            // simulated complete-axis observation for this transport test.
+            guard
+                .acknowledge_stopped(
+                    4,
+                    StopFeedback {
+                        cycle: 4,
+                        observed_axis_mask: 0x03,
+                        stationary_axis_mask: 0x03,
+                        non_enabled_axis_mask: 0x03,
+                    },
+                )
+                .expect("simulated stop is acknowledged");
             guard.update_gate(GateId::Link, true, 5, 0);
             assert_eq!(
                 guard.request_rearm(renewed_permit, 5, 20_000),

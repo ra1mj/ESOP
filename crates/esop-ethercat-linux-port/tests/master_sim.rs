@@ -6,6 +6,7 @@ use esop_ethercat_core::{
 use esop_ethercat_linux_port::{Cia402DriveSimulator, SimulatedPort};
 use esop_lifecycle_guard::{
     GateId, GuardPolicy, LifecycleError, LifecycleGuard, LifecycleState, MotionPermit,
+    cia402::stop_feedback_from_cia402,
 };
 use esop_profile_cia402::{
     CONTROLWORD_ENABLE_OPERATION, Cia402MotionGate, Cia402PdoCommand, Cia402PdoField, Cia402PdoMap,
@@ -272,6 +273,10 @@ fn lifecycle_guard_denial_cannot_reach_cyclic_output() {
         .with_entry(
             Cia402PdoField::ActualPosition,
             entry(Cia402PdoField::ActualPosition, 168),
+        )
+        .with_entry(
+            Cia402PdoField::ActualVelocity,
+            entry(Cia402PdoField::ActualVelocity, 200),
         );
     let mut drive = Cia402DriveSimulator::new(map);
     let mut guard = LifecycleGuard::new(GateId::Link.bit(), 7, GuardPolicy::conservative());
@@ -319,9 +324,16 @@ fn lifecycle_guard_denial_cannot_reach_cyclic_output() {
     drive
         .step_with_lifecycle(&mut guard, 3, 3, command)
         .unwrap();
-    drive
+    drive.set_actual_velocity(20).unwrap();
+    let moving = drive
         .step_with_lifecycle(&mut guard, 4, 101, command)
         .unwrap();
+    assert_eq!(guard.state(), LifecycleState::Stopping);
+    assert!(guard.permit().is_none());
+    assert_eq!(
+        guard.acknowledge_stopped(4, stop_feedback_from_cia402(4, 0, moving, 0).unwrap()),
+        Err(LifecycleError::InvalidStopFeedback)
+    );
     assert_eq!(
         drive
             .map()
@@ -365,13 +377,20 @@ fn lifecycle_guard_denial_cannot_reach_cyclic_output() {
     drive
         .step_with_lifecycle(&mut guard, 6, 6, command)
         .unwrap();
-    guard.acknowledge_stopped(6).unwrap();
+    drive.set_statusword(0x0040);
+    drive.set_actual_velocity(0).unwrap();
+    let stopped = drive
+        .step_with_lifecycle(&mut guard, 7, 7, command)
+        .unwrap();
+    guard
+        .acknowledge_stopped(7, stop_feedback_from_cia402(7, 0, stopped, 0).unwrap())
+        .unwrap();
     assert_eq!(
         guard.request_rearm(
             MotionPermit {
                 boot_id: 7,
                 source_id: 1,
-                permit_epoch: 3,
+                permit_epoch: 4,
                 sequence: 1,
                 axis_mask: 1,
                 expires_at_ns: 200,
@@ -379,13 +398,13 @@ fn lifecycle_guard_denial_cannot_reach_cyclic_output() {
                 reserved: [0; 3],
                 policy_version: 1,
             },
-            6,
-            6,
+            7,
+            7,
         ),
         Err(LifecycleError::NotReady)
     );
     drive
-        .step_with_lifecycle(&mut guard, 6, 6, command)
+        .step_with_lifecycle(&mut guard, 7, 7, command)
         .unwrap();
     assert_eq!(
         drive
@@ -403,7 +422,7 @@ fn lifecycle_guard_denial_cannot_reach_cyclic_output() {
             MotionPermit {
                 boot_id: 7,
                 source_id: 1,
-                permit_epoch: 3,
+                permit_epoch: 4,
                 sequence: 2,
                 axis_mask: 1,
                 expires_at_ns: 200,
@@ -415,6 +434,7 @@ fn lifecycle_guard_denial_cannot_reach_cyclic_output() {
             9,
         )
         .unwrap();
+    drive.set_statusword(0x0027);
     drive
         .step_with_lifecycle(&mut guard, 9, 9, command)
         .unwrap();
@@ -430,7 +450,8 @@ fn lifecycle_guard_denial_cannot_reach_cyclic_output() {
     guard.latch_fault(0xBEEF, 10);
     assert_eq!(guard.state(), LifecycleState::Stopping);
     assert_eq!(guard.clear_fault(10), Err(LifecycleError::InvalidState));
-    drive
+    drive.set_actual_velocity(20).unwrap();
+    let still_moving = drive
         .step_with_lifecycle(&mut guard, 10, 10, command)
         .unwrap();
     assert_eq!(
@@ -441,11 +462,25 @@ fn lifecycle_guard_denial_cannot_reach_cyclic_output() {
             .read_unsigned(drive.process_image()),
         Ok(esop_profile_cia402::CONTROLWORD_QUICK_STOP as u64)
     );
-    guard.acknowledge_stopped(10).unwrap();
+    assert_eq!(
+        guard.acknowledge_stopped(
+            11,
+            stop_feedback_from_cia402(10, 0, still_moving, 0).unwrap()
+        ),
+        Err(LifecycleError::InvalidStopFeedback)
+    );
+    drive.set_statusword(0x0040);
+    drive.set_actual_velocity(0).unwrap();
+    let stopped = drive
+        .step_with_lifecycle(&mut guard, 11, 11, command)
+        .unwrap();
+    guard
+        .acknowledge_stopped(11, stop_feedback_from_cia402(11, 0, stopped, 0).unwrap())
+        .unwrap();
     assert_eq!(guard.state(), LifecycleState::FaultLatched);
     assert_eq!(guard.latched_fault_code(), 0xBEEF);
     drive
-        .step_with_lifecycle(&mut guard, 11, 11, command)
+        .step_with_lifecycle(&mut guard, 12, 12, command)
         .unwrap();
     assert_eq!(
         drive

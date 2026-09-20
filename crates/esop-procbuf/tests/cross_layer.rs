@@ -35,6 +35,7 @@ fn procbuf_command_expiry_stops_mlg_and_blocks_cia402_enable() {
         enter_good_cycles: 1,
         exit_bad_cycles: 2,
         max_age_cycles: 1,
+        stop_timeout_cycles: 1_000,
         stop_action: StopAction::QuickStop,
         authorized_source_id: 11,
         minimum_authority: 1,
@@ -153,8 +154,8 @@ fn procbuf_command_expiry_stops_mlg_and_blocks_cia402_enable() {
     assert_eq!(published.lifecycle.state, snapshot.state as u8);
     assert_eq!(published.lifecycle.stop_action, snapshot.stop_action as u8);
     assert_eq!(published.lifecycle.gates_ready, 0);
-    // A still-current permit is not permission to move while a gate is blocked.
-    assert_eq!(published.lifecycle.motion_permit, 1);
+    // Entering Stopping revokes the permit before this snapshot is published.
+    assert_eq!(published.lifecycle.motion_permit, 0);
     assert_eq!(published.lifecycle.required_gate_mask, required);
     assert_eq!(published.lifecycle.first_blocking_code, 0x434D_0001);
     assert_ne!(
@@ -204,6 +205,7 @@ fn ebpf_health_heartbeat_can_qualify_then_stop_motion() {
         enter_good_cycles: 1,
         exit_bad_cycles: 1,
         max_age_cycles: 1,
+        stop_timeout_cycles: 1_000,
         stop_action: StopAction::QuickStop,
         authorized_source_id: 1,
         minimum_authority: 1,

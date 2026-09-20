@@ -66,6 +66,7 @@ fn admitted_command_becomes_mlg_permit_without_network_in_rt_path() {
             enter_good_cycles: 1,
             exit_bad_cycles: 1,
             max_age_cycles: 1,
+            stop_timeout_cycles: 1_000,
             stop_action: StopAction::QuickStop,
             authorized_source_id: 42,
             minimum_authority: 2,
