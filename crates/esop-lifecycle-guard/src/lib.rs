@@ -465,6 +465,14 @@ impl LifecycleGuard {
 
     pub fn update_gate(&mut self, gate: GateId, valid: bool, cycle: u64, fault_code: u32) {
         let status = &mut self.gates[gate as usize];
+        let observed = status.good_cycles != 0 || status.bad_cycles != 0;
+        if observed && cycle <= status.last_update_cycle {
+            // A bad observation may override a good one in the same cycle,
+            // but a replay or a later good report cannot erase the failure.
+            if cycle < status.last_update_cycle || !status.valid || valid {
+                return;
+            }
+        }
         status.last_update_cycle = cycle;
         if valid {
             let was_valid = status.valid;
@@ -489,11 +497,11 @@ impl LifecycleGuard {
                 status.bad_cycles.saturating_add(1)
             };
             status.fault_code = fault_code;
+            if self.required_mask & gate.bit() != 0 && self.first_fault_code == 0 {
+                self.first_fault_code = fault_code;
+            }
             if status.bad_cycles >= self.policy.exit_bad_cycles {
                 status.qualified = false;
-                if self.first_fault_code == 0 {
-                    self.first_fault_code = fault_code;
-                }
             }
         }
     }
@@ -675,6 +683,7 @@ impl LifecycleGuard {
         if !self.gates_ready(cycle) {
             return Err(LifecycleError::NotReady);
         }
+        self.first_fault_code = 0;
         self.transition(LifecycleState::Active, cycle);
         self.recovery_count = self.recovery_count.saturating_add(1);
         Ok(LifecycleAction::EnableAllowed)
@@ -691,8 +700,13 @@ impl LifecycleGuard {
         let permit_current = self.permit_current(now_ns);
         match self.state {
             LifecycleState::Qualifying | LifecycleState::Ready => {
-                if self.gates_ready(cycle) && permit_current {
-                    self.transition(LifecycleState::Ready, cycle);
+                if self.gates_ready(cycle) {
+                    self.first_fault_code = 0;
+                    if permit_current {
+                        self.transition(LifecycleState::Ready, cycle);
+                    } else {
+                        self.transition(LifecycleState::Qualifying, cycle);
+                    }
                 } else {
                     self.transition(LifecycleState::Qualifying, cycle);
                 }
@@ -740,12 +754,16 @@ impl LifecycleGuard {
     fn gate_ready(&self, status: GateStatus, cycle: u64) -> bool {
         status.qualified
             && status.valid
-            && cycle.saturating_sub(status.last_update_cycle) <= self.policy.max_age_cycles
+            && status.good_cycles >= self.policy.enter_good_cycles
+            && status.last_update_cycle <= cycle
+            && cycle - status.last_update_cycle <= self.policy.max_age_cycles
     }
 
     fn gate_active(&self, status: GateStatus, cycle: u64) -> bool {
         status.qualified
-            && cycle.saturating_sub(status.last_update_cycle) <= self.policy.max_age_cycles
+            && status.valid
+            && status.last_update_cycle <= cycle
+            && cycle - status.last_update_cycle <= self.policy.max_age_cycles
     }
 
     fn transition(&mut self, state: LifecycleState, cycle: u64) {
@@ -1104,6 +1122,8 @@ mod tests {
             ),
             Ok(LifecycleAction::EnableAllowed)
         );
+        assert_eq!(guard.first_fault_code(), 0);
+        assert_eq!(guard.transition_at(1).unwrap().fault_code, 0xCAFE);
         assert_eq!(guard.cycle(4, 4), LifecycleAction::EnableAllowed);
     }
 
@@ -1189,22 +1209,103 @@ mod tests {
     }
 
     #[test]
-    fn active_guard_stops_after_bad_window_and_never_auto_rearms() {
+    fn active_guard_stops_on_first_bad_cycle_and_requires_fresh_good_window() {
         let mut guard = LifecycleGuard::new(GateId::Link.bit(), 10, POLICY);
         guard.update_gate(GateId::Link, true, 1, 0);
         guard.update_gate(GateId::Link, true, 2, 0);
         guard.request_rearm(permit(1, 100), 2, 2).unwrap();
         guard.update_gate(GateId::Link, false, 3, 0xCAFE);
-        assert_eq!(guard.cycle(3, 3), LifecycleAction::EnableAllowed);
-        guard.update_gate(GateId::Link, false, 4, 0xCAFE);
+        assert!(guard.gate(GateId::Link).qualified);
+        assert_eq!(guard.gate(GateId::Link).bad_cycles, 1);
+        assert_eq!(guard.first_fault_code(), 0xCAFE);
         assert_eq!(
-            guard.cycle(4, 4),
+            guard.cycle(3, 3),
             LifecycleAction::Stop(StopAction::QuickStop)
         );
         assert_eq!(guard.state(), LifecycleState::Stopping);
-        guard.acknowledge_stopped(5).unwrap();
+        assert_eq!(guard.transition_at(1).unwrap().fault_code, 0xCAFE);
+        guard.acknowledge_stopped(3).unwrap();
+        guard.update_gate(GateId::Link, true, 4, 0);
+        assert_eq!(guard.ready_gate_mask(4) & GateId::Link.bit(), 0);
+        assert_eq!(
+            guard.request_rearm(
+                MotionPermit {
+                    permit_epoch: 2,
+                    ..permit(2, 100)
+                },
+                4,
+                4
+            ),
+            Err(LifecycleError::NotReady)
+        );
+        guard.update_gate(GateId::Link, true, 5, 0);
         assert_eq!(guard.cycle(5, 5), LifecycleAction::Hold);
-        assert_eq!(guard.state(), LifecycleState::Qualifying);
+        assert_eq!(guard.state(), LifecycleState::Ready);
+        assert_eq!(
+            guard.request_rearm(
+                MotionPermit {
+                    permit_epoch: 2,
+                    ..permit(3, 100)
+                },
+                5,
+                5
+            ),
+            Ok(LifecycleAction::EnableAllowed)
+        );
+    }
+
+    #[test]
+    fn duplicate_and_future_gate_observations_cannot_qualify_early() {
+        let mut guard = LifecycleGuard::new(GateId::Link.bit(), 10, POLICY);
+        guard.update_gate(GateId::Link, true, 5, 0);
+        guard.update_gate(GateId::Link, true, 5, 0);
+        assert_eq!(guard.gate(GateId::Link).good_cycles, 1);
+        guard.update_gate(GateId::Link, true, 4, 0);
+        assert_eq!(guard.gate(GateId::Link).last_update_cycle, 5);
+        guard.update_gate(GateId::Link, true, 6, 0);
+        assert_eq!(guard.ready_gate_mask(5) & GateId::Link.bit(), 0);
+        assert_ne!(guard.ready_gate_mask(6) & GateId::Link.bit(), 0);
+
+        guard.update_gate(GateId::Link, false, 6, 0xCAFE);
+        assert_eq!(guard.gate(GateId::Link).bad_cycles, 1);
+        assert!(!guard.gate(GateId::Link).valid);
+        guard.update_gate(GateId::Link, true, 6, 0);
+        guard.update_gate(GateId::Link, true, 5, 0);
+        assert_eq!(guard.gate(GateId::Link).bad_cycles, 1);
+        assert_eq!(guard.ready_gate_mask(6) & GateId::Link.bit(), 0);
+        guard.update_gate(GateId::Link, true, 7, 0);
+        assert_eq!(guard.ready_gate_mask(7) & GateId::Link.bit(), 0);
+        guard.update_gate(GateId::Link, true, 8, 0);
+        assert_ne!(guard.ready_gate_mask(8) & GateId::Link.bit(), 0);
+    }
+
+    #[test]
+    fn active_guard_stops_on_stale_or_future_gate_observations() {
+        let mut stale = LifecycleGuard::new(GateId::Link.bit(), 10, POLICY);
+        stale.update_gate(GateId::Link, true, 1, 0);
+        stale.update_gate(GateId::Link, true, 2, 0);
+        assert_eq!(
+            stale.request_rearm(permit(1, 100), 2, 2),
+            Ok(LifecycleAction::EnableAllowed)
+        );
+        assert_eq!(stale.cycle(2, 2), LifecycleAction::EnableAllowed);
+        assert_eq!(
+            stale.cycle(4, 4),
+            LifecycleAction::Stop(StopAction::QuickStop)
+        );
+
+        let mut future = LifecycleGuard::new(GateId::Link.bit(), 10, POLICY);
+        future.update_gate(GateId::Link, true, 1, 0);
+        future.update_gate(GateId::Link, true, 2, 0);
+        assert_eq!(
+            future.request_rearm(permit(1, 100), 2, 2),
+            Ok(LifecycleAction::EnableAllowed)
+        );
+        future.update_gate(GateId::Link, true, 4, 0);
+        assert_eq!(
+            future.cycle(3, 3),
+            LifecycleAction::Stop(StopAction::QuickStop)
+        );
     }
 
     #[test]
@@ -1317,7 +1418,11 @@ mod tests {
         guard
             .update_host_observation(observation(1, 3, ObservationState::Degraded), 3, 100, 10)
             .unwrap();
-        assert_eq!(guard.cycle(3, 100), LifecycleAction::EnableAllowed);
+        assert_eq!(
+            guard.cycle(3, 100),
+            LifecycleAction::Stop(StopAction::QuickStop)
+        );
+        assert_eq!(guard.first_fault_code(), 0xBEEF);
         guard
             .update_host_observation(observation(1, 4, ObservationState::Degraded), 4, 100, 10)
             .unwrap();

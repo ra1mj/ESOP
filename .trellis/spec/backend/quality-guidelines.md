@@ -38,6 +38,9 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
 - Preserve raw cyclic observations separately from debounced lifecycle gates.
   A quality projection must carry known and good bits, match the State sequence,
   and leave incomplete or stale quality absent in the external message.
+- In the active guard, a required gate's observed bad value stops motion in
+  that cycle even if its exit debounce still marks it qualified. Count at most
+  one good observation per cycle; rearm needs a fresh enter-good window.
 - Treat `motion_permit_current` as permit freshness, not motion authorization:
   a blocked gate can move the guard to `Stopping` while the permit remains
   current. Only the guard's cycle action may authorize CiA 402 enable.

@@ -33,7 +33,7 @@ fn procbuf_command_expiry_stops_mlg_and_blocks_cia402_enable() {
     let buffer = Buffer::new(1, 7);
     let policy = GuardPolicy {
         enter_good_cycles: 1,
-        exit_bad_cycles: 1,
+        exit_bad_cycles: 2,
         max_age_cycles: 1,
         stop_action: StopAction::QuickStop,
         authorized_source_id: 11,
@@ -156,6 +156,11 @@ fn procbuf_command_expiry_stops_mlg_and_blocks_cia402_enable() {
     // A still-current permit is not permission to move while a gate is blocked.
     assert_eq!(published.lifecycle.motion_permit, 1);
     assert_eq!(published.lifecycle.required_gate_mask, required);
+    assert_eq!(published.lifecycle.first_blocking_code, 0x434D_0001);
+    assert_ne!(
+        published.lifecycle.qualified_gate_mask & GateId::Command.bit(),
+        0
+    );
     assert_eq!(
         published.lifecycle.valid_gate_mask,
         snapshot.valid_gate_mask
@@ -183,6 +188,10 @@ fn procbuf_command_expiry_stops_mlg_and_blocks_cia402_enable() {
         snapshot.transition_sequence
     );
     assert_eq!(published.lifecycle_history.len(), guard.transition_count());
+    assert_eq!(
+        published.lifecycle_history.get(1).unwrap().fault_code,
+        0x434D_0001
+    );
     assert_eq!(
         published.lifecycle_history.get(1).unwrap().to_state,
         guard.transition_at(1).unwrap().to as u8
