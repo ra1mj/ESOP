@@ -3,6 +3,13 @@
 use crate::CyclicQuality;
 use esop_ethercat_core::{CycleReport, DcCyclicSync, DomainQuality, ScheduleTable};
 
+#[cfg(feature = "cia402")]
+use crate::{AxisCycleDecision, StopFeedback, cia402::stop_feedback_from_cia402};
+#[cfg(feature = "cia402")]
+use esop_ethercat_core::Domain;
+#[cfg(feature = "cia402")]
+use esop_profile_cia402::{Cia402PdoMap, OperatingMode};
+
 /// One quality snapshot bound to a frozen schedule Domain ID, in schedule order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ScheduledDomainQuality {
@@ -47,14 +54,81 @@ pub(crate) fn cyclic_quality_from_domains<'a>(
     let mut has_due_domain = false;
     let domain_valid = due_domains.all(|domain| {
         has_due_domain = true;
-        domain.valid
-            && domain.complete
-            && domain.expected_wkc != 0
-            && domain.actual_wkc == domain.expected_wkc
-            && domain.last_valid_cycle == report.cycle
-            && domain.input_age_cycles == 0
+        domain_current(report, *domain)
     }) && has_due_domain;
     quality_from_domain_health(report, domain_valid, dc, other)
+}
+
+fn domain_current(report: CycleReport, domain: DomainQuality) -> bool {
+    domain.valid
+        && domain.complete
+        && domain.expected_wkc != 0
+        && domain.actual_wkc == domain.expected_wkc
+        && domain.last_valid_cycle == report.cycle
+        && domain.input_age_cycles == 0
+}
+
+fn rx_current(report: CycleReport) -> bool {
+    !report.link_down
+        && report.received_frames != 0
+        && report.parsed_datagrams != 0
+        && report.unmatched_datagrams == 0
+        && report.corrupt_frames == 0
+        && report.wkc_mismatches == 0
+        && report.timed_out_datagrams == 0
+        && report.consumer_rejections == 0
+}
+
+/// Build complete stop proof from the committed Domain image, never from a
+/// retained input page after a missed receive. The Domain must have finished
+/// this cycle's receive and the guard must already have issued a stop in an
+/// earlier cycle. Missing velocity leaves the axis unconfirmed, and any
+/// malformed PDO or incomplete axis set rejects the entire proof.
+#[cfg(feature = "cia402")]
+pub fn verified_ethercat_stop_feedback<
+    const AXES: usize,
+    const BYTES: usize,
+    const SEGMENTS: usize,
+>(
+    decision: &AxisCycleDecision<'_>,
+    report: CycleReport,
+    domain: &Domain<BYTES, SEGMENTS>,
+    maps: &[Cia402PdoMap; AXES],
+    modes: &[OperatingMode; AXES],
+    max_stationary_velocities: &[u32; AXES],
+) -> Option<StopFeedback> {
+    if AXES > crate::MAX_MOTION_AXES
+        || decision.cycle() != report.cycle
+        || !decision
+            .stop_issued_cycle()
+            .is_some_and(|issued| report.cycle > issued)
+        || report.budget_exhausted
+        || !rx_current(report)
+        || !domain_current(report, domain.quality())
+    {
+        return None;
+    }
+
+    let mask = decision.stopping_axis_mask();
+    if mask == 0 || (AXES < crate::MAX_MOTION_AXES && mask >> AXES != 0) {
+        return None;
+    }
+    let mut feedback = StopFeedback::empty(report.cycle);
+    for axis in 0..AXES {
+        if mask & (1u32 << axis) == 0 {
+            continue;
+        }
+        let inputs = maps[axis]
+            .read_inputs_for(domain.input(), modes[axis])
+            .ok()?;
+        feedback = feedback.merge(stop_feedback_from_cia402(
+            report.cycle,
+            axis as u8,
+            inputs,
+            max_stationary_velocities[axis],
+        )?)?;
+    }
+    Some(feedback)
 }
 
 /// Evaluate every configured Domain, including those not due on this tick.
@@ -114,14 +188,7 @@ fn quality_from_domain_health(
     dc: &DcCyclicSync,
     other: OtherCycleFacts,
 ) -> CyclicQuality {
-    let rx_valid = !report.link_down
-        && report.received_frames != 0
-        && report.parsed_datagrams != 0
-        && report.unmatched_datagrams == 0
-        && report.corrupt_frames == 0
-        && report.wkc_mismatches == 0
-        && report.timed_out_datagrams == 0
-        && report.consumer_rejections == 0;
+    let rx_valid = rx_current(report);
 
     CyclicQuality {
         platform_ready: other.platform_ready,

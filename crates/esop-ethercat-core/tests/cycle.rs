@@ -1030,3 +1030,42 @@ fn control_request_index_conflict_does_not_mutate_request_or_frame() {
     );
     assert_eq!(master.frame_slot_mut(frame).unwrap().len, 0);
 }
+
+#[test]
+fn expired_receive_can_reuse_index_only_after_deadline_and_emits_diagnostic() {
+    let mut master = EthercatMaster::<1, MTU>::new(MasterConfig::new([0xFF; 6], [1; 6]));
+    let expectation = RxExpectation {
+        generation: 1,
+        deadline_ns: 100,
+        expected_address: 0x1000,
+        expected_size: 2,
+        expected_type: Command::Lrd as u8,
+        expected_wkc: 1,
+    };
+    master.arm_rx(12, 0, expectation).unwrap();
+
+    assert_eq!(master.reap_expired_rx_before_tx(100), 0);
+    assert_eq!(master.rx_entry(12).state, RxSlotState::Armed);
+    assert_eq!(master.diagnostics().pending(), 0);
+    assert_eq!(master.reap_expired_rx_before_tx(101), 1);
+    assert_eq!(master.rx_entry(12).state, RxSlotState::Empty);
+    let event = master.diagnostics().pop().unwrap();
+    assert_eq!(event.code, EventCode::RxTimeout);
+    assert_eq!(event.index, 12);
+    assert_eq!(event.timestamp_ns, 101);
+    assert_eq!(master.reap_expired_rx_before_tx(101), 0);
+    assert_eq!(master.diagnostics().pending(), 0);
+
+    master
+        .arm_rx(
+            12,
+            0,
+            RxExpectation {
+                generation: 2,
+                deadline_ns: 200,
+                ..expectation
+            },
+        )
+        .unwrap();
+    assert_eq!(master.rx_entry(12).generation, 2);
+}

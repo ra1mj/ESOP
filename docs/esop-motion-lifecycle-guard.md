@@ -201,7 +201,7 @@ expires_monotonic_ns
 
 实时域校验：boot ID 相同、策略版本已激活、source 被本地配置允许、authority 达到策略下限、epoch 单调不回退、轴掩码不为空、序号未重放且未超过 expiry。每次拒绝写入固定容量 `PermitAudit` 环，记录拒绝序号、单调时间、来源、epoch、permit 序号和拒绝原因；认证、签名、用户会话和 ACL 的复杂校验发生在网关或可信监督域，实时域不等待其结果。
 
-RT 端 `GuardPolicy.allowed_axis_mask` 是随生命周期策略冻结的本地授权上限，`conservative()` 默认为 0（拒绝所有轴），产品激活前必须显式配置；网关的轴掩码校验只作入口预筛，不能代替 RT 的检查。`accept_permit` 拒绝任何包含本地未授权轴的 permit；在 `Active` 状态还要求续发 permit 的轴集合与本次已激活集合完全一致。扩轴或缩轴需先完成原集合的停机确认，再以新 permit 显式重新使能。拒绝尝试均记录在固定审计环，不覆盖仍有效的原 permit，也不消耗其序号；原 permit 到期或其他门槛失效仍按当前周期停止。当前实现尚未覆盖 PRD 所需的每轴独立停止策略、真实驱动和 HIL 验证。
+RT 端 `GuardPolicy.allowed_axis_mask` 是随生命周期策略冻结的本地授权上限，`conservative()` 默认为 0（拒绝所有轴），产品激活前必须显式配置；网关的轴掩码校验只作入口预筛，不能代替 RT 的检查。`accept_permit` 拒绝任何包含本地未授权轴的 permit；在 `Active` 状态还要求续发 permit 的轴集合与本次已激活集合完全一致。扩轴或缩轴需先完成原集合的停机确认，再以新 permit 显式重新使能。拒绝尝试均记录在固定审计环，不覆盖仍有效的原 permit，也不消耗其序号；原 permit 到期或其他门槛失效仍按当前周期停止。当前已实现冻结的每轴独立停止策略，但真实驱动和 HIL 验证尚未完成。
 
 ### 7.3 恢复协议
 
@@ -222,6 +222,8 @@ RT 端 `GuardPolicy.allowed_axis_mask` 是随生命周期策略冻结的本地�
 
 从首次请求停机起，超过 `GuardPolicy.stop_timeout_cycles` 仍未确认时，即使维护模式切换或迟到的确认请求发生，也锁存 `STOP_TIMEOUT_FAULT_CODE` 并输出 `Disable`；首个阻塞原因仍单独保留。`clear_fault` 只有在故障后的必需门槛重新连续合格时才接受，并再次撤销旧 permit；恢复运动仍需显式 `request_rearm` 和更新 epoch 的 permit。维护退出也须由退出后的新观测重新满足稳定窗口，不能沿用维护前的健康计数。周期所有者必须从已完成帧校验、WKC 和输入年龄校验的 Domain 提供真实反馈；仿真测试不能替代实物驱动停机确认、产品安全链和 HIL 验证。
 
+`verified_ethercat_stop_feedback` 在 `ethercat` 与 `cia402` 可选特性同时启用时，将原许可轴集合绑定到同周期 `CycleReport` 与 `Domain::finish_receive` 后的已提交输入。必须有完整、非零且符合预期的 WKC，无 RX 错误、超预算或丢帧，且停机控制动作在更早周期已经发出。无实际速度样本、驱动仍使能或状态不可辨时不能确认停稳。周期所有者仍需按先发停机控制字、再收新反馈、再调用 `acknowledge_stopped` 的顺序执行；当前跨层测试使用的是模拟端口，不代表真实设备验证。
+
 ## 8. 实时执行与数据契约
 
 ### 8.1 每周期顺序
@@ -240,6 +242,8 @@ MLG 的每周期执行顺序固定如下：
 ```
 
 MLG 不读取网络、不运行 SDO、不分配内存、不格式化日志，也不从 ISR 调用。`evaluate()` 使用连续数组、固定枚举和有界循环；所有时间均来自 ESOP 单调时间，不能以 ROS time 或 wall clock 判断 permit 时效。
+
+单调时间跨周期推进时，缺响应的 RX 索引可能仍处于 Armed。下次发帧前调用 `EthercatMaster::reap_expired_rx_before_tx`，仅在旧截止时间**之后**清理并记录 RX 超时；截止时间内继续拒绝相同索引的复用。该诊断属于旧响应，不应计作新周期已提交的数据。
 
 ### 8.2 ProcBuf 扩展
 
@@ -260,7 +264,7 @@ ProcBuf 应包含固定大小的 lifecycle 区域：
 
 ProcBuf ABI v4 在 State 页增加固定容量的 `axis_stops[AXES]`：`request_cycle` 标记当周期请求，`requested_action` 为策略动作，`issued_action` 为本周期 CiA 402 控制字对应的动作。对于缺乏受控目标发生器的 Hold/Ramp，`issued_action=Disable`。只有从完成帧、WKC 与年龄合格且**晚于首次发出停机控制字的周期**的输入生成的 `StopFeedback` 才能填写 `feedback_cycle` 与 `feedback_valid/stationary/non_enabled`；首次发出的同周期输入不能冒充停机响应，缺失速度或未知驱动状态也不能证明已停稳。写入 API 校验决策、状态和反馈周期/轴掩码，并在失败时保持旧记录不变；下一周期无停止请求时清空旧证据。Protobuf v1 使用新增的可选 `LifecycleSummary.axis_stops` 字段承载同一语义，旧读者忽略该字段且经其重新编码会丢失。单值 `stop_action` 仍仅是旧接口的全局默认/摘要，**不是**逐轴实际反馈。需要停止旧 RT 与监督进程、重建共享区域，再以 v4 同版本重启；v1/v2/v3 header 均被拒绝。
 
-停机超时在 `LifecycleGuard.stop_timeout_record()` 中保留超时周期、原轴掩码、首次发出停机的周期（可能缺失）、转换序号和升级当时每轴请求动作；进入 `FaultLatched` 后所有轴仍保持 inhibit，CiA 402 输出 Disable，但本周期 `axis_stops` 清空，因为没有新的可确认停机反馈。已提供 `stop_timeout_events_to_procbuf` 接口，供周期所有者将原轴集合逐轴写入 SPSC 事件环：`source=0x4D4C`、`code=1`、`severity=Fault`、`sequence=transition_sequence`、`value=0x53540001`、`axis_or_device=0` 起的轴号；`aux` 低两字节分别是 Protobuf 请求/发出动作（1..4），bit 16 表示此前确实发过停机控制字，高字节是 `FaultLatched` 状态值。事件时间戳是调用方提供的**写入时**单调时间，重试时可能晚于真实转换时间；应用可用相同的 boot ID 和转换序号关联 State 页的 `transition_cycle/time_ns` 和首个阻塞码。环满会返回错误并计入 `lost_events`，已写轴不重发，剩余轴下次调用再写；调用方应持续消费并重试，且避免在排空前覆盖旧超时记录。事件不证明机械静止，不改变既有 ABI 或 Protobuf 布局。生产周期所有者接线、受控 Hold/Ramp、完整的常规转换事件发布与实物 HIL 仍待完成。
+停机超时在 `LifecycleGuard.stop_timeout_record()` 中保留超时周期、原轴掩码、首次发出停机的周期（可能缺失）、转换序号和升级当时每轴请求动作；进入 `FaultLatched` 后所有轴仍保持 inhibit，CiA 402 输出 Disable，但本周期 `axis_stops` 清空，因为没有新的可确认停机反馈。已提供 `stop_timeout_events_to_procbuf` 接口，供周期所有者将原轴集合逐轴写入 SPSC 事件环：`source=0x4D4C`、`code=1`、`severity=Fault`、`sequence=transition_sequence`、`value=0x53540001`、`axis_or_device=0` 起的轴号；`aux` 低两字节分别是 Protobuf 请求/发出动作（1..4），bit 16 表示此前确实发过停机控制字，高字节是 `FaultLatched` 状态值。事件时间戳是调用方提供的**写入时**单调时间，重试时可能晚于真实转换时间；应用可用相同的 boot ID 和转换序号关联 State 页的 `transition_cycle/time_ns` 和首个阻塞码。环满会返回错误并计入 `lost_events`，已写轴不重发，剩余轴下次调用再写；调用方应持续消费并重试，且避免在排空前覆盖旧超时记录。事件不证明机械静止，不改变既有 ABI 或 Protobuf 布局。生产周期所有者接线、受控 Hold/Ramp 与实物 HIL 仍待完成。
 
 `LifecycleEventCursor::new(&guard)` 绑定启动实例，`lifecycle_events_to_procbuf` 先将守卫固定转换环中尚未发布的转换按序写入事件环，再尝试写入上面的逐轴超时事件；调用方只应选择这个组合接口或分别调用两个接口中的一个发布路径，避免事件乱序。转换事件使用 `source=0x4D4C`、`code=2`、`sequence=transition_sequence`、`axis_or_device=0xFFFF`、`value=transition.fault_code`，`aux` 低字节为原始 MLG `from_state`，第二字节为原始 MLG `to_state`。超时事件的高字节同样是原始 MLG 状态值，**不是** Protobuf `LifecycleState` 值（后者为未指定状态保留 0）；接收方应依据事件 code 分别解码。`FaultLatched` 事件为 Fault，Stopping/Maintenance 为 Warning，其余转换为 Info。环满时游标仅推进已写成功的转换，重试不会重复提交；若尚未写入的转换被 16 条历史覆盖，接口返回明确的 `HistoryOverrun { missed }`，调用方记录缺失量后才调用 `acknowledge_history_loss` 跳到最早可用转换。单调时间参数是实际写入时刻，不得冒充历史转换时刻；生产周期所有者尚未集成此发布路径。
 

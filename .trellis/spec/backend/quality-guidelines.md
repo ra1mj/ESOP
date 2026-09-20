@@ -88,6 +88,13 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   must leave only unwritten axes pending for retry; event-ring loss is
   observable. Never treat an event or issued Disable as stationary feedback,
   and do not carry previous-cycle axis stop proof into a fault-latched page.
+- Derive CiA 402 stop confirmation from the just-finished verified Domain
+  image, never the retained last-good image after a missed receive. Require
+  matching receive/decision cycles, complete nonzero WKC, no RX errors or
+  budget exhaustion, and fresh validated PDO reads for every armed axis.
+  A missing velocity sample is not stationary proof. Before reusing a fixed
+  EtherCAT datagram index after a missing response, reap expired expectations
+  with the port's monotonic time; unexpired indices must remain armed.
 - Publish lifecycle transitions before timeout escalation events through the
   boot-bound, fixed-size event cursor. Advance the cursor only after a ring
   write succeeds, explicitly report overwritten transition history before

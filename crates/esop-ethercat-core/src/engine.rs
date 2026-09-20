@@ -257,6 +257,31 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
         self.config
     }
 
+    /// Reap late RX expectations before reusing a fixed datagram index for
+    /// the next TX. The cycle owner supplies the port's monotonic time and
+    /// calls this before building the next frame, after the previous receive
+    /// window has closed. Unexpired indices remain armed and cannot be reused.
+    /// Timed-out indices are recorded in the fixed diagnostics ring; the
+    /// returned count lets the owner report late completions separately from
+    /// the next cycle's receive quality.
+    pub fn reap_expired_rx_before_tx(&mut self, now_ns: u64) -> usize {
+        let mut count = 0;
+        for index in self.rx_index.expire_armed(now_ns).indices() {
+            count += 1;
+            self.diagnostics.record(EventRecord::new(
+                self.cycle,
+                now_ns,
+                EventCode::RxTimeout,
+                EventSeverity::Error,
+                index,
+                0,
+                0,
+            ));
+        }
+        self.rx_index.reset_complete();
+        count
+    }
+
     pub fn acquire_frame(
         &mut self,
         generation: u16,
