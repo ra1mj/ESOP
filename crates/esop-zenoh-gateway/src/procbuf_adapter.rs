@@ -135,15 +135,14 @@ impl ProcBufProjector {
             if evidence.request_cycle != state.sequence {
                 continue;
             }
+            let expected_issued = if evidence.requested_action == StopAction::QuickStop as u8 {
+                StopAction::QuickStop as u8
+            } else {
+                StopAction::Disable as u8
+            };
             if !(1..=4).contains(&evidence.requested_action)
-                || (evidence.issued_action != StopAction::QuickStop as u8
-                    && evidence.issued_action != StopAction::Disable as u8)
-                || evidence.issued_action
-                    != if evidence.requested_action == StopAction::QuickStop as u8 {
-                        StopAction::QuickStop as u8
-                    } else {
-                        StopAction::Disable as u8
-                    }
+                || (evidence.issued_action != StopAction::Unspecified as u8
+                    && evidence.issued_action != expected_issued)
                 || evidence.feedback_valid > 1
                 || evidence.stationary > 1
                 || evidence.non_enabled > 1

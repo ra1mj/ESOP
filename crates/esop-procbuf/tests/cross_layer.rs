@@ -303,10 +303,12 @@ fn external_inhibit_latches_only_after_stop_and_publishes_fault_reason() {
         )
         .unwrap();
     guard.update_gate(GateId::ExternalSafety, false, 2, 0x5341_0001);
+    let mut decision = guard.cycle_axes(2, 2);
     assert_eq!(
-        guard.cycle(2, 2),
+        decision.action(),
         LifecycleAction::Stop(StopAction::QuickStop)
     );
+    decision.mark_stop_transmitted().unwrap();
     assert_eq!(guard.state(), LifecycleState::Stopping);
     assert_eq!(guard.clear_fault(2), Err(LifecycleError::InvalidState));
 

@@ -218,11 +218,11 @@ RT 端 `GuardPolicy.allowed_axis_mask` 是随生命周期策略冻结的本地�
 
 当前固定容量 `LifecycleGuard` 在进入和退出维护模式、请求锁存故障时撤销旧门槛资格；发生边界转换之前或同周期的门槛上报不得计入新的稳定窗口。运动中运行门槛或 permit 失效时立即撤销旧 permit，保存本次运动的轴掩码并请求配置的停止动作。从运动或停机中请求硬故障，先记录待锁存原因并保持 `STOPPING` 的配置停止动作，只有停机确认后才进入 `FAULT_LATCHED`；此前 `clear_fault` 和重新使能均被拒绝。重复上报不得覆盖待锁存原因；停止前已记录的首个阻塞原因与最终锁存原因分别保留。从非运动状态发起且无待确认停机的硬故障可直接锁存。已锁存时快照的停止动作为 `Disable`，与周期输出一致。
 
-维护状态的周期动作显式请求 `Disable`，不得将普通 `Hold` 当作驱动断使能；从运动/停止中进入维护，退出后仍须维持 `Disable` 请求并显式确认停机，不能跳过停止确认。待锁存硬故障在维护模式切换期间不得丢失；已锁存故障不接受维护开关转换，避免绕过显式恢复。`acknowledge_stopped` 现要求已经至少输出一次停止动作，且确认周期晚于停止请求和本次 `STOPPING` 进入周期。`StopFeedback` 必须覆盖原 permit 的全部轴，且每轴同时有经验证的当前周期输入、静止判断和非 `Operation enabled` 判断；缺任一项、重复轴、错周期或旧周期证据均不能完成停机确认。可选的 `cia402` 适配器依据 Statusword 和实际速度生成单轴证据；缺速度 PDO、未知状态或驱动仍使能均 fail closed。速度阈值必须由产品结合驱动标定和机械设计确定，不能把 `Disable` 直接等同于机械静止。
+维护状态的周期动作显式请求 `Disable`，不得将普通 `Hold` 当作驱动断使能；从运动/停止中进入维护，退出后仍须维持 `Disable` 请求并显式确认停机，不能跳过停止确认。待锁存硬故障在维护模式切换期间不得丢失；已锁存故障不接受维护开关转换，避免绕过显式恢复。`cycle_axes` 只准备本周期动作；周期所有者必须在已验证停机 PDO 的帧成功提交到端口后，在该借用决策上调用 `mark_stop_transmitted`。构造帧、发送失败或只有周期决策均不能记为“已发出”；端口接受帧也不证明驱动已执行，仍需新鲜接收反馈。`acknowledge_stopped` 要求已经成功提交至少一次停机动作，且确认周期晚于该次提交、停机请求和本次 `STOPPING` 进入周期。`StopFeedback` 必须覆盖原 permit 的全部轴，且每轴同时有经验证的当前周期输入、静止判断和非 `Operation enabled` 判断；缺任一项、重复轴、错周期或旧周期证据均不能完成停机确认。可选的 `cia402` 适配器依据 Statusword 和实际速度生成单轴证据；缺速度 PDO、未知状态或驱动仍使能均 fail closed。速度阈值必须由产品结合驱动标定和机械设计确定，不能把 `Disable` 直接等同于机械静止。
 
 从首次请求停机起，超过 `GuardPolicy.stop_timeout_cycles` 仍未确认时，即使维护模式切换或迟到的确认请求发生，也锁存 `STOP_TIMEOUT_FAULT_CODE` 并输出 `Disable`；首个阻塞原因仍单独保留。`clear_fault` 只有在故障后的必需门槛重新连续合格时才接受，并再次撤销旧 permit；恢复运动仍需显式 `request_rearm` 和更新 epoch 的 permit。维护退出也须由退出后的新观测重新满足稳定窗口，不能沿用维护前的健康计数。周期所有者必须从已完成帧校验、WKC 和输入年龄校验的 Domain 提供真实反馈；仿真测试不能替代实物驱动停机确认、产品安全链和 HIL 验证。
 
-`verified_ethercat_stop_feedback` 在 `ethercat` 与 `cia402` 可选特性同时启用时，将原许可轴集合绑定到同周期 `CycleReport` 与 `Domain::finish_receive` 后的已提交输入。必须有完整、非零且符合预期的 WKC，无 RX 错误、超预算或丢帧，且停机控制动作在更早周期已经发出。无实际速度样本、驱动仍使能或状态不可辨时不能确认停稳。周期所有者仍需按先发停机控制字、再收新反馈、再调用 `acknowledge_stopped` 的顺序执行；当前跨层测试使用的是模拟端口，不代表真实设备验证。
+`verified_ethercat_stop_feedback` 在 `ethercat` 与 `cia402` 可选特性同时启用时，将原许可轴集合绑定到同周期 `CycleReport` 与 `Domain::finish_receive` 后的已提交输入。必须有完整、非零且符合预期的 WKC，无 RX 错误、超预算或丢帧，且停机控制动作在更早周期已由端口接受。无实际速度样本、驱动仍使能或状态不可辨时不能确认停稳。周期所有者仍需按先收上周期输入、评估并生成停机输出、成功提交下一帧并标记发送、再收新反馈、再调用 `acknowledge_stopped` 的顺序执行；模拟端口的失败发送和重试测试不代表真实设备验证。
 
 ## 8. 实时执行与数据契约
 
@@ -262,7 +262,7 @@ ProcBuf 应包含固定大小的 lifecycle 区域：
 
 所有固定事件记录必须带 lifecycle state、gate/fault code、axis/device、transition sequence 和 monotonic timestamp。
 
-ProcBuf ABI v4 在 State 页增加固定容量的 `axis_stops[AXES]`：`request_cycle` 标记当周期请求，`requested_action` 为策略动作，`issued_action` 为本周期 CiA 402 控制字对应的动作。对于缺乏受控目标发生器的 Hold/Ramp，`issued_action=Disable`。只有从完成帧、WKC 与年龄合格且**晚于首次发出停机控制字的周期**的输入生成的 `StopFeedback` 才能填写 `feedback_cycle` 与 `feedback_valid/stationary/non_enabled`；首次发出的同周期输入不能冒充停机响应，缺失速度或未知驱动状态也不能证明已停稳。写入 API 校验决策、状态和反馈周期/轴掩码，并在失败时保持旧记录不变；下一周期无停止请求时清空旧证据。Protobuf v1 使用新增的可选 `LifecycleSummary.axis_stops` 字段承载同一语义，旧读者忽略该字段且经其重新编码会丢失。单值 `stop_action` 仍仅是旧接口的全局默认/摘要，**不是**逐轴实际反馈。需要停止旧 RT 与监督进程、重建共享区域，再以 v4 同版本重启；v1/v2/v3 header 均被拒绝。
+ProcBuf ABI v4 在 State 页增加固定容量的 `axis_stops[AXES]`：`request_cycle` 标记当周期请求，`requested_action` 为策略动作，`issued_action` 仅在本周期停机帧成功提交端口后记录相应 CiA 402 控制字动作；发送失败或尚未提交为 0。对于缺乏受控目标发生器的 Hold/Ramp，成功提交后的 `issued_action=Disable`。只有从完成帧、WKC 与年龄合格且**晚于首次成功提交停机控制字的周期**的输入生成的 `StopFeedback` 才能填写 `feedback_cycle` 与 `feedback_valid/stationary/non_enabled`；首次提交的同周期输入不能冒充停机响应，缺失速度或未知驱动状态也不能证明已停稳。写入 API 校验决策、状态和反馈周期/轴掩码，并在失败时保持旧记录不变；下一周期无停止请求时清空旧证据。Protobuf v1 使用新增的可选 `LifecycleSummary.axis_stops` 字段承载同一语义，旧读者忽略该字段且经其重新编码会丢失。单值 `stop_action` 仍仅是旧接口的全局默认/摘要，**不是**逐轴实际反馈。需要停止旧 RT 与监督进程、重建共享区域，再以 v4 同版本重启；v1/v2/v3 header 均被拒绝。
 
 停机超时在 `LifecycleGuard.stop_timeout_record()` 中保留超时周期、原轴掩码、首次发出停机的周期（可能缺失）、转换序号和升级当时每轴请求动作；进入 `FaultLatched` 后所有轴仍保持 inhibit，CiA 402 输出 Disable，但本周期 `axis_stops` 清空，因为没有新的可确认停机反馈。已提供 `stop_timeout_events_to_procbuf` 接口，供周期所有者将原轴集合逐轴写入 SPSC 事件环：`source=0x4D4C`、`code=1`、`severity=Fault`、`sequence=transition_sequence`、`value=0x53540001`、`axis_or_device=0` 起的轴号；`aux` 低两字节分别是 Protobuf 请求/发出动作（1..4），bit 16 表示此前确实发过停机控制字，高字节是 `FaultLatched` 状态值。事件时间戳是调用方提供的**写入时**单调时间，重试时可能晚于真实转换时间；应用可用相同的 boot ID 和转换序号关联 State 页的 `transition_cycle/time_ns` 和首个阻塞码。环满会返回错误并计入 `lost_events`，已写轴不重发，剩余轴下次调用再写；调用方应持续消费并重试，且避免在排空前覆盖旧超时记录。事件不证明机械静止，不改变既有 ABI 或 Protobuf 布局。生产周期所有者接线、受控 Hold/Ramp 与实物 HIL 仍待完成。
 

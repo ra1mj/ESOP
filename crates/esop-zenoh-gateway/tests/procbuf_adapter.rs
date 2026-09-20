@@ -218,24 +218,20 @@ fn per_axis_stop_request_issued_control_and_observed_feedback_survive_projection
     let mut projector = projector();
     let mut initial = state(2);
     {
-        let decision = guard.cycle_axes(2, 2);
+        let mut decision = guard.cycle_axes(2, 2);
         let outputs = step_axis_bank(&mut bank, &decision, [0x0027; 2], [DriveRequest::Enable; 2]);
         axis_stops_to_procbuf(&mut initial, &decision, &outputs, None).unwrap();
+        decision.mark_stop_transmitted().unwrap();
     }
     initial.lifecycle = lifecycle_to_procbuf(guard.snapshot(2, 2), 2);
     buffer.publish_state(initial).unwrap();
     let first = projector.read_state(&buffer).unwrap().unwrap();
-    assert!(
-        first
-            .lifecycle
-            .unwrap()
-            .axis_stops
-            .iter()
-            .all(|stop| !stop.feedback_observed)
-    );
+    assert!(first.lifecycle.unwrap().axis_stops.iter().all(|stop| {
+        !stop.feedback_observed && stop.issued_action == StopAction::Unspecified as i32
+    }));
 
     guard.update_gate(GateId::Link, false, 3, 0xCAFE);
-    let decision = guard.cycle_axes(3, 3);
+    let mut decision = guard.cycle_axes(3, 3);
     let outputs = step_axis_bank(
         &mut bank,
         &decision,
@@ -249,6 +245,7 @@ fn per_axis_stop_request_issued_control_and_observed_feedback_survive_projection
         stationary_axis_mask: 0b01,
         non_enabled_axis_mask: 0b01,
     };
+    decision.mark_stop_transmitted().unwrap();
     axis_stops_to_procbuf(&mut state, &decision, &outputs, Some(feedback)).unwrap();
     state.lifecycle = lifecycle_to_procbuf(guard.snapshot(3, 3), 3);
     buffer.publish_state(state).unwrap();
@@ -645,7 +642,9 @@ fn stop_timeout_escalations_retain_original_axes_and_retry_full_event_ring() {
         )
         .unwrap();
     guard.update_gate(GateId::Link, false, 2, 0xCAFE);
-    assert_eq!(guard.cycle_axes(2, 2).stopping_axis_mask(), 0b11);
+    let mut stop = guard.cycle_axes(2, 2);
+    assert_eq!(stop.stopping_axis_mask(), 0b11);
+    stop.mark_stop_transmitted().unwrap();
 
     let decision = guard.cycle_axes(4, 4);
     assert_eq!(
@@ -850,12 +849,14 @@ fn lifecycle_transition_event_precedes_timeout_escalation_and_matches_state() {
     assert_eq!(axis0.sequence, fault.sequence);
     assert_eq!(axis0.code, u32::from(STOP_TIMEOUT_EVENT_CODE));
     assert_eq!(axis0.axis_or_device, 0);
+    assert_eq!(axis0.aux & (1 << 16), 0);
     assert_eq!(
         lifecycle_events_to_procbuf(&mut guard, &buffer, &mut cursor, 402),
         Ok(1)
     );
     let axis1 = projector.pop_event(&buffer).unwrap().unwrap();
     assert_eq!((axis1.sequence, axis1.axis_or_device), (fault.sequence, 1));
+    assert_eq!(axis1.aux & (1 << 16), 0);
     assert_eq!(
         lifecycle_events_to_procbuf(&mut guard, &buffer, &mut cursor, 403),
         Ok(0)

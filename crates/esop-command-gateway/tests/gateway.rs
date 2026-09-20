@@ -198,10 +198,12 @@ fn gateway_renewal_cannot_change_active_rt_axis_set_or_stop_evidence() {
     assert_eq!(guard.cycle(2, 2), LifecycleAction::EnableAllowed);
 
     guard.update_gate(GateId::Link, false, 3, 0xCAFE);
+    let mut decision = guard.cycle_axes(3, 3);
     assert_eq!(
-        guard.cycle(3, 3),
+        decision.action(),
         LifecycleAction::Stop(StopAction::QuickStop)
     );
+    decision.mark_stop_transmitted().unwrap();
     assert_eq!(
         guard.acknowledge_stopped(
             4,

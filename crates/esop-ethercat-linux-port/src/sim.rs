@@ -135,7 +135,7 @@ impl Cia402DriveSimulator {
         now_ns: u64,
         command: Cia402PdoCommand,
     ) -> Result<Cia402PdoInputs, Cia402PdoError> {
-        let decision = guard.cycle_axes(cycle, now_ns);
+        let mut decision = guard.cycle_axes(cycle, now_ns);
         match decision.axis(0) {
             esop_lifecycle_guard::AxisDirective::EnableAllowed => self.step(
                 command,
@@ -152,17 +152,33 @@ impl Cia402DriveSimulator {
                 self.map
                     .write_control(&mut self.image, command.mode, CONTROLWORD_QUICK_STOP)?;
                 self.publish_feedback(command.mode)?;
-                self.map.read_inputs_for(&self.image, command.mode)
+                let inputs = self.map.read_inputs_for(&self.image, command.mode)?;
+                // The simulator commits its output image synchronously; a real
+                // port must mark the decision only after successful TX submit.
+                decision
+                    .mark_stop_transmitted()
+                    .map_err(|_| Cia402PdoError::MotionNotAllowed)?;
+                Ok(inputs)
             }
             esop_lifecycle_guard::AxisDirective::Inhibit
             | esop_lifecycle_guard::AxisDirective::Stop(_) => {
+                let stopping = matches!(
+                    decision.axis(0),
+                    esop_lifecycle_guard::AxisDirective::Stop(_)
+                );
                 self.map.write_control(
                     &mut self.image,
                     command.mode,
                     CONTROLWORD_DISABLE_VOLTAGE,
                 )?;
                 self.publish_feedback(command.mode)?;
-                self.map.read_inputs_for(&self.image, command.mode)
+                let inputs = self.map.read_inputs_for(&self.image, command.mode)?;
+                if stopping {
+                    decision
+                        .mark_stop_transmitted()
+                        .map_err(|_| Cia402PdoError::MotionNotAllowed)?;
+                }
+                Ok(inputs)
             }
         }
     }

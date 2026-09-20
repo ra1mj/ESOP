@@ -489,7 +489,8 @@ impl LifecycleSummary {
 
 /// Actions use Protobuf StopAction discriminants: 0 means no stop request;
 /// 1..=4 mean Hold, RampToZero, QuickStop and Disable respectively.
-/// An issued action denotes the controlword sent, not drive execution.
+/// An issued action denotes a controlword accepted by the port, not drive
+/// execution. Zero means no stop frame was submitted in this cycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct AxisStopEvidence {

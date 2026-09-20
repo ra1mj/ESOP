@@ -463,7 +463,11 @@ pub fn axis_stops_to_procbuf<const AXES: usize, const IO: usize, const DOMAINS: 
                     request_cycle: state.sequence,
                     feedback_cycle: if observed { state.sequence } else { 0 },
                     requested_action: requested as u8 + 1,
-                    issued_action: issued as u8 + 1,
+                    issued_action: if decision.stop_transmitted() {
+                        issued as u8 + 1
+                    } else {
+                        0
+                    },
                     feedback_valid: observed as u8,
                     stationary: feedback
                         .is_some_and(|sample| observed && sample.stationary_axis_mask & bit != 0)

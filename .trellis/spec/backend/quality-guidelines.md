@@ -69,6 +69,11 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   unknown drive state cannot confirm a stop. Preserve the first blocker while
   latching an unconfirmed stop at the configured timeout, even across a
   maintenance toggle. Simulator feedback is not HIL qualification evidence.
+- `cycle_axes` prepares a stop decision but must not claim it was issued.
+  Keep the decision borrowed while building the next PDO; only after the port
+  accepts that frame call `mark_stop_transmitted`. A failed TX leaves the
+  issuance cycle absent, and ProcBuf `issued_action` stays zero until success.
+  Stop confirmation still requires a fresh complete receive after that TX.
 - Freeze per-axis stop selections in `AxisStopPolicy` at guard construction.
   Assemble all axis outputs from one borrowed `cycle_axes` decision, use the
   originally armed mask for stop requests, and force every other axis to
