@@ -485,13 +485,25 @@ impl<const AXES: usize> Cia402AxisBank<AXES> {
         motion_mask: u32,
         stop_request: DriveRequest,
     ) -> [Cia402Output; AXES] {
+        self.step_with_axis_stop(statuswords, requests, motion_mask, [stop_request; AXES])
+    }
+
+    /// Per-axis stop requests are applied only to denied axes. An Enable or
+    /// FaultReset in a denied slot is forced to Disable.
+    pub fn step_with_axis_stop(
+        &mut self,
+        statuswords: [u16; AXES],
+        requests: [DriveRequest; AXES],
+        motion_mask: u32,
+        stop_requests: [DriveRequest; AXES],
+    ) -> [Cia402Output; AXES] {
         core::array::from_fn(|index| {
             let permitted = index < 32 && motion_mask & (1u32 << index) != 0;
             let request = if permitted {
                 requests[index]
             } else {
-                match stop_request {
-                    DriveRequest::QuickStop | DriveRequest::Disable => stop_request,
+                match stop_requests[index] {
+                    DriveRequest::QuickStop | DriveRequest::Disable => stop_requests[index],
                     DriveRequest::Enable | DriveRequest::FaultReset => DriveRequest::Disable,
                 }
             };
@@ -613,6 +625,27 @@ mod tests {
         assert_eq!(outputs[0].controlword, CONTROLWORD_ENABLE_OPERATION);
         assert_eq!(outputs[1].controlword, CONTROLWORD_QUICK_STOP);
         assert!(!outputs[1].motion_allowed);
+    }
+
+    #[test]
+    fn axis_bank_keeps_stop_requests_independent_and_sanitizes_unsafe_requests() {
+        let mut bank = Cia402AxisBank::<4>::new();
+        let outputs = bank.step_with_axis_stop(
+            [0x0027; 4],
+            [DriveRequest::Enable; 4],
+            0,
+            [
+                DriveRequest::QuickStop,
+                DriveRequest::Disable,
+                DriveRequest::Enable,
+                DriveRequest::FaultReset,
+            ],
+        );
+        assert_eq!(outputs[0].controlword, CONTROLWORD_QUICK_STOP);
+        assert!(outputs[1..].iter().all(|output| {
+            output.controlword == CONTROLWORD_DISABLE_VOLTAGE && !output.motion_allowed
+        }));
+        assert!(outputs.iter().all(|output| !output.fault_reset_pulse));
     }
 
     #[test]

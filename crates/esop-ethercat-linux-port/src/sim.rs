@@ -12,7 +12,7 @@ use esop_ethercat_core::wire::{
 use esop_ethercat_core::{
     DmaTxHandle, EthercatDmaTxPort, EthercatPort, LinkState, PortError, RxPoll,
 };
-use esop_lifecycle_guard::{LifecycleAction, LifecycleGuard};
+use esop_lifecycle_guard::LifecycleGuard;
 use esop_profile_cia402::{
     CONTROLWORD_DISABLE_VOLTAGE, CONTROLWORD_QUICK_STOP, Cia402MotionGate, Cia402PdoCommand,
     Cia402PdoError, Cia402PdoField, Cia402PdoInputs, Cia402PdoMap, Cia402Target, DriveState,
@@ -135,9 +135,9 @@ impl Cia402DriveSimulator {
         now_ns: u64,
         command: Cia402PdoCommand,
     ) -> Result<Cia402PdoInputs, Cia402PdoError> {
-        let action = guard.cycle(cycle, now_ns);
-        match action {
-            LifecycleAction::EnableAllowed => self.step(
+        let decision = guard.cycle_axes(cycle, now_ns);
+        match decision.axis(0) {
+            esop_lifecycle_guard::AxisDirective::EnableAllowed => self.step(
                 command,
                 Cia402MotionGate {
                     lifecycle_permit: true,
@@ -146,13 +146,16 @@ impl Cia402DriveSimulator {
                     setpoint_valid: true,
                 },
             ),
-            LifecycleAction::Stop(esop_lifecycle_guard::StopAction::QuickStop) => {
+            esop_lifecycle_guard::AxisDirective::Stop(
+                esop_lifecycle_guard::StopAction::QuickStop,
+            ) => {
                 self.map
                     .write_control(&mut self.image, command.mode, CONTROLWORD_QUICK_STOP)?;
                 self.publish_feedback(command.mode)?;
                 self.map.read_inputs_for(&self.image, command.mode)
             }
-            LifecycleAction::Hold | LifecycleAction::Stop(_) | LifecycleAction::FaultLatched => {
+            esop_lifecycle_guard::AxisDirective::Inhibit
+            | esop_lifecycle_guard::AxisDirective::Stop(_) => {
                 self.map.write_control(
                     &mut self.image,
                     command.mode,

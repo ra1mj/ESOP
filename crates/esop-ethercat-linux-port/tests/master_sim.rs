@@ -5,12 +5,14 @@ use esop_ethercat_core::{
 };
 use esop_ethercat_linux_port::{Cia402DriveSimulator, SimulatedPort};
 use esop_lifecycle_guard::{
-    GateId, GuardPolicy, LifecycleError, LifecycleGuard, LifecycleState, MotionPermit,
-    cia402::stop_feedback_from_cia402,
+    AxisDirective, AxisStopPolicy, GateId, GuardPolicy, LifecycleError, LifecycleGuard,
+    LifecycleState, MotionPermit, StopAction,
+    cia402::{step_axis_bank, stop_feedback_from_cia402},
 };
 use esop_profile_cia402::{
-    CONTROLWORD_ENABLE_OPERATION, Cia402MotionGate, Cia402PdoCommand, Cia402PdoField, Cia402PdoMap,
-    Cia402Target, OperatingMode,
+    CONTROLWORD_DISABLE_VOLTAGE, CONTROLWORD_ENABLE_OPERATION, CONTROLWORD_QUICK_STOP,
+    Cia402AxisBank, Cia402MotionGate, Cia402PdoCommand, Cia402PdoField, Cia402PdoMap, Cia402Target,
+    DriveRequest, OperatingMode,
 };
 
 #[test]
@@ -496,6 +498,219 @@ fn lifecycle_guard_denial_cannot_reach_cyclic_output() {
             .unwrap()
             .read_unsigned(drive.process_image()),
         Ok(esop_profile_cia402::CONTROLWORD_DISABLE_VOLTAGE as u64)
+    );
+}
+
+#[test]
+fn per_axis_stop_plan_drives_independent_controlwords_and_maintenance_override() {
+    let policy = GuardPolicy {
+        enter_good_cycles: 1,
+        allowed_axis_mask: 0b11,
+        ..GuardPolicy::conservative()
+    };
+    let permit = MotionPermit {
+        boot_id: 7,
+        source_id: 1,
+        permit_epoch: 1,
+        sequence: 1,
+        axis_mask: 0b11,
+        expires_at_ns: 100,
+        authority: 1,
+        reserved: [0; 3],
+        policy_version: 1,
+    };
+    let actions = AxisStopPolicy::uniform(StopAction::QuickStop)
+        .with_action(1, StopAction::Disable)
+        .unwrap();
+    let mut guard =
+        LifecycleGuard::new_with_axis_stop_policy(GateId::Link.bit(), 7, policy, actions);
+    let mut bank = Cia402AxisBank::<3>::new();
+    guard.update_gate(GateId::Link, true, 1, 0);
+    guard.request_rearm(permit, 1, 1).unwrap();
+    {
+        let decision = guard.cycle_axes(1, 1);
+        let outputs = step_axis_bank(&mut bank, &decision, [0x0027; 3], [DriveRequest::Enable; 3]);
+        assert_eq!(outputs[0].controlword, CONTROLWORD_ENABLE_OPERATION);
+        assert_eq!(outputs[1].controlword, CONTROLWORD_ENABLE_OPERATION);
+        assert_eq!(outputs[2].controlword, CONTROLWORD_DISABLE_VOLTAGE);
+    }
+
+    guard.update_gate(GateId::Link, false, 2, 0xCAFE);
+    {
+        let decision = guard.cycle_axes(2, 2);
+        assert_eq!(decision.stopping_axis_mask(), 0b11);
+        let outputs = step_axis_bank(&mut bank, &decision, [0x0027; 3], [DriveRequest::Enable; 3]);
+        assert_eq!(outputs[0].controlword, CONTROLWORD_QUICK_STOP);
+        assert_eq!(outputs[1].controlword, CONTROLWORD_DISABLE_VOLTAGE);
+        assert_eq!(outputs[2].controlword, CONTROLWORD_DISABLE_VOLTAGE);
+        assert!(outputs.iter().all(|output| !output.motion_allowed));
+    }
+
+    guard.set_maintenance(true, 3);
+    let decision = guard.cycle_axes(3, 3);
+    let outputs = step_axis_bank(&mut bank, &decision, [0x0027; 3], [DriveRequest::Enable; 3]);
+    assert!(
+        outputs
+            .iter()
+            .all(|output| output.controlword == CONTROLWORD_DISABLE_VOLTAGE)
+    );
+
+    let timeout_policy = GuardPolicy {
+        stop_timeout_cycles: 2,
+        ..policy
+    };
+    let mut timed_out =
+        LifecycleGuard::new_with_axis_stop_policy(GateId::Link.bit(), 7, timeout_policy, actions);
+    timed_out.update_gate(GateId::Link, true, 1, 0);
+    timed_out.request_rearm(permit, 1, 1).unwrap();
+    timed_out.update_gate(GateId::Link, false, 2, 0xCAFE);
+    assert_eq!(timed_out.cycle_axes(2, 2).stopping_axis_mask(), 0b11);
+    let decision = timed_out.cycle_axes(4, 4);
+    assert_eq!(decision.axis(0), AxisDirective::Inhibit);
+    assert_eq!(decision.axis(1), AxisDirective::Inhibit);
+    let outputs = step_axis_bank(&mut bank, &decision, [0x0027; 3], [DriveRequest::Enable; 3]);
+    assert!(
+        outputs
+            .iter()
+            .all(|output| output.controlword == CONTROLWORD_DISABLE_VOLTAGE)
+    );
+
+    let controlled = AxisStopPolicy::uniform(StopAction::Hold)
+        .with_action(1, StopAction::RampToZero)
+        .unwrap();
+    let mut guard =
+        LifecycleGuard::new_with_axis_stop_policy(GateId::Link.bit(), 7, policy, controlled);
+    guard.update_gate(GateId::Link, true, 1, 0);
+    guard.request_rearm(permit, 1, 1).unwrap();
+    guard.update_gate(GateId::Link, false, 2, 0xCAFE);
+    let decision = guard.cycle_axes(2, 2);
+    assert_eq!(decision.axis(0), AxisDirective::Stop(StopAction::Hold));
+    assert_eq!(
+        decision.axis(1),
+        AxisDirective::Stop(StopAction::RampToZero)
+    );
+    let outputs = step_axis_bank(&mut bank, &decision, [0x0027; 3], [DriveRequest::Enable; 3]);
+    assert!(
+        outputs
+            .iter()
+            .all(|output| output.controlword == CONTROLWORD_DISABLE_VOLTAGE)
+    );
+}
+
+#[test]
+fn single_drive_simulator_uses_axis_zero_stop_policy() {
+    let map = Cia402PdoMap::new()
+        .with_entry(
+            Cia402PdoField::Controlword,
+            entry(Cia402PdoField::Controlword, 0),
+        )
+        .with_entry(
+            Cia402PdoField::ModeOfOperation,
+            entry(Cia402PdoField::ModeOfOperation, 16),
+        )
+        .with_entry(
+            Cia402PdoField::TargetPosition,
+            entry(Cia402PdoField::TargetPosition, 24),
+        )
+        .with_entry(
+            Cia402PdoField::Statusword,
+            entry(Cia402PdoField::Statusword, 128),
+        )
+        .with_entry(
+            Cia402PdoField::ModeDisplay,
+            entry(Cia402PdoField::ModeDisplay, 144),
+        )
+        .with_entry(
+            Cia402PdoField::ErrorCode,
+            entry(Cia402PdoField::ErrorCode, 152),
+        )
+        .with_entry(
+            Cia402PdoField::ActualPosition,
+            entry(Cia402PdoField::ActualPosition, 168),
+        );
+    let mut drive = Cia402DriveSimulator::new(map);
+    let mut guard = LifecycleGuard::new_with_axis_stop_policy(
+        GateId::Link.bit(),
+        7,
+        GuardPolicy {
+            enter_good_cycles: 1,
+            allowed_axis_mask: 1,
+            ..GuardPolicy::conservative()
+        },
+        AxisStopPolicy::uniform(StopAction::Disable),
+    );
+    guard.update_gate(GateId::Link, true, 1, 0);
+    guard
+        .request_rearm(
+            MotionPermit {
+                boot_id: 7,
+                source_id: 1,
+                permit_epoch: 1,
+                sequence: 1,
+                axis_mask: 1,
+                expires_at_ns: 2,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
+            },
+            1,
+            1,
+        )
+        .unwrap();
+    let command = Cia402PdoCommand {
+        controlword: CONTROLWORD_ENABLE_OPERATION,
+        mode: OperatingMode::Csp,
+        target: Cia402Target::Position(42),
+    };
+    drive
+        .step_with_lifecycle(&mut guard, 1, 1, command)
+        .unwrap();
+    drive
+        .step_with_lifecycle(&mut guard, 2, 2, command)
+        .unwrap();
+    assert_eq!(guard.state(), LifecycleState::Stopping);
+    assert_eq!(
+        map.entry(Cia402PdoField::Controlword)
+            .unwrap()
+            .read_unsigned(drive.process_image()),
+        Ok(CONTROLWORD_DISABLE_VOLTAGE as u64)
+    );
+
+    let mut other_guard = LifecycleGuard::new(
+        0,
+        7,
+        GuardPolicy {
+            allowed_axis_mask: 0b10,
+            ..GuardPolicy::conservative()
+        },
+    );
+    other_guard
+        .request_rearm(
+            MotionPermit {
+                boot_id: 7,
+                source_id: 1,
+                permit_epoch: 1,
+                sequence: 1,
+                axis_mask: 0b10,
+                expires_at_ns: 100,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
+            },
+            1,
+            1,
+        )
+        .unwrap();
+    let mut other_drive = Cia402DriveSimulator::new(map);
+    other_drive
+        .step_with_lifecycle(&mut other_guard, 1, 1, command)
+        .unwrap();
+    assert_eq!(other_guard.state(), LifecycleState::Active);
+    assert_eq!(
+        map.entry(Cia402PdoField::Controlword)
+            .unwrap()
+            .read_unsigned(other_drive.process_image()),
+        Ok(CONTROLWORD_DISABLE_VOLTAGE as u64)
     );
 }
 

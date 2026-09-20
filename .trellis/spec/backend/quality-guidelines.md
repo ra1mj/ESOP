@@ -68,6 +68,14 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   unknown drive state cannot confirm a stop. Preserve the first blocker while
   latching an unconfirmed stop at the configured timeout, even across a
   maintenance toggle. Simulator feedback is not HIL qualification evidence.
+- Freeze per-axis stop selections in `AxisStopPolicy` at guard construction.
+  Assemble all axis outputs from one borrowed `cycle_axes` decision, use the
+  originally armed mask for stop requests, and force every other axis to
+  inhibit. Maintenance overrides every armed axis to Disable. The CiA 402
+  adapter implements QuickStop/Disable; until a validated controlled target
+  generator exists, Hold/RampToZero must fail closed as Disable. ProcBuf v3's
+  scalar `stop_action` is the legacy default summary, not per-axis observed
+  feedback; do not publish or consume it as such without an ABI upgrade.
 - A required hard-class gate (platform, configuration, topology, drive, cycle
   budget, or external safety) entering bad or unavailable state while active
   must stage a fault through Stopping and verified stop acknowledgment before

@@ -1,8 +1,35 @@
 //! Project validated, current-cycle CiA 402 feedback into stop evidence.
 
-use esop_profile_cia402::{Cia402PdoInputs, DriveState};
+use esop_profile_cia402::{
+    Cia402AxisBank, Cia402Output, Cia402PdoInputs, DriveRequest, DriveState,
+};
 
-use crate::StopFeedback;
+use crate::{AxisCycleDecision, AxisDirective, StopAction, StopFeedback};
+
+/// Apply this guard cycle's per-axis decision to a CiA 402 bank. Hold and
+/// RampToZero require product-validated target generators; without one they
+/// fail closed as Disable rather than replaying a stale Enable or setpoint.
+pub fn step_axis_bank<const AXES: usize>(
+    bank: &mut Cia402AxisBank<AXES>,
+    decision: &AxisCycleDecision<'_>,
+    statuswords: [u16; AXES],
+    requests: [DriveRequest; AXES],
+) -> [Cia402Output; AXES] {
+    let stop_requests = core::array::from_fn(|index| match decision.axis(index) {
+        AxisDirective::Stop(StopAction::QuickStop) => DriveRequest::QuickStop,
+        AxisDirective::Inhibit
+        | AxisDirective::EnableAllowed
+        | AxisDirective::Stop(StopAction::Disable | StopAction::Hold | StopAction::RampToZero) => {
+            DriveRequest::Disable
+        }
+    });
+    bank.step_with_axis_stop(
+        statuswords,
+        requests,
+        decision.permitted_axis_mask(),
+        stop_requests,
+    )
+}
 
 /// Call only after the input Domain has passed complete-frame, WKC and age
 /// checks. A missing velocity sample or unknown drive state cannot confirm a stop.

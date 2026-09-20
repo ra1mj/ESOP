@@ -174,6 +174,8 @@ MLG 每周期读取一个固定大小的 `lifecycle_evidence` 快照。每项门
 
 MLG 记录请求动作、实际驱动状态、停止开始/结束时间、超时和升级路径。若在 `stop_deadline` 内没有得到预期驱动状态，必须锁存故障。
 
+当前固定容量 RT 实现支持在构造 `LifecycleGuard` 时通过 `AxisStopPolicy` 冻结最多 32 轴的动作；`cycle_axes` 对同一周期返回受守卫借用约束的逐轴决策，停机轴掩码保持为原已激活 permit 的轴集合，其他轴保持 inhibit。CiA 402 多轴适配器 `step_axis_bank` 对已停机轴分别输出 `QUICK_STOP` 或 `DISABLE`，维护模式与停止超时强制禁用普通运动使能；任何未授权轴都不能借旧的 Enable/FaultReset 请求启动。`HOLD` 和 `RAMP_TO_ZERO` 虽可在策略中表达，但当前尚无经过产品标定、输入质量验证和限幅的受控目标生成器；CiA 402 适配器将其降级为 `DISABLE`，不得把此降级称为已实现受控保持/减速。以上均为软件仿真验证，真实驱动、制动器和安全链的 HIL 仍是 FR-042 的待验收项。
+
 ## 7. Motion Permit 与恢复协议
 
 ### 7.1 Permit 目的
@@ -255,6 +257,8 @@ ProcBuf 应包含固定大小的 lifecycle 区域：
 | `transition_history[]` | RT State page | 固定容量、按时间顺序的最近状态转换、周期时间和故障码。 |
 
 所有固定事件记录必须带 lifecycle state、gate/fault code、axis/device、transition sequence 和 monotonic timestamp。
+
+当前 ProcBuf v3 的单值 `stop_action` 与 `LifecycleSnapshot.stop_action` 仅表示旧接口的全局默认/摘要动作，不编码逐轴 `AxisCycleDecision`，也不能表示驱动实际执行结果。逐轴停止请求、反馈和停止超时/升级路径的独立发布需要版本化 ABI 与外部 schema 扩展；在升级完成前，消费者不得凭单值摘要推断每轴已停机或 Hold/Ramp 已执行。
 
 ## 9. 配置与可观测性
 

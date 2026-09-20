@@ -10,6 +10,7 @@ pub mod cia402;
 pub mod procbuf;
 
 pub const MAX_GATES: usize = 16;
+pub const MAX_MOTION_AXES: usize = 32;
 pub const MAX_TRANSITIONS: usize = 16;
 pub const MAX_PERMIT_AUDITS: usize = 16;
 pub const STOP_TIMEOUT_FAULT_CODE: u32 = 0x5354_0001;
@@ -68,6 +69,47 @@ pub enum StopAction {
     RampToZero = 1,
     QuickStop = 2,
     Disable = 3,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AxisStopPolicyError {
+    InvalidAxis,
+}
+
+/// Frozen, fixed-capacity stop selection. Construct before activating the
+/// guard; there is no mutation path after the policy is installed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AxisStopPolicy {
+    actions: [StopAction; MAX_MOTION_AXES],
+}
+
+impl AxisStopPolicy {
+    pub const fn uniform(action: StopAction) -> Self {
+        Self {
+            actions: [action; MAX_MOTION_AXES],
+        }
+    }
+
+    pub fn with_action(
+        mut self,
+        axis: usize,
+        action: StopAction,
+    ) -> Result<Self, AxisStopPolicyError> {
+        let slot = self
+            .actions
+            .get_mut(axis)
+            .ok_or(AxisStopPolicyError::InvalidAxis)?;
+        *slot = action;
+        Ok(self)
+    }
+
+    pub const fn action(&self, axis: usize) -> Option<StopAction> {
+        if axis < MAX_MOTION_AXES {
+            Some(self.actions[axis])
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -274,6 +316,64 @@ pub enum LifecycleAction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AxisDirective {
+    Inhibit,
+    EnableAllowed,
+    Stop(StopAction),
+}
+
+/// The cycle owner's decision, borrowed from the guard so it cannot be
+/// re-evaluated or rearmed while the current output is being assembled.
+pub struct AxisCycleDecision<'a> {
+    guard: &'a LifecycleGuard,
+    action: LifecycleAction,
+}
+
+impl AxisCycleDecision<'_> {
+    pub const fn action(&self) -> LifecycleAction {
+        self.action
+    }
+
+    pub const fn permitted_axis_mask(&self) -> u32 {
+        if matches!(self.action, LifecycleAction::EnableAllowed) {
+            self.guard.motion_axes_mask
+        } else {
+            0
+        }
+    }
+
+    pub const fn stopping_axis_mask(&self) -> u32 {
+        if matches!(self.action, LifecycleAction::Stop(_)) {
+            self.guard.motion_axes_mask
+        } else {
+            0
+        }
+    }
+
+    pub fn axis(&self, index: usize) -> AxisDirective {
+        if index >= MAX_MOTION_AXES {
+            return AxisDirective::Inhibit;
+        }
+        let bit = 1u32 << index;
+        if self.permitted_axis_mask() & bit != 0 {
+            AxisDirective::EnableAllowed
+        } else if self.stopping_axis_mask() & bit != 0 {
+            AxisDirective::Stop(
+                if self.guard.state == LifecycleState::Maintenance
+                    || self.guard.maintenance_stop_pending
+                {
+                    StopAction::Disable
+                } else {
+                    self.guard.axis_stop_policy.actions[index]
+                },
+            )
+        } else {
+            AxisDirective::Inhibit
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GateStatus {
     pub valid: bool,
     pub qualified: bool,
@@ -358,6 +458,7 @@ pub enum LifecycleError {
 
 pub struct LifecycleGuard {
     policy: GuardPolicy,
+    axis_stop_policy: AxisStopPolicy,
     required_mask: u16,
     gates: [GateStatus; MAX_GATES],
     boot_id: u64,
@@ -390,8 +491,23 @@ pub struct LifecycleGuard {
 
 impl LifecycleGuard {
     pub const fn new(required_mask: u16, boot_id: u64, policy: GuardPolicy) -> Self {
+        Self::new_with_axis_stop_policy(
+            required_mask,
+            boot_id,
+            policy,
+            AxisStopPolicy::uniform(policy.stop_action),
+        )
+    }
+
+    pub const fn new_with_axis_stop_policy(
+        required_mask: u16,
+        boot_id: u64,
+        policy: GuardPolicy,
+        axis_stop_policy: AxisStopPolicy,
+    ) -> Self {
         Self {
             policy: policy.normalized(),
+            axis_stop_policy,
             required_mask,
             gates: [GateStatus::EMPTY; MAX_GATES],
             boot_id,
@@ -931,6 +1047,16 @@ impl LifecycleGuard {
         }
     }
 
+    /// Evaluate once after the current-cycle gate updates, then use the
+    /// borrowed result for all axis outputs before accepting new observations.
+    pub fn cycle_axes(&mut self, cycle: u64, now_ns: u64) -> AxisCycleDecision<'_> {
+        let action = self.cycle(cycle, now_ns);
+        AxisCycleDecision {
+            guard: self,
+            action,
+        }
+    }
+
     fn permit_current(&self, now_ns: u64) -> bool {
         self.permit
             .map(|permit| {
@@ -1281,6 +1407,71 @@ mod tests {
             reserved: [0; 3],
             policy_version: 1,
         }
+    }
+
+    #[test]
+    fn frozen_axis_stop_policy_keeps_armed_axes_and_maintenance_override() {
+        assert_eq!(
+            AxisStopPolicy::uniform(StopAction::QuickStop)
+                .with_action(MAX_MOTION_AXES, StopAction::Disable),
+            Err(AxisStopPolicyError::InvalidAxis)
+        );
+        let actions = AxisStopPolicy::uniform(StopAction::QuickStop)
+            .with_action(1, StopAction::Disable)
+            .unwrap();
+        let mut guard = LifecycleGuard::new_with_axis_stop_policy(
+            GateId::Link.bit(),
+            10,
+            GuardPolicy {
+                enter_good_cycles: 1,
+                ..POLICY
+            },
+            actions,
+        );
+        guard.update_gate(GateId::Link, true, 1, 0);
+        guard.request_rearm(permit(1, 100), 1, 1).unwrap();
+        {
+            let decision = guard.cycle_axes(1, 1);
+            assert_eq!(decision.action(), LifecycleAction::EnableAllowed);
+            assert_eq!(decision.permitted_axis_mask(), 0b11);
+            assert_eq!(decision.stopping_axis_mask(), 0);
+            assert_eq!(decision.axis(0), AxisDirective::EnableAllowed);
+            assert_eq!(decision.axis(1), AxisDirective::EnableAllowed);
+            assert_eq!(decision.axis(2), AxisDirective::Inhibit);
+            assert_eq!(decision.axis(MAX_MOTION_AXES), AxisDirective::Inhibit);
+        }
+
+        guard.update_gate(GateId::Link, false, 2, 0xCAFE);
+        {
+            let decision = guard.cycle_axes(2, 2);
+            assert_eq!(
+                decision.action(),
+                LifecycleAction::Stop(StopAction::QuickStop)
+            );
+            assert_eq!(decision.permitted_axis_mask(), 0);
+            assert_eq!(decision.stopping_axis_mask(), 0b11);
+            assert_eq!(decision.axis(0), AxisDirective::Stop(StopAction::QuickStop));
+            assert_eq!(decision.axis(1), AxisDirective::Stop(StopAction::Disable));
+            assert_eq!(decision.axis(2), AxisDirective::Inhibit);
+        }
+
+        guard.set_maintenance(true, 3);
+        {
+            let decision = guard.cycle_axes(3, 3);
+            assert_eq!(decision.axis(0), AxisDirective::Stop(StopAction::Disable));
+            assert_eq!(decision.axis(1), AxisDirective::Stop(StopAction::Disable));
+        }
+        guard.set_maintenance(false, 3);
+        {
+            let decision = guard.cycle_axes(4, 4);
+            assert_eq!(decision.axis(0), AxisDirective::Stop(StopAction::Disable));
+            assert_eq!(decision.axis(1), AxisDirective::Stop(StopAction::Disable));
+        }
+        guard.acknowledge_stopped(4, stopped(4)).unwrap();
+        let decision = guard.cycle_axes(5, 5);
+        assert_eq!(decision.action(), LifecycleAction::Hold);
+        assert_eq!(decision.axis(0), AxisDirective::Inhibit);
+        assert_eq!(decision.axis(1), AxisDirective::Inhibit);
     }
 
     fn observation(epoch: u64, heartbeat_seq: u64, state: ObservationState) -> HostObservation {
