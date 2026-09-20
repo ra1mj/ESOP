@@ -88,6 +88,12 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   must leave only unwritten axes pending for retry; event-ring loss is
   observable. Never treat an event or issued Disable as stationary feedback,
   and do not carry previous-cycle axis stop proof into a fault-latched page.
+- Publish lifecycle transitions before timeout escalation events through the
+  boot-bound, fixed-size event cursor. Advance the cursor only after a ring
+  write succeeds, explicitly report overwritten transition history before
+  acknowledging the skip, and treat event timestamps as emission time when
+  retrying older transitions. `aux` lifecycle states use MLG/ProcBuf raw
+  discriminants, not Protobuf enum values.
 - A required hard-class gate (platform, configuration, topology, drive, cycle
   budget, or external safety) entering bad or unavailable state while active
   must stage a fault through Stopping and verified stop acknowledgment before

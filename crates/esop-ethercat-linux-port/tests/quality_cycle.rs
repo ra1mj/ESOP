@@ -6,7 +6,9 @@ use esop_ethercat_core::{
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::ethercat::{OtherCycleFacts, ScheduledDomainQuality};
 use esop_lifecycle_guard::procbuf::{
-    ethercat_cycle_to_procbuf, lifecycle_to_procbuf, scheduled_ethercat_cycle_to_procbuf,
+    LIFECYCLE_EVENT_NO_AXIS, LIFECYCLE_TRANSITION_EVENT_CODE, LifecycleEventCursor,
+    ethercat_cycle_to_procbuf, lifecycle_events_to_procbuf, lifecycle_to_procbuf,
+    scheduled_ethercat_cycle_to_procbuf,
 };
 use esop_lifecycle_guard::{
     GateId, GuardPolicy, LifecycleAction, LifecycleGuard, MotionPermit, StopAction,
@@ -61,6 +63,7 @@ fn received_domain_and_dc_drive_guard_and_published_quality() {
         ..GuardPolicy::conservative()
     };
     let mut guard = LifecycleGuard::new(required, 7, policy);
+    let mut event_cursor = LifecycleEventCursor::new(&guard);
     let buffer = ProcBuf::<1, 0, 1, 2>::new(1, 7);
     let other = OtherCycleFacts {
         platform_ready: true,
@@ -129,7 +132,19 @@ fn received_domain_and_dc_drive_guard_and_published_quality() {
 
         state.lifecycle = lifecycle_to_procbuf(guard.snapshot(report.cycle, 10), report.cycle);
         buffer.publish_state(state).unwrap();
+        assert_eq!(
+            lifecycle_events_to_procbuf(&mut guard, &buffer, &mut event_cursor, report.cycle),
+            Ok(1)
+        );
         let published = buffer.read_state().unwrap().state;
+        let event = buffer.pop_event().unwrap();
+        assert_eq!(event.sequence, published.lifecycle.transition_sequence);
+        assert_eq!(event.timestamp_ns, report.cycle);
+        assert_eq!(event.code, LIFECYCLE_TRANSITION_EVENT_CODE);
+        assert_eq!(event.axis_or_device, LIFECYCLE_EVENT_NO_AXIS);
+        assert_eq!(event.value, published.lifecycle.first_blocking_code);
+        assert_eq!(event.aux >> 8 & 0xFF, u32::from(published.lifecycle.state));
+        assert!(buffer.pop_event().is_none());
         assert_eq!(published.sequence, published.quality.sequence);
         assert!(published.quality.cyclic.complete());
         assert_eq!(published.quality.link_up, 1);

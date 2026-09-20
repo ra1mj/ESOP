@@ -262,6 +262,8 @@ ProcBuf ABI v4 在 State 页增加固定容量的 `axis_stops[AXES]`：`request_
 
 停机超时在 `LifecycleGuard.stop_timeout_record()` 中保留超时周期、原轴掩码、首次发出停机的周期（可能缺失）、转换序号和升级当时每轴请求动作；进入 `FaultLatched` 后所有轴仍保持 inhibit，CiA 402 输出 Disable，但本周期 `axis_stops` 清空，因为没有新的可确认停机反馈。已提供 `stop_timeout_events_to_procbuf` 接口，供周期所有者将原轴集合逐轴写入 SPSC 事件环：`source=0x4D4C`、`code=1`、`severity=Fault`、`sequence=transition_sequence`、`value=0x53540001`、`axis_or_device=0` 起的轴号；`aux` 低两字节分别是 Protobuf 请求/发出动作（1..4），bit 16 表示此前确实发过停机控制字，高字节是 `FaultLatched` 状态值。事件时间戳是调用方提供的**写入时**单调时间，重试时可能晚于真实转换时间；应用可用相同的 boot ID 和转换序号关联 State 页的 `transition_cycle/time_ns` 和首个阻塞码。环满会返回错误并计入 `lost_events`，已写轴不重发，剩余轴下次调用再写；调用方应持续消费并重试，且避免在排空前覆盖旧超时记录。事件不证明机械静止，不改变既有 ABI 或 Protobuf 布局。生产周期所有者接线、受控 Hold/Ramp、完整的常规转换事件发布与实物 HIL 仍待完成。
 
+`LifecycleEventCursor::new(&guard)` 绑定启动实例，`lifecycle_events_to_procbuf` 先将守卫固定转换环中尚未发布的转换按序写入事件环，再尝试写入上面的逐轴超时事件；调用方只应选择这个组合接口或分别调用两个接口中的一个发布路径，避免事件乱序。转换事件使用 `source=0x4D4C`、`code=2`、`sequence=transition_sequence`、`axis_or_device=0xFFFF`、`value=transition.fault_code`，`aux` 低字节为原始 MLG `from_state`，第二字节为原始 MLG `to_state`。超时事件的高字节同样是原始 MLG 状态值，**不是** Protobuf `LifecycleState` 值（后者为未指定状态保留 0）；接收方应依据事件 code 分别解码。`FaultLatched` 事件为 Fault，Stopping/Maintenance 为 Warning，其余转换为 Info。环满时游标仅推进已写成功的转换，重试不会重复提交；若尚未写入的转换被 16 条历史覆盖，接口返回明确的 `HistoryOverrun { missed }`，调用方记录缺失量后才调用 `acknowledge_history_loss` 跳到最早可用转换。单调时间参数是实际写入时刻，不得冒充历史转换时刻；生产周期所有者尚未集成此发布路径。
+
 ## 9. 配置与可观测性
 
 ### 9.1 生成配置

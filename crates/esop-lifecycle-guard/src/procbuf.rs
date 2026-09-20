@@ -173,12 +173,156 @@ pub fn lifecycle_to_procbuf(
     }
 }
 
-/// Source/code reserved for per-axis stop deadline escalation. `value` holds
+/// Source/code reserved for lifecycle diagnostics and per-axis stop deadline
+/// escalation. Timeout `value` holds
 /// the full fault code; `sequence` matches the lifecycle transition sequence.
 /// `aux` packs requested/issued Protobuf action values in the low two bytes,
 /// prior stop issuance in bit 16 and the FaultLatched state in the high byte.
-pub const STOP_TIMEOUT_EVENT_SOURCE: u16 = 0x4D4C;
+pub const LIFECYCLE_EVENT_SOURCE: u16 = 0x4D4C;
+pub const STOP_TIMEOUT_EVENT_SOURCE: u16 = LIFECYCLE_EVENT_SOURCE;
 pub const STOP_TIMEOUT_EVENT_CODE: u16 = 1;
+pub const LIFECYCLE_TRANSITION_EVENT_CODE: u16 = 2;
+pub const LIFECYCLE_EVENT_NO_AXIS: u16 = u16::MAX;
+
+fn stop_timeout_axes_fit<const AXES: usize>(mask: u32) -> bool {
+    AXES <= MAX_MOTION_AXES && (AXES == MAX_MOTION_AXES || mask & !((1u32 << AXES) - 1) == 0)
+}
+
+/// The RT owner retains this cursor across cycles; a new boot needs a new
+/// cursor. `next_sequence` is the first transition not yet written to ProcBuf.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LifecycleEventCursor {
+    boot_id: u64,
+    next_sequence: u64,
+}
+
+impl LifecycleEventCursor {
+    pub const fn new(guard: &LifecycleGuard) -> Self {
+        Self {
+            boot_id: guard.boot_id,
+            next_sequence: 1,
+        }
+    }
+
+    pub const fn next_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+
+    /// Explicitly acknowledge transitions overwritten before they could be
+    /// published. Call only after reporting the returned lost count.
+    pub fn acknowledge_history_loss(
+        &mut self,
+        guard: &LifecycleGuard,
+    ) -> Result<u64, LifecycleEventError> {
+        if self.boot_id != guard.boot_id {
+            return Err(LifecycleEventError::BootMismatch);
+        }
+        if self.next_sequence > guard.transition_sequence.saturating_add(1) {
+            return Err(LifecycleEventError::CursorAhead);
+        }
+        let oldest = guard
+            .transition_at(0)
+            .map(|record| record.sequence)
+            .unwrap_or(guard.transition_sequence.saturating_add(1));
+        let missed = oldest.saturating_sub(self.next_sequence);
+        self.next_sequence = self.next_sequence.max(oldest);
+        Ok(missed)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LifecycleEventError {
+    Header(HeaderError),
+    BootMismatch,
+    CursorAhead,
+    HistoryOverrun { missed: u64 },
+    Ring(EventPushError),
+    StopTimeout(StopTimeoutEventError),
+}
+
+/// Publish all available lifecycle transitions before per-axis timeout events.
+/// Both kinds use their transition sequence for State-page correlation. The
+/// timestamp is the monotonic time of emission, not a reconstructed historical
+/// transition time. A full ring keeps the failed transition/axis pending.
+pub fn lifecycle_events_to_procbuf<
+    const AXES: usize,
+    const IO: usize,
+    const DOMAINS: usize,
+    const EVENTS: usize,
+>(
+    guard: &mut LifecycleGuard,
+    buffer: &ProcBuf<AXES, IO, DOMAINS, EVENTS>,
+    cursor: &mut LifecycleEventCursor,
+    timestamp_ns: u64,
+) -> Result<usize, LifecycleEventError> {
+    if cursor.boot_id != guard.boot_id {
+        return Err(LifecycleEventError::BootMismatch);
+    }
+    if cursor.next_sequence > guard.transition_sequence.saturating_add(1) {
+        return Err(LifecycleEventError::CursorAhead);
+    }
+    let oldest = guard.transition_at(0);
+    if let Some(record) = oldest {
+        if cursor.next_sequence < record.sequence {
+            return Err(LifecycleEventError::HistoryOverrun {
+                missed: record.sequence - cursor.next_sequence,
+            });
+        }
+    }
+    if cursor.next_sequence == guard.transition_sequence.saturating_add(1)
+        && guard.pending_stop_timeout_events_mask == 0
+    {
+        return Ok(0);
+    }
+    buffer
+        .validate_header(buffer.header().robot_id, guard.boot_id)
+        .map_err(LifecycleEventError::Header)?;
+    if guard.pending_stop_timeout_events_mask != 0
+        && !stop_timeout_axes_fit::<AXES>(
+            guard
+                .stop_timeout_record
+                .map_or(0, |record| record.axis_mask),
+        )
+    {
+        return Err(LifecycleEventError::StopTimeout(
+            StopTimeoutEventError::AxisCapacityExceeded,
+        ));
+    }
+
+    let mut written = 0;
+    for index in 0..guard.transition_count() {
+        let Some(transition) = guard.transition_at(index) else {
+            continue;
+        };
+        if transition.sequence < cursor.next_sequence {
+            continue;
+        }
+        let severity = match transition.to {
+            LifecycleState::Stopping | LifecycleState::Maintenance => EventSeverity::Warning,
+            LifecycleState::FaultLatched => EventSeverity::Fault,
+            LifecycleState::Qualifying | LifecycleState::Ready | LifecycleState::Active => {
+                EventSeverity::Info
+            }
+        };
+        buffer
+            .record_event(ProcBufEvent {
+                sequence: transition.sequence,
+                timestamp_ns,
+                source: LIFECYCLE_EVENT_SOURCE,
+                severity,
+                code: LIFECYCLE_TRANSITION_EVENT_CODE,
+                axis_or_device: LIFECYCLE_EVENT_NO_AXIS,
+                value: transition.fault_code,
+                aux: transition.from as u32 | ((transition.to as u32) << 8),
+            })
+            .map_err(LifecycleEventError::Ring)?;
+        cursor.next_sequence = transition.sequence.saturating_add(1);
+        written += 1;
+    }
+    let escalated = stop_timeout_events_to_procbuf(guard, buffer, timestamp_ns)
+        .map_err(LifecycleEventError::StopTimeout)?;
+    Ok(written + escalated)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StopTimeoutEventError {
@@ -210,15 +354,7 @@ pub fn stop_timeout_events_to_procbuf<
     buffer
         .validate_header(buffer.header().robot_id, guard.boot_id)
         .map_err(StopTimeoutEventError::Header)?;
-    if AXES > MAX_MOTION_AXES {
-        return Err(StopTimeoutEventError::AxisCapacityExceeded);
-    }
-    let axes_mask = if AXES == MAX_MOTION_AXES {
-        u32::MAX
-    } else {
-        (1u32 << AXES) - 1
-    };
-    if record.axis_mask & !axes_mask != 0 {
+    if !stop_timeout_axes_fit::<AXES>(record.axis_mask) {
         return Err(StopTimeoutEventError::AxisCapacityExceeded);
     }
     let mut written = 0;

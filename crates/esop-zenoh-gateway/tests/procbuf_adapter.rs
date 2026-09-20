@@ -6,9 +6,11 @@ use esop_lifecycle_guard::{
     StopAction as GuardStop, StopFeedback,
     cia402::step_axis_bank,
     procbuf::{
-        AxisEvidenceError, STOP_TIMEOUT_EVENT_CODE, STOP_TIMEOUT_EVENT_SOURCE,
-        StopTimeoutEventError, axis_stops_to_procbuf, cyclic_quality_to_procbuf,
-        lifecycle_to_procbuf, stop_timeout_events_to_procbuf,
+        AxisEvidenceError, LIFECYCLE_EVENT_NO_AXIS, LIFECYCLE_TRANSITION_EVENT_CODE,
+        LifecycleEventCursor, LifecycleEventError, STOP_TIMEOUT_EVENT_CODE,
+        STOP_TIMEOUT_EVENT_SOURCE, StopTimeoutEventError, axis_stops_to_procbuf,
+        cyclic_quality_to_procbuf, lifecycle_events_to_procbuf, lifecycle_to_procbuf,
+        stop_timeout_events_to_procbuf,
     },
 };
 use esop_procbuf::{
@@ -722,4 +724,147 @@ fn stop_timeout_escalations_retain_original_axes_and_retry_full_event_ring() {
         Ok(0)
     );
     assert!(projector.pop_event(&buffer).unwrap().is_none());
+}
+
+#[test]
+fn lifecycle_event_cursor_reports_overrun_and_resumes_without_duplicates() {
+    let mut guard = LifecycleGuard::new(0, 7, GuardPolicy::conservative());
+    let mut cursor = LifecycleEventCursor::new(&guard);
+    let buffer = ProcBuf::<0, 0, 0, 2>::new(42, 7);
+    for cycle in 1..=20 {
+        guard.set_maintenance(cycle % 2 == 1, cycle);
+    }
+    assert_eq!(guard.transition_sequence(), 20);
+    assert_eq!(
+        lifecycle_events_to_procbuf(&mut guard, &buffer, &mut cursor, 21),
+        Err(LifecycleEventError::HistoryOverrun { missed: 4 })
+    );
+    assert_eq!(cursor.next_sequence(), 1);
+    assert_eq!(buffer.pending_events(), 0);
+    assert_eq!(cursor.acknowledge_history_loss(&guard), Ok(4));
+    assert_eq!(cursor.next_sequence(), 5);
+    assert_eq!(
+        lifecycle_events_to_procbuf(&mut guard, &buffer, &mut cursor, 22),
+        Err(LifecycleEventError::Ring(EventPushError::Full))
+    );
+    assert_eq!(cursor.next_sequence(), 7);
+    let mut seen = Vec::new();
+    let mut projector = projector();
+    while cursor.next_sequence() <= guard.transition_sequence() {
+        while let Some(event) = projector.pop_event(&buffer).unwrap() {
+            seen.push(event.sequence);
+        }
+        match lifecycle_events_to_procbuf(&mut guard, &buffer, &mut cursor, 23) {
+            Ok(_) | Err(LifecycleEventError::Ring(EventPushError::Full)) => {}
+            error => panic!("unexpected event result: {error:?}"),
+        }
+    }
+    while let Some(event) = projector.pop_event(&buffer).unwrap() {
+        seen.push(event.sequence);
+    }
+    assert_eq!(seen, (5..=20).collect::<Vec<_>>());
+    assert_eq!(
+        lifecycle_events_to_procbuf(&mut guard, &buffer, &mut cursor, 24),
+        Ok(0)
+    );
+    assert_eq!(buffer.lost_events(), 7);
+}
+
+#[test]
+fn lifecycle_transition_event_precedes_timeout_escalation_and_matches_state() {
+    let policy = GuardPolicy {
+        enter_good_cycles: 1,
+        stop_timeout_cycles: 2,
+        allowed_axis_mask: 0b11,
+        ..GuardPolicy::conservative()
+    };
+    let mut guard = LifecycleGuard::new(GateId::Link.bit(), 7, policy);
+    let mut cursor = LifecycleEventCursor::new(&guard);
+    let buffer = ProcBuf::<2, 0, 0, 2>::new(42, 7);
+    let mut projector = projector();
+    guard.update_gate(GateId::Link, true, 1, 0);
+    guard
+        .request_rearm(
+            MotionPermit {
+                boot_id: 7,
+                source_id: 1,
+                permit_epoch: 1,
+                sequence: 1,
+                axis_mask: 0b11,
+                expires_at_ns: 100,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
+            },
+            1,
+            1,
+        )
+        .unwrap();
+    assert_eq!(
+        lifecycle_events_to_procbuf(&mut guard, &buffer, &mut cursor, 100),
+        Ok(1)
+    );
+    assert_eq!(projector.pop_event(&buffer).unwrap().unwrap().sequence, 1);
+    guard.update_gate(GateId::Link, false, 2, 0xCAFE);
+    guard.cycle(2, 2);
+    assert_eq!(
+        lifecycle_events_to_procbuf(&mut guard, &buffer, &mut cursor, 200),
+        Ok(1)
+    );
+    let stop = projector.pop_event(&buffer).unwrap().unwrap();
+    assert_eq!((stop.sequence, stop.value), (2, 0xCAFE));
+    assert_eq!(stop.aux >> 8 & 0xFF, GuardState::Stopping as u32);
+
+    guard.cycle(4, 4);
+    let mut page = StatePage::<2, 0, 0>::new(7);
+    page.sequence = 4;
+    page.lifecycle = lifecycle_to_procbuf(guard.snapshot(4, 400), 400);
+    buffer.publish_state(page).unwrap();
+    let too_few_axes = ProcBuf::<1, 0, 0, 2>::new(42, 7);
+    assert_eq!(
+        lifecycle_events_to_procbuf(&mut guard, &too_few_axes, &mut cursor, 400),
+        Err(LifecycleEventError::StopTimeout(
+            StopTimeoutEventError::AxisCapacityExceeded
+        ))
+    );
+    assert_eq!(too_few_axes.pending_events(), 0);
+    assert_eq!(cursor.next_sequence(), 3);
+    assert_eq!(
+        lifecycle_events_to_procbuf(&mut guard, &buffer, &mut cursor, 401),
+        Err(LifecycleEventError::StopTimeout(
+            StopTimeoutEventError::Ring(EventPushError::Full)
+        ))
+    );
+    assert_eq!(cursor.next_sequence(), 4);
+    let state = projector.read_state(&buffer).unwrap().unwrap();
+    let lifecycle = state.lifecycle.unwrap();
+    assert_eq!(lifecycle.transition_sequence, 3);
+    assert_eq!(lifecycle.latched_fault_code, STOP_TIMEOUT_FAULT_CODE);
+    let fault = projector.pop_event(&buffer).unwrap().unwrap();
+    let axis0 = projector.pop_event(&buffer).unwrap().unwrap();
+    assert_eq!(fault.sequence, lifecycle.transition_sequence);
+    assert_eq!(fault.code, u32::from(LIFECYCLE_TRANSITION_EVENT_CODE));
+    assert_eq!(fault.axis_or_device, u32::from(LIFECYCLE_EVENT_NO_AXIS));
+    assert_eq!(fault.value, lifecycle.latched_fault_code);
+    assert_eq!(fault.aux >> 8 & 0xFF, GuardState::FaultLatched as u32);
+    assert_eq!(axis0.sequence, fault.sequence);
+    assert_eq!(axis0.code, u32::from(STOP_TIMEOUT_EVENT_CODE));
+    assert_eq!(axis0.axis_or_device, 0);
+    assert_eq!(
+        lifecycle_events_to_procbuf(&mut guard, &buffer, &mut cursor, 402),
+        Ok(1)
+    );
+    let axis1 = projector.pop_event(&buffer).unwrap().unwrap();
+    assert_eq!((axis1.sequence, axis1.axis_or_device), (fault.sequence, 1));
+    assert_eq!(
+        lifecycle_events_to_procbuf(&mut guard, &buffer, &mut cursor, 403),
+        Ok(0)
+    );
+
+    let wrong_cursor = LifecycleEventCursor::new(&LifecycleGuard::new(0, 8, policy));
+    let mut wrong_cursor = wrong_cursor;
+    assert_eq!(
+        lifecycle_events_to_procbuf(&mut guard, &buffer, &mut wrong_cursor, 404),
+        Err(LifecycleEventError::BootMismatch)
+    );
 }
