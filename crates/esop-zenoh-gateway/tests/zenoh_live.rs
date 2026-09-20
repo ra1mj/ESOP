@@ -469,6 +469,7 @@ fn router_restart_is_observable_and_cannot_rearm_motion() {
                     authorized_source_id: 42,
                     minimum_authority: 2,
                     permit_policy_version: 9,
+                    allowed_axis_mask: 0x03,
                 },
             );
             guard.update_gate(GateId::Link, true, 1, 0);

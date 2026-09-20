@@ -279,7 +279,14 @@ fn lifecycle_guard_denial_cannot_reach_cyclic_output() {
             entry(Cia402PdoField::ActualVelocity, 200),
         );
     let mut drive = Cia402DriveSimulator::new(map);
-    let mut guard = LifecycleGuard::new(GateId::Link.bit(), 7, GuardPolicy::conservative());
+    let mut guard = LifecycleGuard::new(
+        GateId::Link.bit(),
+        7,
+        GuardPolicy {
+            allowed_axis_mask: 1,
+            ..GuardPolicy::conservative()
+        },
+    );
     for cycle in 1..=3 {
         guard.update_gate(GateId::Link, true, cycle, 0);
     }

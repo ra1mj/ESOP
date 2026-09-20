@@ -56,6 +56,12 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   acknowledgment, and maintenance toggles must never clear a latched fault.
   Snapshot stop_action must match the action sent to the drive.
 - Revoke the motion permit in the same cycle an active guard enters Stopping.
+  Configure the frozen RT `GuardPolicy.allowed_axis_mask` explicitly (the
+  conservative default denies all axes), and reject any permit outside it
+  even if the ingress gateway accepted the command. Active renewals must keep
+  the exact armed axis set; audit invalid renewals without replacing the
+  existing permit or advancing its replay cursor. Change axes only after a
+  verified stop and explicit rearm.
   Bind stop confirmation to the original armed axis mask and to a complete,
   fresh input sample after a stop action was issued; do not infer stationary
   motion from a disabled CiA 402 state alone. A missing velocity sample or

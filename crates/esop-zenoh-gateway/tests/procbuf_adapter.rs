@@ -127,6 +127,7 @@ fn guard_snapshot_flows_through_procbuf_to_protobuf_without_losing_gate_or_audit
             authorized_source_id: 11,
             minimum_authority: 1,
             permit_policy_version: 1,
+            allowed_axis_mask: 0x03,
         },
     );
     guard.update_gate(GateId::Platform, true, 4, 0);

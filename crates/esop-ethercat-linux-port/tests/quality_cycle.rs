@@ -57,6 +57,7 @@ fn received_domain_and_dc_drive_guard_and_published_quality() {
         exit_bad_cycles: 2,
         max_age_cycles: 1,
         stop_action: StopAction::QuickStop,
+        allowed_axis_mask: 1,
         ..GuardPolicy::conservative()
     };
     let mut guard = LifecycleGuard::new(required, 7, policy);
@@ -216,6 +217,7 @@ fn multi_rate_idle_tick_keeps_motion_but_missing_due_domain_stops_it() {
             exit_bad_cycles: 2,
             max_age_cycles: 1,
             stop_action: StopAction::QuickStop,
+            allowed_axis_mask: 1,
             ..GuardPolicy::conservative()
         },
     );

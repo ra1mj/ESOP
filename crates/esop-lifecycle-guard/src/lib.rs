@@ -112,6 +112,8 @@ pub struct GuardPolicy {
     pub authorized_source_id: u64,
     pub minimum_authority: u8,
     pub permit_policy_version: u32,
+    /// Frozen local axis authorization, independent of the command gateway.
+    pub allowed_axis_mask: u32,
 }
 
 /// Cross-layer quality facts collected by the cycle owner. Each field is an
@@ -195,6 +197,7 @@ impl GuardPolicy {
             authorized_source_id: 1,
             minimum_authority: 1,
             permit_policy_version: 1,
+            allowed_axis_mask: 0,
         }
     }
 
@@ -220,6 +223,7 @@ impl GuardPolicy {
             authorized_source_id: self.authorized_source_id,
             minimum_authority: self.minimum_authority,
             permit_policy_version: self.permit_policy_version,
+            allowed_axis_mask: self.allowed_axis_mask,
         }
     }
 }
@@ -315,6 +319,8 @@ pub enum PermitError {
     EmptyAxisMask,
     EpochReplayed,
     SequenceReplayed,
+    AxisOutsidePolicy,
+    AxisMaskChanged,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -703,6 +709,12 @@ impl LifecycleGuard {
         if permit.axis_mask == 0 {
             return self.reject_permit(permit, now_ns, PermitError::EmptyAxisMask);
         }
+        if permit.axis_mask & !self.policy.allowed_axis_mask != 0 {
+            return self.reject_permit(permit, now_ns, PermitError::AxisOutsidePolicy);
+        }
+        if self.state == LifecycleState::Active && permit.axis_mask != self.motion_axes_mask {
+            return self.reject_permit(permit, now_ns, PermitError::AxisMaskChanged);
+        }
         if permit.permit_epoch < self.permit_epoch {
             return self.reject_permit(permit, now_ns, PermitError::EpochReplayed);
         }
@@ -924,6 +936,9 @@ impl LifecycleGuard {
             .map(|permit| {
                 permit.boot_id == self.boot_id
                     && permit.axis_mask != 0
+                    && permit.axis_mask & !self.policy.allowed_axis_mask == 0
+                    && (self.state != LifecycleState::Active
+                        || permit.axis_mask == self.motion_axes_mask)
                     && permit.expires_at_ns > now_ns
             })
             .unwrap_or(false)
@@ -1133,6 +1148,7 @@ mod tests {
             authorized_source_id: 1,
             minimum_authority: 1,
             permit_policy_version: 1,
+            allowed_axis_mask: 1,
         };
         let mut guard = LifecycleGuard::new(required, 1, policy);
         guard.update_cyclic_quality(
@@ -1205,6 +1221,7 @@ mod tests {
                 authorized_source_id: 1,
                 minimum_authority: 1,
                 permit_policy_version: 1,
+                allowed_axis_mask: 1,
             },
         );
         guard.update_cyclic_quality(
@@ -1240,6 +1257,7 @@ mod tests {
         authorized_source_id: 1,
         minimum_authority: 1,
         permit_policy_version: 1,
+        allowed_axis_mask: 0x03,
     };
 
     fn stopped(cycle: u64) -> StopFeedback {
@@ -1315,6 +1333,7 @@ mod tests {
                 authorized_source_id: 1,
                 minimum_authority: 1,
                 permit_policy_version: 1,
+                allowed_axis_mask: 0x03,
             },
         );
         guard.update_gate(GateId::Link, true, 4, 0);
@@ -1395,6 +1414,7 @@ mod tests {
                 authorized_source_id: 1,
                 minimum_authority: 1,
                 permit_policy_version: 1,
+                allowed_axis_mask: 0x03,
             },
         );
         guard.update_gate(GateId::Link, true, 1, 0);
@@ -1446,6 +1466,7 @@ mod tests {
                 authorized_source_id: 1,
                 minimum_authority: 1,
                 permit_policy_version: 1,
+                allowed_axis_mask: 0x03,
             },
         );
         guard.update_gate(GateId::Link, true, 1, 0);
@@ -2054,6 +2075,113 @@ mod tests {
     }
 
     #[test]
+    fn local_axis_policy_rejects_empty_and_outside_masks_without_consuming_sequence() {
+        let mut guard = LifecycleGuard::new(0, 10, GuardPolicy::conservative());
+        let mut empty = permit(1, 100);
+        empty.axis_mask = 0;
+        assert_eq!(
+            guard.accept_permit(empty, 1),
+            Err(PermitError::EmptyAxisMask)
+        );
+        assert_eq!(
+            guard.accept_permit(permit(1, 100), 1),
+            Err(PermitError::AxisOutsidePolicy)
+        );
+        assert!(guard.permit().is_none());
+        assert_eq!(
+            guard.permit_audit_at(1).unwrap().error,
+            PermitError::AxisOutsidePolicy
+        );
+
+        let mut guard = LifecycleGuard::new(
+            0,
+            10,
+            GuardPolicy {
+                allowed_axis_mask: 0b01,
+                ..POLICY
+            },
+        );
+        assert_eq!(
+            guard.request_rearm(permit(1, 100), 1, 1),
+            Err(LifecycleError::Permit(PermitError::AxisOutsidePolicy))
+        );
+        assert_eq!(guard.state(), LifecycleState::Qualifying);
+        let mut permitted = permit(1, 100);
+        permitted.axis_mask = 0b01;
+        assert_eq!(
+            guard.request_rearm(permitted, 1, 1),
+            Ok(LifecycleAction::EnableAllowed)
+        );
+    }
+
+    #[test]
+    fn active_axis_set_cannot_change_until_verified_stop_and_explicit_rearm() {
+        let mut guard = LifecycleGuard::new(0, 10, POLICY);
+        guard.request_rearm(permit(1, 100), 1, 1).unwrap();
+        let initial = guard.permit();
+        for (changed_mask, expected_error) in [
+            (0b01, PermitError::AxisMaskChanged),
+            (0b111, PermitError::AxisOutsidePolicy),
+        ] {
+            let mut changed = permit(2, 200);
+            changed.axis_mask = changed_mask;
+            assert_eq!(guard.accept_permit(changed, 2), Err(expected_error));
+            assert_eq!(guard.permit(), initial);
+        }
+        assert_eq!(guard.permit_audit_count(), 2);
+        assert_eq!(
+            guard.permit_audit_at(0).unwrap().error,
+            PermitError::AxisMaskChanged
+        );
+
+        guard.accept_permit(permit(2, 200), 2).unwrap();
+        assert_eq!(guard.cycle(2, 2), LifecycleAction::EnableAllowed);
+        guard.latch_fault(0xBEEF, 3);
+        assert_eq!(
+            guard.cycle(3, 3),
+            LifecycleAction::Stop(StopAction::QuickStop)
+        );
+        assert_eq!(
+            guard.acknowledge_stopped(
+                4,
+                StopFeedback {
+                    cycle: 4,
+                    observed_axis_mask: 0b01,
+                    stationary_axis_mask: 0b01,
+                    non_enabled_axis_mask: 0b01,
+                }
+            ),
+            Err(LifecycleError::InvalidStopFeedback)
+        );
+        guard.acknowledge_stopped(4, stopped(4)).unwrap();
+        guard.clear_fault(5).unwrap();
+        let mut rearmed = permit(1, 300);
+        rearmed.permit_epoch = 4;
+        rearmed.axis_mask = 0b01;
+        assert_eq!(
+            guard.request_rearm(rearmed, 5, 5),
+            Ok(LifecycleAction::EnableAllowed)
+        );
+    }
+
+    #[test]
+    fn rejected_axis_change_cannot_extend_an_expiring_permit() {
+        let mut guard = LifecycleGuard::new(0, 10, POLICY);
+        guard.request_rearm(permit(1, 10), 1, 1).unwrap();
+        let mut changed = permit(2, 200);
+        changed.axis_mask = 0b01;
+        assert_eq!(
+            guard.accept_permit(changed, 2),
+            Err(PermitError::AxisMaskChanged)
+        );
+        assert_eq!(
+            guard.cycle(2, 10),
+            LifecycleAction::Stop(StopAction::QuickStop)
+        );
+        assert!(guard.permit().is_none());
+    }
+
+    #[test]
     fn permit_policy_rejections_are_fixed_capacity_audits() {
         let policy = GuardPolicy {
             enter_good_cycles: 1,
@@ -2064,6 +2192,7 @@ mod tests {
             authorized_source_id: 42,
             minimum_authority: 2,
             permit_policy_version: 9,
+            allowed_axis_mask: 0x03,
         };
         let mut guard = LifecycleGuard::new(0, 10, policy);
 

@@ -3,7 +3,8 @@ use esop_command_gateway::{
     MAX_INGRESS_AUDITS,
 };
 use esop_lifecycle_guard::{
-    GateId, GuardPolicy, LifecycleAction, LifecycleGuard, MotionPermit, StopAction,
+    GateId, GuardPolicy, LifecycleAction, LifecycleError, LifecycleGuard, LifecycleState,
+    MotionPermit, PermitError, StopAction, StopFeedback,
 };
 
 fn command(sequence: u64, source_id: u64, deadline_ns: u64) -> ExternalMotionCommand {
@@ -71,6 +72,7 @@ fn admitted_command_becomes_mlg_permit_without_network_in_rt_path() {
             authorized_source_id: 42,
             minimum_authority: 2,
             permit_policy_version: 9,
+            allowed_axis_mask: 0x03,
         },
     );
     guard.update_gate(GateId::Platform, true, 1, 0);
@@ -125,4 +127,103 @@ fn ingress_rejects_policy_violations_and_bounds_audit_history() {
         ingress.audit_at(0).unwrap().error_code,
         IngressError::PolicyVersionMismatch.code()
     );
+}
+
+#[test]
+fn rt_guard_rejects_axis_that_gateway_policy_admitted() {
+    let mut ingress = CommandIngress::new(7, policy());
+    let permit = ingress.admit(command(1, 42, 100), 1).unwrap();
+    let mut guard = LifecycleGuard::new(
+        GateId::Platform.bit(),
+        7,
+        GuardPolicy {
+            enter_good_cycles: 1,
+            authorized_source_id: 42,
+            minimum_authority: 2,
+            permit_policy_version: 9,
+            allowed_axis_mask: 0b01,
+            ..GuardPolicy::conservative()
+        },
+    );
+    guard.update_gate(GateId::Platform, true, 1, 0);
+    assert_eq!(
+        guard.request_rearm(permit, 1, 1),
+        Err(LifecycleError::Permit(PermitError::AxisOutsidePolicy))
+    );
+    assert_eq!(guard.cycle(1, 1), LifecycleAction::Hold);
+    assert_eq!(guard.state(), LifecycleState::Qualifying);
+    assert_eq!(
+        guard.permit_audit_at(0).unwrap().error,
+        PermitError::AxisOutsidePolicy
+    );
+}
+
+#[test]
+fn gateway_renewal_cannot_change_active_rt_axis_set_or_stop_evidence() {
+    let mut ingress_policy = policy();
+    ingress_policy.max_commands_per_window = 4;
+    let mut ingress = CommandIngress::new(7, ingress_policy);
+    let mut guard = LifecycleGuard::new(
+        GateId::Link.bit(),
+        7,
+        GuardPolicy {
+            enter_good_cycles: 1,
+            exit_bad_cycles: 1,
+            authorized_source_id: 42,
+            minimum_authority: 2,
+            permit_policy_version: 9,
+            allowed_axis_mask: 0b11,
+            ..GuardPolicy::conservative()
+        },
+    );
+    guard.update_gate(GateId::Link, true, 1, 0);
+    let mut initial = command(1, 42, 100);
+    initial.axis_mask = 0b01;
+    let initial_permit = ingress.admit(initial, 1).unwrap();
+    assert_eq!(
+        guard.request_rearm(initial_permit, 1, 1),
+        Ok(LifecycleAction::EnableAllowed)
+    );
+
+    let expanded = ingress.admit(command(2, 42, 100), 2).unwrap();
+    assert_eq!(
+        guard.accept_permit(expanded, 2),
+        Err(PermitError::AxisMaskChanged)
+    );
+    assert_eq!(guard.permit(), Some(initial_permit));
+    assert_eq!(
+        guard.permit_audit_at(0).unwrap().error,
+        PermitError::AxisMaskChanged
+    );
+    assert_eq!(guard.cycle(2, 2), LifecycleAction::EnableAllowed);
+
+    guard.update_gate(GateId::Link, false, 3, 0xCAFE);
+    assert_eq!(
+        guard.cycle(3, 3),
+        LifecycleAction::Stop(StopAction::QuickStop)
+    );
+    assert_eq!(
+        guard.acknowledge_stopped(
+            4,
+            StopFeedback {
+                cycle: 4,
+                observed_axis_mask: 0b10,
+                stationary_axis_mask: 0b10,
+                non_enabled_axis_mask: 0b10,
+            }
+        ),
+        Err(LifecycleError::InvalidStopFeedback)
+    );
+    guard
+        .acknowledge_stopped(
+            4,
+            StopFeedback {
+                cycle: 4,
+                observed_axis_mask: 0b01,
+                stationary_axis_mask: 0b01,
+                non_enabled_axis_mask: 0b01,
+            },
+        )
+        .unwrap();
+    assert_eq!(guard.state(), LifecycleState::Ready);
 }

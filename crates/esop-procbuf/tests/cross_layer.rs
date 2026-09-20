@@ -40,6 +40,7 @@ fn procbuf_command_expiry_stops_mlg_and_blocks_cia402_enable() {
         authorized_source_id: 11,
         minimum_authority: 1,
         permit_policy_version: 1,
+        allowed_axis_mask: 0x03,
     };
     let required = GateId::Platform.bit() | GateId::Link.bit() | GateId::Command.bit();
     let mut guard = LifecycleGuard::new(required, 7, policy);
@@ -212,6 +213,7 @@ fn ebpf_health_heartbeat_can_qualify_then_stop_motion() {
         authorized_source_id: 1,
         minimum_authority: 1,
         permit_policy_version: 1,
+        allowed_axis_mask: 1,
     };
     let mut guard = LifecycleGuard::new(GateId::HostObservation.bit(), 7, policy);
     let mut agent = RuntimeAgent::<2>::new(7, 1, 1_000);
@@ -278,6 +280,7 @@ fn external_inhibit_latches_only_after_stop_and_publishes_fault_reason() {
         7,
         GuardPolicy {
             enter_good_cycles: 1,
+            allowed_axis_mask: 0x03,
             ..GuardPolicy::conservative()
         },
     );
