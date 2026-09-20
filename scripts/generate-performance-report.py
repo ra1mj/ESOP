@@ -49,6 +49,7 @@ def performance_report() -> dict:
         "topology": {
             "slave_count": 0,
             "axis_count": 0,
+            "io_channels": 0,
             "pdo_bytes": 0,
             "frame_count": 0,
             "dc_enabled": False,
@@ -87,6 +88,19 @@ def performance_report() -> dict:
             "rt_stack_peak_bytes": None,
             "text_rodata_bytes": None,
             "rt_cpu_percent": None,
+        },
+        "measurement": {
+            "source": "not_measured",
+            "cycle_samples": 0,
+            "max_accumulator_samples": 0,
+            "heap_allocations_after_activation": None,
+            "trace_sha256": None,
+        },
+        "workload": {
+            "concurrent_sdo_requests": 0,
+            "p99_regression_percent": None,
+            "baseline_report_sha256": None,
+            "baseline_fast_path_p99_ns": None,
         },
         "qualification": {
             "scenario": "host-build-baseline",

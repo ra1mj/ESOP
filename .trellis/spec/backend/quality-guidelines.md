@@ -98,6 +98,10 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
 - Auto-bind SII segments only when their logical and physical offsets and bit
   length are byte-aligned. Bit-packed segments require an explicit aggregate
   datagram so byte-oriented Domain staging cannot overwrite neighboring bits.
+- Keep host-generated performance reports explicitly unqualified. Accept a
+  `passed` scenario only with complete cycle/max-accumulator coverage, matching
+  Q1-Q4 load and thresholds, zero fault-free errors, and trace/topology hashes;
+  a structurally valid JSON report is not proof of real hardware qualification.
 
 ## Testing Requirements
 

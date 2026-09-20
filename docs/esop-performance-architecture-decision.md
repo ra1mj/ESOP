@@ -582,6 +582,7 @@ T_path <= cycle_period
   "topology": {
     "slave_count": 0,
     "axis_count": 0,
+    "io_channels": 0,
     "pdo_bytes": 0,
     "frame_count": 0,
     "dc_enabled": true,
@@ -621,11 +622,24 @@ T_path <= cycle_period
     "text_rodata_bytes": 0,
     "rt_cpu_percent": 0
   },
-  "qualification": {"scenario": "Q2", "passed": false, "failures": []}
+  "measurement": {
+    "source": "not_measured",
+    "cycle_samples": 0,
+    "max_accumulator_samples": 0,
+    "heap_allocations_after_activation": null,
+    "trace_sha256": null
+  },
+  "workload": {
+    "concurrent_sdo_requests": 0,
+    "p99_regression_percent": null,
+    "baseline_report_sha256": null,
+    "baseline_fast_path_p99_ns": null
+  },
+  "qualification": {"scenario": "Q2", "passed": false, "failures": ["HIL measurements missing"]}
 }
 ```
 
-报告生成器必须拒绝缺失 cycles、最大值、错误计数或配置 hash 的“通过”结果。原始 trace 可以抽样保存，但计数器和 max 不能抽样。
+报告校验器对 `passed=true` 强制核对 Q1-Q4 的周期、轴/IO 负载、拓扑/映像上限、至少 1800 秒完整周期数、延迟分位序和场景门槛、零故障计数、资源/CPU 上限、零激活后堆分配，以及与运行周期数相同的样本/最大值累积次数。Q4 另需至少 8 个并发 SDO 请求、空载基线哈希及与实测 P99 相符的回归百分比（<= 10%）。缺少这些字段或仅有未测量的主机基线不得判定通过。`trace_sha256`、`topology_manifest_hash` 和 `baseline_report_sha256` 只是关联原始证据的摘要；校验 JSON 不能证明硬件来源、完整 trace 内容或真实测量，候选发布仍需核对 HIL 原始证据与配置。原始 trace 可以抽样保存，但计数器和 max 不能抽样。
 
 ## 13. 验证需求
 

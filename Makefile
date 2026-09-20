@@ -56,6 +56,7 @@ build-report:
 performance-report:
 	python3 scripts/generate-performance-report.py --output build/performance_report.json
 	python3 scripts/validate-performance-report.py build/performance_report.json
+	python3 -m unittest discover -s scripts/tests -p 'test_performance_report.py'
 
 zenoh-check:
 	$(CARGO) check -p esop-zenoh-gateway --features zenoh
