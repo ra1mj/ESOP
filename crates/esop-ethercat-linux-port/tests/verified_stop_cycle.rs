@@ -2,7 +2,8 @@ use esop_ethercat_core::wire::{Command, MAX_ETHERNET_FRAME_LEN};
 use esop_ethercat_core::{
     CycleError, CycleReport, DatagramPlan, DcCyclicConfig, DcCyclicSync, DcMonitor, Domain,
     DomainSegment, EthercatMaster, EthercatPort, FramePlan, LinkState, MasterConfig, PdoDirection,
-    PdoEntry, PortError, RxConsumerMux, RxPoll, ScheduleDomain, ScheduleTable,
+    PdoEntry, PortError, RxPoll, ScheduleDomain, ScheduleTable, ScheduledDomainBank,
+    ScheduledDomainEntry,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::cia402::step_axis_bank;
@@ -2242,15 +2243,27 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
         external_safety_clear: true,
         deadline_met: true,
     };
-    let mut mux = RxConsumerMux::new(motion, auxiliary);
+    let mut domain_bank = ScheduledDomainBank::new(
+        &schedule,
+        [
+            ScheduledDomainEntry {
+                id: 9,
+                domain: &mut motion,
+            },
+            ScheduledDomainEntry {
+                id: 10,
+                domain: &mut auxiliary,
+            },
+        ],
+    )
+    .unwrap();
     let mut port = SimulatedPort::new(1);
     let safe_image = input_image(0x0040, 0);
     let mut initial_image = [0u8; IMAGE_BYTES + 2];
     initial_image[..IMAGE_BYTES].copy_from_slice(&safe_image);
     initial_image[IMAGE_BYTES..].copy_from_slice(&[0xAB, 0xCD]);
     port.set_now_ns(100_000);
-    mux.first_mut().begin_receive(1).unwrap();
-    mux.second_mut().begin_receive(1).unwrap();
+    domain_bank.begin_due(1, 1).unwrap();
     let frame = master.acquire_frame(1, 150_000).unwrap();
     master
         .build_and_arm_frame_from_plan(frame, &initial_plan, &initial_image)
@@ -2258,19 +2271,22 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
     master.submit_frame(&mut port, frame).unwrap();
     let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
     let first = master
-        .cycle_receive_with_consumer(&mut port, &mut scratch, 1, &mut mux)
+        .cycle_receive_with_consumer(&mut port, &mut scratch, 1, &mut domain_bank)
         .unwrap();
-    assert!(mux.first_mut().finish_receive(1, first.cycle).unwrap());
-    assert!(mux.second_mut().finish_receive(1, first.cycle).unwrap());
-    assert_eq!(mux.second().input(), &[0xAB, 0xCD]);
+    let received = domain_bank.finish_due(first.cycle, 1).unwrap();
+    assert_eq!(
+        domain_bank.domain::<2, 1>(10).unwrap().input(),
+        &[0xAB, 0xCD]
+    );
+    assert!(domain_bank.domain::<2, 1>(9).is_none());
     let mut snapshots = [
         ScheduledDomainQuality {
             id: 9,
-            quality: mux.first().quality(),
+            quality: received[0],
         },
         ScheduledDomainQuality {
             id: 10,
-            quality: mux.second().quality(),
+            quality: received[1],
         },
     ];
 
@@ -2323,7 +2339,7 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
             bank: &mut bank,
             master: &mut master,
             port: &mut port,
-            domain: mux.first(),
+            domain: domain_bank.domain::<IMAGE_BYTES, 1>(9).unwrap(),
             dc: &dc,
             buffer: &buffer,
             event_cursor: &mut cursor,
@@ -2432,13 +2448,13 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
     }
 
     port.set_now_ns(200_000);
-    mux.first_mut().begin_receive(2).unwrap();
+    domain_bank.begin_due(2, 2).unwrap();
     let second = master
-        .cycle_receive_with_consumer(&mut port, &mut scratch, 2, &mut mux)
+        .cycle_receive_with_consumer(&mut port, &mut scratch, 2, &mut domain_bank)
         .unwrap();
-    assert!(mux.first_mut().finish_receive(2, second.cycle).unwrap());
-    snapshots[0].quality = mux.first().quality();
-    snapshots[1].quality = mux.second().quality();
+    let received = domain_bank.finish_due(second.cycle, 2).unwrap();
+    snapshots[0].quality = received[0];
+    snapshots[1].quality = received[1];
     let mut state = StatePage::<1, 0, 2>::new(7);
     state.sequence = second.cycle;
     let idle = StopCycleContext {
@@ -2446,7 +2462,7 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
         bank: &mut bank,
         master: &mut master,
         port: &mut port,
-        domain: mux.first(),
+        domain: domain_bank.domain::<IMAGE_BYTES, 1>(9).unwrap(),
         dc: &dc,
         buffer: &buffer,
         event_cursor: &mut cursor,
@@ -2483,13 +2499,13 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
     );
 
     port.set_now_ns(300_000);
-    mux.first_mut().begin_receive(3).unwrap();
+    domain_bank.begin_due(3, 3).unwrap();
     let third = master
-        .cycle_receive_with_consumer(&mut port, &mut scratch, 3, &mut mux)
+        .cycle_receive_with_consumer(&mut port, &mut scratch, 3, &mut domain_bank)
         .unwrap();
-    assert!(mux.first_mut().finish_receive(3, third.cycle).unwrap());
-    snapshots[0].quality = mux.first().quality();
-    snapshots[1].quality = mux.second().quality();
+    let received = domain_bank.finish_due(third.cycle, 3).unwrap();
+    snapshots[0].quality = received[0];
+    snapshots[1].quality = received[1];
     let mut state = StatePage::<1, 0, 2>::new(7);
     state.sequence = third.cycle;
     let failed = StopCycleContext {
@@ -2497,7 +2513,7 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
         bank: &mut bank,
         master: &mut master,
         port: &mut port,
-        domain: mux.first(),
+        domain: domain_bank.domain::<IMAGE_BYTES, 1>(9).unwrap(),
         dc: &dc,
         buffer: &buffer,
         event_cursor: &mut cursor,

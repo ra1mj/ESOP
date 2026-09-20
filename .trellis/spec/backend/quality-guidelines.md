@@ -182,6 +182,17 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   frozen schedule ID and derive the due tick from master cycle 1 = schedule
   tick 0. An idle tick may reuse only the last successfully scheduled sample
   within its period; current-cycle RX/DC evidence remains mandatory.
+- Bind heterogeneous, configured RX Domains to the frozen schedule through
+  `ScheduledDomainBank` at activation. Reject duplicate datagram indices or
+  ID order changes before starting any receive. Start and finish every due
+  Domain exactly once per master cycle, including missing or failed receives;
+  non-due data must never stage into that Domain. The bank's fixed index map
+  routes only verified datagrams and its real quality array feeds the MLG
+  projection. Its typed, read-only Domain accessor is valid only after
+  `finish_due`, so the motion lifecycle branch can read the same verified
+  Domain without breaking exclusive RX ownership. The caller still owns
+  matching output plans, DC/control RX,
+  lifecycle output submission, and the full-cycle deadline.
 - Build slave-to-slave copy plans from an active Domain registry, not ad hoc
   offsets. Bind the source TxPDO, target RxPDO, and target quality RxPDO to
   verified datagram coverage. At the target's scheduled send cycle, accept a

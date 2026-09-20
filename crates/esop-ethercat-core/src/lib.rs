@@ -26,6 +26,7 @@ mod ring;
 mod rx_index;
 mod scan;
 mod schedule;
+mod scheduled_domains;
 mod sii;
 mod sii_config;
 mod sii_discovery;
@@ -106,6 +107,9 @@ pub use rx_index::{
 };
 pub use scan::{ScanAction, ScanController, ScanError, ScanPhase, ScanProgress, ScanRecord};
 pub use schedule::{ScheduleDomain, ScheduleError, ScheduleSlot, ScheduleTable};
+pub use scheduled_domains::{
+    ScheduledDomainBank, ScheduledDomainEntry, ScheduledDomainError, ScheduledDomainRx,
+};
 pub use sii::{
     EEPROM_BUSY, EEPROM_ERROR_MASK, EEPROM_READ_COMMAND, SII_CATEGORY_DC, SII_CATEGORY_END,
     SII_CATEGORY_FMMU, SII_CATEGORY_GENERAL, SII_CATEGORY_RX_PDO, SII_CATEGORY_STRINGS,

@@ -110,6 +110,10 @@ impl<const BYTES: usize, const SEGMENTS: usize> Domain<BYTES, SEGMENTS> {
         self.quality
     }
 
+    pub const fn receive_generation(&self) -> Option<u16> {
+        self.active_generation
+    }
+
     pub fn input(&self) -> &[u8; BYTES] {
         &self.committed
     }
