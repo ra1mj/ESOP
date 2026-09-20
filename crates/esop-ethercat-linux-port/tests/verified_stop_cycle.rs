@@ -1,12 +1,13 @@
 use esop_ethercat_core::wire::{Command, MAX_ETHERNET_FRAME_LEN};
 use esop_ethercat_core::{
-    CycleReport, DatagramPlan, DcCyclicConfig, DcCyclicSync, DcMonitor, Domain, DomainSegment,
-    EthercatMaster, FramePlan, MasterConfig, PdoDirection, PdoEntry,
+    CycleError, CycleReport, DatagramPlan, DcCyclicConfig, DcCyclicSync, DcMonitor, Domain,
+    DomainSegment, EthercatMaster, FramePlan, MasterConfig, PdoDirection, PdoEntry,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::cia402::step_axis_bank;
 use esop_lifecycle_guard::ethercat::{
-    OtherCycleFacts, cyclic_quality_from_ethercat, verified_ethercat_stop_feedback,
+    OtherCycleFacts, StopFrameError, cyclic_quality_from_ethercat, submit_stopping_frame,
+    verified_ethercat_stop_feedback,
 };
 use esop_lifecycle_guard::procbuf::{
     LifecycleEventCursor, axis_stops_to_procbuf, lifecycle_events_to_procbuf, lifecycle_to_procbuf,
@@ -215,30 +216,181 @@ fn failed_stop_tx_never_becomes_stop_proof_and_retry_requires_a_new_response() {
     );
     let second = receive(&mut master, &mut port, &mut domain, 2);
     guard.update_gate(GateId::Link, false, second.cycle, 0xCAFE);
-    let decision = guard.cycle_axes(second.cycle, 200);
-    let mut bank = Cia402AxisBank::<1>::new();
-    let outputs = step_axis_bank(&mut bank, &decision, [0x0027], [DriveRequest::Enable]);
-    assert_eq!(outputs[0].controlword, CONTROLWORD_QUICK_STOP);
     let mut state = StatePage::<1, 0, 1>::new(7);
     state.sequence = second.cycle;
-    let mut stop_image = input_image(0x0040, 0);
-    map.write_control(&mut stop_image, OperatingMode::Csp, outputs[0].controlword)
-        .unwrap();
+    let stop_image = input_image(0x0040, 0);
     port.set_now_ns(300_000);
     domain.begin_receive(3).unwrap();
-    let frame = master.acquire_frame(3, 350_000).unwrap();
-    master
-        .build_and_arm_frame_from_plan(frame, &plan, &stop_image)
-        .unwrap();
-    port.fail_next_tx();
-    assert!(master.submit_frame(&mut port, frame).is_err());
-    assert_eq!(decision.stop_issued_cycle(), None);
-    axis_stops_to_procbuf(&mut state, &decision, &outputs, None).unwrap();
-    assert_eq!(
-        state.axis_stops[0].requested_action,
-        esop_lifecycle_guard::StopAction::QuickStop as u8 + 1
-    );
-    assert_eq!(state.axis_stops[0].issued_action, 0);
+
+    let outputs = {
+        let mut decision = guard.cycle_axes(second.cycle, 200);
+        let mut bank = Cia402AxisBank::<1>::new();
+        let outputs = step_axis_bank(&mut bank, &decision, [0x0027], [DriveRequest::Enable]);
+        assert_eq!(outputs[0].controlword, CONTROLWORD_QUICK_STOP);
+
+        let mut unsafe_outputs = outputs;
+        unsafe_outputs[0].controlword = 0x000F;
+        assert!(matches!(
+            submit_stopping_frame(
+                &mut decision,
+                &unsafe_outputs,
+                &[map],
+                &[OperatingMode::Csp],
+                &stop_image,
+                &domain,
+                &plan,
+                &mut master,
+                &mut port,
+                3,
+                350_000,
+            ),
+            Err(StopFrameError::UnsafeOutput(0))
+        ));
+
+        for (command, address) in [(Command::Lrd, 0x1000), (Command::Lrw, 0x1001)] {
+            let mut invalid_plan = FramePlan::<1>::new();
+            invalid_plan
+                .push(DatagramPlan {
+                    command,
+                    index: 12,
+                    address,
+                    payload_offset: 0,
+                    payload_len: IMAGE_BYTES,
+                    expected_wkc: 1,
+                })
+                .unwrap();
+            assert!(matches!(
+                submit_stopping_frame(
+                    &mut decision,
+                    &outputs,
+                    &[map],
+                    &[OperatingMode::Csp],
+                    &stop_image,
+                    &domain,
+                    &invalid_plan,
+                    &mut master,
+                    &mut port,
+                    3,
+                    350_000,
+                ),
+                Err(StopFrameError::UncoveredOutput(
+                    0,
+                    Cia402PdoField::Controlword
+                ))
+            ));
+        }
+
+        let duplicated_outputs = step_axis_bank(
+            &mut Cia402AxisBank::<2>::new(),
+            &decision,
+            [0x0027, 0x0040],
+            [DriveRequest::Enable, DriveRequest::Enable],
+        );
+        assert!(matches!(
+            submit_stopping_frame(
+                &mut decision,
+                &duplicated_outputs,
+                &[map, map],
+                &[OperatingMode::Csp; 2],
+                &stop_image,
+                &domain,
+                &plan,
+                &mut master,
+                &mut port,
+                3,
+                350_000,
+            ),
+            Err(StopFrameError::OverlappingOutput(0, 1))
+        ));
+
+        let mut overwriting_plan = FramePlan::<2>::new();
+        overwriting_plan.push(plan.datagrams()[0]).unwrap();
+        overwriting_plan
+            .push(DatagramPlan {
+                command: Command::Lwr,
+                index: 13,
+                address: 0x1010,
+                payload_offset: 20,
+                payload_len: 2,
+                expected_wkc: 1,
+            })
+            .unwrap();
+        assert!(matches!(
+            submit_stopping_frame(
+                &mut decision,
+                &outputs,
+                &[map],
+                &[OperatingMode::Csp],
+                &stop_image,
+                &domain,
+                &overwriting_plan,
+                &mut master,
+                &mut port,
+                3,
+                350_000,
+            ),
+            Err(StopFrameError::UncoveredOutput(
+                0,
+                Cia402PdoField::Controlword
+            ))
+        ));
+
+        let mut unbuildable_plan = FramePlan::<2>::new();
+        unbuildable_plan.push(plan.datagrams()[0]).unwrap();
+        unbuildable_plan
+            .push(DatagramPlan {
+                command: Command::Lrw,
+                index: 13,
+                address: 0x2000,
+                payload_offset: IMAGE_BYTES,
+                payload_len: 1,
+                expected_wkc: 1,
+            })
+            .unwrap();
+        assert!(matches!(
+            submit_stopping_frame(
+                &mut decision,
+                &outputs,
+                &[map],
+                &[OperatingMode::Csp],
+                &stop_image,
+                &domain,
+                &unbuildable_plan,
+                &mut master,
+                &mut port,
+                3,
+                350_000,
+            ),
+            Err(StopFrameError::Build(CycleError::Plan(_)))
+        ));
+        assert_eq!(decision.stop_issued_cycle(), None);
+
+        port.fail_next_tx();
+        assert!(matches!(
+            submit_stopping_frame(
+                &mut decision,
+                &outputs,
+                &[map],
+                &[OperatingMode::Csp],
+                &stop_image,
+                &domain,
+                &plan,
+                &mut master,
+                &mut port,
+                3,
+                350_000,
+            ),
+            Err(StopFrameError::Transmit(CycleError::Port(_)))
+        ));
+        assert_eq!(decision.stop_issued_cycle(), None);
+        axis_stops_to_procbuf(&mut state, &decision, &outputs, None).unwrap();
+        assert_eq!(
+            state.axis_stops[0].requested_action,
+            esop_lifecycle_guard::StopAction::QuickStop as u8 + 1
+        );
+        assert_eq!(state.axis_stops[0].issued_action, 0);
+        outputs
+    };
     assert_eq!(
         guard.acknowledge_stopped(
             3,
@@ -253,12 +405,20 @@ fn failed_stop_tx_never_becomes_stop_proof_and_retry_requires_a_new_response() {
     );
 
     let mut retry = guard.cycle_axes(second.cycle, 201);
-    let frame = master.acquire_frame(3, 350_000).unwrap();
-    master
-        .build_and_arm_frame_from_plan(frame, &plan, &stop_image)
-        .unwrap();
-    master.submit_frame(&mut port, frame).unwrap();
-    retry.mark_stop_transmitted().unwrap();
+    submit_stopping_frame(
+        &mut retry,
+        &outputs,
+        &[map],
+        &[OperatingMode::Csp],
+        &stop_image,
+        &domain,
+        &plan,
+        &mut master,
+        &mut port,
+        3,
+        350_000,
+    )
+    .unwrap();
     assert_eq!(retry.stop_issued_cycle(), Some(second.cycle));
     axis_stops_to_procbuf(&mut state, &retry, &outputs, None).unwrap();
     assert_eq!(
@@ -266,6 +426,10 @@ fn failed_stop_tx_never_becomes_stop_proof_and_retry_requires_a_new_response() {
         esop_lifecycle_guard::StopAction::QuickStop as u8 + 1
     );
     let third = receive(&mut master, &mut port, &mut domain, 3);
+    assert_eq!(
+        &domain.input()[16..18],
+        &CONTROLWORD_QUICK_STOP.to_le_bytes()
+    );
     let decision = guard.cycle_axes(third.cycle, 300);
     let feedback = verified_ethercat_stop_feedback(
         &decision,

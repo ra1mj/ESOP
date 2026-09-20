@@ -74,6 +74,14 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   accepts that frame call `mark_stop_transmitted`. A failed TX leaves the
   issuance cycle absent, and ProcBuf `issued_action` stays zero until success.
   Stop confirmation still requires a fresh complete receive after that TX.
+- For CiA 402 stop TX, use `submit_stopping_frame` with all mapped axes, a
+  caller-verified safe image for other outputs, and a frozen Domain/FramePlan.
+  Check that each stop Controlword and mode field is fully covered by a
+  writable, matching Domain segment and that axes cannot alias one another's
+  output bits. Reject later writable datagrams that overwrite a stop field
+  from a different process-image offset. Build errors must release unarmed
+  frame slots; TX errors must not mark issuance. A successful submission is
+  not drive-execution proof.
 - Freeze per-axis stop selections in `AxisStopPolicy` at guard construction.
   Assemble all axis outputs from one borrowed `cycle_axes` decision, use the
   originally armed mask for stop requests, and force every other axis to

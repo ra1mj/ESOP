@@ -4,11 +4,203 @@ use crate::CyclicQuality;
 use esop_ethercat_core::{CycleReport, DcCyclicSync, DomainQuality, ScheduleTable};
 
 #[cfg(feature = "cia402")]
-use crate::{AxisCycleDecision, StopFeedback, cia402::stop_feedback_from_cia402};
+use crate::{
+    AxisCycleDecision, AxisDirective, LifecycleAction, MAX_MOTION_AXES, StopAction, StopFeedback,
+    cia402::stop_feedback_from_cia402,
+};
 #[cfg(feature = "cia402")]
-use esop_ethercat_core::Domain;
+use esop_ethercat_core::{
+    CycleError, Domain, EthercatMaster, EthercatPort, FramePlan, FramePoolError, wire::Command,
+};
 #[cfg(feature = "cia402")]
-use esop_profile_cia402::{Cia402PdoMap, OperatingMode};
+use esop_profile_cia402::{
+    CONTROLWORD_DISABLE_VOLTAGE, CONTROLWORD_QUICK_STOP, Cia402Output, Cia402PdoError,
+    Cia402PdoField, Cia402PdoMap, OperatingMode,
+};
+
+/// A stopped-axis frame is prepared but does not count as issued until the
+/// platform accepts it. Callers must supply a frozen safe image for all other
+/// outputs; this function only overwrites the CiA 402 control and mode fields.
+#[cfg(feature = "cia402")]
+#[derive(Debug)]
+pub enum StopFrameError<E> {
+    InvalidDecision,
+    AxisCapacityExceeded,
+    InvalidDeadline,
+    UnsafeOutput(usize),
+    UncoveredOutput(usize, Cia402PdoField),
+    OverlappingOutput(usize, usize),
+    Pdo(usize, Cia402PdoError),
+    FramePool(FramePoolError),
+    Build(CycleError<core::convert::Infallible>),
+    Transmit(CycleError<E>),
+}
+
+/// Submit one frozen, writable Domain plan for the current stop decision.
+/// The same decision must be used to derive `outputs` and later ProcBuf proof.
+/// A failed build or TX never marks a stop as issued; the caller must still
+/// publish the failed cycle and retry or escalate according to its policy.
+#[cfg(feature = "cia402")]
+#[allow(clippy::too_many_arguments)]
+pub fn submit_stopping_frame<
+    P: EthercatPort,
+    const AXES: usize,
+    const BYTES: usize,
+    const SEGMENTS: usize,
+    const DATAGRAMS: usize,
+    const SLOTS: usize,
+    const MTU: usize,
+>(
+    decision: &mut AxisCycleDecision<'_>,
+    outputs: &[Cia402Output; AXES],
+    maps: &[Cia402PdoMap; AXES],
+    modes: &[OperatingMode; AXES],
+    safe_process_image: &[u8; BYTES],
+    domain: &Domain<BYTES, SEGMENTS>,
+    plan: &FramePlan<DATAGRAMS>,
+    master: &mut EthercatMaster<SLOTS, MTU>,
+    port: &mut P,
+    generation: u16,
+    deadline_ns: u64,
+) -> Result<usize, StopFrameError<P::Error>> {
+    let stopping = decision.stopping_axis_mask();
+    if !matches!(decision.action(), LifecycleAction::Stop(_)) || stopping == 0 {
+        return Err(StopFrameError::InvalidDecision);
+    }
+    if AXES > MAX_MOTION_AXES || (AXES < MAX_MOTION_AXES && stopping >> AXES != 0) {
+        return Err(StopFrameError::AxisCapacityExceeded);
+    }
+    if deadline_ns <= port.now_ns() {
+        return Err(StopFrameError::InvalidDeadline);
+    }
+
+    let mut image = *safe_process_image;
+    for axis in 0..AXES {
+        let expected = match decision.axis(axis) {
+            AxisDirective::Stop(StopAction::QuickStop) => CONTROLWORD_QUICK_STOP,
+            AxisDirective::Stop(_) | AxisDirective::Inhibit => CONTROLWORD_DISABLE_VOLTAGE,
+            AxisDirective::EnableAllowed => return Err(StopFrameError::InvalidDecision),
+        };
+        let output = outputs[axis];
+        if output.controlword != expected || output.motion_allowed || output.fault_reset_pulse {
+            return Err(StopFrameError::UnsafeOutput(axis));
+        }
+        for field in [Cia402PdoField::Controlword, Cia402PdoField::ModeOfOperation] {
+            if !writable_domain_field(&maps[axis], field, domain, plan) {
+                return Err(StopFrameError::UncoveredOutput(axis, field));
+            }
+            let Some(current) = maps[axis].entry(field) else {
+                return Err(StopFrameError::UncoveredOutput(axis, field));
+            };
+            for (earlier, prior_map) in maps.iter().enumerate().take(axis) {
+                for prior_field in [Cia402PdoField::Controlword, Cia402PdoField::ModeOfOperation] {
+                    if prior_map.entry(prior_field).is_some_and(|prior| {
+                        current.bit_offset
+                            < prior.bit_offset.saturating_add(prior.bit_length as usize)
+                            && prior.bit_offset
+                                < current
+                                    .bit_offset
+                                    .saturating_add(current.bit_length as usize)
+                    }) {
+                        return Err(StopFrameError::OverlappingOutput(earlier, axis));
+                    }
+                }
+            }
+        }
+        maps[axis]
+            .write_control(&mut image, modes[axis], output.controlword)
+            .map_err(|error| StopFrameError::Pdo(axis, error))?;
+    }
+
+    master.reap_expired_rx_before_tx(port.now_ns());
+    let frame = master
+        .acquire_frame(generation, deadline_ns)
+        .map_err(StopFrameError::FramePool)?;
+    let length = match master.build_and_arm_frame_from_plan(frame, plan, &image) {
+        Ok(length) => length,
+        Err(error) => {
+            // The nonzero deadline and pre-arm index check make a failed build
+            // leave no new RX expectations; never cancel an older slot's RX.
+            master
+                .release_unarmed_frame(frame)
+                .map_err(StopFrameError::FramePool)?;
+            return Err(StopFrameError::Build(error));
+        }
+    };
+    master
+        .submit_frame(port, frame)
+        .map_err(StopFrameError::Transmit)?;
+    decision
+        .mark_stop_transmitted()
+        .map_err(|_| StopFrameError::InvalidDecision)?;
+    Ok(length)
+}
+
+#[cfg(feature = "cia402")]
+fn writable_domain_field<const BYTES: usize, const SEGMENTS: usize, const DATAGRAMS: usize>(
+    map: &Cia402PdoMap,
+    field: Cia402PdoField,
+    domain: &Domain<BYTES, SEGMENTS>,
+    plan: &FramePlan<DATAGRAMS>,
+) -> bool {
+    let Some(entry) = map.entry(field) else {
+        return false;
+    };
+    let Some(end_bit) = entry.bit_offset.checked_add(entry.bit_length as usize) else {
+        return false;
+    };
+    let first_byte = entry.bit_offset / 8;
+    let end_byte = end_bit.div_ceil(8);
+    let Some(field_start) = u32::try_from(first_byte)
+        .ok()
+        .and_then(|offset| domain.logical_address().checked_add(offset))
+    else {
+        return false;
+    };
+    let Some(field_end) = u32::try_from(end_byte)
+        .ok()
+        .and_then(|offset| domain.logical_address().checked_add(offset))
+    else {
+        return false;
+    };
+    // A later writable datagram must not rewrite this logical PDO field from
+    // unrelated process-image bytes, even if an earlier datagram covers it.
+    if plan.datagrams().iter().any(|datagram| {
+        matches!(datagram.command, Command::Lrw | Command::Lwr)
+            && datagram
+                .address
+                .checked_add(datagram.payload_len as u32)
+                .is_none_or(|end| {
+                    datagram.address < field_end
+                        && field_start < end
+                        && u32::try_from(datagram.payload_offset)
+                            .ok()
+                            .and_then(|offset| domain.logical_address().checked_add(offset))
+                            != Some(datagram.address)
+                })
+    }) {
+        return false;
+    }
+    plan.datagrams().iter().any(|datagram| {
+        matches!(datagram.command, Command::Lrw | Command::Lwr)
+            && datagram.payload_offset <= first_byte
+            && datagram
+                .payload_offset
+                .checked_add(datagram.payload_len)
+                .is_some_and(|end| end >= end_byte && end <= BYTES)
+            && u32::try_from(datagram.payload_offset)
+                .ok()
+                .and_then(|offset| domain.logical_address().checked_add(offset))
+                == Some(datagram.address)
+            && domain.segments().iter().any(|segment| {
+                segment.datagram_index == datagram.index
+                    && segment.input_offset == datagram.payload_offset
+                    && segment.len == datagram.payload_len
+                    && segment.expected_wkc != 0
+                    && segment.expected_wkc == datagram.expected_wkc
+            })
+    })
+}
 
 /// One quality snapshot bound to a frozen schedule Domain ID, in schedule order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

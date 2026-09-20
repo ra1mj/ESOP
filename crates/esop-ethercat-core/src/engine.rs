@@ -291,6 +291,13 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
         self.frames.acquire(sequence, generation, deadline_ns)
     }
 
+    /// Release a frame whose build/arm attempt failed before installing any
+    /// new RX expectations. Never use this after a successful arm: a submitted
+    /// frame must be released by `submit_frame` or its TX error path.
+    pub fn release_unarmed_frame(&mut self, handle: FrameHandle) -> Result<(), FramePoolError> {
+        self.frames.release(handle)
+    }
+
     pub fn frame_slot_mut(
         &mut self,
         handle: FrameHandle,
