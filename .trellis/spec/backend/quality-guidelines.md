@@ -54,7 +54,8 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   must request Disable explicitly rather than rely on Hold's consumer meaning;
   exiting maintenance from Active/Stopping must retain Disable until stop
   acknowledgment, and maintenance toggles must never clear a latched fault.
-  Snapshot stop_action must match the action sent to the drive.
+  The legacy scalar snapshot stop_action is only a default/summary; match
+  actual per-axis issued actions to the CiA 402 controlwords instead.
 - Revoke the motion permit in the same cycle an active guard enters Stopping.
   Configure the frozen RT `GuardPolicy.allowed_axis_mask` explicitly (the
   conservative default denies all axes), and reject any permit outside it
@@ -73,9 +74,13 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   originally armed mask for stop requests, and force every other axis to
   inhibit. Maintenance overrides every armed axis to Disable. The CiA 402
   adapter implements QuickStop/Disable; until a validated controlled target
-  generator exists, Hold/RampToZero must fail closed as Disable. ProcBuf v3's
-  scalar `stop_action` is the legacy default summary, not per-axis observed
-  feedback; do not publish or consume it as such without an ABI upgrade.
+  generator exists, Hold/RampToZero must fail closed as Disable. ProcBuf v4
+  carries per-axis requested and issued actions plus fresh, quality-checked
+  feedback proof bits. Bind every sample to the guard decision and State
+  sequence, require observed stop feedback strictly after the first stop
+  issuance cycle, stage the fixed array before publication, and never infer drive
+  execution from a sent controlword. The scalar `stop_action` remains only a
+  legacy default/summary; old ABI attachments must fail validation.
 - A required hard-class gate (platform, configuration, topology, drive, cycle
   budget, or external safety) entering bad or unavailable state while active
   must stage a fault through Stopping and verified stop acknowledgment before

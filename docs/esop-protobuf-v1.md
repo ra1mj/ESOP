@@ -12,7 +12,7 @@
 当前契约覆盖：
 
 - `RobotState`、`JointState`、`IoState` 和 `QualitySummary`
-- `LifecycleSummary`、`DiagnosticEvent` 和审计关联字段
+- `LifecycleSummary`（包括可选逐轴 `AxisStopEvidence`）、`DiagnosticEvent` 和审计关联字段
 - `MotionCommand`、`CommandReply` 和外部命令来源/TTL/序号/策略版本
 - `RuntimeIncident`、`RuntimeEvidence`、查询请求与查询响应
 
@@ -46,6 +46,7 @@ independently; baseline bindings are included only by integration tests.
 | Frozen v1 / Current v1 | Seven top-level messages, including representative nested state, command targets and incident evidence |
 | Current v1 / Frozen v1 | The same non-default values survive decoding with the frozen generated bindings |
 | Additive test writer / Both v1 readers | Unknown fields are ignored; decode/re-encode drops them |
+| Current v1 axis stop evidence / Frozen v1 reader | Old reader preserves legacy summary but ignores new per-axis evidence; re-encoding loses the evidence |
 | Unknown enum writer / Both v1 readers | Numeric value remains unknown and typed conversion fails |
 
 The descriptor gate rejects package/syntax changes, removed messages, field

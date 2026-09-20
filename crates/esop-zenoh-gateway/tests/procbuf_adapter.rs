@@ -1,13 +1,18 @@
 #![cfg(feature = "zenoh")]
 
 use esop_lifecycle_guard::{
-    CyclicQuality, GateId, GuardPolicy, LifecycleGuard, LifecycleState as GuardState, MotionPermit,
-    PermitError, StopAction as GuardStop,
-    procbuf::{cyclic_quality_to_procbuf, lifecycle_to_procbuf},
+    AxisStopPolicy, CyclicQuality, GateId, GuardPolicy, LifecycleGuard,
+    LifecycleState as GuardState, MotionPermit, PermitError, StopAction as GuardStop, StopFeedback,
+    cia402::step_axis_bank,
+    procbuf::{
+        AxisEvidenceError, axis_stops_to_procbuf, cyclic_quality_to_procbuf, lifecycle_to_procbuf,
+    },
 };
 use esop_procbuf::{
-    EventSeverity as ProcSeverity, HeaderError, ProcBuf, ProcBufEvent, QualityFact, StatePage,
+    AxisStopEvidence as RawAxisStopEvidence, EventSeverity as ProcSeverity, HeaderError, ProcBuf,
+    ProcBufEvent, QualityFact, StatePage,
 };
+use esop_profile_cia402::{Cia402AxisBank, DriveRequest};
 use esop_proto::v1::{EventSeverity, LifecycleState, StopAction};
 use esop_proto::{CURRENT_SCHEMA_VERSION, Message};
 use esop_zenoh_gateway::procbuf_adapter::{ProcBufProjector, ProjectionError};
@@ -173,6 +178,220 @@ fn guard_snapshot_flows_through_procbuf_to_protobuf_without_losing_gate_or_audit
 }
 
 #[test]
+fn per_axis_stop_request_issued_control_and_observed_feedback_survive_projection() {
+    let policy = GuardPolicy {
+        enter_good_cycles: 1,
+        allowed_axis_mask: 0b11,
+        ..GuardPolicy::conservative()
+    };
+    let actions = AxisStopPolicy::uniform(GuardStop::QuickStop)
+        .with_action(1, GuardStop::Hold)
+        .unwrap();
+    let mut guard =
+        LifecycleGuard::new_with_axis_stop_policy(GateId::Link.bit(), 7, policy, actions);
+    let mut bank = Cia402AxisBank::<2>::new();
+    guard.update_gate(GateId::Link, true, 1, 0);
+    guard
+        .request_rearm(
+            MotionPermit {
+                boot_id: 7,
+                source_id: 1,
+                permit_epoch: 1,
+                sequence: 1,
+                axis_mask: 0b11,
+                expires_at_ns: 100,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
+            },
+            1,
+            1,
+        )
+        .unwrap();
+    guard.update_gate(GateId::Link, false, 2, 0xCAFE);
+    let buffer = TestBuf::new(42, 7);
+    let mut projector = projector();
+    let mut initial = state(2);
+    {
+        let decision = guard.cycle_axes(2, 2);
+        let outputs = step_axis_bank(&mut bank, &decision, [0x0027; 2], [DriveRequest::Enable; 2]);
+        axis_stops_to_procbuf(&mut initial, &decision, &outputs, None).unwrap();
+    }
+    initial.lifecycle = lifecycle_to_procbuf(guard.snapshot(2, 2), 2);
+    buffer.publish_state(initial).unwrap();
+    let first = projector.read_state(&buffer).unwrap().unwrap();
+    assert!(
+        first
+            .lifecycle
+            .unwrap()
+            .axis_stops
+            .iter()
+            .all(|stop| !stop.feedback_observed)
+    );
+
+    guard.update_gate(GateId::Link, false, 3, 0xCAFE);
+    let decision = guard.cycle_axes(3, 3);
+    let outputs = step_axis_bank(
+        &mut bank,
+        &decision,
+        [0x0040, 0x0027],
+        [DriveRequest::Enable; 2],
+    );
+    let mut state = state(3);
+    let feedback = StopFeedback {
+        cycle: 3,
+        observed_axis_mask: 0b11,
+        stationary_axis_mask: 0b01,
+        non_enabled_axis_mask: 0b01,
+    };
+    axis_stops_to_procbuf(&mut state, &decision, &outputs, Some(feedback)).unwrap();
+    state.lifecycle = lifecycle_to_procbuf(guard.snapshot(3, 3), 3);
+    buffer.publish_state(state).unwrap();
+    let projected = projector.read_state(&buffer).unwrap().unwrap();
+    let stops = projected.lifecycle.unwrap().axis_stops;
+    assert_eq!(stops.len(), 2);
+    assert_eq!(
+        (
+            stops[0].axis,
+            stops[0].requested_action,
+            stops[0].issued_action
+        ),
+        (
+            0,
+            StopAction::QuickStop as i32,
+            StopAction::QuickStop as i32
+        )
+    );
+    assert_eq!(
+        (
+            stops[1].axis,
+            stops[1].requested_action,
+            stops[1].issued_action
+        ),
+        (1, StopAction::Hold as i32, StopAction::Disable as i32)
+    );
+    assert_eq!((stops[0].request_cycle, stops[0].feedback_cycle), (3, 3));
+    assert!(stops[0].feedback_observed && stops[0].stationary && stops[0].non_enabled);
+    assert!(stops[1].feedback_observed && !stops[1].stationary && !stops[1].non_enabled);
+}
+
+#[test]
+fn stale_and_unsafe_axis_stop_evidence_cannot_be_published_as_current() {
+    let mut guard = LifecycleGuard::new_with_axis_stop_policy(
+        0,
+        7,
+        GuardPolicy {
+            allowed_axis_mask: 1,
+            ..GuardPolicy::conservative()
+        },
+        AxisStopPolicy::uniform(GuardStop::QuickStop),
+    );
+    guard
+        .request_rearm(
+            MotionPermit {
+                boot_id: 7,
+                source_id: 1,
+                permit_epoch: 1,
+                sequence: 1,
+                axis_mask: 1,
+                expires_at_ns: 100,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
+            },
+            1,
+            1,
+        )
+        .unwrap();
+    guard.set_maintenance(true, 2);
+    let decision = guard.cycle_axes(2, 2);
+    let mut bank = Cia402AxisBank::<2>::new();
+    let outputs = step_axis_bank(&mut bank, &decision, [0x0027; 2], [DriveRequest::Enable; 2]);
+    let mut page = state(2);
+    let initial = page.axis_stops;
+    let stale = StopFeedback {
+        cycle: 1,
+        observed_axis_mask: 1,
+        stationary_axis_mask: 1,
+        non_enabled_axis_mask: 1,
+    };
+    assert_eq!(
+        axis_stops_to_procbuf(&mut page, &decision, &outputs, Some(stale)),
+        Err(AxisEvidenceError::CycleMismatch)
+    );
+    assert_eq!(page.axis_stops, initial);
+    let premature = StopFeedback {
+        cycle: 2,
+        observed_axis_mask: 1,
+        stationary_axis_mask: 1,
+        non_enabled_axis_mask: 1,
+    };
+    assert_eq!(
+        axis_stops_to_procbuf(&mut page, &decision, &outputs, Some(premature)),
+        Err(AxisEvidenceError::FeedbackBeforeStop)
+    );
+    assert_eq!(page.axis_stops, initial);
+    let outside = StopFeedback {
+        cycle: 2,
+        observed_axis_mask: 2,
+        stationary_axis_mask: 0,
+        non_enabled_axis_mask: 0,
+    };
+    assert_eq!(
+        axis_stops_to_procbuf(&mut page, &decision, &outputs, Some(outside)),
+        Err(AxisEvidenceError::InvalidFeedback)
+    );
+    assert_eq!(page.axis_stops, initial);
+    let mut unsafe_outputs = outputs;
+    unsafe_outputs[0].controlword = 0x000f;
+    assert_eq!(
+        axis_stops_to_procbuf(&mut page, &decision, &unsafe_outputs, None),
+        Err(AxisEvidenceError::UnsafeOutput(0))
+    );
+    assert_eq!(page.axis_stops, initial);
+    page.sequence = 3;
+    assert_eq!(
+        axis_stops_to_procbuf(&mut page, &decision, &outputs, None),
+        Err(AxisEvidenceError::CycleMismatch)
+    );
+    page.sequence = 2;
+    axis_stops_to_procbuf(&mut page, &decision, &outputs, None).unwrap();
+    assert_eq!(
+        page.axis_stops[0].requested_action,
+        StopAction::Disable as u8
+    );
+    assert_eq!(page.axis_stops[0].feedback_valid, 0);
+    assert_eq!(page.axis_stops[0].feedback_cycle, 0);
+    assert_eq!(page.axis_stops[1], RawAxisStopEvidence::EMPTY);
+    let mut oversized = StatePage::<33, 0, 0>::new(7);
+    oversized.sequence = 2;
+    assert_eq!(
+        axis_stops_to_procbuf(&mut oversized, &decision, &[outputs[0]; 33], None),
+        Err(AxisEvidenceError::AxisCapacityExceeded)
+    );
+
+    let buffer = TestBuf::new(42, 7);
+    let mut old = state(4);
+    old.axis_stops[0] = RawAxisStopEvidence {
+        request_cycle: 3,
+        requested_action: 3,
+        issued_action: 3,
+        ..RawAxisStopEvidence::EMPTY
+    };
+    buffer.publish_state(old).unwrap();
+    assert!(
+        projector()
+            .read_state(&buffer)
+            .unwrap()
+            .unwrap()
+            .lifecycle
+            .unwrap()
+            .axis_stops
+            .is_empty()
+    );
+}
+
+#[test]
 fn raw_cyclic_quality_projects_all_observed_facts_without_using_qualified_gate_masks() {
     let buffer = TestBuf::new(42, 7);
     let facts = quality_facts();
@@ -308,6 +527,32 @@ fn checks_header_before_consumption_and_rejects_replay_or_invalid_state() {
     ));
     buffer.publish_state(state(13)).unwrap();
     assert_eq!(projector.read_state(&buffer).unwrap().unwrap().sequence, 13);
+    let mut stale_feedback = state(14);
+    stale_feedback.axis_stops[0] = RawAxisStopEvidence {
+        request_cycle: 14,
+        feedback_cycle: 13,
+        requested_action: StopAction::QuickStop as u8,
+        issued_action: StopAction::QuickStop as u8,
+        feedback_valid: 1,
+        ..RawAxisStopEvidence::EMPTY
+    };
+    buffer.publish_state(stale_feedback).unwrap();
+    assert_eq!(
+        projector.read_state(&buffer),
+        Err(ProjectionError::InvalidAxisStopEvidence(0))
+    );
+    let mut inconsistent = state(15);
+    inconsistent.axis_stops[0] = RawAxisStopEvidence {
+        request_cycle: 15,
+        requested_action: StopAction::QuickStop as u8,
+        issued_action: StopAction::Hold as u8,
+        ..RawAxisStopEvidence::EMPTY
+    };
+    buffer.publish_state(inconsistent).unwrap();
+    assert_eq!(
+        projector.read_state(&buffer),
+        Err(ProjectionError::InvalidAxisStopEvidence(0))
+    );
 }
 
 #[test]

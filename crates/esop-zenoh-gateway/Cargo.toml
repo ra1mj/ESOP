@@ -26,7 +26,8 @@ serde_json = { version = "1.0.145", optional = true }
 zenoh = { version = "1.10.1", optional = true }
 
 [dev-dependencies]
-esop-lifecycle-guard = { path = "../esop-lifecycle-guard", features = ["procbuf"] }
+esop-lifecycle-guard = { path = "../esop-lifecycle-guard", features = ["procbuf", "cia402"] }
+esop-profile-cia402 = { path = "../esop-profile-cia402" }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "time"] }
 
 [lib]

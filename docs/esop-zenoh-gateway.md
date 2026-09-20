@@ -2,7 +2,7 @@
 
 - 文档版本：1.0
 - 日期：2026-09-20
-- 状态：固定 key namespace、方向策略、可选 Zenoh Session、ProcBuf v3 生命周期与原始周期质量投影、事件投影、v1 命令和类型化查询边界、host QoS、生产安全配置准入及 loopback router 验证已实现；真实设备质量采集、远程 ACL 和生产认证部署待完成
+- 状态：固定 key namespace、方向策略、可选 Zenoh Session、ProcBuf v4 生命周期、逐轴停止证据与原始周期质量投影、事件投影、v1 命令和类型化查询边界、host QoS、生产安全配置准入及 loopback router 验证已实现；真实设备质量采集、远程 ACL 和生产认证部署待完成
 - 上游需求：PRD FR-031、FR-030、FR-045、FR-051
 
 ## 1. Key namespace
@@ -73,6 +73,6 @@ callback 运行在 Zenoh host runtime：命令 callback 应只把数据投递到
 
 `motion_permit_current` 仅表示 permit 本身未过期，不表示当前可以驱动：命令门槛失效时，状态可能已进入 `Stopping`，而 permit 仍在有效期。执行侧始终以 MLG 状态和门槛决策约束 CiA 402，不以该布尔字段单独判定运动授权。
 
-ProcBuf 固定布局已升级到 ABI v3；v1/v2 reader/writer 不能复用 v3 区域，attach 时必须核对 version、layout hash、容量、robot 和 boot ID。升级需停止旧实时端与监督进程并重新创建区域，再启动相同版本的双方；旧 header 在单元测试中明确被拒绝。Protobuf 仍为 v1 外部契约，不能据此推断实时共享内存 ABI 与 Protobuf 版本相同。
+ProcBuf 固定布局已升级到 ABI v4；v1/v2/v3 reader/writer 不能复用 v4 区域，attach 时必须核对 version、layout hash、容量、robot 和 boot ID。升级需停止旧实时端与监督进程并重新创建区域，再启动相同版本的双方；旧 header 在单元测试中明确被拒绝。Protobuf 仍为 v1 外部契约，新增 `LifecycleSummary.axis_stops` 只携带本周期请求/发出动作和合格的驱动反馈证明位，不表示真实执行的停止动作；旧 Protobuf 读者丢弃新增字段，不能充当透明中继。
 
 补充验证：测试进程为每个场景动态申请 loopback 临时端口并独占 zenohd，覆盖 state/event/incident 的 v1 payload、router 重启后的 health recovery、旧命令 TTL/代际拒绝，以及恢复必须经过新 permit 和显式 rearm。ZenohGateway::refresh_health 使用 session 的 router/peer 连接快照；它属于 host supervisor 观察，不是 motion permit 或应用层投递确认。[Zenoh SessionInfo API](https://docs.rs/zenoh/1.10.1/zenoh/session/struct.SessionInfo.html)

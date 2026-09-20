@@ -4,8 +4,8 @@ use esop_procbuf::{
     EventSeverity as ProcSeverity, HeaderError, ProcBuf, ProcBufEvent, QualityFact, StateSnapshot,
 };
 use esop_proto::v1::{
-    DiagnosticEvent, EventSeverity, IoState, JointState, LifecycleState, LifecycleSummary,
-    QualitySummary, RobotState, StopAction,
+    AxisStopEvidence, DiagnosticEvent, EventSeverity, IoState, JointState, LifecycleState,
+    LifecycleSummary, QualitySummary, RobotState, StopAction,
 };
 use esop_proto::{CURRENT_SCHEMA_VERSION, Message};
 
@@ -16,6 +16,7 @@ pub enum ProjectionError {
     Header(HeaderError),
     InvalidLifecycleState(u8),
     InvalidStopAction(u8),
+    InvalidAxisStopEvidence(usize),
     InvalidRobotId,
     NonFiniteJoint(usize),
     InvalidQualityMask,
@@ -129,6 +130,43 @@ impl ProcBufProjector {
             3 => StopAction::Disable,
             value => return Err(ProjectionError::InvalidStopAction(value)),
         };
+        let mut axis_stops = Vec::new();
+        for (axis, evidence) in state.axis_stops.iter().enumerate() {
+            if evidence.request_cycle != state.sequence {
+                continue;
+            }
+            if !(1..=4).contains(&evidence.requested_action)
+                || (evidence.issued_action != StopAction::QuickStop as u8
+                    && evidence.issued_action != StopAction::Disable as u8)
+                || evidence.issued_action
+                    != if evidence.requested_action == StopAction::QuickStop as u8 {
+                        StopAction::QuickStop as u8
+                    } else {
+                        StopAction::Disable as u8
+                    }
+                || evidence.feedback_valid > 1
+                || evidence.stationary > 1
+                || evidence.non_enabled > 1
+                || (evidence.feedback_valid == 0
+                    && (evidence.feedback_cycle != 0
+                        || evidence.stationary != 0
+                        || evidence.non_enabled != 0))
+                || (evidence.feedback_valid == 1 && evidence.feedback_cycle != state.sequence)
+                || evidence.reserved != [0; 3]
+            {
+                return Err(ProjectionError::InvalidAxisStopEvidence(axis));
+            }
+            axis_stops.push(AxisStopEvidence {
+                axis: axis as u32,
+                requested_action: i32::from(evidence.requested_action),
+                issued_action: i32::from(evidence.issued_action),
+                feedback_observed: evidence.feedback_valid != 0,
+                stationary: evidence.stationary != 0,
+                non_enabled: evidence.non_enabled != 0,
+                request_cycle: evidence.request_cycle,
+                feedback_cycle: evidence.feedback_cycle,
+            });
+        }
         let quality = if state.quality.sequence == state.sequence {
             let facts = state.quality.cyclic;
             if !facts.well_formed() {
@@ -207,6 +245,7 @@ impl ProcBufProjector {
                 transition_cycle: state.lifecycle.transition_cycle,
                 recovery_count: state.lifecycle.recovery_count,
                 permit_audit_sequence: state.lifecycle.permit_audit_sequence,
+                axis_stops,
             }),
             quality,
             joints,

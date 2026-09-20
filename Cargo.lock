@@ -718,6 +718,7 @@ dependencies = [
  "esop-command-gateway",
  "esop-lifecycle-guard",
  "esop-procbuf",
+ "esop-profile-cia402",
  "esop-proto",
  "serde_json",
  "tokio",

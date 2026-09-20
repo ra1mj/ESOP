@@ -63,6 +63,7 @@ message RobotState {
 
 message LifecycleSummary {
   LifecycleState state = 1;
+  // Legacy scalar default/summary, not a per-axis issued or observed action.
   StopAction stop_action = 2;
   uint32 required_gate_mask = 3;
   uint32 valid_gate_mask = 4;
@@ -80,6 +81,18 @@ message LifecycleSummary {
 
   reserved 16, 17;
   reserved "gate_score";
+  repeated AxisStopEvidence axis_stops = 18;
+}
+
+message AxisStopEvidence {
+  uint32 axis = 1;
+  StopAction requested_action = 2;
+  StopAction issued_action = 3;
+  bool feedback_observed = 4;
+  bool stationary = 5;
+  bool non_enabled = 6;
+  uint64 request_cycle = 7;
+  uint64 feedback_cycle = 8;
 }
 
 message QualitySummary {

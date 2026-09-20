@@ -327,9 +327,18 @@ pub enum AxisDirective {
 pub struct AxisCycleDecision<'a> {
     guard: &'a LifecycleGuard,
     action: LifecycleAction,
+    cycle: u64,
 }
 
 impl AxisCycleDecision<'_> {
+    pub const fn cycle(&self) -> u64 {
+        self.cycle
+    }
+
+    pub const fn stop_issued_cycle(&self) -> Option<u64> {
+        self.guard.stop_issued_cycle
+    }
+
     pub const fn action(&self) -> LifecycleAction {
         self.action
     }
@@ -1054,6 +1063,7 @@ impl LifecycleGuard {
         AxisCycleDecision {
             guard: self,
             action,
+            cycle,
         }
     }
 

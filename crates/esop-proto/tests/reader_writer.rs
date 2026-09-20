@@ -197,3 +197,34 @@ fn unknown_enum_values_remain_unknown_for_both_readers() {
     assert!(baseline::LifecycleState::try_from(old.state).is_err());
     assert!(v1::LifecycleState::try_from(new.state).is_err());
 }
+
+#[test]
+fn additive_axis_stop_evidence_is_visible_to_new_readers_without_changing_legacy_summary() {
+    let message = v1::LifecycleSummary {
+        state: v1::LifecycleState::Stopping as i32,
+        stop_action: v1::StopAction::QuickStop as i32,
+        axis_stops: vec![v1::AxisStopEvidence {
+            axis: 1,
+            requested_action: v1::StopAction::Hold as i32,
+            issued_action: v1::StopAction::Disable as i32,
+            feedback_observed: true,
+            stationary: false,
+            non_enabled: false,
+            request_cycle: 9,
+            feedback_cycle: 9,
+        }],
+        ..Default::default()
+    };
+    let bytes = message.encode_to_vec();
+    let old = baseline::LifecycleSummary::decode(bytes.as_slice()).unwrap();
+    assert_eq!(old.state, message.state);
+    assert_eq!(old.stop_action, message.stop_action);
+    let projected = v1::LifecycleSummary::decode(bytes.as_slice()).unwrap();
+    assert_eq!(projected.axis_stops, message.axis_stops);
+    assert!(
+        v1::LifecycleSummary::decode(old.encode_to_vec().as_slice())
+            .unwrap()
+            .axis_stops
+            .is_empty()
+    );
+}

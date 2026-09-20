@@ -3,6 +3,13 @@
 use crate::{CyclicQuality, LifecycleSnapshot};
 use esop_procbuf::{CyclicQualityMask, LifecycleSummary, QualityFact, StatePage};
 
+#[cfg(feature = "cia402")]
+use crate::{AxisCycleDecision, AxisDirective, MAX_MOTION_AXES, StopAction, StopFeedback};
+#[cfg(feature = "cia402")]
+use esop_procbuf::AxisStopEvidence;
+#[cfg(feature = "cia402")]
+use esop_profile_cia402::{CONTROLWORD_DISABLE_VOLTAGE, CONTROLWORD_QUICK_STOP, Cia402Output};
+
 #[cfg(feature = "ethercat")]
 use crate::ethercat::{
     OtherCycleFacts, ScheduledDomainQuality, cyclic_quality_from_domains,
@@ -161,6 +168,110 @@ pub fn lifecycle_to_procbuf(
         recovery_count: snapshot.recovery_count,
         permit_audit_sequence: snapshot.permit_audit_sequence,
     }
+}
+
+#[cfg(feature = "cia402")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AxisEvidenceError {
+    AxisCapacityExceeded,
+    CycleMismatch,
+    FeedbackBeforeStop,
+    InvalidFeedback,
+    UnsafeOutput(usize),
+}
+
+/// Stage evidence from the same cycle's guard decision and CiA 402 outputs.
+/// Feedback must come from quality-checked current-cycle inputs; booleans are
+/// proof of stationary/non-enabled only when feedback_valid is set.
+#[cfg(feature = "cia402")]
+pub fn axis_stops_to_procbuf<const AXES: usize, const IO: usize, const DOMAINS: usize>(
+    state: &mut StatePage<AXES, IO, DOMAINS>,
+    decision: &AxisCycleDecision<'_>,
+    outputs: &[Cia402Output; AXES],
+    feedback: Option<StopFeedback>,
+) -> Result<(), AxisEvidenceError> {
+    if AXES > MAX_MOTION_AXES {
+        return Err(AxisEvidenceError::AxisCapacityExceeded);
+    }
+    if state.sequence == 0 || state.sequence != decision.cycle() {
+        return Err(AxisEvidenceError::CycleMismatch);
+    }
+    let axes_mask = if AXES == MAX_MOTION_AXES {
+        u32::MAX
+    } else {
+        (1u32 << AXES) - 1
+    };
+    let stopping_mask = decision.stopping_axis_mask();
+    if stopping_mask & !axes_mask != 0 || decision.permitted_axis_mask() & !axes_mask != 0 {
+        return Err(AxisEvidenceError::AxisCapacityExceeded);
+    }
+    if let Some(sample) = feedback {
+        if sample.cycle != state.sequence {
+            return Err(AxisEvidenceError::CycleMismatch);
+        }
+        if sample.observed_axis_mask & !stopping_mask != 0
+            || (sample.stationary_axis_mask | sample.non_enabled_axis_mask)
+                & !sample.observed_axis_mask
+                != 0
+        {
+            return Err(AxisEvidenceError::InvalidFeedback);
+        }
+        if sample.observed_axis_mask != 0
+            && !decision
+                .stop_issued_cycle()
+                .is_some_and(|issued| sample.cycle > issued)
+        {
+            return Err(AxisEvidenceError::FeedbackBeforeStop);
+        }
+    }
+
+    let mut evidence = [AxisStopEvidence::EMPTY; AXES];
+    for (axis, output) in outputs.iter().enumerate() {
+        match decision.axis(axis) {
+            AxisDirective::Stop(requested) => {
+                let issued = match output.controlword {
+                    CONTROLWORD_QUICK_STOP => StopAction::QuickStop,
+                    CONTROLWORD_DISABLE_VOLTAGE => StopAction::Disable,
+                    _ => return Err(AxisEvidenceError::UnsafeOutput(axis)),
+                };
+                let expected = if requested == StopAction::QuickStop {
+                    StopAction::QuickStop
+                } else {
+                    StopAction::Disable
+                };
+                if issued != expected || output.motion_allowed || output.fault_reset_pulse {
+                    return Err(AxisEvidenceError::UnsafeOutput(axis));
+                }
+                let bit = 1u32 << axis;
+                let observed = feedback.is_some_and(|sample| sample.observed_axis_mask & bit != 0);
+                evidence[axis] = AxisStopEvidence {
+                    request_cycle: state.sequence,
+                    feedback_cycle: if observed { state.sequence } else { 0 },
+                    requested_action: requested as u8 + 1,
+                    issued_action: issued as u8 + 1,
+                    feedback_valid: observed as u8,
+                    stationary: feedback
+                        .is_some_and(|sample| observed && sample.stationary_axis_mask & bit != 0)
+                        as u8,
+                    non_enabled: feedback
+                        .is_some_and(|sample| observed && sample.non_enabled_axis_mask & bit != 0)
+                        as u8,
+                    reserved: [0; 3],
+                };
+            }
+            AxisDirective::Inhibit => {
+                if output.controlword != CONTROLWORD_DISABLE_VOLTAGE
+                    || output.motion_allowed
+                    || output.fault_reset_pulse
+                {
+                    return Err(AxisEvidenceError::UnsafeOutput(axis));
+                }
+            }
+            AxisDirective::EnableAllowed => {}
+        }
+    }
+    state.axis_stops = evidence;
+    Ok(())
 }
 
 #[cfg(all(test, feature = "ethercat"))]

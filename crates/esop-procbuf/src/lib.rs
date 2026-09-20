@@ -12,7 +12,7 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 pub const ABI_MAGIC: u32 = 0x4553_4F50;
-pub const ABI_VERSION: u16 = 3;
+pub const ABI_VERSION: u16 = 4;
 
 const PAGE_FREE: u32 = 0;
 const PAGE_WRITING: u32 = 1;
@@ -487,6 +487,35 @@ impl LifecycleSummary {
     };
 }
 
+/// Actions use Protobuf StopAction discriminants: 0 means no stop request;
+/// 1..=4 mean Hold, RampToZero, QuickStop and Disable respectively.
+/// An issued action denotes the controlword sent, not drive execution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct AxisStopEvidence {
+    pub request_cycle: u64,
+    pub feedback_cycle: u64,
+    pub requested_action: u8,
+    pub issued_action: u8,
+    pub feedback_valid: u8,
+    pub stationary: u8,
+    pub non_enabled: u8,
+    pub reserved: [u8; 3],
+}
+
+impl AxisStopEvidence {
+    pub const EMPTY: Self = Self {
+        request_cycle: 0,
+        feedback_cycle: 0,
+        requested_action: 0,
+        issued_action: 0,
+        feedback_valid: 0,
+        stationary: 0,
+        non_enabled: 0,
+        reserved: [0; 3],
+    };
+}
+
 pub const LIFECYCLE_HISTORY_CAPACITY: usize = 8;
 
 /// Raw lifecycle transition record embedded in a ProcBuf state snapshot.
@@ -598,6 +627,7 @@ pub struct StatePage<const AXES: usize, const IO: usize, const DOMAINS: usize> {
     pub io: [IoState; IO],
     pub quality: QualityPage<DOMAINS>,
     pub lifecycle: LifecycleSummary,
+    pub axis_stops: [AxisStopEvidence; AXES],
     pub lifecycle_history: LifecycleHistory,
     pub runtime_observation: RuntimeObservation,
 }
@@ -613,6 +643,7 @@ impl<const AXES: usize, const IO: usize, const DOMAINS: usize> StatePage<AXES, I
             io: [IoState::EMPTY; IO],
             quality: QualityPage::new(),
             lifecycle: LifecycleSummary::EMPTY,
+            axis_stops: [AxisStopEvidence::EMPTY; AXES],
             lifecycle_history: LifecycleHistory::EMPTY,
             runtime_observation: RuntimeObservation::EMPTY,
         }
@@ -1007,12 +1038,14 @@ mod tests {
         let buffer = TestBuf::new(42, 9);
         assert_eq!(buffer.validate_header(42, 9), Ok(()));
         assert_eq!(buffer.header().abi_version, ABI_VERSION);
-        let mut previous_abi = buffer.header();
-        previous_abi.abi_version = 2;
-        assert_eq!(
-            previous_abi.validate::<2, 1, 2, 2>(42, 9),
-            Err(HeaderError::AbiVersionMismatch)
-        );
+        for version in [1, 2, 3] {
+            let mut previous_abi = buffer.header();
+            previous_abi.abi_version = version;
+            assert_eq!(
+                previous_abi.validate::<2, 1, 2, 2>(42, 9),
+                Err(HeaderError::AbiVersionMismatch)
+            );
+        }
         assert_eq!(
             buffer.validate_header(41, 9),
             Err(HeaderError::RobotIdMismatch)
