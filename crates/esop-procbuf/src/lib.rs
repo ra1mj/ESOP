@@ -12,7 +12,7 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 pub const ABI_MAGIC: u32 = 0x4553_4F50;
-pub const ABI_VERSION: u16 = 2;
+pub const ABI_VERSION: u16 = 3;
 
 const PAGE_FREE: u32 = 0;
 const PAGE_WRITING: u32 = 1;
@@ -352,6 +352,57 @@ impl DomainQuality {
     };
 }
 
+/// Raw per-cycle observations, distinct from the debounced MLG gate masks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum QualityFact {
+    Platform = 0,
+    Configuration = 1,
+    Topology = 2,
+    DistributedClock = 3,
+    Drive = 4,
+    Domain = 5,
+    Wkc = 6,
+    Command = 7,
+    Supervisor = 8,
+    ExternalSafety = 9,
+    CycleBudget = 10,
+}
+
+impl QualityFact {
+    pub const ALL_MASK: u16 = (1 << 11) - 1;
+
+    pub const fn bit(self) -> u16 {
+        1u16 << (self as u8)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
+pub struct CyclicQualityMask {
+    pub known_mask: u16,
+    pub good_mask: u16,
+}
+
+impl CyclicQualityMask {
+    pub const EMPTY: Self = Self {
+        known_mask: 0,
+        good_mask: 0,
+    };
+
+    pub const fn well_formed(self) -> bool {
+        self.known_mask & !QualityFact::ALL_MASK == 0 && self.good_mask & !self.known_mask == 0
+    }
+
+    pub const fn complete(self) -> bool {
+        self.well_formed() && self.known_mask == QualityFact::ALL_MASK
+    }
+
+    pub const fn good(self, fact: QualityFact) -> bool {
+        self.good_mask & fact.bit() != 0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct QualityPage<const DOMAINS: usize> {
@@ -364,6 +415,7 @@ pub struct QualityPage<const DOMAINS: usize> {
     pub command_age_cycles: u64,
     pub deadline_misses: u64,
     pub dc_offset_ns: i64,
+    pub cyclic: CyclicQualityMask,
     pub domains: [DomainQuality; DOMAINS],
 }
 
@@ -379,6 +431,7 @@ impl<const DOMAINS: usize> QualityPage<DOMAINS> {
             command_age_cycles: 0,
             deadline_misses: 0,
             dc_offset_ns: 0,
+            cyclic: CyclicQualityMask::EMPTY,
             domains: [DomainQuality::EMPTY; DOMAINS],
         }
     }
@@ -955,7 +1008,7 @@ mod tests {
         assert_eq!(buffer.validate_header(42, 9), Ok(()));
         assert_eq!(buffer.header().abi_version, ABI_VERSION);
         let mut previous_abi = buffer.header();
-        previous_abi.abi_version = 1;
+        previous_abi.abi_version = 2;
         assert_eq!(
             previous_abi.validate::<2, 1, 2, 2>(42, 9),
             Err(HeaderError::AbiVersionMismatch)
@@ -1031,6 +1084,11 @@ mod tests {
         state.monotonic_time_ns = 1234;
         state.quality.link_up = 1;
         state.quality.domains[0].expected_wkc = 4;
+        state.quality.sequence = 11;
+        state.quality.cyclic = CyclicQualityMask {
+            known_mask: QualityFact::ALL_MASK,
+            good_mask: QualityFact::Platform.bit() | QualityFact::Wkc.bit(),
+        };
         state.lifecycle.transition_sequence = 3;
         state.lifecycle.required_gate_mask = 0x125;
         state.lifecycle.valid_gate_mask = 0x025;
@@ -1054,6 +1112,10 @@ mod tests {
         assert_eq!(snapshot.publish_sequence, 1);
         assert_eq!(snapshot.state.sequence, 11);
         assert_eq!(snapshot.state.quality.domains[0].expected_wkc, 4);
+        assert_eq!(snapshot.state.quality.sequence, 11);
+        assert!(snapshot.state.quality.cyclic.complete());
+        assert!(snapshot.state.quality.cyclic.good(QualityFact::Wkc));
+        assert!(!snapshot.state.quality.cyclic.good(QualityFact::Domain));
         assert_eq!(snapshot.state.lifecycle.transition_sequence, 3);
         assert_eq!(snapshot.state.lifecycle.required_gate_mask, 0x125);
         assert_eq!(snapshot.state.lifecycle.valid_gate_mask, 0x025);
@@ -1083,6 +1145,21 @@ mod tests {
             buffer.publish_state(StatePage::new(9)),
             Err(StatePublishError::ZeroSequence)
         );
+    }
+
+    #[test]
+    fn raw_quality_mask_distinguishes_unknown_from_observed_bad() {
+        let mut facts = CyclicQualityMask::EMPTY;
+        assert!(facts.well_formed());
+        assert!(!facts.complete());
+        facts.known_mask = QualityFact::ALL_MASK;
+        assert!(facts.complete());
+        assert!(!facts.good(QualityFact::Platform));
+        facts.good_mask = 1 << 15;
+        assert!(!facts.well_formed());
+        facts.good_mask = 0;
+        facts.known_mask = QualityFact::ALL_MASK | (1 << 15);
+        assert!(!facts.well_formed());
     }
 
     #[test]

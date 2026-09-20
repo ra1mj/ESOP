@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use esop_command_gateway::{CommandIngress, IngressPolicy};
 use esop_lifecycle_guard::{
-    GateId, GuardPolicy, LifecycleAction, LifecycleGuard, LifecycleState, StopAction,
+    CyclicQuality, GateId, GuardPolicy, LifecycleAction, LifecycleGuard, LifecycleState,
+    StopAction, procbuf::cyclic_quality_to_procbuf,
 };
 use esop_procbuf::{EventSeverity as ProcSeverity, ProcBuf, ProcBufEvent, StatePage};
 use esop_proto::v1::{
@@ -113,6 +114,22 @@ fn router_round_trip_covers_gateway_contracts() {
             state.lifecycle.state = LifecycleState::FaultLatched as u8;
             state.lifecycle.stop_action = StopAction::QuickStop as u8;
             state.lifecycle.first_blocking_code = 0x1001;
+            cyclic_quality_to_procbuf(
+                &mut state,
+                CyclicQuality {
+                    platform_ready: true,
+                    coe_ready: true,
+                    topology_valid: true,
+                    distributed_clock_locked: false,
+                    drive_ready: false,
+                    domain_valid: true,
+                    wkc_valid: false,
+                    command_current: false,
+                    supervisor_healthy: true,
+                    external_safety_clear: false,
+                    cycle_within_budget: true,
+                },
+            );
             buffer.publish_state(state).expect("RT state publishes");
             let projected = projector
                 .read_state(&buffer)
@@ -160,7 +177,17 @@ fn router_round_trip_covers_gateway_contracts() {
                     .first_blocking_code,
                 0x1001
             );
-            assert!(state_payload.quality.is_none());
+            let quality = state_payload
+                .quality
+                .as_ref()
+                .expect("cycle quality arrives");
+            assert!(quality.platform_ready);
+            assert!(!quality.distributed_clock_locked);
+            assert!(!quality.drive_ready);
+            assert!(quality.domain_valid);
+            assert!(!quality.wkc_valid);
+            assert!(!quality.external_safety_clear);
+            assert_eq!(quality.first_fault_code, 0x1001);
             assert_eq!(state_priority, zenoh::qos::Priority::Data);
             assert_eq!(state_congestion, zenoh::qos::CongestionControl::Drop);
             assert!(!state_express);

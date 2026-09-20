@@ -1,10 +1,13 @@
 #![cfg(feature = "zenoh")]
 
 use esop_lifecycle_guard::{
-    GateId, GuardPolicy, LifecycleGuard, LifecycleState as GuardState, MotionPermit, PermitError,
-    StopAction as GuardStop, procbuf::lifecycle_to_procbuf,
+    CyclicQuality, GateId, GuardPolicy, LifecycleGuard, LifecycleState as GuardState, MotionPermit,
+    PermitError, StopAction as GuardStop,
+    procbuf::{cyclic_quality_to_procbuf, lifecycle_to_procbuf},
 };
-use esop_procbuf::{EventSeverity as ProcSeverity, HeaderError, ProcBuf, ProcBufEvent, StatePage};
+use esop_procbuf::{
+    EventSeverity as ProcSeverity, HeaderError, ProcBuf, ProcBufEvent, QualityFact, StatePage,
+};
 use esop_proto::v1::{EventSeverity, LifecycleState, StopAction};
 use esop_proto::{CURRENT_SCHEMA_VERSION, Message};
 use esop_zenoh_gateway::procbuf_adapter::{ProcBufProjector, ProjectionError};
@@ -42,6 +45,22 @@ fn state(sequence: u64) -> StatePage<2, 1, 1> {
     state.lifecycle.recovery_count = 2;
     state.lifecycle.permit_audit_sequence = 4;
     state
+}
+
+fn quality_facts() -> CyclicQuality {
+    CyclicQuality {
+        platform_ready: true,
+        coe_ready: false,
+        topology_valid: true,
+        distributed_clock_locked: false,
+        drive_ready: true,
+        domain_valid: false,
+        wkc_valid: true,
+        command_current: false,
+        supervisor_healthy: true,
+        external_safety_clear: false,
+        cycle_within_budget: true,
+    }
 }
 
 #[test]
@@ -149,6 +168,97 @@ fn guard_snapshot_flows_through_procbuf_to_protobuf_without_losing_gate_or_audit
         lifecycle.motion_permit_current,
         snapshot.motion_permit_current
     );
+}
+
+#[test]
+fn raw_cyclic_quality_projects_all_observed_facts_without_using_qualified_gate_masks() {
+    let buffer = TestBuf::new(42, 7);
+    let facts = quality_facts();
+    let mut state = state(10);
+    cyclic_quality_to_procbuf(&mut state, facts);
+    buffer.publish_state(state).unwrap();
+
+    let projected = projector().read_state(&buffer).unwrap().unwrap();
+    let quality = projected.quality.unwrap();
+    assert!(quality.platform_ready);
+    assert!(!quality.configuration_ready);
+    assert!(quality.topology_valid);
+    assert!(!quality.distributed_clock_locked);
+    assert!(quality.drive_ready);
+    assert!(!quality.domain_valid);
+    assert!(quality.wkc_valid);
+    assert!(!quality.command_current);
+    assert!(quality.supervisor_healthy);
+    assert!(!quality.external_safety_clear);
+    assert!(quality.cycle_within_budget);
+    assert_eq!(quality.first_fault_code, 0x102);
+    assert_eq!(projected.lifecycle.unwrap().ready_gate_mask, 0x025);
+}
+
+#[test]
+fn unknown_stale_and_invalid_quality_never_appears_as_complete() {
+    let buffer = TestBuf::new(42, 7);
+    let mut projector = projector();
+
+    let mut partial = state(10);
+    partial.quality.sequence = 10;
+    partial.quality.cyclic.known_mask = QualityFact::Platform.bit();
+    partial.quality.cyclic.good_mask = QualityFact::Platform.bit();
+    buffer.publish_state(partial).unwrap();
+    assert!(
+        projector
+            .read_state(&buffer)
+            .unwrap()
+            .unwrap()
+            .quality
+            .is_none()
+    );
+
+    let mut stale = state(11);
+    cyclic_quality_to_procbuf(&mut stale, quality_facts());
+    stale.quality.sequence = 10;
+    buffer.publish_state(stale).unwrap();
+    assert!(
+        projector
+            .read_state(&buffer)
+            .unwrap()
+            .unwrap()
+            .quality
+            .is_none()
+    );
+
+    let mut invalid = state(12);
+    cyclic_quality_to_procbuf(&mut invalid, quality_facts());
+    invalid.quality.cyclic.good_mask |= 1 << 15;
+    buffer.publish_state(invalid).unwrap();
+    assert_eq!(
+        projector.read_state(&buffer),
+        Err(ProjectionError::InvalidQualityMask)
+    );
+
+    let mut all_bad = state(13);
+    let facts = CyclicQuality {
+        platform_ready: false,
+        coe_ready: false,
+        topology_valid: false,
+        distributed_clock_locked: false,
+        drive_ready: false,
+        domain_valid: false,
+        wkc_valid: false,
+        command_current: false,
+        supervisor_healthy: false,
+        external_safety_clear: false,
+        cycle_within_budget: false,
+    };
+    cyclic_quality_to_procbuf(&mut all_bad, facts);
+    buffer.publish_state(all_bad).unwrap();
+    let quality = projector
+        .read_state(&buffer)
+        .unwrap()
+        .unwrap()
+        .quality
+        .unwrap();
+    assert!(!quality.platform_ready && !quality.wkc_valid && !quality.external_safety_clear);
 }
 
 #[test]

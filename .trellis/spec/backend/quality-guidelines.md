@@ -35,6 +35,9 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   semantics change. Keep lifecycle projection in the optional `no_std` guard
   adapter; verify guard -> ProcBuf -> external schema with a public test, and
   reject old headers rather than interpreting them as the new layout.
+- Preserve raw cyclic observations separately from debounced lifecycle gates.
+  A quality projection must carry known and good bits, match the State sequence,
+  and leave incomplete or stale quality absent in the external message.
 - Treat `motion_permit_current` as permit freshness, not motion authorization:
   a blocked gate can move the guard to `Stopping` while the permit remains
   current. Only the guard's cycle action may authorize CiA 402 enable.

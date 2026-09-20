@@ -1,7 +1,42 @@
 //! Fixed-size projection for the optional ProcBuf ABI boundary.
 
-use crate::LifecycleSnapshot;
-use esop_procbuf::LifecycleSummary;
+use crate::{CyclicQuality, LifecycleSnapshot};
+use esop_procbuf::{CyclicQualityMask, LifecycleSummary, QualityFact, StatePage};
+
+/// Write the raw cycle owner's facts into the unpublished State page. Bind
+/// their sequence to that same page so the reader can reject stale quality.
+pub fn cyclic_quality_to_procbuf<const AXES: usize, const IO: usize, const DOMAINS: usize>(
+    state: &mut StatePage<AXES, IO, DOMAINS>,
+    quality: CyclicQuality,
+) {
+    let observations = [
+        (QualityFact::Platform, quality.platform_ready),
+        (QualityFact::Configuration, quality.coe_ready),
+        (QualityFact::Topology, quality.topology_valid),
+        (
+            QualityFact::DistributedClock,
+            quality.distributed_clock_locked,
+        ),
+        (QualityFact::Drive, quality.drive_ready),
+        (QualityFact::Domain, quality.domain_valid),
+        (QualityFact::Wkc, quality.wkc_valid),
+        (QualityFact::Command, quality.command_current),
+        (QualityFact::Supervisor, quality.supervisor_healthy),
+        (QualityFact::ExternalSafety, quality.external_safety_clear),
+        (QualityFact::CycleBudget, quality.cycle_within_budget),
+    ];
+    let mut good_mask = 0;
+    for (fact, good) in observations {
+        if good {
+            good_mask |= fact.bit();
+        }
+    }
+    state.quality.cyclic = CyclicQualityMask {
+        known_mask: QualityFact::ALL_MASK,
+        good_mask,
+    };
+    state.quality.sequence = state.sequence;
+}
 
 /// `transition_time_ns` must come from the recorded transition's monotonic
 /// timestamp, not from the current cycle when publishing a later snapshot.

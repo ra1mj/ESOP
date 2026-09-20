@@ -1,11 +1,11 @@
 //! Host-only, single-reader projection from the fixed ProcBuf ABI into v1 messages.
 
 use esop_procbuf::{
-    EventSeverity as ProcSeverity, HeaderError, ProcBuf, ProcBufEvent, StateSnapshot,
+    EventSeverity as ProcSeverity, HeaderError, ProcBuf, ProcBufEvent, QualityFact, StateSnapshot,
 };
 use esop_proto::v1::{
     DiagnosticEvent, EventSeverity, IoState, JointState, LifecycleState, LifecycleSummary,
-    RobotState, StopAction,
+    QualitySummary, RobotState, StopAction,
 };
 use esop_proto::{CURRENT_SCHEMA_VERSION, Message};
 
@@ -18,6 +18,7 @@ pub enum ProjectionError {
     InvalidStopAction(u8),
     InvalidRobotId,
     NonFiniteJoint(usize),
+    InvalidQualityMask,
     ReplayedState,
     PayloadTooLarge,
 }
@@ -128,6 +129,28 @@ impl ProcBufProjector {
             3 => StopAction::Disable,
             value => return Err(ProjectionError::InvalidStopAction(value)),
         };
+        let quality = if state.quality.sequence == state.sequence {
+            let facts = state.quality.cyclic;
+            if !facts.well_formed() {
+                return Err(ProjectionError::InvalidQualityMask);
+            }
+            facts.complete().then(|| QualitySummary {
+                platform_ready: facts.good(QualityFact::Platform),
+                configuration_ready: facts.good(QualityFact::Configuration),
+                topology_valid: facts.good(QualityFact::Topology),
+                distributed_clock_locked: facts.good(QualityFact::DistributedClock),
+                drive_ready: facts.good(QualityFact::Drive),
+                domain_valid: facts.good(QualityFact::Domain),
+                wkc_valid: facts.good(QualityFact::Wkc),
+                command_current: facts.good(QualityFact::Command),
+                supervisor_healthy: facts.good(QualityFact::Supervisor),
+                external_safety_clear: facts.good(QualityFact::ExternalSafety),
+                cycle_within_budget: facts.good(QualityFact::CycleBudget),
+                first_fault_code: state.lifecycle.first_blocking_code,
+            })
+        } else {
+            None
+        };
         let mut joints = Vec::with_capacity(AXES);
         for (axis, joint) in state.axes.iter().enumerate() {
             if !joint.position.is_finite()
@@ -185,7 +208,7 @@ impl ProcBufProjector {
                 recovery_count: state.lifecycle.recovery_count,
                 permit_audit_sequence: state.lifecycle.permit_audit_sequence,
             }),
-            quality: None,
+            quality,
             joints,
             io,
             events: Vec::new(),

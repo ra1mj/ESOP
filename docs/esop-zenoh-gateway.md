@@ -2,7 +2,7 @@
 
 - 文档版本：1.0
 - 日期：2026-09-20
-- 状态：固定 key namespace、方向策略、可选 Zenoh Session、ProcBuf v2 生命周期状态/事件投影、v1 命令和类型化查询边界、host QoS、生产安全配置准入及 loopback router 验证已实现；完整质量语义、远程 ACL 和生产认证部署待完成
+- 状态：固定 key namespace、方向策略、可选 Zenoh Session、ProcBuf v3 生命周期与原始周期质量投影、事件投影、v1 命令和类型化查询边界、host QoS、生产安全配置准入及 loopback router 验证已实现；真实设备质量采集、远程 ACL 和生产认证部署待完成
 - 上游需求：PRD FR-031、FR-030、FR-045、FR-051
 
 ## 1. Key namespace
@@ -48,7 +48,7 @@ Zenoh session、router、发现、重连、QoS 和 transport security 均属于 
 - `PublishQos`：state 使用可丢弃的 data 队列，event/diagnostic 使用可丢弃的高优先级队列；不会因 Zenoh 背压阻塞监督域任务。
 - `TransportSecurityPolicy` / `open_secure`：在建立 Session 前检查传输协议、TLS 根证书、名称校验、mTLS 客户端证书/私钥和公钥或用户名密码认证材料；生产调用方应使用 `TransportSecurityPolicy::production()`，开发/HIL 可显式使用 `open` 或 `development()`。
 - `decode_command` / `admit_command`：解码 `esop.v1.MotionCommand`，校验 robot ID，并转交 `CommandIngress` 执行来源、权限、TTL、epoch、序号、轴掩码、限流和审计。
-- `ProcBufProjector`：监督域单读者在校验 ABI/layout、数值 robot ID 和 boot ID 后读取完整状态页与事件环，转换为外部 `RobotState` / `DiagnosticEvent`；原样投影 required/valid/qualified/ready 门槛位图、permit epoch/expiry、转换周期、恢复计数和 permit 审计序号，拒绝状态序号回退、无效生命周期值、非有限关节值和超 4096-byte 状态。数值 robot ID 与外部文本 ID 的配对须由部署配置提供，不从字符串猜测哈希。
+- `ProcBufProjector`：监督域单读者在校验 ABI/layout、数值 robot ID 和 boot ID 后读取完整状态页与事件环，转换为外部 `RobotState` / `DiagnosticEvent`；原样投影 required/valid/qualified/ready 门槛位图、permit epoch/expiry、转换周期、恢复计数和 permit 审计序号，并在原始质量事实完整且与 State 序号相同时生成 `QualitySummary`；拒绝状态序号回退、无效生命周期值、非法质量位图、非有限关节值和超 4096-byte 状态。数值 robot ID 与外部文本 ID 的配对须由部署配置提供，不从字符串猜测哈希。
 
 示例编译检查：
 
@@ -69,10 +69,10 @@ callback 运行在 Zenoh host runtime：命令 callback 应只把数据投递到
 
 类型化 query provider 必须只读取监督域快照，并自行限制执行时间和并发；`limit` 限制结果记录数及响应字节数，不是远程身份认证或请求速率限制。生产环境仍须在传输层配置调用方身份、ACL 和限流；robot boot 变化时应关闭旧 gateway 并重新绑定 queryable，不得继续服务旧 boot 的快照。
 
-`ProcBufProjector` 的输出是独立的有所有权快照。一个监督域 reader 负责更新缓存，发布者和 query provider 使用同一份已校验的快照，不得各自竞争 ProcBuf 双页的单读者所有权。`RobotState.joints`/`io` 中的 index 从 0 开始，直接复制已经由 profile 换算的 SI 值；事件使用独立的 SPSC 环，`RobotState.events` 不隐式混入事件。实时端可启用 `esop-lifecycle-guard/procbuf`，用 `lifecycle_to_procbuf(snapshot, transition_time_ns)` 无分配地产生同一份生命周期摘要；时间参数必须来自对应转换记录，不能把当前周期时间冒充历史转换时间。`QualitySummary` 暂不发布（`None`）：ProcBuf 的 Domain/Link/DC 原始质量事实尚未独立覆盖 Protobuf 所要求的全部布尔门槛，不能把资格位图冒充原始 WKC/link 检测。`RobotState` 是观测数据，不是运动许可或功能安全判断。
+`ProcBufProjector` 的输出是独立的有所有权快照。一个监督域 reader 负责更新缓存，发布者和 query provider 使用同一份已校验的快照，不得各自竞争 ProcBuf 双页的单读者所有权。`RobotState.joints`/`io` 中的 index 从 0 开始，直接复制已经由 profile 换算的 SI 值；事件使用独立的 SPSC 环，`RobotState.events` 不隐式混入事件。实时端可启用 `esop-lifecycle-guard/procbuf`，用 `lifecycle_to_procbuf(snapshot, transition_time_ns)` 无分配地产生同一份生命周期摘要；时间参数必须来自对应转换记录，不能把当前周期时间冒充历史转换时间。`cyclic_quality_to_procbuf(&mut state, observations)` 从待发布的 State 页获取序号，把周期所有者采集的 11 项原始布尔事实写入固定双位图：`known_mask` 表示有观测，`good_mask` 表示实际为真。它与 MLG 去抖后的门槛位图不同；其中 `configuration_ready` 对应现有 `CyclicQuality.coe_ready`，不是通用配置认证。质量序号不等于 State 序号或已知位图不完整时，`RobotState.quality` 为 `None`；序号匹配但位图有非法位则拒绝整个投影，已完整观测但所有位均为 false 时仍发布真实的全 false 摘要。`first_fault_code` 沿用同周期 MLG 的 `first_blocking_code`，不伪造原始诊断代码。`RobotState` 是观测数据，不是运动许可或功能安全判断。
 
 `motion_permit_current` 仅表示 permit 本身未过期，不表示当前可以驱动：命令门槛失效时，状态可能已进入 `Stopping`，而 permit 仍在有效期。执行侧始终以 MLG 状态和门槛决策约束 CiA 402，不以该布尔字段单独判定运动授权。
 
-ProcBuf 固定布局已升级到 ABI v2；v1 reader/writer 不能复用 v2 区域，attach 时必须核对 version、layout hash、容量、robot 和 boot ID。升级需停止旧实时端与监督进程并重新创建区域，再启动相同版本的双方；旧 header 在单元测试中明确被拒绝。Protobuf 仍为 v1 外部契约，不能据此推断实时共享内存 ABI 与 Protobuf 版本相同。
+ProcBuf 固定布局已升级到 ABI v3；v1/v2 reader/writer 不能复用 v3 区域，attach 时必须核对 version、layout hash、容量、robot 和 boot ID。升级需停止旧实时端与监督进程并重新创建区域，再启动相同版本的双方；旧 header 在单元测试中明确被拒绝。Protobuf 仍为 v1 外部契约，不能据此推断实时共享内存 ABI 与 Protobuf 版本相同。
 
 补充验证：测试进程为每个场景动态申请 loopback 临时端口并独占 zenohd，覆盖 state/event/incident 的 v1 payload、router 重启后的 health recovery、旧命令 TTL/代际拒绝，以及恢复必须经过新 permit 和显式 rearm。ZenohGateway::refresh_health 使用 session 的 router/peer 连接快照；它属于 host supervisor 观察，不是 motion permit 或应用层投递确认。[Zenoh SessionInfo API](https://docs.rs/zenoh/1.10.1/zenoh/session/struct.SessionInfo.html)
