@@ -195,8 +195,12 @@ impl<'master, const SLOTS: usize, const MTU: usize> DmaReceiveCycle<'master, SLO
             self.report.corrupt_frames += 1;
             return;
         }
+        if frame.len() > self.master.config.rx_budget_bytes - self.report.received_bytes {
+            self.report.budget_exhausted = true;
+            return;
+        }
         self.report.received_frames += 1;
-        self.report.received_bytes = self.report.received_bytes.saturating_add(frame.len());
+        self.report.received_bytes += frame.len();
         self.master.process_received_frame(
             frame,
             self.generation,
@@ -620,11 +624,13 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
             return Ok(report);
         }
 
-        while report.received_frames < self.config.rx_budget_frames
+        let mut poll_attempts = 0;
+        while poll_attempts < self.config.rx_budget_frames
             && report.received_bytes < self.config.rx_budget_bytes
             && port.now_ns() < deadline_ns
         {
             let poll = port.rx_poll(scratch).map_err(CycleError::Port)?;
+            poll_attempts += 1;
             let length = match poll {
                 RxPoll::Empty => break,
                 RxPoll::LinkDown => {
@@ -655,9 +661,15 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
                 ));
                 continue;
             }
-            report.received_frames += 1;
-            report.received_bytes = report.received_bytes.saturating_add(length);
             let received_at_ns = port.now_ns();
+            if received_at_ns >= deadline_ns
+                || length > self.config.rx_budget_bytes - report.received_bytes
+            {
+                report.budget_exhausted = true;
+                break;
+            }
+            report.received_frames += 1;
+            report.received_bytes += length;
             self.process_received_frame(
                 &scratch[..length],
                 generation,
@@ -666,6 +678,9 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
                 &mut report,
                 consumer,
             );
+        }
+        if poll_attempts >= self.config.rx_budget_frames {
+            report.budget_exhausted = true;
         }
 
         self.expire_rx_entries(port.now_ns(), &mut report);
@@ -820,7 +835,8 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
     }
 
     fn finish_receive_report(&mut self, report: &mut CycleReport, now_ns: u64, deadline_ns: u64) {
-        if report.received_frames >= self.config.rx_budget_frames
+        if report.budget_exhausted
+            || report.received_frames >= self.config.rx_budget_frames
             || report.received_bytes >= self.config.rx_budget_bytes
             || now_ns >= deadline_ns
         {

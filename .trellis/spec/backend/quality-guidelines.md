@@ -24,6 +24,12 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
 - Make ownership transitions and cache maintenance visible at DMA boundaries.
 - Keep frame plans immutable during the active cycle and bind RX expectations
   to the same frame or descriptor generation.
+- Admit a received frame only when the complete frame fits the remaining RX
+  byte budget and, for polled ports, the poll returned before the cycle's RX
+  deadline. Rejected frames must not reach the datagram consumer; record a
+  budget diagnostic even when the remaining budget is nonzero.
+- Bound poll attempts independently from admitted frames so a malformed-frame
+  flood terminates even when the port clock does not advance.
 - Add a regression test for every lifecycle or validation change. Prefer
   public integration tests when a change crosses crates.
 - Preserve the existing `EthercatPort` copy-compatible path while adding a

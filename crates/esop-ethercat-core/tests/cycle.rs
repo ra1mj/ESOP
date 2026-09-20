@@ -115,6 +115,96 @@ impl EthercatPort for MockPort {
     }
 }
 
+struct QueuedPort {
+    frames: [([u8; MTU], usize); 2],
+    next: usize,
+    now_ns: u64,
+    poll_delay_ns: u64,
+}
+
+impl EthercatPort for QueuedPort {
+    type Error = PortError;
+
+    fn link_state(&self) -> LinkState {
+        LinkState::Up
+    }
+
+    fn now_ns(&self) -> u64 {
+        self.now_ns
+    }
+
+    fn tx_submit(&mut self, _: &[u8]) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn rx_poll(&mut self, destination: &mut [u8; MTU]) -> Result<RxPoll, Self::Error> {
+        self.now_ns += self.poll_delay_ns;
+        if self.next >= self.frames.len() {
+            return Ok(RxPoll::Empty);
+        }
+        let (frame, len) = &self.frames[self.next];
+        if *len == 0 {
+            return Ok(RxPoll::Empty);
+        }
+        destination[..*len].copy_from_slice(&frame[..*len]);
+        self.next += 1;
+        Ok(RxPoll::Frame(*len))
+    }
+}
+
+struct BadFramePort {
+    polls: usize,
+}
+
+impl EthercatPort for BadFramePort {
+    type Error = PortError;
+
+    fn link_state(&self) -> LinkState {
+        LinkState::Up
+    }
+
+    fn now_ns(&self) -> u64 {
+        0
+    }
+
+    fn tx_submit(&mut self, _: &[u8]) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn rx_poll(&mut self, _: &mut [u8; MTU]) -> Result<RxPoll, Self::Error> {
+        self.polls += 1;
+        Ok(RxPoll::Frame(0))
+    }
+}
+
+fn response_frame(index: u8, payload: &[u8]) -> ([u8; MTU], usize) {
+    let mut bytes = [0; MTU];
+    let mut builder = FrameBuilder::new(&mut bytes, [0xFF; 6], [1, 2, 3, 4, 5, 6]).unwrap();
+    builder.push(Command::Lrd, index, 0x1000, payload).unwrap();
+    let len = builder.finish().unwrap();
+    let wkc_offset =
+        ETHERNET_HEADER_LEN + ETHERCAT_FRAME_HEADER_LEN + DATAGRAM_HEADER_LEN + payload.len();
+    bytes[wkc_offset..wkc_offset + 2].copy_from_slice(&1u16.to_le_bytes());
+    (bytes, len)
+}
+
+fn arm_response(master: &mut EthercatMaster<2, MTU>, index: u8, generation: u16, len: usize) {
+    master
+        .arm_rx(
+            index,
+            0,
+            RxExpectation {
+                generation,
+                deadline_ns: 100_000,
+                expected_address: 0x1000,
+                expected_size: len as u16,
+                expected_type: Command::Lrd as u8,
+                expected_wkc: 1,
+            },
+        )
+        .unwrap();
+}
+
 struct MockDmaTxPort {
     frame: [u8; MTU],
     frame_len: usize,
@@ -360,6 +450,149 @@ fn dma_receive_cycle_parses_completed_descriptor_buffer_in_place() {
     assert_eq!(master.rx_entry(51).state, RxSlotState::Empty);
     ring.rx_rearm(completed, &mut cache).unwrap();
     assert_eq!(ring.rx_owner(completed), Ok(DmaOwner::DmaOwned));
+}
+
+#[test]
+fn polled_receive_drops_a_frame_that_would_cross_the_byte_budget() {
+    let mut config = MasterConfig::new([0xFF; 6], [1, 2, 3, 4, 5, 6]);
+    config.rx_budget_bytes = 90;
+    let mut master = EthercatMaster::<2, MTU>::new(config);
+    let mut domain = Domain::<4, 2>::new(0x1000);
+    for (index, offset) in [(61, 0), (62, 2)] {
+        domain
+            .add_segment(DomainSegment {
+                datagram_index: index,
+                input_offset: offset,
+                len: 2,
+                expected_wkc: 1,
+            })
+            .unwrap();
+    }
+    domain.begin_receive(1).unwrap();
+    for (index, payload) in [(61, [9, 8]), (62, [7, 6])] {
+        domain
+            .stage_datagram(
+                1,
+                DatagramHeader {
+                    command: Command::Lrd,
+                    index,
+                    address: 0x1000,
+                    length: 2,
+                    last: true,
+                },
+                &payload,
+                1,
+            )
+            .unwrap();
+    }
+    assert!(domain.finish_receive(1, 1).unwrap());
+    let frames = [response_frame(61, &[1, 2]), response_frame(62, &[3, 4])];
+    assert_eq!(frames[0].1, 64);
+    arm_response(&mut master, 61, 42, 2);
+    arm_response(&mut master, 62, 42, 2);
+    domain.begin_receive(42).unwrap();
+    let mut port = QueuedPort {
+        frames,
+        next: 0,
+        now_ns: 0,
+        poll_delay_ns: 0,
+    };
+    let mut scratch = [0; MTU];
+    let report = master
+        .cycle_receive_with_consumer(&mut port, &mut scratch, 42, &mut domain)
+        .unwrap();
+    assert_eq!(port.next, 2);
+    assert_eq!(report.received_frames, 1);
+    assert_eq!(report.received_bytes, 64);
+    assert_eq!(report.parsed_datagrams, 1);
+    assert!(report.budget_exhausted);
+    assert_eq!(
+        master.diagnostics().pop().unwrap().code,
+        EventCode::RxBudgetExhausted
+    );
+    assert!(!domain.finish_receive(42, report.cycle).unwrap());
+    assert_eq!(domain.input(), &[9, 8, 7, 6]);
+}
+
+#[test]
+fn polled_receive_drops_a_frame_returned_after_the_deadline() {
+    let mut config = MasterConfig::new([0xFF; 6], [1, 2, 3, 4, 5, 6]);
+    config.rx_budget_ns = 100;
+    let mut master = EthercatMaster::<2, MTU>::new(config);
+    let mut port = QueuedPort {
+        frames: [response_frame(63, &[1, 2]), ([0; MTU], 0)],
+        next: 0,
+        now_ns: 0,
+        poll_delay_ns: 101,
+    };
+    master
+        .arm_rx(
+            63,
+            0,
+            RxExpectation {
+                generation: 42,
+                deadline_ns: 100,
+                expected_address: 0x1000,
+                expected_size: 2,
+                expected_type: Command::Lrd as u8,
+                expected_wkc: 1,
+            },
+        )
+        .unwrap();
+    let mut scratch = [0; MTU];
+    let report = master.cycle_receive(&mut port, &mut scratch, 42).unwrap();
+    assert_eq!(report.received_frames, 0);
+    assert_eq!(report.received_bytes, 0);
+    assert_eq!(report.parsed_datagrams, 0);
+    assert!(report.budget_exhausted);
+    assert!(report.timed_out_datagrams > 0);
+}
+
+#[test]
+fn polled_receive_bounds_repeated_bad_frames_even_with_a_frozen_clock() {
+    let mut config = MasterConfig::new([0xFF; 6], [1, 2, 3, 4, 5, 6]);
+    config.rx_budget_frames = 3;
+    let mut master = EthercatMaster::<2, MTU>::new(config);
+    let mut port = BadFramePort { polls: 0 };
+    let mut scratch = [0; MTU];
+    let report = master.cycle_receive(&mut port, &mut scratch, 42).unwrap();
+    assert_eq!(port.polls, 3);
+    assert_eq!(report.received_frames, 0);
+    assert_eq!(report.corrupt_frames, 3);
+    assert_eq!(report.received_bytes, 0);
+    assert!(report.budget_exhausted);
+    for _ in 0..3 {
+        assert_eq!(
+            master.diagnostics().pop().unwrap().code,
+            EventCode::FrameCorrupt
+        );
+    }
+    assert_eq!(
+        master.diagnostics().pop().unwrap().code,
+        EventCode::RxBudgetExhausted
+    );
+}
+
+#[test]
+fn dma_receive_never_parses_past_its_byte_budget() {
+    let mut config = MasterConfig::new([0xFF; 6], [1, 2, 3, 4, 5, 6]);
+    config.rx_budget_bytes = 90;
+    let mut master = EthercatMaster::<2, MTU>::new(config);
+    arm_response(&mut master, 64, 42, 2);
+    arm_response(&mut master, 65, 42, 2);
+    let frames = [response_frame(64, &[1, 2]), response_frame(65, &[3, 4])];
+    let mut receive = master.begin_dma_receive_cycle(0, 42);
+    receive.consume_frame(&frames[0].0[..frames[0].1], 1, &mut ());
+    receive.consume_frame(&frames[1].0[..frames[1].1], 2, &mut ());
+    let report = receive.finish(2);
+    assert_eq!(report.received_frames, 1);
+    assert_eq!(report.received_bytes, 64);
+    assert_eq!(report.parsed_datagrams, 1);
+    assert!(report.budget_exhausted);
+    assert_eq!(
+        master.diagnostics().pop().unwrap().code,
+        EventCode::RxBudgetExhausted
+    );
 }
 
 #[test]
