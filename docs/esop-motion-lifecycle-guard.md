@@ -258,7 +258,9 @@ ProcBuf 应包含固定大小的 lifecycle 区域：
 
 所有固定事件记录必须带 lifecycle state、gate/fault code、axis/device、transition sequence 和 monotonic timestamp。
 
-ProcBuf ABI v4 在 State 页增加固定容量的 `axis_stops[AXES]`：`request_cycle` 标记当周期请求，`requested_action` 为策略动作，`issued_action` 为本周期 CiA 402 控制字对应的动作。对于缺乏受控目标发生器的 Hold/Ramp，`issued_action=Disable`。只有从完成帧、WKC 与年龄合格且**晚于首次发出停机控制字的周期**的输入生成的 `StopFeedback` 才能填写 `feedback_cycle` 与 `feedback_valid/stationary/non_enabled`；首次发出的同周期输入不能冒充停机响应，缺失速度或未知驱动状态也不能证明已停稳。写入 API 校验决策、状态和反馈周期/轴掩码，并在失败时保持旧记录不变；下一周期无停止请求时清空旧证据。Protobuf v1 使用新增的可选 `LifecycleSummary.axis_stops` 字段承载同一语义，旧读者忽略该字段且经其重新编码会丢失。单值 `stop_action` 仍仅是旧接口的全局默认/摘要，**不是**逐轴实际反馈。需要停止旧 RT 与监督进程、重建共享区域，再以 v4 同版本重启；v1/v2/v3 header 均被拒绝。逐轴停止超时/升级事件与实物 HIL 仍待完成。
+ProcBuf ABI v4 在 State 页增加固定容量的 `axis_stops[AXES]`：`request_cycle` 标记当周期请求，`requested_action` 为策略动作，`issued_action` 为本周期 CiA 402 控制字对应的动作。对于缺乏受控目标发生器的 Hold/Ramp，`issued_action=Disable`。只有从完成帧、WKC 与年龄合格且**晚于首次发出停机控制字的周期**的输入生成的 `StopFeedback` 才能填写 `feedback_cycle` 与 `feedback_valid/stationary/non_enabled`；首次发出的同周期输入不能冒充停机响应，缺失速度或未知驱动状态也不能证明已停稳。写入 API 校验决策、状态和反馈周期/轴掩码，并在失败时保持旧记录不变；下一周期无停止请求时清空旧证据。Protobuf v1 使用新增的可选 `LifecycleSummary.axis_stops` 字段承载同一语义，旧读者忽略该字段且经其重新编码会丢失。单值 `stop_action` 仍仅是旧接口的全局默认/摘要，**不是**逐轴实际反馈。需要停止旧 RT 与监督进程、重建共享区域，再以 v4 同版本重启；v1/v2/v3 header 均被拒绝。
+
+停机超时在 `LifecycleGuard.stop_timeout_record()` 中保留超时周期、原轴掩码、首次发出停机的周期（可能缺失）、转换序号和升级当时每轴请求动作；进入 `FaultLatched` 后所有轴仍保持 inhibit，CiA 402 输出 Disable，但本周期 `axis_stops` 清空，因为没有新的可确认停机反馈。已提供 `stop_timeout_events_to_procbuf` 接口，供周期所有者将原轴集合逐轴写入 SPSC 事件环：`source=0x4D4C`、`code=1`、`severity=Fault`、`sequence=transition_sequence`、`value=0x53540001`、`axis_or_device=0` 起的轴号；`aux` 低两字节分别是 Protobuf 请求/发出动作（1..4），bit 16 表示此前确实发过停机控制字，高字节是 `FaultLatched` 状态值。事件时间戳是调用方提供的**写入时**单调时间，重试时可能晚于真实转换时间；应用可用相同的 boot ID 和转换序号关联 State 页的 `transition_cycle/time_ns` 和首个阻塞码。环满会返回错误并计入 `lost_events`，已写轴不重发，剩余轴下次调用再写；调用方应持续消费并重试，且避免在排空前覆盖旧超时记录。事件不证明机械静止，不改变既有 ABI 或 Protobuf 布局。生产周期所有者接线、受控 Hold/Ramp、完整的常规转换事件发布与实物 HIL 仍待完成。
 
 ## 9. 配置与可观测性
 

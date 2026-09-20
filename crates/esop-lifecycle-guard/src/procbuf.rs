@@ -3,8 +3,11 @@
 use crate::{CyclicQuality, LifecycleSnapshot};
 use esop_procbuf::{CyclicQualityMask, LifecycleSummary, QualityFact, StatePage};
 
+use crate::{LifecycleGuard, LifecycleState, MAX_MOTION_AXES, STOP_TIMEOUT_FAULT_CODE, StopAction};
+use esop_procbuf::{EventPushError, EventSeverity, HeaderError, ProcBuf, ProcBufEvent};
+
 #[cfg(feature = "cia402")]
-use crate::{AxisCycleDecision, AxisDirective, MAX_MOTION_AXES, StopAction, StopFeedback};
+use crate::{AxisCycleDecision, AxisDirective, StopFeedback};
 #[cfg(feature = "cia402")]
 use esop_procbuf::AxisStopEvidence;
 #[cfg(feature = "cia402")]
@@ -168,6 +171,82 @@ pub fn lifecycle_to_procbuf(
         recovery_count: snapshot.recovery_count,
         permit_audit_sequence: snapshot.permit_audit_sequence,
     }
+}
+
+/// Source/code reserved for per-axis stop deadline escalation. `value` holds
+/// the full fault code; `sequence` matches the lifecycle transition sequence.
+/// `aux` packs requested/issued Protobuf action values in the low two bytes,
+/// prior stop issuance in bit 16 and the FaultLatched state in the high byte.
+pub const STOP_TIMEOUT_EVENT_SOURCE: u16 = 0x4D4C;
+pub const STOP_TIMEOUT_EVENT_CODE: u16 = 1;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StopTimeoutEventError {
+    Header(HeaderError),
+    AxisCapacityExceeded,
+    Ring(EventPushError),
+}
+
+/// Emit each armed axis's timeout escalation once, with retry on event-ring
+/// overflow. The cycle owner supplies a monotonic timestamp and calls this
+/// after evaluating the guard; a partial write leaves only unwritten axes
+/// pending. Events are diagnostic, never stop confirmation.
+pub fn stop_timeout_events_to_procbuf<
+    const AXES: usize,
+    const IO: usize,
+    const DOMAINS: usize,
+    const EVENTS: usize,
+>(
+    guard: &mut LifecycleGuard,
+    buffer: &ProcBuf<AXES, IO, DOMAINS, EVENTS>,
+    timestamp_ns: u64,
+) -> Result<usize, StopTimeoutEventError> {
+    let Some(record) = guard.stop_timeout_record else {
+        return Ok(0);
+    };
+    if guard.pending_stop_timeout_events_mask == 0 {
+        return Ok(0);
+    }
+    buffer
+        .validate_header(buffer.header().robot_id, guard.boot_id)
+        .map_err(StopTimeoutEventError::Header)?;
+    if AXES > MAX_MOTION_AXES {
+        return Err(StopTimeoutEventError::AxisCapacityExceeded);
+    }
+    let axes_mask = if AXES == MAX_MOTION_AXES {
+        u32::MAX
+    } else {
+        (1u32 << AXES) - 1
+    };
+    if record.axis_mask & !axes_mask != 0 {
+        return Err(StopTimeoutEventError::AxisCapacityExceeded);
+    }
+    let mut written = 0;
+    for axis in 0..MAX_MOTION_AXES {
+        let bit = 1u32 << axis;
+        if guard.pending_stop_timeout_events_mask & bit == 0 {
+            continue;
+        }
+        let requested = record.actions[axis] as u32 + 1;
+        buffer
+            .record_event(ProcBufEvent {
+                sequence: record.transition_sequence,
+                timestamp_ns,
+                source: STOP_TIMEOUT_EVENT_SOURCE,
+                severity: EventSeverity::Fault,
+                code: STOP_TIMEOUT_EVENT_CODE,
+                axis_or_device: axis as u16,
+                value: STOP_TIMEOUT_FAULT_CODE,
+                aux: requested
+                    | ((StopAction::Disable as u32 + 1) << 8)
+                    | ((record.first_issued_cycle.is_some() as u32) << 16)
+                    | ((LifecycleState::FaultLatched as u32) << 24),
+            })
+            .map_err(StopTimeoutEventError::Ring)?;
+        guard.pending_stop_timeout_events_mask &= !bit;
+        written += 1;
+    }
+    Ok(written)
 }
 
 #[cfg(feature = "cia402")]

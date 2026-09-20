@@ -2,15 +2,18 @@
 
 use esop_lifecycle_guard::{
     AxisStopPolicy, CyclicQuality, GateId, GuardPolicy, LifecycleGuard,
-    LifecycleState as GuardState, MotionPermit, PermitError, StopAction as GuardStop, StopFeedback,
+    LifecycleState as GuardState, MotionPermit, PermitError, STOP_TIMEOUT_FAULT_CODE,
+    StopAction as GuardStop, StopFeedback,
     cia402::step_axis_bank,
     procbuf::{
-        AxisEvidenceError, axis_stops_to_procbuf, cyclic_quality_to_procbuf, lifecycle_to_procbuf,
+        AxisEvidenceError, STOP_TIMEOUT_EVENT_CODE, STOP_TIMEOUT_EVENT_SOURCE,
+        StopTimeoutEventError, axis_stops_to_procbuf, cyclic_quality_to_procbuf,
+        lifecycle_to_procbuf, stop_timeout_events_to_procbuf,
     },
 };
 use esop_procbuf::{
-    AxisStopEvidence as RawAxisStopEvidence, EventSeverity as ProcSeverity, HeaderError, ProcBuf,
-    ProcBufEvent, QualityFact, StatePage,
+    AxisStopEvidence as RawAxisStopEvidence, EventPushError, EventSeverity as ProcSeverity,
+    HeaderError, ProcBuf, ProcBufEvent, QualityFact, StatePage,
 };
 use esop_profile_cia402::{Cia402AxisBank, DriveRequest};
 use esop_proto::v1::{EventSeverity, LifecycleState, StopAction};
@@ -602,5 +605,121 @@ fn maps_fixed_event_ring_to_versioned_diagnostic_event() {
     assert_eq!((event.value, event.aux), (6, 7));
     assert_eq!(event.severity, EventSeverity::Critical as i32);
     assert_eq!(event.schema_version, CURRENT_SCHEMA_VERSION);
+    assert!(projector.pop_event(&buffer).unwrap().is_none());
+}
+
+#[test]
+fn stop_timeout_escalations_retain_original_axes_and_retry_full_event_ring() {
+    let policy = GuardPolicy {
+        enter_good_cycles: 1,
+        stop_timeout_cycles: 2,
+        allowed_axis_mask: 0b11,
+        ..GuardPolicy::conservative()
+    };
+    let actions = AxisStopPolicy::uniform(GuardStop::QuickStop)
+        .with_action(1, GuardStop::RampToZero)
+        .unwrap();
+    let mut guard =
+        LifecycleGuard::new_with_axis_stop_policy(GateId::Link.bit(), 7, policy, actions);
+    let mut bank = Cia402AxisBank::<2>::new();
+    let buffer = ProcBuf::<2, 0, 0, 1>::new(42, 7);
+    let mut projector = projector();
+    guard.update_gate(GateId::Link, true, 1, 0);
+    guard
+        .request_rearm(
+            MotionPermit {
+                boot_id: 7,
+                source_id: 1,
+                permit_epoch: 1,
+                sequence: 1,
+                axis_mask: 0b11,
+                expires_at_ns: 100,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
+            },
+            1,
+            1,
+        )
+        .unwrap();
+    guard.update_gate(GateId::Link, false, 2, 0xCAFE);
+    assert_eq!(guard.cycle_axes(2, 2).stopping_axis_mask(), 0b11);
+
+    let decision = guard.cycle_axes(4, 4);
+    assert_eq!(
+        decision.action(),
+        esop_lifecycle_guard::LifecycleAction::FaultLatched
+    );
+    let outputs = step_axis_bank(&mut bank, &decision, [0x0027; 2], [DriveRequest::Enable; 2]);
+    assert!(outputs.iter().all(|output| {
+        output.controlword == esop_profile_cia402::CONTROLWORD_DISABLE_VOLTAGE
+            && !output.motion_allowed
+    }));
+    let mut page = StatePage::<2, 0, 0>::new(7);
+    page.sequence = 4;
+    axis_stops_to_procbuf(&mut page, &decision, &outputs, None).unwrap();
+    assert_eq!(page.axis_stops, [RawAxisStopEvidence::EMPTY; 2]);
+    page.lifecycle = lifecycle_to_procbuf(guard.snapshot(4, 400), 400);
+    assert_eq!(page.lifecycle.first_blocking_code, 0xCAFE);
+    assert_eq!(page.lifecycle.latched_fault_code, STOP_TIMEOUT_FAULT_CODE);
+    buffer.publish_state(page).unwrap();
+    let state = projector.read_state(&buffer).unwrap().unwrap();
+    assert!(state.lifecycle.unwrap().axis_stops.is_empty());
+
+    let record = guard.stop_timeout_record().unwrap();
+    assert_eq!(
+        (record.cycle, record.axis_mask, record.first_issued_cycle),
+        (4, 0b11, Some(2))
+    );
+    assert_eq!(record.requested_action(0), Some(GuardStop::QuickStop));
+    assert_eq!(record.requested_action(1), Some(GuardStop::RampToZero));
+    assert_eq!(record.requested_action(2), None);
+
+    let wrong_boot = ProcBuf::<2, 0, 0, 1>::new(42, 8);
+    assert_eq!(
+        stop_timeout_events_to_procbuf(&mut guard, &wrong_boot, 400),
+        Err(StopTimeoutEventError::Header(HeaderError::BootIdMismatch))
+    );
+    let too_few_axes = ProcBuf::<1, 0, 0, 1>::new(42, 7);
+    assert_eq!(
+        stop_timeout_events_to_procbuf(&mut guard, &too_few_axes, 400),
+        Err(StopTimeoutEventError::AxisCapacityExceeded)
+    );
+    assert_eq!(wrong_boot.pending_events(), 0);
+    assert_eq!(too_few_axes.pending_events(), 0);
+
+    assert_eq!(
+        stop_timeout_events_to_procbuf(&mut guard, &buffer, 401),
+        Err(StopTimeoutEventError::Ring(EventPushError::Full))
+    );
+    let first = projector.pop_event(&buffer).unwrap().unwrap();
+    assert_eq!(first.boot_id, 7);
+    assert_eq!(first.sequence, record.transition_sequence);
+    assert_eq!(first.timestamp_ns, 401);
+    assert_eq!(
+        (first.source, first.code),
+        (
+            u32::from(STOP_TIMEOUT_EVENT_SOURCE),
+            u32::from(STOP_TIMEOUT_EVENT_CODE)
+        )
+    );
+    assert_eq!(first.axis_or_device, 0);
+    assert_eq!(first.severity, EventSeverity::Critical as i32);
+    assert_eq!(first.value, STOP_TIMEOUT_FAULT_CODE);
+    assert_eq!(first.aux, 3 | (4 << 8) | (1 << 16) | (4 << 24));
+    assert_eq!(buffer.lost_events(), 1);
+
+    assert_eq!(
+        stop_timeout_events_to_procbuf(&mut guard, &buffer, 402),
+        Ok(1)
+    );
+    let second = projector.pop_event(&buffer).unwrap().unwrap();
+    assert_eq!(second.sequence, record.transition_sequence);
+    assert_eq!(second.axis_or_device, 1);
+    assert_eq!(second.aux, 2 | (4 << 8) | (1 << 16) | (4 << 24));
+    assert_eq!(
+        stop_timeout_events_to_procbuf(&mut guard, &buffer, 403),
+        Ok(0)
+    );
     assert!(projector.pop_event(&buffer).unwrap().is_none());
 }

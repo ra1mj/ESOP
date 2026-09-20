@@ -228,6 +228,27 @@ impl StopFeedback {
     }
 }
 
+/// Latched stop deadline and the exact per-axis plan at escalation time.
+/// A sent Disable controlword is not proof that any drive stopped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StopTimeoutRecord {
+    pub cycle: u64,
+    pub transition_sequence: u64,
+    pub first_issued_cycle: Option<u64>,
+    pub axis_mask: u32,
+    actions: [StopAction; MAX_MOTION_AXES],
+}
+
+impl StopTimeoutRecord {
+    pub const fn requested_action(&self, axis: usize) -> Option<StopAction> {
+        if axis < MAX_MOTION_AXES && self.axis_mask & (1u32 << axis) != 0 {
+            Some(self.actions[axis])
+        } else {
+            None
+        }
+    }
+}
+
 impl GuardPolicy {
     pub const fn conservative() -> Self {
         Self {
@@ -479,6 +500,8 @@ pub struct LifecycleGuard {
     motion_axes_mask: u32,
     stop_started_cycle: Option<u64>,
     stop_issued_cycle: Option<u64>,
+    stop_timeout_record: Option<StopTimeoutRecord>,
+    pending_stop_timeout_events_mask: u32,
     maintenance_stop_pending: bool,
     pending_fault_code: Option<u32>,
     requalify_after_cycle: Option<u64>,
@@ -528,6 +551,8 @@ impl LifecycleGuard {
             motion_axes_mask: 0,
             stop_started_cycle: None,
             stop_issued_cycle: None,
+            stop_timeout_record: None,
+            pending_stop_timeout_events_mask: 0,
             maintenance_stop_pending: false,
             pending_fault_code: None,
             requalify_after_cycle: None,
@@ -566,6 +591,10 @@ impl LifecycleGuard {
 
     pub const fn latched_fault_code(&self) -> u32 {
         self.latched_fault_code
+    }
+
+    pub const fn stop_timeout_record(&self) -> Option<StopTimeoutRecord> {
+        self.stop_timeout_record
     }
 
     pub const fn recovery_count(&self) -> u64 {
@@ -1098,6 +1127,12 @@ impl LifecycleGuard {
     }
 
     fn latch_stop_timeout(&mut self, cycle: u64) {
+        let mut actions = self.axis_stop_policy.actions;
+        if self.maintenance_stop_pending || self.state == LifecycleState::Maintenance {
+            actions = [StopAction::Disable; MAX_MOTION_AXES];
+        }
+        let axis_mask = self.motion_axes_mask;
+        let first_issued_cycle = self.stop_issued_cycle;
         self.revoke_permit();
         self.pending_fault_code = None;
         self.maintenance_stop_pending = false;
@@ -1109,6 +1144,14 @@ impl LifecycleGuard {
         }
         self.latched_fault_code = STOP_TIMEOUT_FAULT_CODE;
         self.transition_with_fault(LifecycleState::FaultLatched, cycle, STOP_TIMEOUT_FAULT_CODE);
+        self.stop_timeout_record = Some(StopTimeoutRecord {
+            cycle,
+            transition_sequence: self.transition_sequence,
+            first_issued_cycle,
+            axis_mask,
+            actions,
+        });
+        self.pending_stop_timeout_events_mask = axis_mask;
     }
 
     fn gates_ready(&self, cycle: u64) -> bool {
@@ -2079,6 +2122,13 @@ mod tests {
         assert_eq!(guard.cycle(4, 4), LifecycleAction::FaultLatched);
         assert_eq!(guard.latched_fault_code(), STOP_TIMEOUT_FAULT_CODE);
         assert_eq!(guard.first_fault_code(), STOP_TIMEOUT_FAULT_CODE);
+        let timeout = guard.stop_timeout_record().unwrap();
+        assert_eq!(timeout.cycle, 4);
+        assert_eq!(timeout.transition_sequence, guard.transition_sequence());
+        assert_eq!(timeout.axis_mask, 0b11);
+        assert_eq!(timeout.first_issued_cycle, Some(2));
+        assert_eq!(timeout.requested_action(0), Some(StopAction::Disable));
+        assert_eq!(timeout.requested_action(1), Some(StopAction::Disable));
         assert_eq!(
             guard.acknowledge_stopped(4, stopped(4)),
             Err(LifecycleError::InvalidState)
@@ -2098,6 +2148,22 @@ mod tests {
         assert_eq!(other.state(), LifecycleState::FaultLatched);
         assert_eq!(other.first_fault_code(), 0xBEEF);
         assert_eq!(other.latched_fault_code(), STOP_TIMEOUT_FAULT_CODE);
+        assert_eq!(
+            other.stop_timeout_record().unwrap().first_issued_cycle,
+            Some(2)
+        );
+        assert_eq!(
+            other.stop_timeout_record().unwrap().requested_action(0),
+            Some(StopAction::QuickStop)
+        );
+
+        let mut no_output = LifecycleGuard::new(0, 10, policy);
+        no_output.request_rearm(permit(1, 100), 1, 1).unwrap();
+        no_output.set_maintenance(true, 2);
+        assert_eq!(no_output.cycle(4, 4), LifecycleAction::FaultLatched);
+        let timeout = no_output.stop_timeout_record().unwrap();
+        assert_eq!(timeout.first_issued_cycle, None);
+        assert_eq!(timeout.requested_action(0), Some(StopAction::Disable));
     }
 
     #[test]

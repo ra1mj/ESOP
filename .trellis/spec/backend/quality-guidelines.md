@@ -81,6 +81,13 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   issuance cycle, stage the fixed array before publication, and never infer drive
   execution from a sent controlword. The scalar `stop_action` remains only a
   legacy default/summary; old ABI attachments must fail validation.
+- On stop timeout, snapshot the original armed axis mask and the selected
+  per-axis stop actions before clearing motion authority. Publish each axis's
+  Disable escalation as a bounded ProcBuf event with the full fault code,
+  transition sequence, and caller-supplied monotonic timestamp. Failed writes
+  must leave only unwritten axes pending for retry; event-ring loss is
+  observable. Never treat an event or issued Disable as stationary feedback,
+  and do not carry previous-cycle axis stop proof into a fault-latched page.
 - A required hard-class gate (platform, configuration, topology, drive, cycle
   budget, or external safety) entering bad or unavailable state while active
   must stage a fault through Stopping and verified stop acknowledgment before
