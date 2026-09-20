@@ -4,7 +4,7 @@ use esop_ethercat_core::{
     NoopDmaCache, RxSlotState,
 };
 use esop_ethercat_linux_port::{Cia402DriveSimulator, SimulatedPort};
-use esop_lifecycle_guard::{GuardPolicy, LifecycleGuard, MotionPermit};
+use esop_lifecycle_guard::{GateId, GuardPolicy, LifecycleError, LifecycleGuard, MotionPermit};
 use esop_profile_cia402::{
     CONTROLWORD_ENABLE_OPERATION, Cia402MotionGate, Cia402PdoCommand, Cia402PdoField, Cia402PdoMap,
     Cia402Target, OperatingMode,
@@ -272,7 +272,10 @@ fn lifecycle_guard_denial_cannot_reach_cyclic_output() {
             entry(Cia402PdoField::ActualPosition, 168),
         );
     let mut drive = Cia402DriveSimulator::new(map);
-    let mut guard = LifecycleGuard::new(0, 7, GuardPolicy::conservative());
+    let mut guard = LifecycleGuard::new(GateId::Link.bit(), 7, GuardPolicy::conservative());
+    for cycle in 1..=3 {
+        guard.update_gate(GateId::Link, true, cycle, 0);
+    }
     guard
         .accept_permit(
             MotionPermit {
@@ -302,8 +305,8 @@ fn lifecycle_guard_denial_cannot_reach_cyclic_output() {
                 reserved: [0; 3],
                 policy_version: 1,
             },
-            1,
-            1,
+            3,
+            3,
         )
         .unwrap();
     let command = Cia402PdoCommand {
@@ -312,10 +315,10 @@ fn lifecycle_guard_denial_cannot_reach_cyclic_output() {
         target: Cia402Target::Position(42),
     };
     drive
-        .step_with_lifecycle(&mut guard, 1, 1, command)
+        .step_with_lifecycle(&mut guard, 3, 3, command)
         .unwrap();
     drive
-        .step_with_lifecycle(&mut guard, 2, 101, command)
+        .step_with_lifecycle(&mut guard, 4, 101, command)
         .unwrap();
     assert_eq!(
         drive
@@ -324,6 +327,102 @@ fn lifecycle_guard_denial_cannot_reach_cyclic_output() {
             .unwrap()
             .read_unsigned(drive.process_image()),
         Ok(esop_profile_cia402::CONTROLWORD_QUICK_STOP as u64)
+    );
+
+    guard.set_maintenance(true, 5);
+    drive
+        .step_with_lifecycle(&mut guard, 5, 5, command)
+        .unwrap();
+    assert_eq!(
+        drive
+            .map()
+            .entry(Cia402PdoField::Controlword)
+            .unwrap()
+            .read_unsigned(drive.process_image()),
+        Ok(esop_profile_cia402::CONTROLWORD_DISABLE_VOLTAGE as u64)
+    );
+    guard.set_maintenance(false, 6);
+    assert_eq!(
+        guard.request_rearm(
+            MotionPermit {
+                boot_id: 7,
+                source_id: 1,
+                permit_epoch: 2,
+                sequence: 1,
+                axis_mask: 1,
+                expires_at_ns: 200,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
+            },
+            6,
+            6,
+        ),
+        Err(LifecycleError::InvalidState)
+    );
+    drive
+        .step_with_lifecycle(&mut guard, 6, 6, command)
+        .unwrap();
+    guard.acknowledge_stopped(6).unwrap();
+    assert_eq!(
+        guard.request_rearm(
+            MotionPermit {
+                boot_id: 7,
+                source_id: 1,
+                permit_epoch: 3,
+                sequence: 1,
+                axis_mask: 1,
+                expires_at_ns: 200,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
+            },
+            6,
+            6,
+        ),
+        Err(LifecycleError::NotReady)
+    );
+    drive
+        .step_with_lifecycle(&mut guard, 6, 6, command)
+        .unwrap();
+    assert_eq!(
+        drive
+            .map()
+            .entry(Cia402PdoField::Controlword)
+            .unwrap()
+            .read_unsigned(drive.process_image()),
+        Ok(esop_profile_cia402::CONTROLWORD_DISABLE_VOLTAGE as u64)
+    );
+    for cycle in 7..=9 {
+        guard.update_gate(GateId::Link, true, cycle, 0);
+    }
+    guard
+        .request_rearm(
+            MotionPermit {
+                boot_id: 7,
+                source_id: 1,
+                permit_epoch: 3,
+                sequence: 2,
+                axis_mask: 1,
+                expires_at_ns: 200,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
+            },
+            9,
+            9,
+        )
+        .unwrap();
+    drive
+        .step_with_lifecycle(&mut guard, 9, 9, command)
+        .unwrap();
+    assert_eq!(
+        drive
+            .map()
+            .entry(Cia402PdoField::Controlword)
+            .unwrap()
+            .read_unsigned(drive.process_image()),
+        Ok(CONTROLWORD_ENABLE_OPERATION as u64)
     );
 }
 

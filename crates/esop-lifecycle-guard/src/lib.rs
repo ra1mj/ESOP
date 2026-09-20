@@ -290,6 +290,8 @@ pub struct LifecycleGuard {
     last_permit_sequence: u64,
     state: LifecycleState,
     state_since_cycle: u64,
+    maintenance_stop_pending: bool,
+    requalify_after_cycle: Option<u64>,
     first_fault_code: u32,
     latched_fault_code: u32,
     recovery_count: u64,
@@ -318,6 +320,8 @@ impl LifecycleGuard {
             last_permit_sequence: 0,
             state: LifecycleState::Qualifying,
             state_since_cycle: 0,
+            maintenance_stop_pending: false,
+            requalify_after_cycle: None,
             first_fault_code: 0,
             latched_fault_code: 0,
             recovery_count: 0,
@@ -430,7 +434,7 @@ impl LifecycleGuard {
         });
         LifecycleSnapshot {
             state: self.state,
-            stop_action: self.policy.stop_action,
+            stop_action: self.effective_stop_action(),
             state_since_cycle: self.state_since_cycle,
             required_gate_mask: self.required_mask,
             valid_gate_mask: self.valid_gate_mask(),
@@ -467,8 +471,15 @@ impl LifecycleGuard {
     }
 
     pub fn update_gate(&mut self, gate: GateId, valid: bool, cycle: u64, fault_code: u32) {
+        if self
+            .requalify_after_cycle
+            .is_some_and(|boundary| cycle <= boundary)
+        {
+            return;
+        }
         let status = &mut self.gates[gate as usize];
-        let observed = status.good_cycles != 0 || status.bad_cycles != 0;
+        let observed =
+            status.good_cycles != 0 || status.bad_cycles != 0 || status.last_update_cycle != 0;
         if observed && cycle <= status.last_update_cycle {
             // A bad observation may override a good one in the same cycle,
             // but a replay or a later good report cannot erase the failure.
@@ -634,11 +645,28 @@ impl LifecycleGuard {
     }
 
     pub fn set_maintenance(&mut self, enabled: bool, cycle: u64) {
+        if self.state == LifecycleState::FaultLatched {
+            // A maintenance toggle must not bypass explicit fault recovery.
+            return;
+        }
         if enabled {
+            self.maintenance_stop_pending |= matches!(
+                self.state,
+                LifecycleState::Active | LifecycleState::Stopping
+            );
             self.revoke_permit();
+            self.invalidate_gate_qualification(cycle);
             self.transition(LifecycleState::Maintenance, cycle);
         } else if self.state == LifecycleState::Maintenance {
-            self.transition(LifecycleState::Qualifying, cycle);
+            self.invalidate_gate_qualification(cycle);
+            self.transition(
+                if self.maintenance_stop_pending {
+                    LifecycleState::Stopping
+                } else {
+                    LifecycleState::Qualifying
+                },
+                cycle,
+            );
         }
     }
 
@@ -646,6 +674,7 @@ impl LifecycleGuard {
         if self.state != LifecycleState::Stopping {
             return Err(LifecycleError::InvalidState);
         }
+        self.maintenance_stop_pending = false;
         self.revoke_permit();
         self.transition(LifecycleState::Ready, cycle);
         Ok(())
@@ -653,6 +682,8 @@ impl LifecycleGuard {
 
     pub fn latch_fault(&mut self, code: u32, cycle: u64) {
         self.revoke_permit();
+        self.maintenance_stop_pending = false;
+        self.invalidate_gate_qualification(cycle);
         self.first_fault_code = code;
         self.latched_fault_code = code;
         self.transition(LifecycleState::FaultLatched, cycle);
@@ -662,6 +693,10 @@ impl LifecycleGuard {
         if self.state != LifecycleState::FaultLatched {
             return Err(LifecycleError::InvalidState);
         }
+        if !self.gates_ready(cycle) {
+            return Err(LifecycleError::NotReady);
+        }
+        self.revoke_permit();
         let fault_code = self.first_fault_code;
         self.first_fault_code = 0;
         self.latched_fault_code = 0;
@@ -694,7 +729,7 @@ impl LifecycleGuard {
 
     pub fn cycle(&mut self, cycle: u64, now_ns: u64) -> LifecycleAction {
         if self.state == LifecycleState::Maintenance {
-            return LifecycleAction::Hold;
+            return LifecycleAction::Stop(self.effective_stop_action());
         }
         if self.state == LifecycleState::FaultLatched {
             return LifecycleAction::FaultLatched;
@@ -723,7 +758,7 @@ impl LifecycleGuard {
                     LifecycleAction::Stop(self.policy.stop_action)
                 }
             }
-            LifecycleState::Stopping => LifecycleAction::Stop(self.policy.stop_action),
+            LifecycleState::Stopping => LifecycleAction::Stop(self.effective_stop_action()),
             LifecycleState::Maintenance | LifecycleState::FaultLatched => unreachable!(),
         }
     }
@@ -736,6 +771,14 @@ impl LifecycleGuard {
                     && permit.expires_at_ns > now_ns
             })
             .unwrap_or(false)
+    }
+
+    fn effective_stop_action(&self) -> StopAction {
+        if self.state == LifecycleState::Maintenance || self.maintenance_stop_pending {
+            StopAction::Disable
+        } else {
+            self.policy.stop_action
+        }
     }
 
     fn gates_ready(&self, cycle: u64) -> bool {
@@ -767,6 +810,20 @@ impl LifecycleGuard {
             && status.valid
             && status.last_update_cycle <= cycle
             && cycle - status.last_update_cycle <= self.policy.max_age_cycles
+    }
+
+    fn invalidate_gate_qualification(&mut self, cycle: u64) {
+        self.requalify_after_cycle = Some(
+            self.requalify_after_cycle
+                .map_or(cycle, |previous| previous.max(cycle)),
+        );
+        for status in &mut self.gates {
+            status.valid = false;
+            status.qualified = false;
+            status.good_cycles = 0;
+            status.bad_cycles = 0;
+            status.last_update_cycle = status.last_update_cycle.max(cycle);
+        }
     }
 
     fn transition(&mut self, state: LifecycleState, cycle: u64) {
@@ -1252,6 +1309,116 @@ mod tests {
                 },
                 5,
                 5
+            ),
+            Ok(LifecycleAction::EnableAllowed)
+        );
+    }
+
+    #[test]
+    fn maintenance_exit_requires_new_gate_window_and_permit() {
+        let mut guard = LifecycleGuard::new(GateId::Link.bit(), 10, POLICY);
+        guard.update_gate(GateId::Link, true, 1, 0);
+        guard.update_gate(GateId::Link, true, 2, 0);
+        guard.request_rearm(permit(1, 100), 2, 2).unwrap();
+
+        guard.set_maintenance(true, 3);
+        assert_eq!(
+            guard.cycle(3, 3),
+            LifecycleAction::Stop(StopAction::Disable)
+        );
+        assert_eq!(guard.snapshot(3, 3).stop_action, StopAction::Disable);
+        assert!(!guard.gate(GateId::Link).qualified);
+        assert_eq!(guard.gate(GateId::Link).bad_cycles, 0);
+        assert!(guard.permit().is_none());
+        guard.set_maintenance(false, 4);
+        assert_eq!(guard.state(), LifecycleState::Stopping);
+        assert_eq!(
+            guard.cycle(4, 4),
+            LifecycleAction::Stop(StopAction::Disable)
+        );
+        assert_eq!(guard.snapshot(4, 4).stop_action, StopAction::Disable);
+        assert_eq!(
+            guard.request_rearm(
+                MotionPermit {
+                    permit_epoch: 2,
+                    ..permit(1, 100)
+                },
+                4,
+                4,
+            ),
+            Err(LifecycleError::InvalidState)
+        );
+        guard.acknowledge_stopped(4).unwrap();
+        assert_eq!(guard.snapshot(4, 4).stop_action, POLICY.stop_action);
+        guard.update_gate(GateId::Link, true, 4, 0);
+        assert_eq!(guard.ready_gate_mask(4) & GateId::Link.bit(), 0);
+        assert_eq!(
+            guard.request_rearm(
+                MotionPermit {
+                    permit_epoch: 3,
+                    ..permit(1, 100)
+                },
+                4,
+                4,
+            ),
+            Err(LifecycleError::NotReady)
+        );
+        guard.update_gate(GateId::Link, true, 5, 0);
+        assert_eq!(guard.ready_gate_mask(5) & GateId::Link.bit(), 0);
+        guard.update_gate(GateId::Link, true, 6, 0);
+        assert_eq!(
+            guard.request_rearm(
+                MotionPermit {
+                    permit_epoch: 3,
+                    ..permit(2, 100)
+                },
+                6,
+                6,
+            ),
+            Ok(LifecycleAction::EnableAllowed)
+        );
+    }
+
+    #[test]
+    fn fault_clear_needs_resolved_stable_gates_and_post_recovery_permit() {
+        let mut guard = LifecycleGuard::new(GateId::Link.bit(), 10, POLICY);
+        guard.update_gate(GateId::Link, true, 1, 0);
+        guard.update_gate(GateId::Link, true, 2, 0);
+        guard.request_rearm(permit(1, 100), 2, 2).unwrap();
+        guard.update_gate(GateId::Link, false, 3, 0xCAFE);
+        guard.latch_fault(0xCAFE, 3);
+        guard.set_maintenance(true, 3);
+        guard.set_maintenance(false, 3);
+        assert_eq!(guard.state(), LifecycleState::FaultLatched);
+        assert_eq!(guard.latched_fault_code(), 0xCAFE);
+        assert_eq!(guard.clear_fault(3), Err(LifecycleError::NotReady));
+        guard.update_gate(GateId::Link, true, 3, 0);
+        assert_eq!(guard.clear_fault(3), Err(LifecycleError::NotReady));
+        guard.update_gate(GateId::Link, true, 4, 0);
+        assert_eq!(guard.clear_fault(4), Err(LifecycleError::NotReady));
+        guard.update_gate(GateId::Link, true, 5, 0);
+        assert_eq!(guard.clear_fault(5), Ok(()));
+        assert_eq!(guard.state(), LifecycleState::Qualifying);
+        assert_eq!(guard.latched_fault_code(), 0);
+        assert_eq!(
+            guard.request_rearm(
+                MotionPermit {
+                    permit_epoch: 2,
+                    ..permit(2, 100)
+                },
+                5,
+                5,
+            ),
+            Err(LifecycleError::Permit(PermitError::EpochReplayed))
+        );
+        assert_eq!(
+            guard.request_rearm(
+                MotionPermit {
+                    permit_epoch: 3,
+                    ..permit(2, 100)
+                },
+                5,
+                5,
             ),
             Ok(LifecycleAction::EnableAllowed)
         );

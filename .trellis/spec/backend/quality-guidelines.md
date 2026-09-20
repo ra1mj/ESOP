@@ -47,6 +47,14 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
 - In the active guard, a required gate's observed bad value stops motion in
   that cycle even if its exit debounce still marks it qualified. Count at most
   one good observation per cycle; rearm needs a fresh enter-good window.
+- Maintenance entry/exit and a latched fault invalidate old gate qualification.
+  Preserve per-gate cycle watermarks so same-cycle or replayed evidence cannot
+  restore readiness. Fault clearing requires a fresh stable window; clearing
+  revokes permits again so rearm needs a post-recovery permit epoch. Maintenance
+  must request Disable explicitly rather than rely on Hold's consumer meaning;
+  exiting maintenance from Active/Stopping must retain Disable until stop
+  acknowledgment, and maintenance toggles must never clear a latched fault.
+  Snapshot stop_action must match the action sent to the drive.
 - Sample EtherCAT-backed MLG facts after finishing all due Domains: require
   this cycle's complete nonzero WKC and fresh DC completion, not a retained
   Domain image or the DC monitor's previously locked state. The cycle owner
