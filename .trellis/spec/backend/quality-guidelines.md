@@ -50,6 +50,10 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   the frozen schedule. Project every configured Domain's WKC and age, but only
   qualify scheduled Domains as current; do not overwrite AL, command, or
   fault facts owned by other producers.
+- For multi-rate MLG projection, bind each Domain quality snapshot to its
+  frozen schedule ID and derive the due tick from master cycle 1 = schedule
+  tick 0. An idle tick may reuse only the last successfully scheduled sample
+  within its period; current-cycle RX/DC evidence remains mandatory.
 - Treat `motion_permit_current` as permit freshness, not motion authorization:
   a blocked gate can move the guard to `Stopping` while the permit remains
   current. Only the guard's cycle action may authorize CiA 402 enable.

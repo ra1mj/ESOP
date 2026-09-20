@@ -280,6 +280,8 @@ MLG 配置与 EtherCAT/ProcBuf 配置一起冻结。变更 policy hash、门槛�
 
 同时启用 `ethercat` 和 `procbuf` 后，`ethercat_cycle_to_procbuf` 使用冻结调度的固定容量 Domain 顺序和当周期 due 掩码，从同一来源同时生成 MLG 原始事实与 ProcBuf 的 link/DC/每 Domain WKC 诊断；未调度 Domain 仍保留质量快照，但不会冒充当前周期通过，其输入年龄至少等于当前周期与最后成功周期的差。`dc_offset_ns` 是最后一次观测值，只有 `dc_locked=1` 才表示当前周期的锁定样本；AL 状态、命令年龄、累计 deadline miss 和故障位图仍由各自生产者填写。本入口不改 ProcBuf v3 布局，调用者仍须将返回的同一份事实交给 MLG，并在冻结调度中证明掩码与 Domain 清单一致。
 
+多速率周期优先使用 `cyclic_quality_from_schedule` / `scheduled_ethercat_cycle_to_procbuf`：调度 tick 0 对应主站 `CycleReport.cycle=1`，无需调用方再传 due 掩码。每个固定槽以 `ScheduledDomainQuality` 显式绑定冻结的 Domain ID，槽数或 ID 不匹配即拒绝 Domain/WKC 门槛。已到期 Domain 需要本周期完整 WKC 和 `finish_receive` 成功；未到期 Domain 必须曾在最近一次**实际到期**的 tick 成功收包，且周期年龄小于其配置周期、快照仍完整有效。空到期 tick 可沿用上述有效输入，但 Link/WKC 仍需要本周期的有效接收证据（例如 DC 数据报），DC 门槛仍需要本周期同步。初次尚未成功接收、到期漏收、年龄/相位不符、RX 异常均保持 fail-closed。若没有本周期接收流量，不得将上一周期的 WKC 当成当前 WKC。旧的手动 due 掩码入口保留兼容语义，空 due 掩码不算健康。
+
 ## 10. 验收与验证
 
 | ID | 类型 | 验收要求 |

@@ -4,9 +4,14 @@ use crate::{CyclicQuality, LifecycleSnapshot};
 use esop_procbuf::{CyclicQualityMask, LifecycleSummary, QualityFact, StatePage};
 
 #[cfg(feature = "ethercat")]
-use crate::ethercat::{OtherCycleFacts, cyclic_quality_from_domains};
+use crate::ethercat::{
+    OtherCycleFacts, ScheduledDomainQuality, cyclic_quality_from_domains,
+    cyclic_quality_from_schedule,
+};
 #[cfg(feature = "ethercat")]
-use esop_ethercat_core::{CycleReport, DcCyclicSync, DomainQuality as EthercatDomainQuality};
+use esop_ethercat_core::{
+    CycleReport, DcCyclicSync, DomainQuality as EthercatDomainQuality, ScheduleTable,
+};
 #[cfg(feature = "ethercat")]
 use esop_procbuf::DomainQuality as ProcBufDomainQuality;
 
@@ -69,12 +74,52 @@ pub fn ethercat_cycle_to_procbuf<const AXES: usize, const IO: usize, const DOMAI
         dc,
         other,
     );
+    project_ethercat_diagnostics(state, report, domains.iter().copied(), dc, quality);
+    quality
+}
+
+/// Project schedule-bound Domain evidence, including ticks without any due
+/// Domain. Every slot must match the frozen schedule in order and ID. A bad or
+/// missing snapshot publishes a blocked Domain/WKC gate, not a healthy one.
+#[cfg(feature = "ethercat")]
+pub fn scheduled_ethercat_cycle_to_procbuf<
+    const AXES: usize,
+    const IO: usize,
+    const DOMAINS: usize,
+    const SLOTS: usize,
+>(
+    state: &mut StatePage<AXES, IO, DOMAINS>,
+    report: CycleReport,
+    schedule: &ScheduleTable<DOMAINS, SLOTS>,
+    domains: &[ScheduledDomainQuality; DOMAINS],
+    dc: &DcCyclicSync,
+    other: OtherCycleFacts,
+) -> CyclicQuality {
+    let quality = cyclic_quality_from_schedule(report, schedule, domains, dc, other);
+    project_ethercat_diagnostics(
+        state,
+        report,
+        domains.iter().map(|entry| entry.quality),
+        dc,
+        quality,
+    );
+    quality
+}
+
+#[cfg(feature = "ethercat")]
+fn project_ethercat_diagnostics<const AXES: usize, const IO: usize, const DOMAINS: usize>(
+    state: &mut StatePage<AXES, IO, DOMAINS>,
+    report: CycleReport,
+    domains: impl Iterator<Item = EthercatDomainQuality>,
+    dc: &DcCyclicSync,
+    quality: CyclicQuality,
+) {
     state.quality.link_up = (!report.link_down) as u8;
     state.quality.dc_locked = quality.distributed_clock_locked as u8;
     // Offset is the last observed sample; dc_locked signals whether it is
     // fresh and qualified in this cycle.
     state.quality.dc_offset_ns = dc.monitor().offset_ns();
-    for (destination, source) in state.quality.domains.iter_mut().zip(domains.iter()) {
+    for (destination, source) in state.quality.domains.iter_mut().zip(domains) {
         *destination = ProcBufDomainQuality {
             expected_wkc: source.expected_wkc,
             actual_wkc: source.actual_wkc,
@@ -88,7 +133,6 @@ pub fn ethercat_cycle_to_procbuf<const AXES: usize, const IO: usize, const DOMAI
         };
     }
     cyclic_quality_to_procbuf(state, quality);
-    quality
 }
 
 /// `transition_time_ns` must come from the recorded transition's monotonic

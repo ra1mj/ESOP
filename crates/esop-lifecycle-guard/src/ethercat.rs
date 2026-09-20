@@ -1,7 +1,14 @@
 //! Allocation-free projection of verified EtherCAT cycle evidence into MLG facts.
 
 use crate::CyclicQuality;
-use esop_ethercat_core::{CycleReport, DcCyclicSync, DomainQuality};
+use esop_ethercat_core::{CycleReport, DcCyclicSync, DomainQuality, ScheduleTable};
+
+/// One quality snapshot bound to a frozen schedule Domain ID, in schedule order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScheduledDomainQuality {
+    pub id: u8,
+    pub quality: DomainQuality,
+}
 
 /// Facts owned by the cycle caller, not inferable from EtherCAT RX or DC.
 /// Callers must sample each from its actual owner for the same cycle.
@@ -47,6 +54,66 @@ pub(crate) fn cyclic_quality_from_domains<'a>(
             && domain.last_valid_cycle == report.cycle
             && domain.input_age_cycles == 0
     }) && has_due_domain;
+    quality_from_domain_health(report, domain_valid, dc, other)
+}
+
+/// Evaluate every configured Domain, including those not due on this tick.
+/// The schedule's tick zero is master cycle one. A non-due Domain is healthy only
+/// after a successful receive at its most recent scheduled tick. No Domain
+/// may be omitted or substituted: snapshots must match schedule order and ID.
+pub fn cyclic_quality_from_schedule<const DOMAINS: usize, const SLOTS: usize>(
+    report: CycleReport,
+    schedule: &ScheduleTable<DOMAINS, SLOTS>,
+    domains: &[ScheduledDomainQuality],
+    dc: &DcCyclicSync,
+    other: OtherCycleFacts,
+) -> CyclicQuality {
+    let tick = report.cycle.saturating_sub(1);
+    let domain_valid = report.cycle != 0
+        && !domains.is_empty()
+        && domains.len() == schedule.domain_count()
+        && schedule
+            .domains()
+            .iter()
+            .zip(domains)
+            .all(|(configured, observed)| {
+                if configured.id != observed.id {
+                    return false;
+                }
+                let quality = observed.quality;
+                if !quality.valid
+                    || !quality.complete
+                    || quality.expected_wkc == 0
+                    || quality.actual_wkc != quality.expected_wkc
+                    || quality.input_age_cycles != 0
+                    || quality.last_valid_cycle == 0
+                    || quality.last_valid_cycle > report.cycle
+                {
+                    return false;
+                }
+                let age = report.cycle - quality.last_valid_cycle;
+                let is_due = schedule
+                    .slot((tick % u64::from(schedule.hyperperiod_ticks())) as u32)
+                    .is_due(configured.id);
+                if is_due {
+                    return age == 0;
+                }
+                age < u64::from(configured.period_ticks)
+                    && tick.checked_sub(age).is_some_and(|last_tick| {
+                        schedule
+                            .slot((last_tick % u64::from(schedule.hyperperiod_ticks())) as u32)
+                            .is_due(configured.id)
+                    })
+            });
+    quality_from_domain_health(report, domain_valid, dc, other)
+}
+
+fn quality_from_domain_health(
+    report: CycleReport,
+    domain_valid: bool,
+    dc: &DcCyclicSync,
+    other: OtherCycleFacts,
+) -> CyclicQuality {
     let rx_valid = !report.link_down
         && report.received_frames != 0
         && report.parsed_datagrams != 0
@@ -80,7 +147,7 @@ pub(crate) fn cyclic_quality_from_domains<'a>(
 mod tests {
     use super::*;
     use esop_ethercat_core::wire::{Command, DatagramHeader};
-    use esop_ethercat_core::{DcCyclicConfig, DcMonitor, RxMatch};
+    use esop_ethercat_core::{DcCyclicConfig, DcMonitor, RxMatch, ScheduleDomain};
 
     fn report() -> CycleReport {
         CycleReport {
@@ -306,5 +373,129 @@ mod tests {
             assert!(!facts.cycle_within_budget);
             assert!(facts.wkc_valid);
         }
+    }
+
+    #[test]
+    fn multi_rate_schedule_uses_last_due_sample_without_masking_missed_or_wrong_phase() {
+        let schedule = ScheduleTable::<2, 8>::build(
+            250_000,
+            &[
+                ScheduleDomain {
+                    id: 3,
+                    period_ticks: 4,
+                    phase_ticks: 0,
+                },
+                ScheduleDomain {
+                    id: 17,
+                    period_ticks: 4,
+                    phase_ticks: 2,
+                },
+            ],
+        )
+        .unwrap();
+        let dc = locked_dc();
+        let samples = [
+            ScheduledDomainQuality {
+                id: 3,
+                quality: DomainQuality {
+                    last_valid_cycle: 5,
+                    ..domain()
+                },
+            },
+            ScheduledDomainQuality {
+                id: 17,
+                quality: domain(),
+            },
+        ];
+        let good = cyclic_quality_from_schedule(report(), &schedule, &samples, &dc, other());
+        assert!(good.domain_valid && good.wkc_valid);
+
+        let first = CycleReport {
+            cycle: 1,
+            ..report()
+        };
+        let unobserved = [
+            ScheduledDomainQuality {
+                id: 3,
+                quality: DomainQuality {
+                    last_valid_cycle: 1,
+                    ..domain()
+                },
+            },
+            ScheduledDomainQuality {
+                id: 17,
+                quality: DomainQuality::EMPTY,
+            },
+        ];
+        assert!(
+            !cyclic_quality_from_schedule(first, &schedule, &unobserved, &dc, other()).domain_valid
+        );
+
+        let idle = CycleReport {
+            cycle: 8,
+            parsed_datagrams: 1,
+            ..report()
+        };
+        let idle_quality = cyclic_quality_from_schedule(idle, &schedule, &samples, &dc, other());
+        assert!(idle_quality.domain_valid && idle_quality.wkc_valid);
+        assert!(!idle_quality.distributed_clock_locked);
+        let link_down = CycleReport {
+            link_down: true,
+            ..idle
+        };
+        let failed_link =
+            cyclic_quality_from_schedule(link_down, &schedule, &samples, &dc, other());
+        assert!(!failed_link.wkc_valid && !failed_link.distributed_clock_locked);
+
+        let due = CycleReport {
+            cycle: 9,
+            ..report()
+        };
+        assert!(!cyclic_quality_from_schedule(due, &schedule, &samples, &dc, other()).domain_valid);
+        assert!(
+            !cyclic_quality_from_schedule(report(), &schedule, &samples[..1], &dc, other())
+                .domain_valid
+        );
+        let mut swapped = samples;
+        swapped.swap(0, 1);
+        assert!(
+            !cyclic_quality_from_schedule(report(), &schedule, &swapped, &dc, other()).domain_valid
+        );
+        for invalid in [
+            DomainQuality {
+                last_valid_cycle: 4,
+                ..domain()
+            },
+            DomainQuality {
+                last_valid_cycle: 8,
+                ..domain()
+            },
+            DomainQuality {
+                last_valid_cycle: 6,
+                ..domain()
+            },
+            DomainQuality {
+                valid: false,
+                ..domain()
+            },
+            DomainQuality {
+                input_age_cycles: 1,
+                ..domain()
+            },
+        ] {
+            let mut faulty = samples;
+            faulty[1].quality = invalid;
+            assert!(
+                !cyclic_quality_from_schedule(report(), &schedule, &faulty, &dc, other())
+                    .domain_valid
+            );
+        }
+        let rx_failure = CycleReport {
+            wkc_mismatches: 1,
+            ..idle
+        };
+        assert!(
+            !cyclic_quality_from_schedule(rx_failure, &schedule, &samples, &dc, other()).wkc_valid
+        );
     }
 }
