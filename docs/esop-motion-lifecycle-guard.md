@@ -274,6 +274,8 @@ ProcBuf ABI v4 在 State 页增加固定容量的 `axis_stops[AXES]`：`request_
 
 可选 `ethercat` + `cia402` + `procbuf` 的 `StopCycleContext` 是固定容量的**单 Domain 生命周期输出分支**，不是完整周期任务。输入必须是主站实际完成的当前 `CycleReport` 和 `Domain::finish_receive` 后的输入；调用前核对主站周期、State 序号、boot ID 与冻结许可轴数，不匹配时先拒绝、再避免修改门槛。它按顺序从真实 RX 投影门槛/质量，取得同一守卫决策和逐轴 CiA 402 输出；`run()` 仍只处理停机及禁止输出，活动状态返回 `NotStopping`，而 `run_with_motion()` 将目标守卫绑定到 boot ID 和本次 Active 转换序号，在新的重臂周期弃用旧目标；只有收到通过当前 Domain/WKC 校验、模式已确认的 `SwitchedOn` 反馈，使能边沿目标又与实际位置/速度/力矩一致，才用该实际值播种目标守卫。许可续发但未重新重臂时不重置守卫。`SwitchOnDisabled`/`ReadyToSwitchOn` 握手阶段只发送控制字；`OperationEnabled` 后才允许已播种并通过产品限幅的运动目标，未完成使能边沿播种直接跳到此状态时不得送运动目标。活动输出还须验证目标 PDO 的可写 Domain 覆盖及所有轴的输出别名（包括当前未许可的轴）。目标守卫只在整帧成功提交端口后推进；构帧或 TX 失败不提交播种。活动帧校验、构帧或 TX 失败时，协调器在同周期撤销 permit、记录 `0x5458_0001` 阻塞码并尝试停机帧；`active_failure` 保存原始错误，`transmission` 表示最终停机帧结果。即使停机 TX 也失败，State 仍发布 Stopping 和零发送证据，事件始终排在 State 之后。仅有早于本期的成功停机控制帧加后续新鲜反馈，才可确认停稳；当前调用产生的转换使用本次单调时间，既有转换的时间须由调用者给出。状态页发布失败时事件仍待重试。调用方继续负责最终 deadline 结果、其他 Domain、命令准入、非 CiA 402 输出安全映像与完整周期调度；模拟端口只覆盖软件边界，不能据此宣称完成产品周期闭环或实物 HIL。
 
+多 Domain State 页可使用 `run_scheduled` / `run_scheduled_with_motion`，将冻结的 `ScheduleTable` 和按 ID 顺序排列的每个 Domain 真实质量快照传入同一分支；运动 Domain 必须每 tick 到期，其质量快照须与当前 CiA 402 输入所用的 Domain 一致。配置数量、顺序、运动 Domain 周期或快照不匹配时，在发送和门槛更新之前报错，调用方必须将该错误作为安全失败处理；多 Domain State 页不能调用原单 Domain 入口。辅助 Domain 非到期周期可按冻结速率沿用有效样本，但到期漏收或过期将使质量门槛失效、撤销运动许可并尝试发送停机帧。此分支仍依赖调用者提供的其他 Domain 快照，未自行完成它们的实际接收、输出发送与调度，也未判定本次发送后的最终 deadline；软件模拟回归不构成实物 HIL 验收。
+
 ## 9. 配置与可观测性
 
 ### 9.1 生成配置

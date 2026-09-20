@@ -1,13 +1,15 @@
 use esop_ethercat_core::wire::{Command, MAX_ETHERNET_FRAME_LEN};
 use esop_ethercat_core::{
     CycleError, CycleReport, DatagramPlan, DcCyclicConfig, DcCyclicSync, DcMonitor, Domain,
-    DomainSegment, EthercatMaster, FramePlan, MasterConfig, PdoDirection, PdoEntry,
+    DomainSegment, EthercatMaster, FramePlan, MasterConfig, PdoDirection, PdoEntry, RxConsumerMux,
+    ScheduleDomain, ScheduleTable,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::cia402::step_axis_bank;
 use esop_lifecycle_guard::ethercat::{
-    OtherCycleFacts, StopFrameError, cyclic_quality_from_ethercat, submit_active_frame,
-    submit_inhibited_frame, submit_stopping_frame, verified_ethercat_stop_feedback,
+    OtherCycleFacts, ScheduledDomainQuality, StopFrameError, cyclic_quality_from_ethercat,
+    cyclic_quality_from_schedule, submit_active_frame, submit_inhibited_frame,
+    submit_stopping_frame, verified_ethercat_stop_feedback,
 };
 use esop_lifecycle_guard::procbuf::{
     LifecycleEventCursor, axis_stops_to_procbuf, lifecycle_events_to_procbuf, lifecycle_to_procbuf,
@@ -1921,6 +1923,349 @@ fn verified_stop_requires_complete_feedback_for_every_armed_axis() {
             assert_eq!(guard.state(), LifecycleState::Ready);
         }
     }
+}
+
+#[test]
+fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
+    let mut master = EthercatMaster::<1, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut motion = Domain::<IMAGE_BYTES, 1>::new(0x1000);
+    motion
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: IMAGE_BYTES,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut auxiliary = Domain::<2, 1>::new(0x2000);
+    auxiliary
+        .add_segment(DomainSegment {
+            datagram_index: 13,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let motion_datagram = DatagramPlan {
+        command: Command::Lrw,
+        index: 12,
+        address: 0x1000,
+        payload_offset: 0,
+        payload_len: IMAGE_BYTES,
+        expected_wkc: 1,
+    };
+    let mut initial_plan = FramePlan::<2>::new();
+    initial_plan.push(motion_datagram).unwrap();
+    initial_plan
+        .push(DatagramPlan {
+            command: Command::Lrw,
+            index: 13,
+            address: 0x2000,
+            payload_offset: IMAGE_BYTES,
+            payload_len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut motion_plan = FramePlan::<1>::new();
+    motion_plan.push(motion_datagram).unwrap();
+    let schedule = ScheduleTable::<2, 2>::build(
+        100_000,
+        &[
+            ScheduleDomain {
+                id: 9,
+                period_ticks: 1,
+                phase_ticks: 0,
+            },
+            ScheduleDomain {
+                id: 10,
+                period_ticks: 2,
+                phase_ticks: 0,
+            },
+        ],
+    )
+    .unwrap();
+    let dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 14, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let other = OtherCycleFacts {
+        platform_ready: true,
+        coe_ready: true,
+        topology_valid: true,
+        drive_ready: true,
+        command_current: true,
+        supervisor_healthy: true,
+        external_safety_clear: true,
+        deadline_met: true,
+    };
+    let mut mux = RxConsumerMux::new(motion, auxiliary);
+    let mut port = SimulatedPort::new(1);
+    let safe_image = input_image(0x0040, 0);
+    let mut initial_image = [0u8; IMAGE_BYTES + 2];
+    initial_image[..IMAGE_BYTES].copy_from_slice(&safe_image);
+    initial_image[IMAGE_BYTES..].copy_from_slice(&[0xAB, 0xCD]);
+    port.set_now_ns(100_000);
+    mux.first_mut().begin_receive(1).unwrap();
+    mux.second_mut().begin_receive(1).unwrap();
+    let frame = master.acquire_frame(1, 150_000).unwrap();
+    master
+        .build_and_arm_frame_from_plan(frame, &initial_plan, &initial_image)
+        .unwrap();
+    master.submit_frame(&mut port, frame).unwrap();
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let first = master
+        .cycle_receive_with_consumer(&mut port, &mut scratch, 1, &mut mux)
+        .unwrap();
+    assert!(mux.first_mut().finish_receive(1, first.cycle).unwrap());
+    assert!(mux.second_mut().finish_receive(1, first.cycle).unwrap());
+    assert_eq!(mux.second().input(), &[0xAB, 0xCD]);
+    let mut snapshots = [
+        ScheduledDomainQuality {
+            id: 9,
+            quality: mux.first().quality(),
+        },
+        ScheduledDomainQuality {
+            id: 10,
+            quality: mux.second().quality(),
+        },
+    ];
+
+    let mut guard = LifecycleGuard::new(
+        GateId::Domain.bit() | GateId::Link.bit(),
+        7,
+        GuardPolicy {
+            enter_good_cycles: 1,
+            allowed_axis_mask: 1,
+            ..GuardPolicy::conservative()
+        },
+    );
+    guard.update_cyclic_quality(
+        cyclic_quality_from_schedule(first, &schedule, &snapshots, &dc, other),
+        first.cycle,
+    );
+    guard
+        .request_rearm(
+            MotionPermit {
+                boot_id: 7,
+                source_id: 1,
+                permit_epoch: 1,
+                sequence: 1,
+                expires_at_ns: 10_000,
+                axis_mask: 1,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
+            },
+            first.cycle,
+            100,
+        )
+        .unwrap();
+    let mut cursor = LifecycleEventCursor::new(&guard);
+    let buffer = ProcBuf::<1, 0, 2, 8>::new(1, 7);
+    let mut bank = Cia402AxisBank::<1>::new();
+    let maps = [map()];
+    let modes = [OperatingMode::Csp];
+    let limits = [CyclicLimits {
+        max_position_step: 2.0,
+        max_velocity: 2.0,
+        max_torque: 2.0,
+    }];
+    let mut guards = [CyclicSetpointGuard::new()];
+    let mut state = StatePage::<1, 0, 2>::new(7);
+    state.sequence = first.cycle;
+    {
+        let mut context = StopCycleContext {
+            guard: &mut guard,
+            bank: &mut bank,
+            master: &mut master,
+            port: &mut port,
+            domain: mux.first(),
+            dc: &dc,
+            buffer: &buffer,
+            event_cursor: &mut cursor,
+            state: &mut state,
+            report: first,
+            other,
+            maps: &maps,
+            modes: &modes,
+            max_stationary_velocities: &[1],
+            safe_process_image: &safe_image,
+            plan: &motion_plan,
+            next_generation: 2,
+            deadline_ns: 250_000,
+            now_ns: 101,
+            transition_time_ns: 100,
+        };
+        assert!(matches!(
+            context.run_with_motion(&[None], &mut guards, &limits),
+            Err(StopCycleError::ScheduleRequired)
+        ));
+        let reversed = [snapshots[1], snapshots[0]];
+        assert!(matches!(
+            context.run_scheduled_with_motion(
+                &schedule,
+                &reversed,
+                9,
+                &[None],
+                &mut guards,
+                &limits,
+            ),
+            Err(StopCycleError::InvalidSchedule)
+        ));
+        let mut forged = snapshots;
+        forged[0].quality.actual_wkc = 0;
+        assert!(matches!(
+            context
+                .run_scheduled_with_motion(&schedule, &forged, 9, &[None], &mut guards, &limits,),
+            Err(StopCycleError::MotionDomainMismatch)
+        ));
+        let sparse = ScheduleTable::<2, 2>::build(
+            100_000,
+            &[ScheduleDomain {
+                id: 9,
+                period_ticks: 1,
+                phase_ticks: 0,
+            }],
+        )
+        .unwrap();
+        assert!(matches!(
+            context.run_scheduled_with_motion(
+                &sparse,
+                &snapshots,
+                9,
+                &[None],
+                &mut guards,
+                &limits,
+            ),
+            Err(StopCycleError::InvalidSchedule)
+        ));
+        let slow_motion = ScheduleTable::<2, 2>::build(
+            100_000,
+            &[
+                ScheduleDomain {
+                    id: 9,
+                    period_ticks: 2,
+                    phase_ticks: 0,
+                },
+                ScheduleDomain {
+                    id: 10,
+                    period_ticks: 1,
+                    phase_ticks: 0,
+                },
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            context.run_scheduled_with_motion(
+                &slow_motion,
+                &snapshots,
+                9,
+                &[None],
+                &mut guards,
+                &limits,
+            ),
+            Err(StopCycleError::MotionDomainMismatch)
+        ));
+        assert_eq!(context.state.quality.sequence, 0);
+        assert_eq!(context.port.tx_frames(), 1);
+
+        let sent = context
+            .run_scheduled_with_motion(&schedule, &snapshots, 9, &[None], &mut guards, &limits)
+            .unwrap();
+        assert_eq!(sent.action, LifecycleAction::EnableAllowed);
+        assert!(sent.transmission.is_ok());
+        assert!(sent.quality.domain_valid);
+        assert_eq!(sent.state_publish, Ok(1));
+    }
+
+    port.set_now_ns(200_000);
+    mux.first_mut().begin_receive(2).unwrap();
+    let second = master
+        .cycle_receive_with_consumer(&mut port, &mut scratch, 2, &mut mux)
+        .unwrap();
+    assert!(mux.first_mut().finish_receive(2, second.cycle).unwrap());
+    snapshots[0].quality = mux.first().quality();
+    snapshots[1].quality = mux.second().quality();
+    let mut state = StatePage::<1, 0, 2>::new(7);
+    state.sequence = second.cycle;
+    let idle = StopCycleContext {
+        guard: &mut guard,
+        bank: &mut bank,
+        master: &mut master,
+        port: &mut port,
+        domain: mux.first(),
+        dc: &dc,
+        buffer: &buffer,
+        event_cursor: &mut cursor,
+        state: &mut state,
+        report: second,
+        other,
+        maps: &maps,
+        modes: &modes,
+        max_stationary_velocities: &[1],
+        safe_process_image: &safe_image,
+        plan: &motion_plan,
+        next_generation: 3,
+        deadline_ns: 350_000,
+        now_ns: 201,
+        transition_time_ns: 100,
+    }
+    .run_scheduled_with_motion(&schedule, &snapshots, 9, &[None], &mut guards, &limits)
+    .unwrap();
+    assert_eq!(idle.action, LifecycleAction::EnableAllowed);
+    assert!(idle.transmission.is_ok());
+    assert!(idle.quality.domain_valid);
+    assert_eq!(
+        buffer.read_state().unwrap().state.quality.domains[1].input_age_cycles,
+        1
+    );
+
+    port.set_now_ns(300_000);
+    mux.first_mut().begin_receive(3).unwrap();
+    let third = master
+        .cycle_receive_with_consumer(&mut port, &mut scratch, 3, &mut mux)
+        .unwrap();
+    assert!(mux.first_mut().finish_receive(3, third.cycle).unwrap());
+    snapshots[0].quality = mux.first().quality();
+    snapshots[1].quality = mux.second().quality();
+    let mut state = StatePage::<1, 0, 2>::new(7);
+    state.sequence = third.cycle;
+    let failed = StopCycleContext {
+        guard: &mut guard,
+        bank: &mut bank,
+        master: &mut master,
+        port: &mut port,
+        domain: mux.first(),
+        dc: &dc,
+        buffer: &buffer,
+        event_cursor: &mut cursor,
+        state: &mut state,
+        report: third,
+        other,
+        maps: &maps,
+        modes: &modes,
+        max_stationary_velocities: &[1],
+        safe_process_image: &safe_image,
+        plan: &motion_plan,
+        next_generation: 4,
+        deadline_ns: 450_000,
+        now_ns: 301,
+        transition_time_ns: 100,
+    }
+    .run_scheduled_with_motion(&schedule, &snapshots, 9, &[None], &mut guards, &limits)
+    .unwrap();
+    assert!(matches!(failed.action, LifecycleAction::Stop(_)));
+    assert!(failed.transmission.is_ok());
+    assert!(!failed.quality.domain_valid);
+    assert!(guard.permit().is_none());
+    assert_eq!(guard.state(), LifecycleState::Stopping);
+    let published = buffer.read_state().unwrap().state;
+    assert_eq!(published.quality.domains[1].input_age_cycles, 2);
+    assert_ne!(published.axis_stops[0].issued_action, 0);
+    assert_eq!(published.lifecycle.first_blocking_code, 0x444F_0001);
 }
 
 #[test]

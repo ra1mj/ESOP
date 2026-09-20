@@ -1,4 +1,4 @@
-//! Fixed-capacity single-Domain EtherCAT lifecycle cycle branches.
+//! Fixed-capacity EtherCAT lifecycle cycle branches.
 //!
 //! The caller owns RX, Domain completion, and command admission. These
 //! branches consume a finished Domain and a real receive
@@ -6,18 +6,19 @@
 
 use crate::cia402::step_axis_bank;
 use crate::ethercat::{
-    OtherCycleFacts, StopFrameError, submit_active_frame, submit_inhibited_frame,
-    submit_stopping_frame, verified_ethercat_stop_feedback,
+    OtherCycleFacts, ScheduledDomainQuality, StopFrameError, submit_active_frame,
+    submit_inhibited_frame, submit_stopping_frame, verified_ethercat_stop_feedback,
 };
 use crate::procbuf::{
     AxisEvidenceError, LifecycleEventCursor, LifecycleEventError, axis_stops_to_procbuf,
     ethercat_cycle_to_procbuf, lifecycle_events_to_procbuf, lifecycle_to_procbuf,
+    scheduled_ethercat_cycle_to_procbuf,
 };
 use crate::{
     CyclicQuality, LifecycleAction, LifecycleError, LifecycleGuard, MAX_MOTION_AXES, StopFeedback,
 };
 use esop_ethercat_core::{
-    CycleReport, DcCyclicSync, Domain, EthercatMaster, EthercatPort, FramePlan,
+    CycleReport, DcCyclicSync, Domain, EthercatMaster, EthercatPort, FramePlan, ScheduleTable,
 };
 use esop_procbuf::{HeaderError, ProcBuf, StatePage, StatePublishError};
 use esop_profile_cia402::{
@@ -29,6 +30,9 @@ use esop_profile_cia402::{
 pub enum StopCycleError {
     CycleMismatch,
     AxisCapacityExceeded,
+    ScheduleRequired,
+    InvalidSchedule,
+    MotionDomainMismatch,
     Header(HeaderError),
     NotStopping(LifecycleAction),
     Evidence(AxisEvidenceError),
@@ -55,8 +59,9 @@ pub struct StopCycleOutcome<E> {
 }
 
 /// All non-CiA 402 outputs in `safe_process_image` must be independently
-/// checked by the caller. The Domain has already been finished for `report`;
-/// start the next Domain receive only *after* this branch inspects its input.
+/// checked by the caller. The caller must supply actual quality for every
+/// scheduled Domain, including failed or missing due receives. Start the next
+/// receive only *after* this branch inspects its input.
 /// `transition_time_ns` is the timestamp of a previously recorded transition;
 /// transitions made during `run` use `now_ns` instead.
 pub struct StopCycleContext<
@@ -70,6 +75,7 @@ pub struct StopCycleContext<
     const SLOTS: usize,
     const MTU: usize,
     const EVENTS: usize,
+    const DOMAINS: usize = 1,
 > {
     pub guard: &'a mut LifecycleGuard,
     pub bank: &'a mut Cia402AxisBank<AXES>,
@@ -77,9 +83,9 @@ pub struct StopCycleContext<
     pub port: &'a mut P,
     pub domain: &'a Domain<BYTES, SEGMENTS>,
     pub dc: &'a DcCyclicSync,
-    pub buffer: &'a ProcBuf<AXES, IO, 1, EVENTS>,
+    pub buffer: &'a ProcBuf<AXES, IO, DOMAINS, EVENTS>,
     pub event_cursor: &'a mut LifecycleEventCursor,
-    pub state: &'a mut StatePage<AXES, IO, 1>,
+    pub state: &'a mut StatePage<AXES, IO, DOMAINS>,
     pub report: CycleReport,
     pub other: OtherCycleFacts,
     pub maps: &'a [Cia402PdoMap; AXES],
@@ -99,6 +105,12 @@ struct MotionInputs<'a, const AXES: usize> {
     limits: &'a [CyclicLimits; AXES],
 }
 
+type ScheduledInputs<'a, const DOMAINS: usize, const SLOTS: usize> = (
+    &'a ScheduleTable<DOMAINS, SLOTS>,
+    &'a [ScheduledDomainQuality; DOMAINS],
+    u8,
+);
+
 impl<
     P: EthercatPort,
     const AXES: usize,
@@ -109,14 +121,15 @@ impl<
     const SLOTS: usize,
     const MTU: usize,
     const EVENTS: usize,
-> StopCycleContext<'_, P, AXES, IO, BYTES, SEGMENTS, DATAGRAMS, SLOTS, MTU, EVENTS>
+    const DOMAINS: usize,
+> StopCycleContext<'_, P, AXES, IO, BYTES, SEGMENTS, DATAGRAMS, SLOTS, MTU, EVENTS, DOMAINS>
 {
     /// Project the completed RX cycle, submit a stop or inhibited frame, then
     /// publish causally matched State and transition events. `NotStopping`
     /// means this stop-only entry needs `run_with_motion` for an active cycle;
     /// no frame or State is published on that path.
     pub fn run(&mut self) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
-        self.run_inner(None)
+        self.run_inner::<1>(None, None)
     }
 
     /// Run all lifecycle branches. Guards are reset on a new Active
@@ -128,15 +141,52 @@ impl<
         guards: &mut [CyclicSetpointGuard; AXES],
         limits: &[CyclicLimits; AXES],
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
-        self.run_inner(Some(MotionInputs {
-            targets,
-            guards,
-            limits,
-        }))
+        self.run_inner::<1>(
+            None,
+            Some(MotionInputs {
+                targets,
+                guards,
+                limits,
+            }),
+        )
     }
 
-    fn run_inner(
+    /// Use the frozen schedule to qualify every configured Domain. The caller
+    /// supplies actual snapshots for non-motion Domains, including misses.
+    /// The motion Domain must be due every cycle, and its reported quality
+    /// must equal the actual Domain consumed for CiA 402 input and TX.
+    pub fn run_scheduled<const SCHEDULE_SLOTS: usize>(
         &mut self,
+        schedule: &ScheduleTable<DOMAINS, SCHEDULE_SLOTS>,
+        domains: &[ScheduledDomainQuality; DOMAINS],
+        motion_domain_id: u8,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        self.run_inner(Some((schedule, domains, motion_domain_id)), None)
+    }
+
+    /// As `run_scheduled`, including the active CiA 402 motion branch.
+    pub fn run_scheduled_with_motion<const SCHEDULE_SLOTS: usize>(
+        &mut self,
+        schedule: &ScheduleTable<DOMAINS, SCHEDULE_SLOTS>,
+        domains: &[ScheduledDomainQuality; DOMAINS],
+        motion_domain_id: u8,
+        targets: &[Option<Cia402Target>; AXES],
+        guards: &mut [CyclicSetpointGuard; AXES],
+        limits: &[CyclicLimits; AXES],
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        self.run_inner(
+            Some((schedule, domains, motion_domain_id)),
+            Some(MotionInputs {
+                targets,
+                guards,
+                limits,
+            }),
+        )
+    }
+
+    fn run_inner<const SCHEDULE_SLOTS: usize>(
+        &mut self,
+        scheduled: Option<ScheduledInputs<'_, DOMAINS, SCHEDULE_SLOTS>>,
         motion: Option<MotionInputs<'_, AXES>>,
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
         if self.report.cycle == 0
@@ -163,15 +213,50 @@ impl<
             return Err(StopCycleError::Header(HeaderError::BootIdMismatch));
         }
 
+        if let Some((schedule, domains, motion_domain_id)) = scheduled {
+            if schedule.domain_count() != DOMAINS
+                || !schedule
+                    .domains()
+                    .iter()
+                    .zip(domains)
+                    .all(|(configured, observed)| configured.id == observed.id)
+            {
+                return Err(StopCycleError::InvalidSchedule);
+            }
+            let Some(position) = schedule.domains().iter().position(|configured| {
+                configured.id == motion_domain_id
+                    && configured.period_ticks == 1
+                    && configured.phase_ticks == 0
+            }) else {
+                return Err(StopCycleError::MotionDomainMismatch);
+            };
+            if domains[position].quality != self.domain.quality() {
+                return Err(StopCycleError::MotionDomainMismatch);
+            }
+        } else if DOMAINS != 1 {
+            return Err(StopCycleError::ScheduleRequired);
+        }
+
         let previous_transition_sequence = self.guard.transition_sequence;
-        let quality = ethercat_cycle_to_procbuf(
-            self.state,
-            self.report,
-            &[self.domain.quality()],
-            &[true],
-            self.dc,
-            self.other,
-        );
+        let quality = if let Some((schedule, domains, _)) = scheduled {
+            scheduled_ethercat_cycle_to_procbuf(
+                self.state,
+                self.report,
+                schedule,
+                domains,
+                self.dc,
+                self.other,
+            )
+        } else {
+            ethercat_cycle_to_procbuf(
+                self.state,
+                self.report,
+                &[self.domain.quality(); DOMAINS],
+                &[true; DOMAINS],
+                self.dc,
+                self.other,
+            )
+        };
         self.guard.update_cyclic_quality(quality, self.report.cycle);
         let statuswords = core::array::from_fn(|axis| {
             if quality.domain_valid && quality.wkc_valid {

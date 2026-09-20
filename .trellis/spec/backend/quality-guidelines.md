@@ -87,8 +87,8 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   and unsafe axis outputs, and it must never record stop issuance. On a stop
   timeout, publish the fault-latched State before ordered transition/axis
   timeout events even when the inhibited TX fails.
-- For the optional single-Domain lifecycle branches, use `StopCycleContext` only
-  after the real master cycle has completed Domain RX. Match the report to
+- For the optional lifecycle branches, use `StopCycleContext` only after the
+  real master cycle has completed RX for the motion Domain. Match the report to
   both the master cycle and State sequence, and verify the frozen allowed
   axis mask fits the bank, before mutating gates; project RX quality once,
   decide with one guard borrow, submit the next stop, Disable, or active frame,
@@ -110,9 +110,16 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   On an active validation/build/TX error, preserve the initial error, abort
   motion and attempt a stop PDO in the same cycle; even if that stop TX also
   fails, publish zero issued evidence, the Stopping State, and ordered events.
-  The caller still owns final deadline facts, non-CiA 402 output safety, other
-  Domains, and the full cycle scheduler; this branch is
-  not a complete production owner or HIL qualification.
+  For multi-Domain cycles, require the frozen schedule's exact Domain count,
+  ID order, and a motion Domain scheduled every tick whose snapshot matches
+  the actual Domain. Project caller-owned snapshots for all other Domains,
+  including missing due receives; never silently use the one-Domain entry
+  with a multi-Domain State page. A configuration error must fail before TX
+  or gate mutation, and the caller must handle that error as a safety failure.
+  The caller still owns final deadline facts, verified quality snapshots for
+  other Domains, their output scheduling, non-CiA 402 output safety, and the
+  full cycle scheduler; this branch is not a complete production owner or
+  HIL qualification.
 - Freeze per-axis stop selections in `AxisStopPolicy` at guard construction.
   Assemble all axis outputs from one borrowed `cycle_axes` decision, use the
   originally armed mask for stop requests, and force every other axis to
