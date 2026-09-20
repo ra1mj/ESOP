@@ -76,9 +76,12 @@
         "proto/esop/v1/esop.proto",
         "scripts/validate-proto-schema.py",
         "docs/esop-protobuf-v1.md",
-        "crates/esop-proto/src/lib.rs"
+        "crates/esop-proto/src/lib.rs",
+        "crates/esop-proto/tests/schema_compatibility.rs",
+        "crates/esop-proto/tests/reader_writer.rs",
+        "crates/esop-proto/tests/fixtures/v1_784bf73.proto"
       ],
-      "limitation": "Only v1 is admitted at runtime; old/new reader compatibility matrix and authentication remain open"
+      "limitation": "Frozen-v1/current Rust reader-writer pairs are tested; pre-version writers, cross-language compatibility, semantic upgrades and production rolling upgrades remain unqualified"
     },
     {
       "id": "zenoh_route_policy",

@@ -1,8 +1,8 @@
 # ESOP Protobuf v1 契约
 
 - 文档版本：1.0
-- 日期：2026-09-09
-- 状态：schema 源、结构校验、Rust 生成绑定、v1 版本准入、Zenoh 命令解码适配和 loopback transport round-trip 已实现；跨版本运行时矩阵待集成
+- 日期：2026-09-20
+- 状态：schema 源、结构校验、Rust 生成绑定、v1 版本准入、冻结基线 descriptor 门禁、新旧 reader/writer 双向测试和 loopback transport round-trip 已实现；跨语言与生产滚动升级仍待验证
 - 上游需求：PRD FR-030、FR-031、FR-045、FR-049、FR-051
 
 ## 1. 边界
@@ -23,11 +23,39 @@
 3. 每个 enum 的零值必须是带 `_UNSPECIFIED` 后缀的显式未知值；未知枚举不能被解释为正常状态。
 4. 状态、事件、命令和 incident 都携带可关联的 robot/boot/sequence/time 字段，网关不得从 key 名称推断消息语义。
 5. 所有顶层消息携带 `schema_version`；当前唯一接受值为 `1`，缺失或未知版本必须在网关边界拒绝。
-6. 已知字段之外的 Protobuf 字段可由 reader 保留并忽略，但不能绕过 `schema_version` 准入；破坏性变更必须创建新的版本包。
+6. 当前 Prost reader 会忽略未知字段，重新编码时不会保留它们；不能作为透明中继，也不能绕过 `schema_version` 准入。破坏性变更必须创建新的版本包。
 7. 生成代码、Protobuf 编解码和 Zenoh payload 只在监督域使用；实时节点只接收已经转换并校验过的固定命令/permit。
 
 ## 3. CI 校验
 
-`make proto-schema` 会在没有安装 protobuf runtime 的开发机上检查 `proto/esop/v1/*.proto` 的 proto3/package 声明、顶层消息的 `schema_version`、消息字段号和字段名唯一性、reserved 不复用及 enum 未定义零值。`crates/esop-proto/` 使用 vendored `protoc` 生成 Rust bindings，并通过 encode/decode 单测验证 v1 消息与未知字段兼容性；`esop-zenoh-gateway` 会先校验 schema version 和 robot ID，再把 `MotionCommand` 转交固定容量 `CommandIngress`。`make test-zenoh` 进一步验证 v1 state/event/incident payload、command payload 经真实 loopback router 到达 subscriber，并验证 query reply 与 router 重启后的旧命令拒绝。旧/新 reader-writer 兼容组合、认证身份和生产部署仍是后续验收项。
+`make proto-schema` 检查 proto3/package、顶层消息的 `schema_version`、字段号和名称唯一性、reserved 不复用及 enum 零值。`crates/esop-proto/` 使用 vendored `protoc` 生成 Rust bindings；workspace 测试另外执行第 4 节的 descriptor 门禁和新旧 reader/writer 矩阵。`esop-zenoh-gateway` 的命令入口校验 schema version 和 robot ID 后再转交 `CommandIngress`。`make test-zenoh` 验证类型化发布、命令路由及 router 重启后的旧命令拒绝。生产认证和部署仍是后续验收项。
 
-Live router 测试还验证 v1 的 state、event、incident payload，以及 router 重启后旧命令的 TTL/代际拒绝；认证身份绑定与生产部署仍由监督域认证服务负责。
+## 4. Frozen v1 Compatibility Gate
+
+PRD FR-030 and the R0/R3 schema gates are covered by
+`crates/esop-proto/tests/schema_compatibility.rs` and `reader_writer.rs`.
+Both run under `cargo test -p esop-proto` and the workspace `make ci` gate.
+
+The fixture `tests/fixtures/v1_784bf73.proto` is frozen from commit `784bf73`,
+after explicit schema-version admission was introduced. Do not regenerate this
+fixture when editing the current schema. The build compiles the two schemas
+independently; baseline bindings are included only by integration tests.
+
+| Writer / Reader | Automated evidence |
+| --- | --- |
+| Frozen v1 / Current v1 | Seven top-level messages, including representative nested state, command targets and incident evidence |
+| Current v1 / Frozen v1 | The same non-default values survive decoding with the frozen generated bindings |
+| Additive test writer / Both v1 readers | Unknown fields are ignored; decode/re-encode drops them |
+| Unknown enum writer / Both v1 readers | Numeric value remains unknown and typed conversion fails |
+
+The descriptor gate rejects package/syntax changes, removed messages, field
+renumbering, renaming, type/cardinality/presence/oneof changes, changed enum
+values and removed reservations. Field deletion requires both the name and
+number to be reserved. Existing enum values remain stable under this gate.
+Additive fields are allowed; semantic compatibility still requires review.
+Mutation tests verify that the gate rejects deliberate incompatible changes.
+
+Pre-`784bf73` writers without `schema_version` are not admitted by the current
+gateway. This is not a claim of rolling-upgrade compatibility with those writers.
+Cross-language readers, new major schema packages, transparent relays,
+application semantic changes and production rolling upgrades remain unqualified.
