@@ -1,6 +1,8 @@
 #![cfg_attr(not(feature = "zenoh"), no_std)]
 
 #[cfg(feature = "zenoh")]
+pub mod procbuf_adapter;
+#[cfg(feature = "zenoh")]
 pub mod runtime;
 
 pub const MAX_FLEET_ID_BYTES: usize = 32;

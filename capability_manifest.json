@@ -97,14 +97,17 @@
     {
       "id": "zenoh_runtime_adapter",
       "status": "partial",
-      "scope": "Optional host-domain Zenoh session adapter with bounded health state, typed v1 state/event/incident publishing, command subscription and queryable registration",
+      "scope": "Optional host-domain Zenoh session adapter with bounded health, typed v1 publish/query, and single-reader ProcBuf state/event projection",
       "evidence": [
         "crates/esop-zenoh-gateway/src/runtime.rs",
+        "crates/esop-zenoh-gateway/src/procbuf_adapter.rs",
+        "crates/esop-zenoh-gateway/tests/procbuf_adapter.rs",
+        "crates/esop-zenoh-gateway/tests/query.rs",
         "crates/esop-zenoh-gateway/tests/zenoh_live.rs",
         "scripts/test-zenoh.sh",
         "docs/esop-zenoh-gateway.md"
       ],
-      "limitation": "Remote ACL, certificate lifecycle and production topology still require environment-level tests"
+      "limitation": "ProcBuf ABI lacks full QualitySummary and lifecycle gate/permit facts; remote ACL, certificate lifecycle and production topology still require environment-level tests"
     },
     {
       "id": "ebpf_observation",

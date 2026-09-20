@@ -2,7 +2,7 @@
 
 - 文档版本：1.0
 - 日期：2026-09-20
-- 状态：固定 key namespace、方向策略、可选 Zenoh Session、v1 命令和类型化查询边界、host QoS、生产安全配置准入及 loopback router 验证已实现；远程 ACL 和生产认证部署待完成
+- 状态：固定 key namespace、方向策略、可选 Zenoh Session、ProcBuf 状态/事件投影、v1 命令和类型化查询边界、host QoS、生产安全配置准入及 loopback router 验证已实现；完整状态语义、远程 ACL 和生产认证部署待完成
 - 上游需求：PRD FR-031、FR-030、FR-045、FR-051
 
 ## 1. Key namespace
@@ -48,6 +48,7 @@ Zenoh session、router、发现、重连、QoS 和 transport security 均属于 
 - `PublishQos`：state 使用可丢弃的 data 队列，event/diagnostic 使用可丢弃的高优先级队列；不会因 Zenoh 背压阻塞监督域任务。
 - `TransportSecurityPolicy` / `open_secure`：在建立 Session 前检查传输协议、TLS 根证书、名称校验、mTLS 客户端证书/私钥和公钥或用户名密码认证材料；生产调用方应使用 `TransportSecurityPolicy::production()`，开发/HIL 可显式使用 `open` 或 `development()`。
 - `decode_command` / `admit_command`：解码 `esop.v1.MotionCommand`，校验 robot ID，并转交 `CommandIngress` 执行来源、权限、TTL、epoch、序号、轴掩码、限流和审计。
+- `ProcBufProjector`：监督域单读者在校验 ABI/layout、数值 robot ID 和 boot ID 后读取完整状态页与事件环，转换为外部 `RobotState` / `DiagnosticEvent`；拒绝状态序号回退、无效生命周期值、非有限关节值和超 4096-byte 状态。数值 robot ID 与外部文本 ID 的配对须由部署配置提供，不从字符串猜测哈希。
 
 示例编译检查：
 
@@ -67,5 +68,7 @@ make test-zenoh
 callback 运行在 Zenoh host runtime：命令 callback 应只把数据投递到有界命令队列，query callback 可完成查询应答，但两者都不能直接操作 EtherCAT 周期或绕过 `esop-command-gateway`。会话关闭或传输失败会将状态标为 `Disconnected` 或 `Degraded`；重连不会自动恢复运动许可。
 
 类型化 query provider 必须只读取监督域快照，并自行限制执行时间和并发；`limit` 限制结果记录数及响应字节数，不是远程身份认证或请求速率限制。生产环境仍须在传输层配置调用方身份、ACL 和限流；robot boot 变化时应关闭旧 gateway 并重新绑定 queryable，不得继续服务旧 boot 的快照。
+
+`ProcBufProjector` 的输出是独立的有所有权快照。一个监督域 reader 负责更新缓存，发布者和 query provider 使用同一份已校验的快照，不得各自竞争 ProcBuf 双页的单读者所有权。`RobotState.joints`/`io` 中的 index 从 0 开始，直接复制已经由 profile 换算的 SI 值；事件使用独立的 SPSC 环，`RobotState.events` 不隐式混入事件。当前 ProcBuf lifecycle 只提供状态、停止动作、ready gate mask、故障码、motion permit 布尔值和转换/恢复序号，缺少 required/valid/qualified masks、permit epoch/expiry 等字段；投影会保留这些缺口为默认值，不能据此重建完整 MLG 资格。`QualitySummary` 暂不发布（`None`），因为缺少其全部门槛事实；`RobotState` 是观测数据，不是运动许可或功能安全判断。
 
 补充验证：测试进程为每个场景动态申请 loopback 临时端口并独占 zenohd，覆盖 state/event/incident 的 v1 payload、router 重启后的 health recovery、旧命令 TTL/代际拒绝，以及恢复必须经过新 permit 和显式 rearm。ZenohGateway::refresh_health 使用 session 的 router/peer 连接快照；它属于 host supervisor 观察，不是 motion permit 或应用层投递确认。[Zenoh SessionInfo API](https://docs.rs/zenoh/1.10.1/zenoh/session/struct.SessionInfo.html)

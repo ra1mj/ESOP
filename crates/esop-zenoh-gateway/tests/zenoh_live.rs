@@ -6,11 +6,15 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use esop_command_gateway::{CommandIngress, IngressPolicy};
-use esop_lifecycle_guard::{GateId, GuardPolicy, LifecycleAction, LifecycleGuard, StopAction};
+use esop_lifecycle_guard::{
+    GateId, GuardPolicy, LifecycleAction, LifecycleGuard, LifecycleState, StopAction,
+};
+use esop_procbuf::{EventSeverity as ProcSeverity, ProcBuf, ProcBufEvent, StatePage};
 use esop_proto::v1::{
     DiagnosticEvent, MotionCommand, QueryReply, QueryRequest, RobotState, RuntimeIncident,
 };
 use esop_proto::{CURRENT_SCHEMA_VERSION, Message};
+use esop_zenoh_gateway::procbuf_adapter::ProcBufProjector;
 use esop_zenoh_gateway::runtime::{ConnectionState, ZenohGateway, decode_command_payload};
 use esop_zenoh_gateway::{KeySpace, RouteKind};
 use support::{Router, client_config};
@@ -97,6 +101,23 @@ fn router_round_trip_covers_gateway_contracts() {
             let observer = zenoh::open(client_config(&router.endpoint()))
                 .await
                 .expect("observer session opens");
+            let buffer = ProcBuf::<2, 1, 2, 4>::new(42, 7);
+            let mut projector = ProcBufProjector::new(space, 42, 7);
+            let mut state = StatePage::new(7);
+            state.sequence = 1;
+            state.monotonic_time_ns = 1_000;
+            state.ecat_time_ns = 990;
+            state.axes[0].position = 0.75;
+            state.axes[0].statusword = 0x27;
+            state.io[0].input_bits = 3;
+            state.lifecycle.state = LifecycleState::FaultLatched as u8;
+            state.lifecycle.stop_action = StopAction::QuickStop as u8;
+            state.lifecycle.first_blocking_code = 0x1001;
+            buffer.publish_state(state).expect("RT state publishes");
+            let projected = projector
+                .read_state(&buffer)
+                .expect("state identity and shape valid")
+                .expect("a complete state is available");
 
             let (state_tx, state_rx) = mpsc::channel();
             observer
@@ -115,13 +136,7 @@ fn router_round_trip_covers_gateway_contracts() {
             let mut state_received = None;
             for _ in 0..10 {
                 gateway
-                    .publish_state(&RobotState {
-                        robot_id: "robot_01".to_owned(),
-                        boot_id: 7,
-                        schema_version: CURRENT_SCHEMA_VERSION,
-                        sequence: 1,
-                        ..RobotState::default()
-                    })
+                    .publish_state(&projected)
                     .await
                     .expect("state publishes through router");
                 if let Ok(payload) = state_rx.recv_timeout(Duration::from_millis(500)) {
@@ -135,6 +150,17 @@ fn router_round_trip_covers_gateway_contracts() {
                 RobotState::decode(state_bytes.as_slice()).expect("state payload decodes");
             assert_eq!(state_payload.robot_id, "robot_01");
             assert_eq!(state_payload.sequence, 1);
+            assert_eq!(state_payload.joints[0].position, 0.75);
+            assert_eq!(state_payload.io[0].input_bits, 3);
+            assert_eq!(
+                state_payload
+                    .lifecycle
+                    .as_ref()
+                    .unwrap()
+                    .first_blocking_code,
+                0x1001
+            );
+            assert!(state_payload.quality.is_none());
             assert_eq!(state_priority, zenoh::qos::Priority::Data);
             assert_eq!(state_congestion, zenoh::qos::CongestionControl::Drop);
             assert!(!state_express);
@@ -158,14 +184,24 @@ fn router_round_trip_covers_gateway_contracts() {
                 .await
                 .expect("incident subscriber declares");
             std::thread::sleep(Duration::from_millis(250));
-            gateway
-                .publish_event(&DiagnosticEvent {
+            buffer
+                .record_event(ProcBufEvent {
                     sequence: 2,
                     timestamp_ns: 2_000,
+                    source: 1,
+                    severity: ProcSeverity::Error,
                     code: 0x1001,
-                    schema_version: CURRENT_SCHEMA_VERSION,
-                    ..DiagnosticEvent::default()
+                    axis_or_device: 0,
+                    value: 0,
+                    aux: 0,
                 })
+                .expect("RT event recorded");
+            let projected_event = projector
+                .pop_event(&buffer)
+                .expect("event reader validates header")
+                .expect("event available");
+            gateway
+                .publish_event(&projected_event)
                 .await
                 .expect("event publishes through router");
             gateway
@@ -229,21 +265,13 @@ fn router_round_trip_covers_gateway_contracts() {
             );
 
             gateway
-                .serve_typed_queries(7, |request| {
+                .serve_typed_queries(7, move |request| {
                     Ok(QueryReply {
                         robot_id: request.robot_id.clone(),
                         boot_id: request.boot_id,
                         schema_version: CURRENT_SCHEMA_VERSION,
-                        states: request
-                            .after_sequence
-                            .checked_add(1)
-                            .map(|sequence| RobotState {
-                                robot_id: request.robot_id.clone(),
-                                boot_id: request.boot_id,
-                                sequence,
-                                schema_version: CURRENT_SCHEMA_VERSION,
-                                ..RobotState::default()
-                            })
+                        states: (projected.sequence > request.after_sequence)
+                            .then(|| projected.clone())
                             .into_iter()
                             .collect(),
                         ..QueryReply::default()
@@ -256,7 +284,7 @@ fn router_round_trip_covers_gateway_contracts() {
             let query_request = QueryRequest {
                 robot_id: "robot_01".to_owned(),
                 boot_id: 7,
-                after_sequence: 10,
+                after_sequence: 0,
                 limit: 1,
                 schema_version: CURRENT_SCHEMA_VERSION,
             };
@@ -276,8 +304,26 @@ fn router_round_trip_covers_gateway_contracts() {
             assert_eq!(response.robot_id, "robot_01");
             assert_eq!(response.boot_id, 7);
             assert_eq!(response.states.len(), 1);
-            assert_eq!(response.states[0].sequence, 11);
+            assert_eq!(response.states[0].sequence, 1);
+            assert_eq!(response.states[0], state_payload);
             assert_eq!(response.schema_version, CURRENT_SCHEMA_VERSION);
+
+            let newer_only = QueryRequest {
+                after_sequence: 1,
+                ..query_request.clone()
+            };
+            let reply = observer
+                .get(query_key.as_str())
+                .payload(newer_only.encode_to_vec())
+                .await
+                .expect("incremental query dispatches")
+                .recv_async()
+                .await
+                .expect("incremental reply arrives")
+                .into_result()
+                .expect("incremental query returns data");
+            let empty = QueryReply::decode(reply.payload().to_bytes().as_ref()).unwrap();
+            assert!(empty.states.is_empty());
 
             let invalid = QueryRequest {
                 boot_id: 6,
