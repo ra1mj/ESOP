@@ -11,11 +11,12 @@ use crate::ethercat::{
 };
 use crate::procbuf::{
     AxisEvidenceError, LifecycleEventCursor, LifecycleEventError, axis_stops_to_procbuf,
-    ethercat_cycle_to_procbuf, lifecycle_events_to_procbuf, lifecycle_to_procbuf,
-    scheduled_ethercat_cycle_to_procbuf,
+    cyclic_quality_to_procbuf, ethercat_cycle_to_procbuf, lifecycle_events_to_procbuf,
+    lifecycle_to_procbuf, scheduled_ethercat_cycle_to_procbuf,
 };
 use crate::{
-    CyclicQuality, LifecycleAction, LifecycleError, LifecycleGuard, MAX_MOTION_AXES, StopFeedback,
+    CyclicQuality, GateId, LifecycleAction, LifecycleError, LifecycleGuard, MAX_MOTION_AXES,
+    StopFeedback,
 };
 use esop_ethercat_core::{
     CycleReport, DcCyclicSync, Domain, EthercatMaster, EthercatPort, FramePlan, ScheduleTable,
@@ -33,6 +34,7 @@ pub enum StopCycleError {
     ScheduleRequired,
     InvalidSchedule,
     MotionDomainMismatch,
+    InvalidCycleDeadline,
     Header(HeaderError),
     NotStopping(LifecycleAction),
     Evidence(AxisEvidenceError),
@@ -50,6 +52,13 @@ pub struct StopCycleOutcome<E> {
     pub action: LifecycleAction,
     /// Original active TX failure if a stop was attempted in its place.
     pub active_failure: Option<StopFrameError<E>>,
+    /// `None` for caller-owned deadline facts; checked entries sample the port
+    /// after TX and before publishing State/events.
+    pub post_tx_deadline_met: Option<bool>,
+    /// An active frame was accepted before a post-TX miss was observed. Its RX
+    /// index may still be armed; `transmission` is that active submission, not
+    /// proof that a stop frame was sent. The next cycle must send the stop.
+    pub active_tx_before_deadline_miss: bool,
     pub quality: CyclicQuality,
     pub feedback: Option<StopFeedback>,
     pub acknowledged: bool,
@@ -129,7 +138,17 @@ impl<
     /// means this stop-only entry needs `run_with_motion` for an active cycle;
     /// no frame or State is published on that path.
     pub fn run(&mut self) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
-        self.run_inner::<1>(None, None)
+        self.run_inner::<1>(None, None, None)
+    }
+
+    /// As `run`, with an absolute deadline on the same monotonic clock as the
+    /// port. A miss before TX inhibits output; a miss during TX faults before
+    /// State publication. This does not measure subsequent event publication.
+    pub fn run_until(
+        &mut self,
+        cycle_deadline_ns: u64,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        self.run_inner::<1>(None, None, Some(cycle_deadline_ns))
     }
 
     /// Run all lifecycle branches. Guards are reset on a new Active
@@ -148,6 +167,28 @@ impl<
                 guards,
                 limits,
             }),
+            None,
+        )
+    }
+
+    /// As `run_with_motion`, checking the actual port clock before and after
+    /// the output submission. A late accepted active TX is reported explicitly
+    /// and motion authority is revoked; it is not mislabeled as a stop TX.
+    pub fn run_with_motion_until(
+        &mut self,
+        targets: &[Option<Cia402Target>; AXES],
+        guards: &mut [CyclicSetpointGuard; AXES],
+        limits: &[CyclicLimits; AXES],
+        cycle_deadline_ns: u64,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        self.run_inner::<1>(
+            None,
+            Some(MotionInputs {
+                targets,
+                guards,
+                limits,
+            }),
+            Some(cycle_deadline_ns),
         )
     }
 
@@ -161,7 +202,22 @@ impl<
         domains: &[ScheduledDomainQuality; DOMAINS],
         motion_domain_id: u8,
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
-        self.run_inner(Some((schedule, domains, motion_domain_id)), None)
+        self.run_inner(Some((schedule, domains, motion_domain_id)), None, None)
+    }
+
+    /// Combine frozen multi-Domain quality and a measured post-TX deadline.
+    pub fn run_scheduled_until<const SCHEDULE_SLOTS: usize>(
+        &mut self,
+        schedule: &ScheduleTable<DOMAINS, SCHEDULE_SLOTS>,
+        domains: &[ScheduledDomainQuality; DOMAINS],
+        motion_domain_id: u8,
+        cycle_deadline_ns: u64,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        self.run_inner(
+            Some((schedule, domains, motion_domain_id)),
+            None,
+            Some(cycle_deadline_ns),
+        )
     }
 
     /// As `run_scheduled`, including the active CiA 402 motion branch.
@@ -181,6 +237,30 @@ impl<
                 guards,
                 limits,
             }),
+            None,
+        )
+    }
+
+    /// As `run_scheduled_with_motion`, with a measured post-TX deadline.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_scheduled_with_motion_until<const SCHEDULE_SLOTS: usize>(
+        &mut self,
+        schedule: &ScheduleTable<DOMAINS, SCHEDULE_SLOTS>,
+        domains: &[ScheduledDomainQuality; DOMAINS],
+        motion_domain_id: u8,
+        targets: &[Option<Cia402Target>; AXES],
+        guards: &mut [CyclicSetpointGuard; AXES],
+        limits: &[CyclicLimits; AXES],
+        cycle_deadline_ns: u64,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        self.run_inner(
+            Some((schedule, domains, motion_domain_id)),
+            Some(MotionInputs {
+                targets,
+                guards,
+                limits,
+            }),
+            Some(cycle_deadline_ns),
         )
     }
 
@@ -188,6 +268,7 @@ impl<
         &mut self,
         scheduled: Option<ScheduledInputs<'_, DOMAINS, SCHEDULE_SLOTS>>,
         motion: Option<MotionInputs<'_, AXES>>,
+        cycle_deadline_ns: Option<u64>,
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
         if self.report.cycle == 0
             || self.state.sequence != self.report.cycle
@@ -236,16 +317,26 @@ impl<
         } else if DOMAINS != 1 {
             return Err(StopCycleError::ScheduleRequired);
         }
+        if cycle_deadline_ns == Some(0) {
+            return Err(StopCycleError::InvalidCycleDeadline);
+        }
 
         let previous_transition_sequence = self.guard.transition_sequence;
-        let quality = if let Some((schedule, domains, _)) = scheduled {
+        let decision_now_ns = cycle_deadline_ns
+            .map(|_| self.port.now_ns().max(self.now_ns))
+            .unwrap_or(self.now_ns);
+        let mut other = self.other;
+        if cycle_deadline_ns.is_some_and(|deadline| decision_now_ns >= deadline) {
+            other.deadline_met = false;
+        }
+        let mut quality = if let Some((schedule, domains, _)) = scheduled {
             scheduled_ethercat_cycle_to_procbuf(
                 self.state,
                 self.report,
                 schedule,
                 domains,
                 self.dc,
-                self.other,
+                other,
             )
         } else {
             ethercat_cycle_to_procbuf(
@@ -254,10 +345,13 @@ impl<
                 &[self.domain.quality(); DOMAINS],
                 &[true; DOMAINS],
                 self.dc,
-                self.other,
+                other,
             )
         };
         self.guard.update_cyclic_quality(quality, self.report.cycle);
+        if cycle_deadline_ns.is_some() && !quality.cycle_within_budget {
+            self.guard.latch_fault(0x4255_0001, self.report.cycle);
+        }
         let statuswords = core::array::from_fn(|axis| {
             if quality.domain_valid && quality.wkc_valid {
                 self.maps[axis]
@@ -269,7 +363,7 @@ impl<
         });
         let activation = (self.guard.boot_id, self.guard.transition_sequence);
         let (mut action, mut transmission, feedback, mut stop_mask) = {
-            let mut decision = self.guard.cycle_axes(self.report.cycle, self.now_ns);
+            let mut decision = self.guard.cycle_axes(self.report.cycle, decision_now_ns);
             let action = decision.action();
             if matches!(action, LifecycleAction::EnableAllowed) && motion.is_none() {
                 return Err(StopCycleError::NotStopping(action));
@@ -369,7 +463,7 @@ impl<
             self.guard
                 .abort_active_cycle(self.report.cycle, 0x5458_0001)
                 .map_err(StopCycleError::Abort)?;
-            let mut stop_decision = self.guard.cycle_axes(self.report.cycle, self.now_ns);
+            let mut stop_decision = self.guard.cycle_axes(self.report.cycle, decision_now_ns);
             action = stop_decision.action();
             let stop_outputs = step_axis_bank(
                 self.bank,
@@ -395,6 +489,38 @@ impl<
             stop_mask = stop_decision.stopping_axis_mask();
             transmission = stop_transmission;
         }
+        let mut active_tx_before_deadline_miss = false;
+        let publish_now_ns = cycle_deadline_ns
+            .map(|_| self.port.now_ns().max(decision_now_ns))
+            .unwrap_or(self.now_ns);
+        let post_tx_deadline_met = cycle_deadline_ns
+            .map(|deadline| quality.cycle_within_budget && publish_now_ns < deadline);
+        if post_tx_deadline_met == Some(false) {
+            quality.cycle_within_budget = false;
+            cyclic_quality_to_procbuf(self.state, quality);
+            self.guard
+                .update_gate(GateId::Budget, false, self.report.cycle, 0x4255_0001);
+            self.guard.latch_fault(0x4255_0001, self.report.cycle);
+            if matches!(action, LifecycleAction::EnableAllowed) && transmission.is_ok() {
+                active_tx_before_deadline_miss = true;
+                let stop_decision = self.guard.cycle_axes(self.report.cycle, publish_now_ns);
+                action = stop_decision.action();
+                let stop_outputs = step_axis_bank(
+                    self.bank,
+                    &stop_decision,
+                    statuswords,
+                    [DriveRequest::Disable; AXES],
+                );
+                axis_stops_to_procbuf(self.state, &stop_decision, &stop_outputs, None)
+                    .map_err(StopCycleError::Evidence)?;
+                stop_mask = stop_decision.stopping_axis_mask();
+            } else if matches!(action, LifecycleAction::Hold) {
+                action = self
+                    .guard
+                    .cycle_axes(self.report.cycle, publish_now_ns)
+                    .action();
+            }
+        }
         let acknowledged = feedback
             .filter(|proof| {
                 proof.observed_axis_mask & stop_mask == stop_mask
@@ -407,20 +533,25 @@ impl<
                     .is_ok()
             });
         self.state.lifecycle = lifecycle_to_procbuf(
-            self.guard.snapshot(self.report.cycle, self.now_ns),
+            self.guard.snapshot(self.report.cycle, publish_now_ns),
             if self.guard.transition_sequence != previous_transition_sequence {
-                self.now_ns
+                publish_now_ns
             } else {
                 self.transition_time_ns
             },
         );
+        if cycle_deadline_ns.is_some() {
+            self.state.monotonic_time_ns = publish_now_ns;
+        }
         let state_publish = self.buffer.publish_state(*self.state);
         let event_publish = state_publish.as_ref().ok().map(|_| {
-            lifecycle_events_to_procbuf(self.guard, self.buffer, self.event_cursor, self.now_ns)
+            lifecycle_events_to_procbuf(self.guard, self.buffer, self.event_cursor, publish_now_ns)
         });
         Ok(StopCycleOutcome {
             action,
             active_failure,
+            post_tx_deadline_met,
+            active_tx_before_deadline_miss,
             quality,
             feedback,
             acknowledged,

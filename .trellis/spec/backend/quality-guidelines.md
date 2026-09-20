@@ -120,6 +120,17 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   other Domains, their output scheduling, non-CiA 402 output safety, and the
   full cycle scheduler; this branch is not a complete production owner or
   HIL qualification.
+- Deadline-checked `StopCycleContext` entries take the current cycle's
+  absolute deadline, distinct from the next TX frame's RX deadline. Use the
+  port's monotonic clock for permit freshness and check it both before TX and
+  after the last attempted TX, before State publication. A pre-TX miss must
+  suppress active output. If an accepted active TX finishes late, revoke the
+  permit and publish a blocked budget gate, Stopping, and an unissued stop
+  request in that same cycle. The old TX may still own its RX index: report
+  that active TX truthfully and send the stop once the next cycle can reuse
+  the index. Never treat a post-TX observation as the final full-cycle
+  deadline; State/event publication and any other Domain TX remain the
+  complete cycle owner's responsibility.
 - Freeze per-axis stop selections in `AxisStopPolicy` at guard construction.
   Assemble all axis outputs from one borrowed `cycle_axes` decision, use the
   originally armed mask for stop requests, and force every other axis to
