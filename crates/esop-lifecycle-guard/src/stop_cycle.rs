@@ -1,7 +1,7 @@
 //! Fixed-capacity single-Domain EtherCAT lifecycle cycle branches.
 //!
-//! The caller owns RX, Domain completion, command admission, and setpoint
-//! seeding. These branches consume a finished Domain and a real receive
+//! The caller owns RX, Domain completion, and command admission. These
+//! branches consume a finished Domain and a real receive
 //! report, then publish TX and its evidence for that cycle.
 
 use crate::cia402::step_axis_bank;
@@ -119,9 +119,9 @@ impl<
         self.run_inner(None)
     }
 
-    /// Run all lifecycle branches. Seed each setpoint guard from freshly
-    /// validated actual feedback on the current permit epoch before entering
-    /// Operation Enabled; targets are accepted only after successful TX.
+    /// Run all lifecycle branches. Guards are reset on a new Active
+    /// transition, and the enable-operation edge seeds them from current
+    /// verified actual feedback. Targets commit only after successful TX.
     pub fn run_with_motion(
         &mut self,
         targets: &[Option<Cia402Target>; AXES],
@@ -182,6 +182,7 @@ impl<
                 u16::MAX
             }
         });
+        let activation = (self.guard.boot_id, self.guard.transition_sequence);
         let (mut action, mut transmission, feedback, mut stop_mask) = {
             let mut decision = self.guard.cycle_axes(self.report.cycle, self.now_ns);
             let action = decision.action();
@@ -220,23 +221,33 @@ impl<
                     self.next_generation,
                     self.deadline_ns,
                 ),
-                (LifecycleAction::EnableAllowed, Some(motion)) => submit_active_frame(
-                    &decision,
-                    self.report,
-                    &outputs,
-                    motion.targets,
-                    motion.guards,
-                    motion.limits,
-                    self.maps,
-                    self.modes,
-                    self.safe_process_image,
-                    self.domain,
-                    self.plan,
-                    self.master,
-                    self.port,
-                    self.next_generation,
-                    self.deadline_ns,
-                ),
+                (LifecycleAction::EnableAllowed, Some(motion)) => {
+                    let mut next_guards = *motion.guards;
+                    for guard in &mut next_guards {
+                        guard.bind_activation(activation.0, activation.1);
+                    }
+                    let transmission = submit_active_frame(
+                        &decision,
+                        self.report,
+                        &outputs,
+                        motion.targets,
+                        &mut next_guards,
+                        motion.limits,
+                        self.maps,
+                        self.modes,
+                        self.safe_process_image,
+                        self.domain,
+                        self.plan,
+                        self.master,
+                        self.port,
+                        self.next_generation,
+                        self.deadline_ns,
+                    );
+                    if transmission.is_ok() {
+                        *motion.guards = next_guards;
+                    }
+                    transmission
+                }
                 (LifecycleAction::Hold | LifecycleAction::FaultLatched, _) => {
                     submit_inhibited_frame(
                         &decision,

@@ -404,7 +404,11 @@ fn active_frame_requires_verified_feedback_and_bounded_target_committed_only_aft
         deadline_met: true,
     };
     let mut enable_image = input_image(0x0023, 0);
+    enable_image[5..9].copy_from_slice(&25i32.to_le_bytes());
     enable_image[19..23].copy_from_slice(&999i32.to_le_bytes());
+    let mut running_image = input_image(0x0027, 0);
+    running_image[5..9].copy_from_slice(&25i32.to_le_bytes());
+    running_image[19..23].copy_from_slice(&999i32.to_le_bytes());
     let handshake = StopCycleContext {
         guard: &mut guard,
         bank: &mut bank,
@@ -433,7 +437,8 @@ fn active_frame_requires_verified_feedback_and_bounded_target_committed_only_aft
     assert!(handshake.active_failure.is_none());
     assert!(handshake.transmission.is_ok());
     assert_eq!(handshake.state_publish, Ok(1));
-    assert_eq!(guards[0].last().position, 1.0);
+    assert!(!guards[0].seeded());
+    assert_eq!(guards[0].last().position, 0.0);
     assert_eq!(
         buffer.read_state().unwrap().state.axis_stops[0].request_cycle,
         0
@@ -444,6 +449,32 @@ fn active_frame_requires_verified_feedback_and_bounded_target_committed_only_aft
     let mut state = StatePage::<1, 0, 1>::new(7);
     state.sequence = third.cycle;
     port.set_now_ns(300_000);
+    {
+        let decision = guard.cycle_axes(third.cycle, 301);
+        let outputs = step_axis_bank(&mut bank, &decision, [0x0023], [DriveRequest::Enable]);
+        port.fail_next_tx();
+        assert!(matches!(
+            submit_active_frame(
+                &decision,
+                third,
+                &outputs,
+                &[Some(Cia402Target::Position(25))],
+                &mut guards,
+                &limits,
+                &maps,
+                &modes,
+                &enable_image,
+                &domain,
+                &plan,
+                &mut master,
+                &mut port,
+                4,
+                350_000,
+            ),
+            Err(StopFrameError::Transmit(CycleError::Port(_)))
+        ));
+        assert!(!guards[0].seeded());
+    }
     let enabled = StopCycleContext {
         guard: &mut guard,
         bank: &mut bank,
@@ -459,32 +490,49 @@ fn active_frame_requires_verified_feedback_and_bounded_target_committed_only_aft
         maps: &maps,
         modes: &modes,
         max_stationary_velocities: &[1],
-        safe_process_image: &enable_image,
+        safe_process_image: &running_image,
         plan: &plan,
         next_generation: 4,
         deadline_ns: 350_000,
         now_ns: 301,
         transition_time_ns: 100,
     }
-    .run_with_motion(&[Some(Cia402Target::Position(0))], &mut guards, &limits)
+    .run_with_motion(&[Some(Cia402Target::Position(25))], &mut guards, &limits)
     .unwrap();
     assert_eq!(enabled.action, LifecycleAction::EnableAllowed);
     assert!(enabled.transmission.is_ok());
     assert!(enabled.active_failure.is_none());
     assert_eq!(enabled.state_publish, Ok(2));
-    assert_eq!(guards[0].last().position, 0.0);
+    assert!(guards[0].seeded());
+    assert_eq!(guards[0].last().position, 25.0);
     domain.begin_receive(4).unwrap();
     let fourth = receive(&mut master, &mut port, &mut domain, 4);
     assert_eq!(
         u16::from_le_bytes(domain.input()[16..18].try_into().unwrap()) & 0x000F,
         0x000F
     );
-    assert_eq!(domain.input()[19..23], [0; 4]);
+    assert_eq!(domain.input()[19..23], 25i32.to_le_bytes());
 
     let mut state = StatePage::<1, 0, 1>::new(7);
     state.sequence = fourth.cycle;
     port.set_now_ns(400_000);
-    let failed_motion = StopCycleContext {
+    guard
+        .accept_permit(
+            MotionPermit {
+                boot_id: 7,
+                source_id: 1,
+                permit_epoch: 2,
+                sequence: 2,
+                expires_at_ns: 10_000,
+                axis_mask: 1,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
+            },
+            401,
+        )
+        .unwrap();
+    let running = StopCycleContext {
         guard: &mut guard,
         bank: &mut bank,
         master: &mut master,
@@ -499,32 +547,65 @@ fn active_frame_requires_verified_feedback_and_bounded_target_committed_only_aft
         maps: &maps,
         modes: &modes,
         max_stationary_velocities: &[1],
-        safe_process_image: &enable_image,
+        safe_process_image: &running_image,
         plan: &plan,
         next_generation: 5,
         deadline_ns: 450_000,
         now_ns: 401,
         transition_time_ns: 100,
     }
-    .run_with_motion(&[Some(Cia402Target::Position(2))], &mut guards, &limits)
+    .run_with_motion(&[Some(Cia402Target::Position(26))], &mut guards, &limits)
+    .unwrap();
+    assert_eq!(running.action, LifecycleAction::EnableAllowed);
+    assert!(running.transmission.is_ok());
+    assert_eq!(guards[0].last().position, 26.0);
+
+    domain.begin_receive(5).unwrap();
+    let fifth = receive(&mut master, &mut port, &mut domain, 5);
+    let mut state = StatePage::<1, 0, 1>::new(7);
+    state.sequence = fifth.cycle;
+    port.set_now_ns(500_000);
+    let failed_motion = StopCycleContext {
+        guard: &mut guard,
+        bank: &mut bank,
+        master: &mut master,
+        port: &mut port,
+        domain: &domain,
+        dc: &dc,
+        buffer: &buffer,
+        event_cursor: &mut cursor,
+        state: &mut state,
+        report: fifth,
+        other,
+        maps: &maps,
+        modes: &modes,
+        max_stationary_velocities: &[1],
+        safe_process_image: &running_image,
+        plan: &plan,
+        next_generation: 6,
+        deadline_ns: 550_000,
+        now_ns: 501,
+        transition_time_ns: 100,
+    }
+    .run_with_motion(&[Some(Cia402Target::Position(29))], &mut guards, &limits)
     .unwrap();
     assert!(matches!(failed_motion.action, LifecycleAction::Stop(_)));
     assert!(matches!(
         failed_motion.active_failure,
-        Some(StopFrameError::Pdo(
+        Some(StopFrameError::InvalidTarget(
             0,
-            esop_profile_cia402::Cia402PdoError::InitialTargetMismatch
+            CyclicSetpointError::PositionStepExceeded
         ))
     ));
     assert!(failed_motion.transmission.is_ok());
-    assert_eq!(failed_motion.state_publish, Ok(3));
+    assert_eq!(failed_motion.state_publish, Ok(4));
     assert_eq!(guard.state(), LifecycleState::Stopping);
     assert_eq!(guard.first_fault_code(), 0x5458_0001);
     assert!(guard.permit().is_none());
-    assert_eq!(guards[0].last().position, 0.0);
+    assert_eq!(guards[0].last().position, 26.0);
     let published = buffer.read_state().unwrap().state;
-    assert_eq!(published.sequence, fourth.cycle);
-    assert_eq!(published.axis_stops[0].request_cycle, fourth.cycle);
+    assert_eq!(published.sequence, fifth.cycle);
+    assert_eq!(published.axis_stops[0].request_cycle, fifth.cycle);
     assert_ne!(published.axis_stops[0].issued_action, 0);
     assert!(matches!(failed_motion.event_publish, Some(Ok(_))));
 }

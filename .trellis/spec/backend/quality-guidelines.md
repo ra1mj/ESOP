@@ -96,8 +96,11 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   actions with current verified feedback, then publish State before emitting
   events. A new transition uses this invocation's monotonic timestamp; an
   older transition needs its recorded timestamp from the caller. The stop-only
-  `run` rejects Active; `run_with_motion` requires caller-owned, fresh-actual
-  seeded and bounded setpoint guards. Require current verified RX and matching
+  `run` rejects Active; `run_with_motion` binds each caller-owned target guard
+  to the boot ID and Active transition sequence. On a new activation, discard
+  the old setpoint seed; only a matching Switched On actual-feedback sample may
+  seed it at the enable-operation edge. Permit renewal during the same Active
+  transition must not reset the seed. Require current verified RX and matching
   Statusword, confirmed mode and Operation Enabled for moving targets. The
   Switched On -> Operation Enabled edge must also carry a target equal to the
   current actual feedback; earlier PDS handshake steps carry no target. Never
@@ -107,8 +110,8 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   On an active validation/build/TX error, preserve the initial error, abort
   motion and attempt a stop PDO in the same cycle; even if that stop TX also
   fails, publish zero issued evidence, the Stopping State, and ordered events.
-  The caller still owns seed epoch freshness, final deadline facts, non-CiA 402
-  output safety, other Domains, and the full cycle scheduler; this branch is
+  The caller still owns final deadline facts, non-CiA 402 output safety, other
+  Domains, and the full cycle scheduler; this branch is
   not a complete production owner or HIL qualification.
 - Freeze per-axis stop selections in `AxisStopPolicy` at guard construction.
   Assemble all axis outputs from one borrowed `cycle_axes` decision, use the

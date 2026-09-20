@@ -44,11 +44,12 @@ pub enum StopFrameError<E> {
 
 /// Submit an active, single-Domain cycle only after the completed receive and
 /// lifecycle decision agree. A permitted axis may handshake without a target
-/// until Switched On; the enable-operation edge must carry an actual-feedback
-/// hold target, and Operation Enabled requires a seeded, bounded target in the
-/// confirmed mode. The caller must seed each setpoint guard from fresh
-/// actual feedback on a new motion epoch and provide a safe image for all
-/// outputs not written here. Failed validation/build/TX cannot advance targets.
+/// until Switched On; the enable-operation edge seeds an unseeded guard from
+/// verified actual feedback and must carry that actual-feedback hold target.
+/// Operation Enabled requires a seeded, bounded target in the confirmed mode.
+/// The caller must reset guards on a new activation (the cycle context binds
+/// them automatically) and provide a safe image for all other outputs.
+/// Failed validation/build/TX cannot advance targets.
 #[cfg(feature = "cia402")]
 #[allow(clippy::too_many_arguments)]
 pub fn submit_active_frame<
@@ -165,6 +166,38 @@ pub fn submit_active_frame<
                 return Err(StopFrameError::MissingTarget(axis));
             }
             (true, DriveState::SwitchedOn | DriveState::OperationEnabled, Some(target)) => {
+                if output.state == DriveState::SwitchedOn {
+                    maps[axis]
+                        .write_enable_with_actual_target(
+                            &mut image,
+                            Cia402PdoCommand {
+                                controlword: output.controlword,
+                                mode: modes[axis],
+                                target,
+                            },
+                            inputs,
+                        )
+                        .map_err(|error| StopFrameError::Pdo(axis, error))?;
+                    if !accepted[axis].seeded() {
+                        let actual = match target {
+                            Cia402Target::Position(value) => CyclicSetpoint {
+                                position: f64::from(value),
+                                ..CyclicSetpoint::ZERO
+                            },
+                            Cia402Target::Velocity(value) => CyclicSetpoint {
+                                velocity: f64::from(value),
+                                ..CyclicSetpoint::ZERO
+                            },
+                            Cia402Target::Torque(value) => CyclicSetpoint {
+                                torque: f64::from(value),
+                                ..CyclicSetpoint::ZERO
+                            },
+                        };
+                        accepted[axis]
+                            .seed_from_actual(actual)
+                            .map_err(|error| StopFrameError::InvalidTarget(axis, error))?;
+                    }
+                }
                 let current = accepted[axis].last();
                 let setpoint = match target {
                     Cia402Target::Position(value) => CyclicSetpoint {
@@ -189,11 +222,7 @@ pub fn submit_active_frame<
                     mode: modes[axis],
                     target,
                 };
-                if output.state == DriveState::SwitchedOn {
-                    maps[axis]
-                        .write_enable_with_actual_target(&mut image, command, inputs)
-                        .map_err(|error| StopFrameError::Pdo(axis, error))?;
-                } else {
+                if output.state == DriveState::OperationEnabled {
                     maps[axis]
                         .write_cyclic(
                             &mut image,

@@ -255,6 +255,8 @@ pub enum CyclicSetpointError {
 pub struct CyclicSetpointGuard {
     seeded: bool,
     last: CyclicSetpoint,
+    boot_id: u64,
+    activation_sequence: u64,
 }
 
 impl CyclicSetpointGuard {
@@ -262,6 +264,21 @@ impl CyclicSetpointGuard {
         Self {
             seeded: false,
             last: CyclicSetpoint::ZERO,
+            boot_id: 0,
+            activation_sequence: 0,
+        }
+    }
+
+    /// An activation is the transition into Active, not a permit renewal.
+    /// The first target of each activation must be seeded again from its
+    /// verified drive feedback, even when the axis was armed previously.
+    pub fn bind_activation(&mut self, boot_id: u64, activation_sequence: u64) {
+        if self.boot_id != boot_id || self.activation_sequence != activation_sequence {
+            *self = Self {
+                boot_id,
+                activation_sequence,
+                ..Self::new()
+            };
         }
     }
 
@@ -785,5 +802,27 @@ mod tests {
             guard.validate_and_accept(OperatingMode::Csv, false, target, limits,),
             Err(CyclicSetpointError::ModeNotReady)
         );
+    }
+
+    #[test]
+    fn setpoint_seed_is_invalidated_only_by_a_new_activation() {
+        let mut guard = CyclicSetpointGuard::new();
+        guard.bind_activation(7, 2);
+        guard
+            .seed_from_actual(CyclicSetpoint {
+                position: 12.0,
+                ..CyclicSetpoint::ZERO
+            })
+            .unwrap();
+        guard.bind_activation(7, 2);
+        assert!(guard.seeded());
+        assert_eq!(guard.last().position, 12.0);
+
+        guard.bind_activation(7, 3);
+        assert!(!guard.seeded());
+        assert_eq!(guard.last(), CyclicSetpoint::ZERO);
+        guard.seed_from_actual(CyclicSetpoint::ZERO).unwrap();
+        guard.bind_activation(8, 3);
+        assert!(!guard.seeded());
     }
 }
