@@ -62,6 +62,12 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   unknown drive state cannot confirm a stop. Preserve the first blocker while
   latching an unconfirmed stop at the configured timeout, even across a
   maintenance toggle. Simulator feedback is not HIL qualification evidence.
+- A required hard-class gate (platform, configuration, topology, drive, cycle
+  budget, or external safety) entering bad or unavailable state while active
+  must stage a fault through Stopping and verified stop acknowledgment before
+  FaultLatched. Keep controlled-stop gates distinct, preserve the first
+  blocker separately from the final latched reason, and treat stale hard-gate
+  observations as faults even without an explicit false report.
 - Sample EtherCAT-backed MLG facts after finishing all due Domains: require
   this cycle's complete nonzero WKC and fresh DC completion, not a retained
   Domain image or the DC monitor's previously locked state. The cycle owner
@@ -82,8 +88,8 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   fallback and invalid quality byte. Runtime binding errors leave output
   untouched and require suppressing that target frame.
 - Treat `motion_permit_current` as permit freshness, not motion authorization:
-  a blocked gate can move the guard to `Stopping` while the permit remains
-  current. Only the guard's cycle action may authorize CiA 402 enable.
+  a blocked gate revokes the permit when the guard enters `Stopping`. Only the
+  guard's cycle action may authorize CiA 402 enable.
 - CiA 402 mode confirmation is not sufficient for motion: cyclic output must
   also require `OperationEnabled`, MLG permission, and a seeded/limited first
   setpoint.

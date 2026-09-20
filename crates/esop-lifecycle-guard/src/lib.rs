@@ -13,6 +13,7 @@ pub const MAX_GATES: usize = 16;
 pub const MAX_TRANSITIONS: usize = 16;
 pub const MAX_PERMIT_AUDITS: usize = 16;
 pub const STOP_TIMEOUT_FAULT_CODE: u32 = 0x5354_0001;
+const UNAVAILABLE_GATE_FAULT_CODE_PREFIX: u32 = 0x4741_0000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -35,6 +36,29 @@ impl GateId {
     pub const fn bit(self) -> u16 {
         1u16 << (self as u8)
     }
+
+    pub const fn failure_class(self) -> GateFailureClass {
+        match self {
+            Self::Platform
+            | Self::Configuration
+            | Self::Topology
+            | Self::Drive
+            | Self::Budget
+            | Self::ExternalSafety => GateFailureClass::HardLatch,
+            Self::Link
+            | Self::Domain
+            | Self::DistributedClock
+            | Self::Command
+            | Self::Supervisor
+            | Self::HostObservation => GateFailureClass::ControlledStop,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GateFailureClass {
+    ControlledStop,
+    HardLatch,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -874,11 +898,15 @@ impl LifecycleGuard {
                 if self.gates_active(cycle) && permit_current {
                     LifecycleAction::EnableAllowed
                 } else {
-                    self.revoke_permit();
-                    self.stop_started_cycle = Some(cycle);
+                    if let Some(code) = self.hard_required_gate_fault(cycle) {
+                        self.latch_fault(code, cycle);
+                    } else {
+                        self.revoke_permit();
+                        self.stop_started_cycle = Some(cycle);
+                        self.transition(LifecycleState::Stopping, cycle);
+                    }
                     self.stop_issued_cycle = Some(cycle);
-                    self.transition(LifecycleState::Stopping, cycle);
-                    LifecycleAction::Stop(self.policy.stop_action)
+                    LifecycleAction::Stop(self.effective_stop_action())
                 }
             }
             LifecycleState::Stopping => {
@@ -946,6 +974,38 @@ impl LifecycleGuard {
                 let bit = 1u16 << index;
                 bit & self.required_mask == 0 || self.gate_active(self.gates[index], cycle)
             })
+    }
+
+    fn hard_required_gate_fault(&self, cycle: u64) -> Option<u32> {
+        for gate in [
+            GateId::ExternalSafety,
+            GateId::Budget,
+            GateId::Drive,
+            GateId::Configuration,
+            GateId::Topology,
+            GateId::Platform,
+            GateId::Link,
+            GateId::Domain,
+            GateId::DistributedClock,
+            GateId::Command,
+            GateId::Supervisor,
+            GateId::HostObservation,
+        ] {
+            if self.required_mask & gate.bit() == 0
+                || gate.failure_class() != GateFailureClass::HardLatch
+            {
+                continue;
+            }
+            let status = self.gates[gate as usize];
+            if !self.gate_active(status, cycle) {
+                return Some(if !status.valid && status.fault_code != 0 {
+                    status.fault_code
+                } else {
+                    UNAVAILABLE_GATE_FAULT_CODE_PREFIX | (gate as u32 + 1)
+                });
+            }
+        }
+        None
     }
 
     fn gate_ready(&self, status: GateStatus, cycle: u64) -> bool {
@@ -1816,6 +1876,112 @@ mod tests {
         assert_eq!(other.state(), LifecycleState::FaultLatched);
         assert_eq!(other.first_fault_code(), 0xBEEF);
         assert_eq!(other.latched_fault_code(), STOP_TIMEOUT_FAULT_CODE);
+    }
+
+    #[test]
+    fn required_hard_gate_failures_wait_for_stop_then_latch() {
+        for (gate, code) in [
+            (GateId::Platform, 0x504C_0001),
+            (GateId::Configuration, 0x434F_0001),
+            (GateId::Topology, 0x544F_0001),
+            (GateId::Drive, 0x4452_0001),
+            (GateId::Budget, 0x4255_0001),
+            (GateId::ExternalSafety, 0x5341_0001),
+        ] {
+            assert_eq!(gate.failure_class(), GateFailureClass::HardLatch);
+            let mut guard = LifecycleGuard::new(
+                gate.bit(),
+                10,
+                GuardPolicy {
+                    enter_good_cycles: 1,
+                    ..POLICY
+                },
+            );
+            guard.update_gate(gate, true, 1, 0);
+            guard.request_rearm(permit(1, 100), 1, 1).unwrap();
+            guard.update_gate(gate, false, 2, code);
+            assert_eq!(
+                guard.cycle(2, 2),
+                LifecycleAction::Stop(StopAction::QuickStop)
+            );
+            assert_eq!(guard.state(), LifecycleState::Stopping);
+            assert!(guard.permit().is_none());
+            assert_eq!(guard.first_fault_code(), code);
+            assert_eq!(guard.latched_fault_code(), 0);
+            assert_eq!(
+                guard.request_rearm(permit(2, 100), 2, 2),
+                Err(LifecycleError::InvalidState)
+            );
+            guard.acknowledge_stopped(3, stopped(3)).unwrap();
+            assert_eq!(guard.state(), LifecycleState::FaultLatched);
+            assert_eq!(guard.latched_fault_code(), code);
+            assert_eq!(guard.cycle(3, 3), LifecycleAction::FaultLatched);
+        }
+    }
+
+    #[test]
+    fn missing_hard_gate_observation_latches_and_preserves_first_blocker() {
+        let policy = GuardPolicy {
+            enter_good_cycles: 1,
+            ..POLICY
+        };
+        let mut stale = LifecycleGuard::new(GateId::ExternalSafety.bit(), 10, policy);
+        stale.update_gate(GateId::ExternalSafety, true, 1, 0);
+        stale.request_rearm(permit(1, 100), 1, 1).unwrap();
+        assert_eq!(
+            stale.cycle(3, 3),
+            LifecycleAction::Stop(StopAction::QuickStop)
+        );
+        let unavailable_code =
+            UNAVAILABLE_GATE_FAULT_CODE_PREFIX | (GateId::ExternalSafety as u32 + 1);
+        assert_eq!(stale.first_fault_code(), unavailable_code);
+        stale.acknowledge_stopped(4, stopped(4)).unwrap();
+        assert_eq!(stale.latched_fault_code(), unavailable_code);
+
+        for (bad, observation_cycle) in [(true, 2), (false, 3)] {
+            let mut unavailable = LifecycleGuard::new(GateId::Budget.bit(), 10, policy);
+            unavailable.update_gate(GateId::Budget, true, 1, 0);
+            unavailable.request_rearm(permit(1, 100), 1, 1).unwrap();
+            unavailable.update_gate(GateId::Budget, !bad, observation_cycle, 0);
+            assert_eq!(
+                unavailable.cycle(2, 2),
+                LifecycleAction::Stop(StopAction::QuickStop)
+            );
+            let expected = UNAVAILABLE_GATE_FAULT_CODE_PREFIX | (GateId::Budget as u32 + 1);
+            assert_eq!(unavailable.first_fault_code(), expected);
+            unavailable.acknowledge_stopped(3, stopped(3)).unwrap();
+            assert_eq!(unavailable.latched_fault_code(), expected);
+        }
+
+        let mut mixed = LifecycleGuard::new(
+            GateId::Command.bit() | GateId::ExternalSafety.bit(),
+            10,
+            policy,
+        );
+        for gate in [GateId::Command, GateId::ExternalSafety] {
+            mixed.update_gate(gate, true, 1, 0);
+        }
+        mixed.request_rearm(permit(1, 100), 1, 1).unwrap();
+        mixed.update_gate(GateId::Command, false, 2, 0x434D_0001);
+        mixed.update_gate(GateId::ExternalSafety, false, 2, 0x5341_0001);
+        assert_eq!(
+            mixed.cycle(2, 2),
+            LifecycleAction::Stop(StopAction::QuickStop)
+        );
+        assert_eq!(mixed.first_fault_code(), 0x434D_0001);
+        mixed.acknowledge_stopped(3, stopped(3)).unwrap();
+        assert_eq!(mixed.latched_fault_code(), 0x5341_0001);
+
+        for gate in [
+            GateId::Link,
+            GateId::Domain,
+            GateId::DistributedClock,
+            GateId::Command,
+            GateId::Supervisor,
+            GateId::HostObservation,
+        ] {
+            assert_eq!(gate.failure_class(), GateFailureClass::ControlledStop);
+        }
     }
 
     #[test]

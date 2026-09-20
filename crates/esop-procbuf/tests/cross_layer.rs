@@ -1,7 +1,7 @@
 use esop_ebpf_agent::{CAPABILITY_BTF, RuntimeAgent};
 use esop_lifecycle_guard::{
-    GateId, GuardPolicy, LifecycleAction, LifecycleGuard, MotionPermit, PermitError, StopAction,
-    procbuf::lifecycle_to_procbuf,
+    GateId, GuardPolicy, LifecycleAction, LifecycleError, LifecycleGuard, LifecycleState,
+    MotionPermit, PermitError, StopAction, StopFeedback, procbuf::lifecycle_to_procbuf,
 };
 use esop_procbuf::{
     CommandPage, ControlMode, JointCommand, LifecycleTransitionRecord, ProcBuf, StatePage,
@@ -110,6 +110,8 @@ fn procbuf_command_expiry_stops_mlg_and_blocks_cia402_enable() {
         buffer.read_command(10, &mut command_floor),
         Err(esop_procbuf::CommandReadError::Expired)
     );
+    guard.update_gate(GateId::Platform, true, 3, 0);
+    guard.update_gate(GateId::Link, true, 3, 0);
     guard.update_gate(GateId::Command, false, 3, 0x434D_0001);
     assert_eq!(
         guard.cycle(3, 3),
@@ -266,4 +268,72 @@ fn ebpf_health_heartbeat_can_qualify_then_stop_motion() {
         guard.cycle(2, 101),
         LifecycleAction::Stop(StopAction::QuickStop)
     );
+}
+
+#[test]
+fn external_inhibit_latches_only_after_stop_and_publishes_fault_reason() {
+    let buffer = Buffer::new(1, 7);
+    let mut guard = LifecycleGuard::new(
+        GateId::ExternalSafety.bit(),
+        7,
+        GuardPolicy {
+            enter_good_cycles: 1,
+            ..GuardPolicy::conservative()
+        },
+    );
+    guard.update_gate(GateId::ExternalSafety, true, 1, 0);
+    guard
+        .request_rearm(
+            MotionPermit {
+                boot_id: 7,
+                source_id: 1,
+                permit_epoch: 1,
+                sequence: 1,
+                axis_mask: 0x03,
+                expires_at_ns: 100,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
+            },
+            1,
+            1,
+        )
+        .unwrap();
+    guard.update_gate(GateId::ExternalSafety, false, 2, 0x5341_0001);
+    assert_eq!(
+        guard.cycle(2, 2),
+        LifecycleAction::Stop(StopAction::QuickStop)
+    );
+    assert_eq!(guard.state(), LifecycleState::Stopping);
+    assert_eq!(guard.clear_fault(2), Err(LifecycleError::InvalidState));
+
+    let mut stopping = StatePage::new(7);
+    stopping.sequence = 2;
+    stopping.lifecycle = lifecycle_to_procbuf(guard.snapshot(2, 2), 2_000_000);
+    buffer.publish_state(stopping).unwrap();
+    let published = buffer.read_state().unwrap().state;
+    assert_eq!(published.lifecycle.motion_permit, 0);
+    assert_eq!(published.lifecycle.first_blocking_code, 0x5341_0001);
+    assert_eq!(published.lifecycle.latched_fault_code, 0);
+
+    guard
+        .acknowledge_stopped(
+            3,
+            StopFeedback {
+                cycle: 3,
+                observed_axis_mask: 0x03,
+                stationary_axis_mask: 0x03,
+                non_enabled_axis_mask: 0x03,
+            },
+        )
+        .unwrap();
+    assert_eq!(guard.state(), LifecycleState::FaultLatched);
+    assert_eq!(guard.cycle(3, 3), LifecycleAction::FaultLatched);
+    let mut latched = StatePage::new(7);
+    latched.sequence = 3;
+    latched.lifecycle = lifecycle_to_procbuf(guard.snapshot(3, 3), 3_000_000);
+    buffer.publish_state(latched).unwrap();
+    let published = buffer.read_state().unwrap().state;
+    assert_eq!(published.lifecycle.latched_fault_code, 0x5341_0001);
+    assert_eq!(published.lifecycle.stop_action, StopAction::Disable as u8);
 }
