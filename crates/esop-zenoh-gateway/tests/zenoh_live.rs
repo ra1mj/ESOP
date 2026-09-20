@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use esop_command_gateway::{CommandIngress, IngressPolicy};
 use esop_lifecycle_guard::{GateId, GuardPolicy, LifecycleAction, LifecycleGuard, StopAction};
-use esop_proto::v1::{DiagnosticEvent, MotionCommand, RobotState, RuntimeIncident};
+use esop_proto::v1::{
+    DiagnosticEvent, MotionCommand, QueryReply, QueryRequest, RobotState, RuntimeIncident,
+};
 use esop_proto::{CURRENT_SCHEMA_VERSION, Message};
 use esop_zenoh_gateway::runtime::{ConnectionState, ZenohGateway, decode_command_payload};
 use esop_zenoh_gateway::{KeySpace, RouteKind};
@@ -227,18 +229,40 @@ fn router_round_trip_covers_gateway_contracts() {
             );
 
             gateway
-                .serve_queries(|query| {
-                    query
-                        .reply(query.key_expr().clone(), "query-reply")
-                        .wait()
-                        .expect("query reply sends");
+                .serve_typed_queries(7, |request| {
+                    Ok(QueryReply {
+                        robot_id: request.robot_id.clone(),
+                        boot_id: request.boot_id,
+                        schema_version: CURRENT_SCHEMA_VERSION,
+                        states: request
+                            .after_sequence
+                            .checked_add(1)
+                            .map(|sequence| RobotState {
+                                robot_id: request.robot_id.clone(),
+                                boot_id: request.boot_id,
+                                sequence,
+                                schema_version: CURRENT_SCHEMA_VERSION,
+                                ..RobotState::default()
+                            })
+                            .into_iter()
+                            .collect(),
+                        ..QueryReply::default()
+                    })
                 })
                 .await
                 .expect("queryable declares");
             std::thread::sleep(Duration::from_millis(250));
+            let query_key = route_key(space, RouteKind::Query);
+            let query_request = QueryRequest {
+                robot_id: "robot_01".to_owned(),
+                boot_id: 7,
+                after_sequence: 10,
+                limit: 1,
+                schema_version: CURRENT_SCHEMA_VERSION,
+            };
             let replies = observer
-                .get(route_key(space, RouteKind::Query))
-                .payload("query-request")
+                .get(query_key.as_str())
+                .payload(query_request.encode_to_vec())
                 .await
                 .expect("query dispatches through router");
             let reply = replies
@@ -247,7 +271,70 @@ fn router_round_trip_covers_gateway_contracts() {
                 .expect("query reply arrives")
                 .into_result()
                 .expect("query reply is data");
-            assert_eq!(reply.payload().to_bytes().as_ref(), b"query-reply");
+            let response = QueryReply::decode(reply.payload().to_bytes().as_ref())
+                .expect("query response is v1 protobuf");
+            assert_eq!(response.robot_id, "robot_01");
+            assert_eq!(response.boot_id, 7);
+            assert_eq!(response.states.len(), 1);
+            assert_eq!(response.states[0].sequence, 11);
+            assert_eq!(response.schema_version, CURRENT_SCHEMA_VERSION);
+
+            let invalid = QueryRequest {
+                boot_id: 6,
+                ..query_request.clone()
+            };
+            let rejected = observer
+                .get(query_key.as_str())
+                .payload(invalid.encode_to_vec())
+                .await
+                .expect("stale query dispatches")
+                .recv_async()
+                .await
+                .expect("stale query returns error")
+                .into_result()
+                .expect_err("stale boot cannot receive a data reply");
+            assert_eq!(rejected.payload().to_bytes().as_ref(), b"boot_mismatch");
+
+            let invalid = QueryRequest {
+                limit: 0,
+                ..query_request
+            };
+            let rejected = observer
+                .get(query_key.as_str())
+                .payload(invalid.encode_to_vec())
+                .await
+                .expect("invalid limit dispatches")
+                .recv_async()
+                .await
+                .expect("invalid limit returns error")
+                .into_result()
+                .expect_err("unbounded query cannot receive a data reply");
+            assert_eq!(rejected.payload().to_bytes().as_ref(), b"invalid_limit");
+
+            let rejected = observer
+                .get(query_key.as_str())
+                .await
+                .expect("empty query dispatches")
+                .recv_async()
+                .await
+                .expect("empty query returns error")
+                .into_result()
+                .expect_err("missing payload cannot receive data");
+            assert_eq!(rejected.payload().to_bytes().as_ref(), b"invalid_payload");
+
+            let rejected = observer
+                .get(query_key.as_str())
+                .payload(vec![0; esop_zenoh_gateway::MAX_PAYLOAD_BYTES + 1])
+                .await
+                .expect("oversized query dispatches")
+                .recv_async()
+                .await
+                .expect("oversized query returns error")
+                .into_result()
+                .expect_err("oversized payload cannot receive data");
+            assert_eq!(rejected.payload().to_bytes().as_ref(), b"invalid_payload");
+            assert_eq!(gateway.health().query_rejections(), 4);
+            assert_eq!(gateway.health().query_reply_failures(), 0);
 
             gateway.close().await.expect("gateway closes");
             assert_eq!(gateway.health().state(), ConnectionState::Disconnected);

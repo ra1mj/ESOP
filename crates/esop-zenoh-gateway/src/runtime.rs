@@ -10,11 +10,19 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use esop_command_gateway::{CommandIngress, ExternalMotionCommand, IngressError};
 use esop_lifecycle_guard::MotionPermit;
-use esop_proto::v1::{DiagnosticEvent, MotionCommand, RobotState, RuntimeIncident};
+use esop_proto::v1::{
+    DiagnosticEvent, MotionCommand, QueryReply, QueryRequest, RobotState, RuntimeIncident,
+};
 use esop_proto::{Message, SchemaCompatibilityError, validate_schema_version};
+use zenoh::Wait;
 use zenoh::qos::{CongestionControl, Priority};
 
-use crate::{KeySpace, MAX_ZENOH_KEY_BYTES, RouteDirection, RouteError, RouteKind};
+use crate::{
+    KeySpace, MAX_PAYLOAD_BYTES, MAX_ZENOH_KEY_BYTES, RouteDirection, RouteError, RouteKind,
+};
+
+/// Maximum number of records in one host-domain query response.
+pub const MAX_QUERY_RECORDS: u32 = 32;
 
 const STATE_CONNECTING: u8 = 0;
 const STATE_CONNECTED: u8 = 1;
@@ -124,6 +132,8 @@ pub struct TransportHealth {
     state: Arc<AtomicU8>,
     publish_failures: Arc<AtomicU64>,
     callback_registrations: Arc<AtomicU64>,
+    query_rejections: Arc<AtomicU64>,
+    query_reply_failures: Arc<AtomicU64>,
 }
 
 impl TransportHealth {
@@ -132,6 +142,8 @@ impl TransportHealth {
             state: Arc::new(AtomicU8::new(STATE_CONNECTING)),
             publish_failures: Arc::new(AtomicU64::new(0)),
             callback_registrations: Arc::new(AtomicU64::new(0)),
+            query_rejections: Arc::new(AtomicU64::new(0)),
+            query_reply_failures: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -149,6 +161,14 @@ impl TransportHealth {
     /// Number of successfully registered background handlers.
     pub fn callback_registrations(&self) -> u64 {
         self.callback_registrations.load(Ordering::Relaxed)
+    }
+
+    pub fn query_rejections(&self) -> u64 {
+        self.query_rejections.load(Ordering::Relaxed)
+    }
+
+    pub fn query_reply_failures(&self) -> u64 {
+        self.query_reply_failures.load(Ordering::Relaxed)
     }
 
     fn set(&self, state: ConnectionState) {
@@ -203,6 +223,100 @@ impl From<esop_proto::DecodeError> for CommandAdapterError {
     fn from(error: esop_proto::DecodeError) -> Self {
         Self::Decode(error)
     }
+}
+
+/// Query contract errors are returned as small, stable Zenoh error payloads.
+#[derive(Debug)]
+pub enum QueryAdapterError {
+    Payload(RouteError),
+    Decode(esop_proto::DecodeError),
+    RobotMismatch,
+    BootMismatch,
+    Schema(SchemaCompatibilityError),
+    LimitOutOfRange,
+    TooManyRecords,
+    StaleState,
+    ProviderUnavailable,
+}
+
+impl QueryAdapterError {
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Payload(_) => "invalid_payload",
+            Self::Decode(_) => "invalid_protobuf",
+            Self::RobotMismatch => "robot_mismatch",
+            Self::BootMismatch => "boot_mismatch",
+            Self::Schema(_) => "unsupported_schema",
+            Self::LimitOutOfRange => "invalid_limit",
+            Self::TooManyRecords => "too_many_records",
+            Self::StaleState => "stale_state",
+            Self::ProviderUnavailable => "provider_unavailable",
+        }
+    }
+}
+
+pub fn decode_query_payload(
+    key_space: KeySpace,
+    expected_boot_id: u64,
+    payload: &[u8],
+) -> Result<QueryRequest, QueryAdapterError> {
+    KeySpace::validate_payload(payload).map_err(QueryAdapterError::Payload)?;
+    let request = QueryRequest::decode(payload).map_err(QueryAdapterError::Decode)?;
+    validate_schema_version(request.schema_version).map_err(QueryAdapterError::Schema)?;
+    if request.robot_id.as_bytes() != key_space.robot() {
+        return Err(QueryAdapterError::RobotMismatch);
+    }
+    if request.boot_id != expected_boot_id {
+        return Err(QueryAdapterError::BootMismatch);
+    }
+    if request.limit == 0 || request.limit > MAX_QUERY_RECORDS {
+        return Err(QueryAdapterError::LimitOutOfRange);
+    }
+    Ok(request)
+}
+
+pub fn encode_query_reply(
+    request: &QueryRequest,
+    reply: &QueryReply,
+) -> Result<Vec<u8>, QueryAdapterError> {
+    validate_schema_version(reply.schema_version).map_err(QueryAdapterError::Schema)?;
+    if reply.robot_id != request.robot_id {
+        return Err(QueryAdapterError::RobotMismatch);
+    }
+    if reply.boot_id != request.boot_id {
+        return Err(QueryAdapterError::BootMismatch);
+    }
+    if reply.states.len().saturating_add(reply.incidents.len()) > request.limit as usize {
+        return Err(QueryAdapterError::TooManyRecords);
+    }
+    let mut last_sequence = request.after_sequence;
+    for state in &reply.states {
+        validate_schema_version(state.schema_version).map_err(QueryAdapterError::Schema)?;
+        if state.robot_id != request.robot_id {
+            return Err(QueryAdapterError::RobotMismatch);
+        }
+        if state.boot_id != request.boot_id {
+            return Err(QueryAdapterError::BootMismatch);
+        }
+        if state.sequence <= last_sequence {
+            return Err(QueryAdapterError::StaleState);
+        }
+        last_sequence = state.sequence;
+    }
+    for incident in &reply.incidents {
+        validate_schema_version(incident.schema_version).map_err(QueryAdapterError::Schema)?;
+        if incident
+            .evidence
+            .iter()
+            .any(|evidence| evidence.boot_id != request.boot_id)
+        {
+            return Err(QueryAdapterError::BootMismatch);
+        }
+    }
+    if reply.encoded_len() > MAX_PAYLOAD_BYTES {
+        return Err(QueryAdapterError::Payload(RouteError::PayloadTooLarge));
+    }
+    Ok(reply.encode_to_vec())
 }
 
 /// Decode a v1 command and map its policy fields into the fixed command shape.
@@ -434,6 +548,51 @@ impl ZenohGateway {
             .fetch_add(1, Ordering::Relaxed);
         self.refresh_health().await;
         Ok(())
+    }
+
+    /// Serve bounded v1 queries from a host-side snapshot provider. The caller
+    /// owns authentication/ACL and must reopen the gateway on a robot boot
+    /// change; a handler bound to the old boot cannot serve the new one.
+    pub async fn serve_typed_queries<F>(
+        &self,
+        expected_boot_id: u64,
+        provider: F,
+    ) -> Result<(), RuntimeError>
+    where
+        F: Fn(&QueryRequest) -> Result<QueryReply, QueryAdapterError> + Send + Sync + 'static,
+    {
+        let key_space = self.key_space;
+        let (key, length) = self.key(RouteKind::Query, RouteDirection::Subscribe)?;
+        let reply_key = str::from_utf8(&key[..length])
+            .map_err(|_| RuntimeError::InvalidKeyEncoding)?
+            .to_owned();
+        let health = self.health.clone();
+        self.serve_queries(move |query| {
+            let result = query
+                .payload()
+                .ok_or(QueryAdapterError::Payload(RouteError::EmptyPayload))
+                .and_then(|payload| {
+                    if payload.len() > MAX_PAYLOAD_BYTES {
+                        return Err(QueryAdapterError::Payload(RouteError::PayloadTooLarge));
+                    }
+                    let bytes = payload.to_bytes();
+                    let request = decode_query_payload(key_space, expected_boot_id, &bytes)?;
+                    let reply = provider(&request)?;
+                    encode_query_reply(&request, &reply)
+                });
+            let sent = match result {
+                Ok(bytes) => query.reply(reply_key.as_str(), bytes).wait(),
+                Err(error) => {
+                    health.query_rejections.fetch_add(1, Ordering::Relaxed);
+                    query.reply_err(error.code()).wait()
+                }
+            };
+            if sent.is_err() {
+                health.query_reply_failures.fetch_add(1, Ordering::Relaxed);
+                health.degrade();
+            }
+        })
+        .await
     }
 
     /// Close the session and make the disconnection visible to the supervisor.

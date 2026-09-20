@@ -28,7 +28,7 @@
 
 ## 3. CI 校验
 
-`make proto-schema` 检查 proto3/package、顶层消息的 `schema_version`、字段号和名称唯一性、reserved 不复用及 enum 零值。`crates/esop-proto/` 使用 vendored `protoc` 生成 Rust bindings；workspace 测试另外执行第 4 节的 descriptor 门禁和新旧 reader/writer 矩阵。`esop-zenoh-gateway` 的命令入口校验 schema version 和 robot ID 后再转交 `CommandIngress`。`make test-zenoh` 验证类型化发布、命令路由及 router 重启后的旧命令拒绝。生产认证和部署仍是后续验收项。
+`make proto-schema` 检查 proto3/package、顶层消息的 `schema_version`、字段号和名称唯一性、reserved 不复用及 enum 零值。`crates/esop-proto/` 使用 vendored `protoc` 生成 Rust bindings；workspace 测试另外执行第 4 节的 descriptor 门禁和新旧 reader/writer 矩阵。`esop-zenoh-gateway` 的命令入口校验 schema version 和 robot ID 后再转交 `CommandIngress`；类型化查询入口校验请求的 schema、robot、boot 和大小以及应答的版本和容量。`make test-zenoh` 验证类型化发布、命令路由、查询往返/拒绝及 router 重启后的旧命令拒绝。生产认证和部署仍是后续验收项。
 
 ## 4. Frozen v1 Compatibility Gate
 
