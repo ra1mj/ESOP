@@ -6,8 +6,8 @@ use esop_ethercat_core::{
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::cia402::step_axis_bank;
 use esop_lifecycle_guard::ethercat::{
-    OtherCycleFacts, StopFrameError, cyclic_quality_from_ethercat, submit_stopping_frame,
-    verified_ethercat_stop_feedback,
+    OtherCycleFacts, StopFrameError, cyclic_quality_from_ethercat, submit_inhibited_frame,
+    submit_stopping_frame, verified_ethercat_stop_feedback,
 };
 use esop_lifecycle_guard::procbuf::{
     LifecycleEventCursor, axis_stops_to_procbuf, lifecycle_events_to_procbuf, lifecycle_to_procbuf,
@@ -19,8 +19,8 @@ use esop_lifecycle_guard::{
 };
 use esop_procbuf::{ProcBuf, StatePage};
 use esop_profile_cia402::{
-    CONTROLWORD_QUICK_STOP, Cia402AxisBank, Cia402PdoField, Cia402PdoMap, DriveRequest,
-    OperatingMode,
+    CONTROLWORD_DISABLE_VOLTAGE, CONTROLWORD_QUICK_STOP, Cia402AxisBank, Cia402PdoField,
+    Cia402PdoMap, DriveRequest, OperatingMode,
 };
 
 const IMAGE_BYTES: usize = 32;
@@ -224,6 +224,59 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
             100,
         )
         .unwrap();
+
+    let tx_before = port.tx_frames();
+    {
+        let decision = guard.cycle_axes(first.cycle, 101);
+        let outputs = step_axis_bank(&mut bank, &decision, [0x0027], [DriveRequest::Disable]);
+        assert!(matches!(
+            submit_inhibited_frame(
+                &decision,
+                &outputs,
+                &maps,
+                &modes,
+                &safe_image,
+                &domain,
+                &plan,
+                &mut master,
+                &mut port,
+                2,
+                250_000,
+            ),
+            Err(StopFrameError::InvalidDecision)
+        ));
+    }
+    let mut active_state = StatePage::<1, 0, 1>::new(7);
+    active_state.sequence = first.cycle;
+    let active = StopCycleContext {
+        guard: &mut guard,
+        bank: &mut bank,
+        master: &mut master,
+        port: &mut port,
+        domain: &domain,
+        dc: &dc,
+        buffer: &buffer,
+        event_cursor: &mut cursor,
+        state: &mut active_state,
+        report: first,
+        other,
+        maps: &maps,
+        modes: &modes,
+        max_stationary_velocities: &max_stationary_velocities,
+        safe_process_image: &safe_image,
+        plan: &plan,
+        next_generation: 2,
+        deadline_ns: 250_000,
+        now_ns: 101,
+        transition_time_ns: 100,
+    }
+    .run();
+    assert!(matches!(
+        active,
+        Err(StopCycleError::NotStopping(LifecycleAction::EnableAllowed))
+    ));
+    assert_eq!(port.tx_frames(), tx_before);
+    assert_eq!(buffer.pending_events(), 0);
 
     port.set_response_wkc(0);
     submit(
@@ -442,7 +495,7 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
     assert_eq!(state.sequence, fourth.cycle + 1);
     assert_eq!(state.lifecycle.state, 0);
 
-    // A real ready cycle belongs to the caller's inhibited-output branch.
+    // A real ready cycle emits a Disable-only frame and clears stop evidence.
     domain.begin_receive(5).unwrap();
     let fifth = receive(&mut master, &mut port, &mut domain, 5);
     port.set_now_ns(600_000);
@@ -470,8 +523,311 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
         now_ns: 500,
         transition_time_ns: 400,
     }
-    .run();
-    assert!(matches!(inactive, Err(StopCycleError::NotStopping(_))));
+    .run()
+    .unwrap();
+    assert_eq!(inactive.action, LifecycleAction::Hold);
+    assert!(inactive.transmission.is_ok());
+    assert_eq!(inactive.state_publish, Ok(4));
+    assert_eq!(inactive.event_publish, Some(Ok(1)));
+    let published = buffer.read_state().unwrap().state;
+    assert_eq!(published.lifecycle.state, LifecycleState::Qualifying as u8);
+    assert_eq!(published.axis_stops[0].issued_action, 0);
+    assert_eq!(published.axis_stops[0].feedback_valid, 0);
+    assert_eq!(
+        buffer.pop_event().unwrap().sequence,
+        published.lifecycle.transition_sequence
+    );
+    domain.begin_receive(6).unwrap();
+    receive(&mut master, &mut port, &mut domain, 6);
+    assert_eq!(
+        maps[0]
+            .entry(Cia402PdoField::Controlword)
+            .unwrap()
+            .read_unsigned(domain.input()),
+        Ok(u64::from(CONTROLWORD_DISABLE_VOLTAGE))
+    );
+    assert_eq!(domain.input()[19..23], [0; 4]);
+}
+
+#[test]
+fn stop_timeout_latches_and_still_sends_disable_with_ordered_events() {
+    let mut master = EthercatMaster::<1, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut domain = Domain::<IMAGE_BYTES, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: IMAGE_BYTES,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut plan = FramePlan::<1>::new();
+    plan.push(DatagramPlan {
+        command: Command::Lrw,
+        index: 12,
+        address: 0x1000,
+        payload_offset: 0,
+        payload_len: IMAGE_BYTES,
+        expected_wkc: 1,
+    })
+    .unwrap();
+    let dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x2000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let other = OtherCycleFacts {
+        platform_ready: true,
+        coe_ready: true,
+        topology_valid: true,
+        drive_ready: true,
+        command_current: true,
+        supervisor_healthy: true,
+        external_safety_clear: true,
+        deadline_met: true,
+    };
+    let mut guard = LifecycleGuard::new(
+        GateId::Domain.bit() | GateId::Link.bit(),
+        7,
+        GuardPolicy {
+            enter_good_cycles: 1,
+            stop_timeout_cycles: 2,
+            allowed_axis_mask: 1,
+            ..GuardPolicy::conservative()
+        },
+    );
+    let mut cursor = LifecycleEventCursor::new(&guard);
+    let buffer = ProcBuf::<1, 0, 1, 8>::new(1, 7);
+    let mut bank = Cia402AxisBank::<1>::new();
+    let maps = [map()];
+    let modes = [OperatingMode::Csp];
+    let thresholds = [1];
+    let safe_image = input_image(0x0040, 0);
+    let mut port = SimulatedPort::new(1);
+
+    submit(
+        &mut master,
+        &mut port,
+        &mut domain,
+        &plan,
+        1,
+        &input_image(0x0027, 10),
+        false,
+    );
+    let first = receive(&mut master, &mut port, &mut domain, 1);
+    guard.update_cyclic_quality(
+        cyclic_quality_from_ethercat(first, &[domain.quality()], &dc, other),
+        first.cycle,
+    );
+    guard
+        .request_rearm(
+            MotionPermit {
+                boot_id: 7,
+                source_id: 1,
+                permit_epoch: 1,
+                sequence: 1,
+                expires_at_ns: 10_000,
+                axis_mask: 1,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
+            },
+            first.cycle,
+            100,
+        )
+        .unwrap();
+
+    port.set_response_wkc(0);
+    submit(
+        &mut master,
+        &mut port,
+        &mut domain,
+        &plan,
+        2,
+        &input_image(0x0027, 10),
+        false,
+    );
+    let second = receive(&mut master, &mut port, &mut domain, 2);
+    port.set_response_wkc(1);
+    port.set_now_ns(300_000);
+    port.fail_next_tx();
+    let mut state = StatePage::<1, 0, 1>::new(7);
+    state.sequence = second.cycle;
+    let failed = StopCycleContext {
+        guard: &mut guard,
+        bank: &mut bank,
+        master: &mut master,
+        port: &mut port,
+        domain: &domain,
+        dc: &dc,
+        buffer: &buffer,
+        event_cursor: &mut cursor,
+        state: &mut state,
+        report: second,
+        other,
+        maps: &maps,
+        modes: &modes,
+        max_stationary_velocities: &thresholds,
+        safe_process_image: &safe_image,
+        plan: &plan,
+        next_generation: 3,
+        deadline_ns: 350_000,
+        now_ns: 200,
+        transition_time_ns: 200,
+    }
+    .run()
+    .unwrap();
+    assert!(matches!(
+        failed.transmission,
+        Err(StopFrameError::Transmit(_))
+    ));
+    assert_eq!(failed.state_publish, Ok(1));
+    assert_eq!(
+        buffer.read_state().unwrap().state.axis_stops[0].issued_action,
+        0
+    );
+    while buffer.pop_event().is_some() {}
+
+    domain.begin_receive(3).unwrap();
+    let third = receive(&mut master, &mut port, &mut domain, 3);
+    port.set_now_ns(400_000);
+    let mut state = StatePage::<1, 0, 1>::new(7);
+    state.sequence = third.cycle;
+    let issued = StopCycleContext {
+        guard: &mut guard,
+        bank: &mut bank,
+        master: &mut master,
+        port: &mut port,
+        domain: &domain,
+        dc: &dc,
+        buffer: &buffer,
+        event_cursor: &mut cursor,
+        state: &mut state,
+        report: third,
+        other,
+        maps: &maps,
+        modes: &modes,
+        max_stationary_velocities: &thresholds,
+        safe_process_image: &safe_image,
+        plan: &plan,
+        next_generation: 4,
+        deadline_ns: 450_000,
+        now_ns: 300,
+        transition_time_ns: 200,
+    }
+    .run()
+    .unwrap();
+    assert!(issued.transmission.is_ok());
+    assert_eq!(
+        buffer.read_state().unwrap().state.axis_stops[0].issued_action,
+        3
+    );
+    assert_eq!(buffer.pop_event(), None);
+
+    domain.begin_receive(4).unwrap();
+    let fourth = receive(&mut master, &mut port, &mut domain, 4);
+    port.set_now_ns(500_000);
+    let mut state = StatePage::<1, 0, 1>::new(7);
+    state.sequence = fourth.cycle;
+    let latched = StopCycleContext {
+        guard: &mut guard,
+        bank: &mut bank,
+        master: &mut master,
+        port: &mut port,
+        domain: &domain,
+        dc: &dc,
+        buffer: &buffer,
+        event_cursor: &mut cursor,
+        state: &mut state,
+        report: fourth,
+        other,
+        maps: &maps,
+        modes: &modes,
+        max_stationary_velocities: &thresholds,
+        safe_process_image: &safe_image,
+        plan: &plan,
+        next_generation: 5,
+        deadline_ns: 550_000,
+        now_ns: 400,
+        transition_time_ns: 200,
+    }
+    .run()
+    .unwrap();
+    assert_eq!(latched.action, LifecycleAction::FaultLatched);
+    assert!(latched.transmission.is_ok());
+    assert_eq!(latched.feedback, None);
+    assert!(!latched.acknowledged);
+    assert_eq!(latched.state_publish, Ok(3));
+    assert_eq!(latched.event_publish, Some(Ok(2)));
+    let published = buffer.read_state().unwrap().state;
+    assert_eq!(
+        published.lifecycle.state,
+        LifecycleState::FaultLatched as u8
+    );
+    assert_eq!(published.lifecycle.transition_time_ns, 400);
+    assert_eq!(published.axis_stops[0].requested_action, 0);
+    assert_eq!(published.axis_stops[0].issued_action, 0);
+    let transition = buffer.pop_event().unwrap();
+    let timeout = buffer.pop_event().unwrap();
+    assert_eq!(transition.code, 2);
+    assert_eq!(timeout.code, 1);
+    assert_eq!(timeout.axis_or_device, 0);
+    assert_eq!(timeout.sequence, transition.sequence);
+    assert_ne!(timeout.aux & (1 << 16), 0);
+    assert_eq!(buffer.pop_event(), None);
+
+    domain.begin_receive(5).unwrap();
+    let fifth = receive(&mut master, &mut port, &mut domain, 5);
+    assert_eq!(
+        maps[0]
+            .entry(Cia402PdoField::Controlword)
+            .unwrap()
+            .read_unsigned(domain.input()),
+        Ok(u64::from(CONTROLWORD_DISABLE_VOLTAGE))
+    );
+
+    port.set_now_ns(600_000);
+    port.fail_next_tx();
+    let mut state = StatePage::<1, 0, 1>::new(7);
+    state.sequence = fifth.cycle;
+    let failed_inhibit = StopCycleContext {
+        guard: &mut guard,
+        bank: &mut bank,
+        master: &mut master,
+        port: &mut port,
+        domain: &domain,
+        dc: &dc,
+        buffer: &buffer,
+        event_cursor: &mut cursor,
+        state: &mut state,
+        report: fifth,
+        other,
+        maps: &maps,
+        modes: &modes,
+        max_stationary_velocities: &thresholds,
+        safe_process_image: &safe_image,
+        plan: &plan,
+        next_generation: 6,
+        deadline_ns: 650_000,
+        now_ns: 500,
+        transition_time_ns: 400,
+    }
+    .run()
+    .unwrap();
+    assert_eq!(failed_inhibit.action, LifecycleAction::FaultLatched);
+    assert!(matches!(
+        failed_inhibit.transmission,
+        Err(StopFrameError::Transmit(_))
+    ));
+    assert_eq!(failed_inhibit.state_publish, Ok(4));
+    assert_eq!(failed_inhibit.event_publish, Some(Ok(0)));
+    assert_eq!(
+        buffer.read_state().unwrap().state.axis_stops[0].issued_action,
+        0
+    );
+    assert_eq!(buffer.pop_event(), None);
 }
 
 #[test]

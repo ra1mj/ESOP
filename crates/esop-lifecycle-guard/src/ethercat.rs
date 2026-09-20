@@ -67,6 +67,98 @@ pub fn submit_stopping_frame<
     if !matches!(decision.action(), LifecycleAction::Stop(_)) || stopping == 0 {
         return Err(StopFrameError::InvalidDecision);
     }
+    let length = submit_safe_frame(
+        decision,
+        outputs,
+        maps,
+        modes,
+        safe_process_image,
+        domain,
+        plan,
+        master,
+        port,
+        generation,
+        deadline_ns,
+    )?;
+    decision
+        .mark_stop_transmitted()
+        .map_err(|_| StopFrameError::InvalidDecision)?;
+    Ok(length)
+}
+
+/// Submit a Disable-only frame while the guard holds or has latched a fault.
+/// This shares the stop frame's writable-Domain and cross-axis alias checks,
+/// but never records stop issuance or treats a fault-latched state as motion.
+#[cfg(feature = "cia402")]
+#[allow(clippy::too_many_arguments)]
+pub fn submit_inhibited_frame<
+    P: EthercatPort,
+    const AXES: usize,
+    const BYTES: usize,
+    const SEGMENTS: usize,
+    const DATAGRAMS: usize,
+    const SLOTS: usize,
+    const MTU: usize,
+>(
+    decision: &AxisCycleDecision<'_>,
+    outputs: &[Cia402Output; AXES],
+    maps: &[Cia402PdoMap; AXES],
+    modes: &[OperatingMode; AXES],
+    safe_process_image: &[u8; BYTES],
+    domain: &Domain<BYTES, SEGMENTS>,
+    plan: &FramePlan<DATAGRAMS>,
+    master: &mut EthercatMaster<SLOTS, MTU>,
+    port: &mut P,
+    generation: u16,
+    deadline_ns: u64,
+) -> Result<usize, StopFrameError<P::Error>> {
+    if !matches!(
+        decision.action(),
+        LifecycleAction::Hold | LifecycleAction::FaultLatched
+    ) || decision.stopping_axis_mask() != 0
+        || decision.permitted_axis_mask() != 0
+    {
+        return Err(StopFrameError::InvalidDecision);
+    }
+    submit_safe_frame(
+        decision,
+        outputs,
+        maps,
+        modes,
+        safe_process_image,
+        domain,
+        plan,
+        master,
+        port,
+        generation,
+        deadline_ns,
+    )
+}
+
+#[cfg(feature = "cia402")]
+#[allow(clippy::too_many_arguments)]
+fn submit_safe_frame<
+    P: EthercatPort,
+    const AXES: usize,
+    const BYTES: usize,
+    const SEGMENTS: usize,
+    const DATAGRAMS: usize,
+    const SLOTS: usize,
+    const MTU: usize,
+>(
+    decision: &AxisCycleDecision<'_>,
+    outputs: &[Cia402Output; AXES],
+    maps: &[Cia402PdoMap; AXES],
+    modes: &[OperatingMode; AXES],
+    safe_process_image: &[u8; BYTES],
+    domain: &Domain<BYTES, SEGMENTS>,
+    plan: &FramePlan<DATAGRAMS>,
+    master: &mut EthercatMaster<SLOTS, MTU>,
+    port: &mut P,
+    generation: u16,
+    deadline_ns: u64,
+) -> Result<usize, StopFrameError<P::Error>> {
+    let stopping = decision.stopping_axis_mask();
     if AXES > MAX_MOTION_AXES || (AXES < MAX_MOTION_AXES && stopping >> AXES != 0) {
         return Err(StopFrameError::AxisCapacityExceeded);
     }
@@ -130,9 +222,6 @@ pub fn submit_stopping_frame<
     master
         .submit_frame(port, frame)
         .map_err(StopFrameError::Transmit)?;
-    decision
-        .mark_stop_transmitted()
-        .map_err(|_| StopFrameError::InvalidDecision)?;
     Ok(length)
 }
 
