@@ -54,6 +54,12 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   frozen schedule ID and derive the due tick from master cycle 1 = schedule
   tick 0. An idle tick may reuse only the last successfully scheduled sample
   within its period; current-cycle RX/DC evidence remains mandatory.
+- Build slave-to-slave copy plans from an active Domain registry, not ad hoc
+  offsets. Bind the source TxPDO, target RxPDO, and target quality RxPDO to
+  verified datagram coverage. At the target's scheduled send cycle, accept a
+  source sample at most one cycle old; otherwise write the product-specified
+  fallback and invalid quality byte. Runtime binding errors leave output
+  untouched and require suppressing that target frame.
 - Treat `motion_permit_current` as permit freshness, not motion authorization:
   a blocked gate can move the guard to `Stopping` while the permit remains
   current. Only the guard's cycle action may authorize CiA 402 enable.

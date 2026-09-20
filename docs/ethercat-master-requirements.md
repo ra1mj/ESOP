@@ -242,6 +242,8 @@ for (;;) {
 
 当前实现已增加 `DomainRegistry`：它在激活前以固定容量登记多个 Domain、PDO entry 和 datagram，自动返回稳定的 Domain-local bit offset，并把 datagram 的相对过程映像 offset 转换为全局 `FramePlan` offset。注册表同时校验 Domain 过程映像/逻辑地址重叠、全局 datagram index、PDO bit overlap、WKC 溢出和多速率 hyperperiod；`activate` 成功后拒绝继续注册。`SiiConfigurationCandidate` 可冻结为 `SiiDomainProjection`，在进入注册表前再次核对 Rx/Tx 统一映像偏移、FMMU 与 SyncManager 物理范围、逻辑基址和映像容量；字节对齐 segment 可由 `LWR`/`LRD` 自动绑定，位打包 segment 必须由调用方提供聚合 datagram。`FramePlanSet` 在激活期按 MTU 和固定容量拆帧，计划与 phase 采用原子发布；失败不会发布部分 Domain/PDO/计划。现有 `Domain` 的输入 staging 段和 `ScheduleTable` 可由注册结果直接生成。真实从站的 PDO 互操作、FMMU/SM read-back 与硬件 HIL 仍需完成。
 
+PDO-006 的软件复制路径使用 `SlaveCopyPlan`：注册表激活后以源 TxPDO、目标 RxPDO、目标质量 RxPDO 绑定一次静态计划，校验不同从站、等宽字节对齐、方向与输入/输出数据报覆盖。周期所有者必须在 `finish_receive` 后、目标到期发送前调用 `apply_to_domains` 或同 Domain 的 `apply_within_domain`；源最近一次成功接收只能是本周期或上一周期，且 WKC、完整性及配置相位均通过。目标质量字节为 `1`（源有效）或 `0`（源无效）；失配或过期时目标字段替换为产品显式配置的降级字节，并输出源周期/年龄诊断。映像、域或目标到期检查失败则返回错误且目标不变，周期所有者不得发送该目标帧。该质量字节不是功能安全信号，降级字节也必须由产品评审其物理意义。主站模拟帧收发与静态检查已覆盖成功、WKC 错误、时效过期及拒绝路径；真实从站映射/回读、端到端时间上界与实物 HIL 仍待验证。
+
 ### 5.5 DC 与时间
 
 | ID | 优先级 | 需求 | 验收证据 |

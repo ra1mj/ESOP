@@ -30,6 +30,7 @@ mod sii;
 mod sii_config;
 mod sii_discovery;
 mod slave;
+mod slave_copy;
 mod startup;
 pub mod wire;
 
@@ -123,6 +124,7 @@ pub use sii_discovery::{
 pub use slave::{
     AlStatus, EthercatState, SlaveIdentity, SlaveRecord, SlaveTable, SlaveTableError, next_state,
 };
+pub use slave_copy::{SlaveCopyError, SlaveCopyOutcome, SlaveCopyPlan, SlaveCopyStatus};
 pub use startup::{
     ExpectedSlave, StartupAction, StartupConfig, StartupController, StartupError, StartupPhase,
     StartupProgress,

@@ -122,6 +122,12 @@ impl<const BYTES: usize, const SEGMENTS: usize> Domain<BYTES, SEGMENTS> {
         &mut self.output
     }
 
+    /// Borrow committed inputs and pending outputs together for a copy between
+    /// two different slaves mapped into this Domain.
+    pub fn process_images_mut(&mut self) -> (&[u8; BYTES], &mut [u8; BYTES]) {
+        (&self.committed, &mut self.output)
+    }
+
     pub fn add_segment(&mut self, segment: DomainSegment) -> Result<(), DomainError> {
         if SEGMENTS == 0 || SEGMENTS > 64 || self.segment_count >= SEGMENTS {
             return Err(DomainError::TooManySegments);
