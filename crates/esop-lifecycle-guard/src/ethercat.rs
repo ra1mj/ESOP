@@ -28,15 +28,25 @@ pub fn cyclic_quality_from_ethercat(
     dc: &DcCyclicSync,
     other: OtherCycleFacts,
 ) -> CyclicQuality {
-    let domain_valid = !due_domains.is_empty()
-        && due_domains.iter().all(|domain| {
-            domain.valid
-                && domain.complete
-                && domain.expected_wkc != 0
-                && domain.actual_wkc == domain.expected_wkc
-                && domain.last_valid_cycle == report.cycle
-                && domain.input_age_cycles == 0
-        });
+    cyclic_quality_from_domains(report, due_domains.iter(), dc, other)
+}
+
+pub(crate) fn cyclic_quality_from_domains<'a>(
+    report: CycleReport,
+    mut due_domains: impl Iterator<Item = &'a DomainQuality>,
+    dc: &DcCyclicSync,
+    other: OtherCycleFacts,
+) -> CyclicQuality {
+    let mut has_due_domain = false;
+    let domain_valid = due_domains.all(|domain| {
+        has_due_domain = true;
+        domain.valid
+            && domain.complete
+            && domain.expected_wkc != 0
+            && domain.actual_wkc == domain.expected_wkc
+            && domain.last_valid_cycle == report.cycle
+            && domain.input_age_cycles == 0
+    }) && has_due_domain;
     let rx_valid = !report.link_down
         && report.received_frames != 0
         && report.parsed_datagrams != 0
@@ -50,7 +60,8 @@ pub fn cyclic_quality_from_ethercat(
         platform_ready: other.platform_ready,
         coe_ready: other.coe_ready,
         topology_valid: other.topology_valid,
-        distributed_clock_locked: dc.sync_count() != 0
+        distributed_clock_locked: !report.link_down
+            && dc.sync_count() != 0
             && dc.last_sync_cycle() == report.cycle
             && dc.last_error().is_none()
             && dc.pending_generation().is_none()
@@ -221,6 +232,12 @@ mod tests {
         ];
         for bad in bad_reports {
             assert!(!cyclic_quality_from_ethercat(bad, &[domain()], &dc, other()).wkc_valid);
+            if bad.link_down {
+                assert!(
+                    !cyclic_quality_from_ethercat(bad, &[domain()], &dc, other())
+                        .distributed_clock_locked
+                );
+            }
         }
         let next = CycleReport {
             cycle: 8,

@@ -4,8 +4,8 @@ use esop_ethercat_core::{
     FramePlan, MasterConfig, RxConsumerMux,
 };
 use esop_ethercat_linux_port::SimulatedPort;
-use esop_lifecycle_guard::ethercat::{OtherCycleFacts, cyclic_quality_from_ethercat};
-use esop_lifecycle_guard::procbuf::{cyclic_quality_to_procbuf, lifecycle_to_procbuf};
+use esop_lifecycle_guard::ethercat::OtherCycleFacts;
+use esop_lifecycle_guard::procbuf::{ethercat_cycle_to_procbuf, lifecycle_to_procbuf};
 use esop_lifecycle_guard::{
     GateId, GuardPolicy, LifecycleAction, LifecycleGuard, MotionPermit, StopAction,
 };
@@ -91,8 +91,16 @@ fn received_domain_and_dc_drive_guard_and_published_quality() {
             .finish_receive(generation, report.cycle)
             .unwrap();
         assert_eq!(completed, generation == 7);
-        let facts =
-            cyclic_quality_from_ethercat(report, &[mux.first().quality()], mux.second(), other);
+        let mut state = StatePage::<1, 0, 1>::new(7);
+        state.sequence = report.cycle;
+        let facts = ethercat_cycle_to_procbuf(
+            &mut state,
+            report,
+            &[mux.first().quality()],
+            &[true],
+            mux.second(),
+            other,
+        );
         guard.update_cyclic_quality(facts, report.cycle);
 
         let action = if generation == 7 {
@@ -116,20 +124,29 @@ fn received_domain_and_dc_drive_guard_and_published_quality() {
             guard.cycle(report.cycle, 10)
         };
 
-        let mut state = StatePage::<1, 0, 1>::new(7);
-        state.sequence = report.cycle;
-        cyclic_quality_to_procbuf(&mut state, facts);
         state.lifecycle = lifecycle_to_procbuf(guard.snapshot(report.cycle, 10), report.cycle);
         buffer.publish_state(state).unwrap();
         let published = buffer.read_state().unwrap().state;
         assert_eq!(published.sequence, published.quality.sequence);
         assert!(published.quality.cyclic.complete());
+        assert_eq!(published.quality.link_up, 1);
+        assert_eq!(
+            published.quality.dc_locked,
+            facts.distributed_clock_locked as u8
+        );
+        assert_eq!(published.quality.domains[0].expected_wkc, 1);
+        assert_eq!(
+            published.quality.domains[0].actual_wkc,
+            u16::from(generation == 7)
+        );
+        assert_eq!(published.quality.domains[0].valid, facts.domain_valid as u8);
         if generation == 7 {
             assert_eq!(action, LifecycleAction::EnableAllowed);
             assert!(published.quality.cyclic.good(QualityFact::Domain));
             assert!(published.quality.cyclic.good(QualityFact::Wkc));
             assert!(published.quality.cyclic.good(QualityFact::DistributedClock));
             assert_eq!(published.lifecycle.gates_ready, 1);
+            assert_eq!(published.quality.domains[0].input_age_cycles, 0);
         } else {
             assert_eq!(action, LifecycleAction::Stop(StopAction::QuickStop));
             assert!(!published.quality.cyclic.good(QualityFact::Domain));
@@ -137,6 +154,7 @@ fn received_domain_and_dc_drive_guard_and_published_quality() {
             assert!(!published.quality.cyclic.good(QualityFact::DistributedClock));
             assert_eq!(published.lifecycle.gates_ready, 0);
             assert_eq!(published.lifecycle.first_blocking_code, 0x4443_0001);
+            assert_eq!(published.quality.domains[0].input_age_cycles, 1);
         }
     }
 }

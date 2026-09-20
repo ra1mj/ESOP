@@ -46,6 +46,10 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   Domain image or the DC monitor's previously locked state. The cycle owner
   must explicitly supply the other safety facts and final deadline result;
   the simulator's synthetic facts are not device qualification evidence.
+- For ProcBuf diagnostics, keep Domain slot order and the due mask aligned with
+  the frozen schedule. Project every configured Domain's WKC and age, but only
+  qualify scheduled Domains as current; do not overwrite AL, command, or
+  fault facts owned by other producers.
 - Treat `motion_permit_current` as permit freshness, not motion authorization:
   a blocked gate can move the guard to `Stopping` while the permit remains
   current. Only the guard's cycle action may authorize CiA 402 enable.
