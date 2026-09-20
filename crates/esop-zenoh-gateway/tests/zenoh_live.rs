@@ -489,10 +489,14 @@ fn router_restart_is_observable_and_cannot_rearm_motion() {
             })
             .await;
             assert!(disconnected.is_ok(), "router loss becomes observable");
+            let mut stop_decision = guard.cycle_axes(2, 10_001);
             assert_eq!(
-                guard.cycle(2, 10_001),
+                stop_decision.action(),
                 LifecycleAction::Stop(StopAction::QuickStop)
             );
+            // The local port remains independent of Zenoh; model a successful
+            // stop PDO submission before any later drive feedback is accepted.
+            stop_decision.mark_stop_transmitted().unwrap();
             assert!(guard.permit().is_none());
 
             router.start();
