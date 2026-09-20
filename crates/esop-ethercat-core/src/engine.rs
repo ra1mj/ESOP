@@ -243,6 +243,12 @@ pub struct EthercatMaster<const SLOTS: usize, const MTU: usize> {
 }
 
 impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
+    /// Receive cycle currently owned by this master. A cycle publisher must
+    /// reject reports from a different receive step before updating gates.
+    pub const fn cycle_number(&self) -> u64 {
+        self.cycle
+    }
+
     pub const fn new(config: MasterConfig) -> Self {
         Self {
             config,

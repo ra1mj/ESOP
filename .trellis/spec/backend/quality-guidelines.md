@@ -82,6 +82,19 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   from a different process-image offset. Build errors must release unarmed
   frame slots; TX errors must not mark issuance. A successful submission is
   not drive-execution proof.
+- For the optional single-Domain stop branch, use `StopCycleContext` only
+  after the real master cycle has completed Domain RX. Match the report to
+  both the master cycle and State sequence, and verify the frozen allowed
+  axis mask fits the bank, before mutating gates; project RX quality once,
+  decide with one guard borrow, submit the next stop frame,
+  stage per-axis evidence even when TX fails, acknowledge only earlier issued
+  actions with current verified feedback, then publish State before emitting
+  events. A new transition uses this invocation's monotonic timestamp; an
+  older transition needs its recorded timestamp from the caller. `NotStopping`
+  requires explicit normal or inhibited output and State/event publication by
+  the caller. The caller also owns final deadline facts, non-CiA 402 output
+  safety, other Domains, and the full cycle scheduler; this branch is not a
+  complete production owner or HIL qualification.
 - Freeze per-axis stop selections in `AxisStopPolicy` at guard construction.
   Assemble all axis outputs from one borrowed `cycle_axes` decision, use the
   originally armed mask for stop requests, and force every other axis to

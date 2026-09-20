@@ -12,6 +12,7 @@ use esop_lifecycle_guard::ethercat::{
 use esop_lifecycle_guard::procbuf::{
     LifecycleEventCursor, axis_stops_to_procbuf, lifecycle_events_to_procbuf, lifecycle_to_procbuf,
 };
+use esop_lifecycle_guard::stop_cycle::{StopCycleContext, StopCycleError};
 use esop_lifecycle_guard::{
     GateId, GuardPolicy, LifecycleAction, LifecycleError, LifecycleGuard, LifecycleState,
     MotionPermit,
@@ -133,6 +134,344 @@ fn receive<const BYTES: usize>(
         .unwrap();
     domain.finish_receive(generation, report.cycle).unwrap();
     report
+}
+
+#[test]
+fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
+    let mut master = EthercatMaster::<1, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut domain = Domain::<IMAGE_BYTES, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: IMAGE_BYTES,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut plan = FramePlan::<1>::new();
+    plan.push(DatagramPlan {
+        command: Command::Lrw,
+        index: 12,
+        address: 0x1000,
+        payload_offset: 0,
+        payload_len: IMAGE_BYTES,
+        expected_wkc: 1,
+    })
+    .unwrap();
+    let dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x2000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let other = OtherCycleFacts {
+        platform_ready: true,
+        coe_ready: true,
+        topology_valid: true,
+        drive_ready: true,
+        command_current: true,
+        supervisor_healthy: true,
+        external_safety_clear: true,
+        deadline_met: true,
+    };
+    let mut guard = LifecycleGuard::new(
+        GateId::Domain.bit() | GateId::Link.bit(),
+        7,
+        GuardPolicy {
+            enter_good_cycles: 1,
+            allowed_axis_mask: 1,
+            ..GuardPolicy::conservative()
+        },
+    );
+    let mut cursor = LifecycleEventCursor::new(&guard);
+    let buffer = ProcBuf::<1, 0, 1, 8>::new(1, 7);
+    let mut bank = Cia402AxisBank::<1>::new();
+    let maps = [map()];
+    let modes = [OperatingMode::Csp];
+    let max_stationary_velocities = [1];
+    let safe_image = input_image(0x0040, 0);
+    let mut port = SimulatedPort::new(1);
+
+    submit(
+        &mut master,
+        &mut port,
+        &mut domain,
+        &plan,
+        1,
+        &input_image(0x0027, 10),
+        false,
+    );
+    let first = receive(&mut master, &mut port, &mut domain, 1);
+    guard.update_cyclic_quality(
+        cyclic_quality_from_ethercat(first, &[domain.quality()], &dc, other),
+        first.cycle,
+    );
+    guard
+        .request_rearm(
+            MotionPermit {
+                boot_id: 7,
+                source_id: 1,
+                permit_epoch: 1,
+                sequence: 1,
+                expires_at_ns: 10_000,
+                axis_mask: 1,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
+            },
+            first.cycle,
+            100,
+        )
+        .unwrap();
+
+    port.set_response_wkc(0);
+    submit(
+        &mut master,
+        &mut port,
+        &mut domain,
+        &plan,
+        2,
+        &input_image(0x0027, 10),
+        false,
+    );
+    let second = receive(&mut master, &mut port, &mut domain, 2);
+    port.set_response_wkc(1);
+    port.set_now_ns(300_000);
+    let mut mismatched_guard = LifecycleGuard::new(
+        GateId::Domain.bit(),
+        7,
+        GuardPolicy {
+            allowed_axis_mask: 0b10,
+            ..GuardPolicy::conservative()
+        },
+    );
+    let mut mismatched_cursor = LifecycleEventCursor::new(&mismatched_guard);
+    let mut rejected_page = StatePage::<1, 0, 1>::new(7);
+    rejected_page.sequence = second.cycle;
+    assert!(matches!(
+        (StopCycleContext {
+            guard: &mut mismatched_guard,
+            bank: &mut bank,
+            master: &mut master,
+            port: &mut port,
+            domain: &domain,
+            dc: &dc,
+            buffer: &buffer,
+            event_cursor: &mut mismatched_cursor,
+            state: &mut rejected_page,
+            report: second,
+            other,
+            maps: &maps,
+            modes: &modes,
+            max_stationary_velocities: &max_stationary_velocities,
+            safe_process_image: &safe_image,
+            plan: &plan,
+            next_generation: 3,
+            deadline_ns: 350_000,
+            now_ns: 200,
+            transition_time_ns: 200,
+        })
+        .run(),
+        Err(StopCycleError::AxisCapacityExceeded)
+    ));
+    assert_eq!(rejected_page.lifecycle.state, 0);
+    assert_eq!(buffer.pending_events(), 0);
+
+    port.fail_next_tx();
+    let mut state = StatePage::<1, 0, 1>::new(7);
+    state.sequence = second.cycle;
+    let failed = StopCycleContext {
+        guard: &mut guard,
+        bank: &mut bank,
+        master: &mut master,
+        port: &mut port,
+        domain: &domain,
+        dc: &dc,
+        buffer: &buffer,
+        event_cursor: &mut cursor,
+        state: &mut state,
+        report: second,
+        other,
+        maps: &maps,
+        modes: &modes,
+        max_stationary_velocities: &max_stationary_velocities,
+        safe_process_image: &safe_image,
+        plan: &plan,
+        next_generation: 3,
+        deadline_ns: 350_000,
+        now_ns: 200,
+        transition_time_ns: 200,
+    }
+    .run()
+    .unwrap();
+    assert!(!failed.quality.domain_valid);
+    assert!(matches!(
+        failed.transmission,
+        Err(StopFrameError::Transmit(CycleError::Port(_)))
+    ));
+    assert_eq!(failed.state_publish, Ok(1));
+    assert_eq!(failed.event_publish, Some(Ok(2)));
+    assert!(!failed.acknowledged);
+    assert_eq!(guard.state(), LifecycleState::Stopping);
+    let published = buffer.read_state().unwrap().state;
+    assert_eq!(published.axis_stops[0].issued_action, 0);
+    assert_eq!(published.lifecycle.transition_time_ns, 200);
+    assert_eq!(buffer.pop_event().unwrap().sequence, 1);
+    assert_eq!(buffer.pop_event().unwrap().sequence, 2);
+
+    domain.begin_receive(3).unwrap();
+    let third = receive(&mut master, &mut port, &mut domain, 3);
+    port.set_now_ns(400_000);
+    let mut state = StatePage::<1, 0, 1>::new(7);
+    state.sequence = third.cycle;
+    let sent = StopCycleContext {
+        guard: &mut guard,
+        bank: &mut bank,
+        master: &mut master,
+        port: &mut port,
+        domain: &domain,
+        dc: &dc,
+        buffer: &buffer,
+        event_cursor: &mut cursor,
+        state: &mut state,
+        report: third,
+        other,
+        maps: &maps,
+        modes: &modes,
+        max_stationary_velocities: &max_stationary_velocities,
+        safe_process_image: &safe_image,
+        plan: &plan,
+        next_generation: 4,
+        deadline_ns: 450_000,
+        now_ns: 300,
+        transition_time_ns: 200,
+    }
+    .run()
+    .unwrap();
+    assert!(sent.transmission.is_ok());
+    assert_eq!(sent.feedback, None);
+    assert!(!sent.acknowledged);
+    assert_eq!(sent.state_publish, Ok(2));
+    assert_eq!(sent.event_publish, Some(Ok(0)));
+    let published = buffer.read_state().unwrap().state;
+    assert_eq!(published.sequence, 3);
+    assert_eq!(published.axis_stops[0].issued_action, 3);
+    assert_eq!(published.axis_stops[0].feedback_valid, 0);
+    assert_eq!(published.quality.domains[0].valid, 0);
+    assert_eq!(published.lifecycle.transition_time_ns, 200);
+
+    domain.begin_receive(4).unwrap();
+    let fourth = receive(&mut master, &mut port, &mut domain, 4);
+    port.set_now_ns(500_000);
+    let mut state = StatePage::<1, 0, 1>::new(7);
+    state.sequence = fourth.cycle;
+    let complete = StopCycleContext {
+        guard: &mut guard,
+        bank: &mut bank,
+        master: &mut master,
+        port: &mut port,
+        domain: &domain,
+        dc: &dc,
+        buffer: &buffer,
+        event_cursor: &mut cursor,
+        state: &mut state,
+        report: fourth,
+        other,
+        maps: &maps,
+        modes: &modes,
+        max_stationary_velocities: &max_stationary_velocities,
+        safe_process_image: &safe_image,
+        plan: &plan,
+        next_generation: 5,
+        deadline_ns: 550_000,
+        now_ns: 400,
+        transition_time_ns: 400,
+    }
+    .run()
+    .unwrap();
+    assert!(complete.transmission.is_ok());
+    assert!(complete.acknowledged);
+    assert_eq!(complete.state_publish, Ok(3));
+    assert_eq!(complete.event_publish, Some(Ok(1)));
+    assert_eq!(guard.state(), LifecycleState::Ready);
+    let published = buffer.read_state().unwrap().state;
+    assert_eq!(published.sequence, fourth.cycle);
+    assert_eq!(published.lifecycle.state, LifecycleState::Ready as u8);
+    assert_eq!(published.axis_stops[0].feedback_valid, 1);
+    assert_eq!(published.axis_stops[0].stationary, 1);
+    assert_eq!(published.axis_stops[0].non_enabled, 1);
+    assert_eq!(published.lifecycle.transition_time_ns, 400);
+    assert_eq!(
+        buffer.pop_event().unwrap().sequence,
+        published.lifecycle.transition_sequence
+    );
+    assert_eq!(buffer.pop_event(), None);
+
+    // A fabricated next-cycle report must not advance the guard or publish.
+    let mut state = StatePage::<1, 0, 1>::new(7);
+    state.sequence = fourth.cycle + 1;
+    let forged = StopCycleContext {
+        guard: &mut guard,
+        bank: &mut bank,
+        master: &mut master,
+        port: &mut port,
+        domain: &domain,
+        dc: &dc,
+        buffer: &buffer,
+        event_cursor: &mut cursor,
+        state: &mut state,
+        report: CycleReport {
+            cycle: fourth.cycle + 1,
+            ..fourth
+        },
+        other,
+        maps: &maps,
+        modes: &modes,
+        max_stationary_velocities: &max_stationary_velocities,
+        safe_process_image: &safe_image,
+        plan: &plan,
+        next_generation: 6,
+        deadline_ns: 650_000,
+        now_ns: 500,
+        transition_time_ns: 400,
+    }
+    .run();
+    assert!(matches!(forged, Err(StopCycleError::CycleMismatch)));
+    assert_eq!(guard.state(), LifecycleState::Ready);
+    assert_eq!(state.sequence, fourth.cycle + 1);
+    assert_eq!(state.lifecycle.state, 0);
+
+    // A real ready cycle belongs to the caller's inhibited-output branch.
+    domain.begin_receive(5).unwrap();
+    let fifth = receive(&mut master, &mut port, &mut domain, 5);
+    port.set_now_ns(600_000);
+    let mut state = StatePage::<1, 0, 1>::new(7);
+    state.sequence = fifth.cycle;
+    let inactive = StopCycleContext {
+        guard: &mut guard,
+        bank: &mut bank,
+        master: &mut master,
+        port: &mut port,
+        domain: &domain,
+        dc: &dc,
+        buffer: &buffer,
+        event_cursor: &mut cursor,
+        state: &mut state,
+        report: fifth,
+        other,
+        maps: &maps,
+        modes: &modes,
+        max_stationary_velocities: &max_stationary_velocities,
+        safe_process_image: &safe_image,
+        plan: &plan,
+        next_generation: 6,
+        deadline_ns: 650_000,
+        now_ns: 500,
+        transition_time_ns: 400,
+    }
+    .run();
+    assert!(matches!(inactive, Err(StopCycleError::NotStopping(_))));
 }
 
 #[test]

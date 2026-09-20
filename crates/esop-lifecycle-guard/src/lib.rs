@@ -9,6 +9,9 @@ pub mod cia402;
 #[cfg(feature = "procbuf")]
 pub mod procbuf;
 
+#[cfg(all(feature = "ethercat", feature = "cia402", feature = "procbuf"))]
+pub mod stop_cycle;
+
 pub const MAX_GATES: usize = 16;
 pub const MAX_MOTION_AXES: usize = 32;
 pub const MAX_TRANSITIONS: usize = 16;
