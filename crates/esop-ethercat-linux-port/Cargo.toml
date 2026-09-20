@@ -14,6 +14,10 @@ esop-profile-cia402 = { path = "../esop-profile-cia402", features = ["ethercat"]
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2.189"
 
+[dev-dependencies]
+esop-lifecycle-guard = { path = "../esop-lifecycle-guard", features = ["ethercat", "procbuf"] }
+esop-procbuf = { path = "../esop-procbuf" }
+
 [lib]
 name = "esop_ethercat_linux_port"
 path = "src/lib.rs"

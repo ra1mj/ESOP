@@ -10,8 +10,10 @@ rust-version.workspace = true
 default = []
 std = []
 procbuf = ["dep:esop-procbuf"]
+ethercat = ["dep:esop-ethercat-core"]
 
 [dependencies]
+esop-ethercat-core = { path = "../esop-ethercat-core", optional = true }
 esop-procbuf = { path = "../esop-procbuf", optional = true }
 
 [lib]

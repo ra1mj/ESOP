@@ -1,5 +1,8 @@
 #![no_std]
 
+#[cfg(feature = "ethercat")]
+pub mod ethercat;
+
 #[cfg(feature = "procbuf")]
 pub mod procbuf;
 

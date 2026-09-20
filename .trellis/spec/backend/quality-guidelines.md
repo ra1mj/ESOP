@@ -41,6 +41,11 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
 - In the active guard, a required gate's observed bad value stops motion in
   that cycle even if its exit debounce still marks it qualified. Count at most
   one good observation per cycle; rearm needs a fresh enter-good window.
+- Sample EtherCAT-backed MLG facts after finishing all due Domains: require
+  this cycle's complete nonzero WKC and fresh DC completion, not a retained
+  Domain image or the DC monitor's previously locked state. The cycle owner
+  must explicitly supply the other safety facts and final deadline result;
+  the simulator's synthetic facts are not device qualification evidence.
 - Treat `motion_permit_current` as permit freshness, not motion authorization:
   a blocked gate can move the guard to `Stopping` while the permit remains
   current. Only the guard's cycle action may authorize CiA 402 enable.

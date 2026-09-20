@@ -671,6 +671,7 @@ version = "0.1.0"
 dependencies = [
  "esop-ethercat-core",
  "esop-lifecycle-guard",
+ "esop-procbuf",
  "esop-profile-cia402",
  "libc",
 ]
@@ -679,6 +680,7 @@ dependencies = [
 name = "esop-lifecycle-guard"
 version = "0.1.0"
 dependencies = [
+ "esop-ethercat-core",
  "esop-procbuf",
 ]
 

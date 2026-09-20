@@ -276,6 +276,8 @@ MLG 配置与 EtherCAT/ProcBuf 配置一起冻结。变更 policy hash、门槛�
 
 `CyclicQuality` 现在覆盖 platform、configuration/CoE、topology、DC、drive、Domain、WKC/link、command、supervisor、external safety 和 cycle budget；每项使用独立故障码投影到对应门槛，任一必需项失效都会按 MLG 策略阻止或停止运动。
 
+可选 `esop-lifecycle-guard/ethercat` 将同周期的 `CycleReport`、**所有当周期必需且已调度** Domain 的 `finish_receive` 后质量，以及实际 `DcCyclicSync` 映射为 `CyclicQuality`。空 Domain 列表、过期/不完整 Domain、无新 DC 同步或 RX 错误均不判为健康；DC 门槛仍需当周期成功同步且 monitor 锁定。平台、CoE、拓扑、驱动、命令、supervisor、外部安全和最终 deadline 由周期所有者从各自来源显式提供，不能从 EtherCAT 报告推断。`budget_exhausted` 与实际 deadline 分开判定。集成测试已验证 Linux 模拟端帧收发、Domain/DC 消费、WKC 故障、MLG 即时停止以及 ProcBuf v3 原始事实发布；它不是实物 HIL 或生产周期任务的证据。若配置不启用 DC，必须在冻结策略中显式豁免 DC 门槛，而非伪造已锁定状态。
+
 ## 10. 验收与验证
 
 | ID | 类型 | 验收要求 |
