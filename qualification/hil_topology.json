@@ -1,0 +1,47 @@
+{
+  "schema_version": "esop.hil-topology.v1",
+  "topology_id": "unqualified-development-topology",
+  "product_profile": "unqualified-development",
+  "profiles": [
+    {
+      "scenario": "Q1",
+      "period_ns": 1000000,
+      "slave_count": 0,
+      "axis_count": 0,
+      "io_channels": 0,
+      "pdo_bytes": 0,
+      "frame_count": 0,
+      "dc_enabled": false,
+      "devices": [],
+      "qualification": {
+        "passed": false,
+        "failures": [
+          "no physical Q1 topology has been qualified"
+        ]
+      }
+    },
+    {
+      "scenario": "Q2",
+      "period_ns": 500000,
+      "slave_count": 0,
+      "axis_count": 0,
+      "io_channels": 0,
+      "pdo_bytes": 0,
+      "frame_count": 0,
+      "dc_enabled": false,
+      "devices": [],
+      "qualification": {
+        "passed": false,
+        "failures": [
+          "no physical Q2 topology has been qualified"
+        ]
+      }
+    }
+  ],
+  "qualification": {
+    "passed": false,
+    "failures": [
+      "two-vendor CiA 402 drive and EtherCAT IO HIL evidence is not supplied"
+    ]
+  }
+}

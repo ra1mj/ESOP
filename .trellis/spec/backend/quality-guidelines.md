@@ -393,6 +393,15 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   `passed` scenario only with complete cycle/max-accumulator coverage, matching
   Q1-Q4 load and thresholds, zero fault-free errors, and trace/topology hashes;
   a structurally valid JSON report is not proof of real hardware qualification.
+- Keep the checked-in R2 qualification manifest explicitly unqualified. A
+  product claim must resolve every evidence path beneath the repository root,
+  verify its SHA-256, and bind the same tested commit, configuration, and HIL
+  topology across the build report and qualified Q1/Q2 reports. Require frozen
+  per-axis `ControlledStopLimits`, two distinct qualified drive vendors, an
+  EtherCAT IO module, CSP/CSV/CST plus configured stop-action HIL coverage, the
+  fault matrix, known limitations, and safety/license/source reviews. Reuse the
+  build/performance validators; never treat simulator tests, placeholder target
+  data, or a structurally valid manifest as product qualification.
 
 ## Scenario: Unified Production Service Scheduling
 

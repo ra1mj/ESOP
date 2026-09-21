@@ -1,0 +1,76 @@
+{
+  "schema_version": "esop.r2-qualification.v1",
+  "release_stage": "R2",
+  "product": {
+    "profile_id": "unqualified-development",
+    "model": "not-qualified",
+    "hardware_revision": "not-qualified",
+    "tested_commit": null,
+    "config_sha256": null
+  },
+  "artifacts": {
+    "hil_topology": {
+      "path": "qualification/hil_topology.json",
+      "sha256": "262ad931cf6c489cfbb925610e16c397a8b7e728bf221f60b814c8db9ee74665"
+    },
+    "known_limitations": {
+      "path": "qualification/KNOWN_LIMITATIONS.md",
+      "sha256": "8dc16471edef5bf5e6d663b4d7cf4a9b25168b2f7035a13044db4d2cfcc5687b"
+    },
+    "build_report": {
+      "path": null,
+      "sha256": null
+    },
+    "performance_reports": [],
+    "hil_fault_matrix": {
+      "passed": false,
+      "artifact": {
+        "path": null,
+        "sha256": null
+      }
+    }
+  },
+  "axis_stop_policies": [],
+  "compatibility": {
+    "drives": [],
+    "io_modules": []
+  },
+  "reviews": [
+    {
+      "kind": "safety_boundary",
+      "passed": false,
+      "artifact": {
+        "path": null,
+        "sha256": null
+      }
+    },
+    {
+      "kind": "license",
+      "passed": false,
+      "artifact": {
+        "path": null,
+        "sha256": null
+      }
+    },
+    {
+      "kind": "source_audit",
+      "passed": false,
+      "artifact": {
+        "path": null,
+        "sha256": null
+      }
+    }
+  ],
+  "qualification": {
+    "passed": false,
+    "approved_by": null,
+    "approved_at": null,
+    "failures": [
+      "product-specific controlled-stop limits are not frozen",
+      "two-vendor drive and IO HIL compatibility evidence is not supplied",
+      "target-hardware Q1 and Q2 reports are not supplied",
+      "target build/resource qualification is not supplied",
+      "fault-matrix and release review evidence is not supplied"
+    ]
+  }
+}

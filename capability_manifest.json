@@ -48,6 +48,19 @@
       "limitation": "Ordinary control safeguard with full runtime quality projection; it is not a certified functional-safety component"
     },
     {
+      "id": "r2_qualification_evidence_gate",
+      "status": "partial",
+      "scope": "Fail-closed product, controlled-stop, HIL topology, compatibility, build and Q1/Q2 evidence validation",
+      "evidence": [
+        "qualification/r2_qualification.json",
+        "qualification/hil_topology.json",
+        "qualification/KNOWN_LIMITATIONS.md",
+        "scripts/validate-r2-qualification.py",
+        "scripts/tests/test_r2_qualification.py"
+      ],
+      "limitation": "The checked-in baseline is intentionally unqualified; real target WCET, two-vendor drive plus IO HIL, product limits and release reviews remain required"
+    },
+    {
       "id": "procbuf_abi",
       "status": "implemented",
       "scope": "Fixed-layout command/state pages, quality, lifecycle history and event ring",
