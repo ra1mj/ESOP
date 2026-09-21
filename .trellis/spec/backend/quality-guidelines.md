@@ -232,6 +232,17 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   optional mailbox FSM outcome so callers can project failures into safety
   facts. A rejected TX may take the configured mailbox retry/delay path, but
   successful retry is not evidence that current-cycle motion is safe.
+- Prefer `run_dc_and_mailbox_cycle` when the mailbox service is the selected
+  cyclic control owner. Submit the already-armed process-Domain frame before
+  entry, then let this owner pair DC/mailbox TX with the common RX finalizer.
+  After a valid submit it must run RX even when the TX report contains a DC or
+  control send failure; otherwise a prepared DC generation can leak into the
+  next cycle. Carry forward only the returned `request`: terminal mailbox
+  outcomes clear it after service consumption, while a live InFlight request
+  remains explicit. A staged RX preflight failure must retain the TX report
+  and be treated as a fault/reinitialization boundary. Its post-RX deadline
+  observation is an intermediate safety fact, not the final deadline after
+  process outputs and lifecycle State/event publication.
 - A successfully submitted frame may still await RX after its frame-pool slot
   or DMA descriptor is recycled. Track the exact indices armed by each frame
   along with its RX generation, and on rejected TX or partial arm failure

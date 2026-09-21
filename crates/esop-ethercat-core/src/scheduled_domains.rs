@@ -170,6 +170,34 @@ pub struct ScheduledMailboxTxReport<E> {
     pub request: Option<RequestHandle>,
 }
 
+/// Result of the bounded mailbox service stage spanning service TX through
+/// the common Domain/DC/control RX finalizer. `request` is the only handle
+/// the caller may carry into the next service cycle; it is cleared once a
+/// terminal mailbox result has been consumed. The deadline observation ends
+/// after RX and is not the final production-cycle deadline after process
+/// outputs and lifecycle publication.
+#[derive(Debug)]
+pub struct ScheduledMailboxCycleReport<E, const DOMAINS: usize> {
+    pub tx: ScheduledMailboxTxReport<E>,
+    pub receive: ScheduledMailboxReceiveReport<E, DOMAINS>,
+    pub request: Option<RequestHandle>,
+    pub post_receive_deadline_met: bool,
+}
+
+/// A submit rejection has not prepared DC and leaves any caller-owned request
+/// with the caller. A receive rejection after a valid submit retains the TX
+/// report (including its request handle), but represents a violated cyclic
+/// invariant that must fault or reinitialize the service stage rather than
+/// continue motion with an open DC generation.
+#[derive(Debug)]
+pub enum ScheduledMailboxCycleError<E> {
+    Submit(ScheduledMailboxTxError),
+    Receive {
+        tx: ScheduledMailboxTxReport<E>,
+        error: ScheduledReceiveError,
+    },
+}
+
 /// Owns the receive borrow for all configured Domains. A single master RX
 /// session dispatches only verified datagrams to Domains due on this tick.
 /// Use `receive_with_dc` when DC is enabled so a port error cannot skip
@@ -376,6 +404,74 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
             }
         }
         Ok(ScheduledMailboxTxReport { service, request })
+    }
+
+    /// Own one bounded mailbox service stage from DC/control submission through
+    /// the shared RX finalizer. Process-Domain frames for this generation must
+    /// already be armed and submitted before entry. Once submission succeeds,
+    /// RX is always attempted even when the returned TX report contains a send
+    /// failure, ensuring a prepared DC generation is retired as missing rather
+    /// than leaking into the next cycle.
+    ///
+    /// This method does not submit process outputs, project service failures
+    /// into lifecycle safety facts, publish State/events, or establish the
+    /// production cycle's final deadline. The caller must perform those stages
+    /// and treat either TX failure or a false post-RX deadline as unsafe.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_dc_and_mailbox_cycle<
+        P: EthercatPort,
+        const FRAMES: usize,
+        const MTU: usize,
+        const REQUESTS: usize,
+    >(
+        &mut self,
+        master: &mut EthercatMaster<FRAMES, MTU>,
+        port: &mut P,
+        scratch: &mut [u8; MAX_ETHERNET_FRAME_LEN],
+        dc: &mut DcCyclicSync,
+        dc_image: &mut [u8],
+        application_time_ns: u64,
+        controls: &mut ControlRequestPool<REQUESTS>,
+        mailbox: &mut MailboxController,
+        request: Option<RequestHandle>,
+        generation: u16,
+        rx_deadline_ns: u64,
+        cycle_deadline_ns: u64,
+    ) -> Result<ScheduledMailboxCycleReport<P::Error, DOMAINS>, ScheduledMailboxCycleError<P::Error>>
+    {
+        let mut tx = self
+            .submit_dc_and_mailbox(
+                master,
+                port,
+                dc,
+                dc_image,
+                application_time_ns,
+                controls,
+                mailbox,
+                request,
+                generation,
+                rx_deadline_ns,
+                cycle_deadline_ns,
+            )
+            .map_err(ScheduledMailboxCycleError::Submit)?;
+        let receive = match self.receive_with_dc_and_mailbox(
+            master, port, scratch, generation, dc, controls, mailbox, tx.request,
+        ) {
+            Ok(receive) => receive,
+            Err(error) => return Err(ScheduledMailboxCycleError::Receive { tx, error }),
+        };
+        if receive.mailbox_progress.is_some() {
+            tx.request = None;
+        }
+        let request = tx.request;
+        let post_receive_deadline_met =
+            tx.service.post_tx_deadline_met && port.now_ns() < cycle_deadline_ns;
+        Ok(ScheduledMailboxCycleReport {
+            tx,
+            receive,
+            request,
+            post_receive_deadline_met,
+        })
     }
 
     /// Submit the DC sample and optionally one prepared control request for

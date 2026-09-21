@@ -1005,6 +1005,144 @@ fn mailbox_service_uses_shared_rx_expiry_to_retry_after_a_missing_poll() {
     }
 }
 
+#[test]
+fn mailbox_cycle_owner_carries_only_live_requests_and_observes_rx_deadline() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master_config = MasterConfig::new([0xFF; 6], [1, 2, 3, 4, 5, 6]);
+    master_config.rx_budget_ns = 100_000;
+    let mut master = EthercatMaster::<1, MAX_ETHERNET_FRAME_LEN>::new(master_config);
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 14, 2),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let mut config = MailboxConfig::new(0x1000, 32, 0x1100, 32)
+        .with_retry_policy(MailboxRetryPolicy::new(1, 10));
+    config.request_timeout_ns = 50_000;
+    config.timeout_ns = 500_000;
+    let mut mailbox = MailboxController::new();
+    mailbox
+        .start(config, 0x1000, 7, 100_000, MailboxProtocol::CoE, &[1])
+        .unwrap();
+    let mut controls = ControlRequestPool::<1>::new();
+    let mut port = TwoFrameSimPort::new();
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let domain_image = [0x40, 0];
+    let mut dc_image = [0u8; 10];
+    let mut plan = FramePlan::<1>::new();
+    plan.push(DatagramPlan {
+        command: Command::Lrw,
+        index: 12,
+        address: 0x1000,
+        payload_offset: 0,
+        payload_len: 2,
+        expected_wkc: 1,
+    })
+    .unwrap();
+    let mut request = None;
+
+    for tick in 1..=3u64 {
+        let now_ns = tick * 100_000;
+        let cycle_deadline_ns = now_ns + 50_000;
+        port.set_now_ns(now_ns);
+        if tick == 2 {
+            // Domain, DC, then mailbox control.
+            port.drop_nth_next_response(3);
+        }
+        let frame = master.acquire_frame(7, cycle_deadline_ns).unwrap();
+        master
+            .build_and_arm_frame_from_plan(frame, &plan, &domain_image)
+            .unwrap();
+        master.submit_frame(&mut port, frame).unwrap();
+        if tick == 3 {
+            // Domain and DC are both delivered, then the service-stage
+            // deadline observation sees the exact deadline boundary.
+            port.report_now_after_next_rx_polls(2, cycle_deadline_ns);
+        }
+
+        let cycle = bank
+            .run_dc_and_mailbox_cycle(
+                &mut master,
+                &mut port,
+                &mut scratch,
+                &mut dc,
+                &mut dc_image,
+                now_ns,
+                &mut controls,
+                &mut mailbox,
+                request,
+                7,
+                now_ns + 80_000,
+                cycle_deadline_ns,
+            )
+            .unwrap();
+        assert!(cycle.tx.service.dc_sent);
+        assert_eq!(cycle.tx.service.control_sent, tick <= 2);
+        assert_eq!(cycle.receive.received.report.cycle, tick);
+        assert!(cycle.receive.received.qualities[0].valid);
+        assert_eq!(cycle.receive.received.dc_result, Ok(()));
+        assert_eq!(dc.pending_generation(), None);
+
+        if tick == 1 {
+            assert_eq!(
+                cycle.receive.mailbox_progress,
+                Some(Ok(MailboxProgress::Advanced))
+            );
+            assert_eq!(cycle.tx.request, None);
+            assert_eq!(cycle.request, None);
+            assert!(cycle.post_receive_deadline_met);
+            assert_eq!(controls.in_use(), 0);
+        } else if tick == 2 {
+            assert_eq!(cycle.receive.mailbox_progress, None);
+            assert_eq!(cycle.tx.request, cycle.request);
+            assert!(cycle.request.is_some());
+            assert!(cycle.post_receive_deadline_met);
+            assert_eq!(
+                controls.get(cycle.request.unwrap()).unwrap().state,
+                RequestState::InFlight
+            );
+        } else {
+            assert_eq!(
+                cycle.receive.mailbox_progress,
+                Some(Ok(MailboxProgress::RetryScheduled))
+            );
+            assert_eq!(cycle.tx.request, None);
+            assert_eq!(cycle.request, None);
+            assert!(!cycle.post_receive_deadline_met);
+            assert_eq!(controls.in_use(), 0);
+            assert_eq!(
+                mailbox.last_retry_error(),
+                Some(esop_ethercat_core::MailboxError::Timeout)
+            );
+        }
+        request = cycle.request;
+    }
+}
+
 struct TwoFrameSimPort {
     inner: SimulatedPort,
     frames: [[u8; MAX_ETHERNET_FRAME_LEN]; 4],
@@ -1012,6 +1150,8 @@ struct TwoFrameSimPort {
     count: usize,
     tx_attempts: usize,
     drop_on_attempt: Option<usize>,
+    rx_polls: usize,
+    reported_now_after_rx_polls: Option<(usize, u64)>,
 }
 
 impl TwoFrameSimPort {
@@ -1023,11 +1163,14 @@ impl TwoFrameSimPort {
             count: 0,
             tx_attempts: 0,
             drop_on_attempt: None,
+            rx_polls: 0,
+            reported_now_after_rx_polls: None,
         }
     }
 
     fn set_now_ns(&mut self, now_ns: u64) {
         self.inner.set_now_ns(now_ns);
+        self.reported_now_after_rx_polls = None;
     }
 
     fn drop_next_response(&mut self) {
@@ -1037,6 +1180,11 @@ impl TwoFrameSimPort {
     fn drop_nth_next_response(&mut self, n: usize) {
         assert!(n > 0);
         self.drop_on_attempt = Some(self.tx_attempts + n);
+    }
+
+    fn report_now_after_next_rx_polls(&mut self, polls: usize, now_ns: u64) {
+        assert!(polls > 0);
+        self.reported_now_after_rx_polls = Some((self.rx_polls + polls, now_ns));
     }
 }
 
@@ -1048,7 +1196,9 @@ impl EthercatPort for TwoFrameSimPort {
     }
 
     fn now_ns(&self) -> u64 {
-        self.inner.now_ns()
+        self.reported_now_after_rx_polls
+            .filter(|(polls, _)| self.rx_polls >= *polls)
+            .map_or_else(|| self.inner.now_ns(), |(_, now_ns)| now_ns)
     }
 
     fn tx_submit(&mut self, frame: &[u8]) -> Result<(), Self::Error> {
@@ -1072,6 +1222,7 @@ impl EthercatPort for TwoFrameSimPort {
         &mut self,
         scratch: &mut [u8; MAX_ETHERNET_FRAME_LEN],
     ) -> Result<RxPoll, Self::Error> {
+        self.rx_polls += 1;
         if self.count == 0 {
             return Ok(RxPoll::Empty);
         }
@@ -1480,9 +1631,10 @@ fn service_tx_preflights_indices_and_retires_failed_transmissions_in_shared_rx()
     controls.release(retained).unwrap();
     port.fail_on = 6;
     let failed_dc = bank
-        .submit_dc_and_mailbox(
+        .run_dc_and_mailbox_cycle(
             &mut master,
             &mut port,
+            &mut scratch,
             &mut dc,
             &mut dc_image,
             400_000,
@@ -1494,9 +1646,9 @@ fn service_tx_preflights_indices_and_retires_failed_transmissions_in_shared_rx()
             450_000,
         )
         .unwrap();
-    assert!(!failed_dc.service.dc_sent && !failed_dc.service.control_sent);
+    assert!(!failed_dc.tx.service.dc_sent && !failed_dc.tx.service.control_sent);
     assert!(matches!(
-        failed_dc.service.failure,
+        failed_dc.tx.service.failure,
         Some(ScheduledServiceTxFailure::Dc(
             ScheduledServiceFrameError::Transmit(CycleError::Port(PortError::HardwareFault))
         ))
@@ -1504,22 +1656,12 @@ fn service_tx_preflights_indices_and_retires_failed_transmissions_in_shared_rx()
     assert_eq!(failed_dc.request, None);
     assert_eq!(controls.in_use(), 0);
     assert!(second_mailbox.pending().is_some());
-    let retired = bank
-        .receive_with_dc_and_mailbox(
-            &mut master,
-            &mut port,
-            &mut scratch,
-            4,
-            &mut dc,
-            &mut controls,
-            &mut second_mailbox,
-            None,
-        )
-        .unwrap();
     assert_eq!(
-        retired.received.dc_result,
+        failed_dc.receive.received.dc_result,
         Err(DcCyclicError::MissingResponse)
     );
-    assert_eq!(retired.mailbox_progress, None);
+    assert_eq!(failed_dc.receive.mailbox_progress, None);
+    assert_eq!(dc.pending_generation(), None);
+    assert!(failed_dc.post_receive_deadline_met);
     assert!(second_mailbox.next_action(400_000).unwrap().is_some());
 }
