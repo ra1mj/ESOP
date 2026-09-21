@@ -301,7 +301,10 @@ pub fn submit_stopping_frame<
     deadline_ns: u64,
 ) -> Result<usize, StopFrameError<P::Error>> {
     let stopping = decision.stopping_axis_mask();
-    if !matches!(decision.action(), LifecycleAction::Stop(_)) || stopping == 0 {
+    if !matches!(decision.action(), LifecycleAction::Stop(_))
+        || stopping == 0
+        || !decision.can_mark_stop_transmitted()
+    {
         return Err(StopFrameError::InvalidDecision);
     }
     let length = submit_safe_frame(
@@ -358,7 +361,10 @@ pub fn submit_controlled_stopping_frame<
     deadline_ns: u64,
 ) -> Result<ControlledStopFrameReport<AXES>, StopFrameError<P::Error>> {
     let stopping = decision.stopping_axis_mask();
-    if !matches!(decision.action(), LifecycleAction::Stop(_)) || stopping == 0 {
+    if !matches!(decision.action(), LifecycleAction::Stop(_))
+        || stopping == 0
+        || !decision.can_mark_stop_transmitted()
+    {
         return Err(StopFrameError::InvalidDecision);
     }
     if AXES > MAX_MOTION_AXES || (AXES < MAX_MOTION_AXES && stopping >> AXES != 0) {

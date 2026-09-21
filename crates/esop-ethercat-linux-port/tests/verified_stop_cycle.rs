@@ -23,9 +23,9 @@ use esop_lifecycle_guard::procbuf::{
     lifecycle_events_to_procbuf, lifecycle_to_procbuf,
 };
 use esop_lifecycle_guard::stop_cycle::{
-    AuxiliaryOutputEntry, AuxiliaryOutputPlanError, ScheduledAuxiliaryOutputs,
-    ScheduledProductionCycleError, ScheduledProductionCycleOwner, ScheduledProductionPhase,
-    StopCycleContext, StopCycleError,
+    AuxiliaryOutputEntry, AuxiliaryOutputPlanError, ControlledStopCycleState,
+    ScheduledAuxiliaryOutputs, ScheduledProductionCycleError, ScheduledProductionCycleOwner,
+    ScheduledProductionPhase, StopCycleContext, StopCycleError,
 };
 use esop_lifecycle_guard::{
     AxisStopPolicy, GateId, GuardPolicy, LifecycleAction, LifecycleError, LifecycleGuard,
@@ -365,7 +365,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
     );
     let mut motion_input_plans = FramePlanSet::<1, 3>::new();
     motion_input_plans.push(motion_plan.datagrams()[0]).unwrap();
-    let safe_image = input_image(0x0040, 0);
+    let safe_image = csp_input_image(0x0027, 120, 10);
     let auxiliary_image = [0xAA, 0xBB];
     let auxiliary_outputs = ScheduledAuxiliaryOutputs::new(
         &domain_bank,
@@ -527,7 +527,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
             quality: service_cycle.receive.received.qualities[1],
         },
     ];
-    let mut guard = LifecycleGuard::new(
+    let mut guard = LifecycleGuard::new_with_axis_stop_policy(
         GateId::Domain.bit()
             | GateId::Link.bit()
             | GateId::Configuration.bit()
@@ -538,6 +538,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
             allowed_axis_mask: 1,
             ..GuardPolicy::conservative()
         },
+        AxisStopPolicy::uniform(StopAction::Hold),
     );
     guard.update_cyclic_quality(
         cyclic_quality_from_schedule(
@@ -577,6 +578,14 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         max_torque: 2.0,
     }];
     let mut guards = [CyclicSetpointGuard::new()];
+    guards[0].bind_activation(7, guard.transition_sequence());
+    guards[0]
+        .seed_from_actual(CyclicSetpoint {
+            position: 120.0,
+            ..CyclicSetpoint::ZERO
+        })
+        .unwrap();
+    let targets = [Some(Cia402Target::Position(120))];
     let mut state = StatePage::<1, 0, 2>::new(7);
     state.sequence = service_cycle.receive.received.report.cycle;
     // The auxiliary output is submitted first for the next cycle. Drop its
@@ -615,7 +624,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
                 &service_cycle,
                 9,
                 &auxiliary_outputs,
-                &[None],
+                &targets,
                 &mut guards,
                 &limits,
                 150_000,
@@ -632,7 +641,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
                 &service_cycle,
                 9,
                 &auxiliary_outputs,
-                &[None],
+                &targets,
                 &mut guards,
                 &limits,
                 150_000,
@@ -649,7 +658,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
                 &service_cycle,
                 9,
                 &auxiliary_outputs,
-                &[None],
+                &targets,
                 &mut guards,
                 &limits,
                 150_000,
@@ -666,7 +675,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
                 &service_cycle,
                 9,
                 &auxiliary_outputs,
-                &[None],
+                &targets,
                 &mut guards,
                 &limits,
                 150_000,
@@ -684,7 +693,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
                 &service_cycle,
                 9,
                 &auxiliary_outputs,
-                &[None],
+                &targets,
                 &mut guards,
                 &limits,
                 150_000,
@@ -753,6 +762,12 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
     assert!(!domain_bank.confirms_receive(&service_cycle.receive.received));
     let mut state = StatePage::<1, 0, 2>::new(7);
     state.sequence = received.report.cycle;
+    let mut controlled = ControlledStopCycleState::new([ControlledStopLimits {
+        max_velocity_step: 1,
+        max_torque_step: 1,
+        max_stationary_velocity: 1,
+        max_zero_torque: 1,
+    }]);
     let stopped = StopCycleContext {
         guard: &mut guard,
         bank: &mut axis_bank,
@@ -775,7 +790,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         now_ns: 200_000,
         transition_time_ns: 100_000,
     }
-    .run_control_cycle_with_outputs_until(
+    .run_control_cycle_with_controlled_stop_until(
         &domain_bank,
         &control_cycle,
         ScheduledControlGate::Configuration,
@@ -785,15 +800,38 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         &[None],
         &mut guards,
         &limits,
+        &mut controlled,
         250_000,
     )
     .unwrap();
     assert!(matches!(stopped.action, LifecycleAction::Stop(_)));
+    assert!(stopped.controlled_stop_used);
+    assert!(!stopped.controlled_stop_fallback);
+    assert!(stopped.controlled_stop_failure.is_none());
+    assert_eq!(controlled.phase(0), Some(ControlledStopPhase::Applying));
     assert!(!stopped.quality.domain_valid);
     assert!(!stopped.quality.distributed_clock_locked);
     assert_eq!(guard.state(), LifecycleState::Stopping);
     assert!(guard.permit().is_none());
-    assert_eq!(buffer.read_state().unwrap().state.sequence, 2);
+    let published = buffer.read_state().unwrap().state;
+    assert_eq!(published.sequence, 2);
+    assert_eq!(
+        published.axis_stops[0].requested_action,
+        StopAction::Hold as u8 + 1
+    );
+    assert_eq!(
+        published.axis_stops[0].issued_action,
+        StopAction::Hold as u8 + 1
+    );
+    let release = production
+        .settle_output(&auxiliary_outputs, &stopped, 350_000)
+        .unwrap();
+    assert!(!release.task_released());
+    assert!(!release.process_complete);
+    assert_eq!(release.next.sent_frames(), 1);
+    assert_eq!(release.next.expected_frames(), 2);
+    assert!(release.controlled_stop_used);
+    assert!(!release.controlled_stop_fallback);
 }
 
 struct AdvancingTxPort<'a> {
@@ -1723,7 +1761,7 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
         external_safety_clear: true,
         deadline_met: true,
     };
-    let mut guard = LifecycleGuard::new(
+    let mut guard = LifecycleGuard::new_with_axis_stop_policy(
         GateId::Domain.bit() | GateId::Link.bit(),
         7,
         GuardPolicy {
@@ -1731,6 +1769,7 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
             allowed_axis_mask: 1,
             ..GuardPolicy::conservative()
         },
+        AxisStopPolicy::uniform(StopAction::Hold),
     );
     let mut cursor = LifecycleEventCursor::new(&guard);
     let buffer = ProcBuf::<1, 0, 1, 8>::new(1, 7);
@@ -1740,6 +1779,12 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
     let max_stationary_velocities = [1];
     let safe_image = input_image(0x0040, 0);
     let mut port = SimulatedPort::new(1);
+    let mut controlled = ControlledStopCycleState::new([ControlledStopLimits {
+        max_velocity_step: 1,
+        max_torque_step: 1,
+        max_stationary_velocity: 1,
+        max_zero_torque: 1,
+    }]);
 
     submit(
         &mut master,
@@ -1904,9 +1949,20 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
         now_ns: 200,
         transition_time_ns: 200,
     }
-    .run()
+    .run_with_controlled_stop(&mut controlled)
     .unwrap();
     assert!(!failed.quality.domain_valid);
+    assert!(!failed.controlled_stop_used);
+    assert!(failed.controlled_stop_fallback);
+    assert!(
+        matches!(
+            failed.controlled_stop_failure,
+            Some(StopFrameError::UnverifiedInput)
+        ),
+        "unexpected controlled failure: {:?}",
+        failed.controlled_stop_failure
+    );
+    assert!(controlled.fallback_latched());
     assert!(matches!(
         failed.transmission,
         Err(StopFrameError::Transmit(CycleError::Port(_)))
@@ -1948,16 +2004,26 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
         now_ns: 300,
         transition_time_ns: 200,
     }
-    .run()
+    .run_with_controlled_stop(&mut controlled)
     .unwrap();
     assert!(sent.transmission.is_ok());
+    assert!(!sent.controlled_stop_used);
+    assert!(sent.controlled_stop_fallback);
+    assert!(sent.controlled_stop_failure.is_none());
     assert_eq!(sent.feedback, None);
     assert!(!sent.acknowledged);
     assert_eq!(sent.state_publish, Ok(2));
     assert_eq!(sent.event_publish, Some(Ok(0)));
     let published = buffer.read_state().unwrap().state;
     assert_eq!(published.sequence, 3);
-    assert_eq!(published.axis_stops[0].issued_action, 3);
+    assert_eq!(
+        published.axis_stops[0].requested_action,
+        StopAction::Hold as u8 + 1
+    );
+    assert_eq!(
+        published.axis_stops[0].issued_action,
+        StopAction::Disable as u8 + 1
+    );
     assert_eq!(published.axis_stops[0].feedback_valid, 0);
     assert_eq!(published.quality.domains[0].valid, 0);
     assert_eq!(published.lifecycle.transition_time_ns, 200);

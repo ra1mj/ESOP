@@ -4,18 +4,20 @@
 //! branches consume a finished Domain and a real receive
 //! report, then publish TX and its evidence for that cycle.
 
-use crate::cia402::step_axis_bank;
+use crate::cia402::{
+    ControlledStopLimits, ControlledStopPhase, ControlledStopPlanner, step_axis_bank,
+};
 use crate::ethercat::{
-    OtherCycleFacts, ScheduledControlGate, ScheduledDomainQuality, StopFrameError,
-    other_cycle_facts_from_control_cycle, other_cycle_facts_from_mailbox_cycle,
+    ControlledStopFrameReport, OtherCycleFacts, ScheduledControlGate, ScheduledDomainQuality,
+    StopFrameError, other_cycle_facts_from_control_cycle, other_cycle_facts_from_mailbox_cycle,
     other_cycle_facts_from_process_tx, other_cycle_facts_from_production_service_cycle,
-    submit_active_frame, submit_inhibited_frame, submit_stopping_frame,
-    verified_ethercat_stop_feedback,
+    submit_active_frame, submit_controlled_stopping_frame, submit_inhibited_frame,
+    submit_stopping_frame, verified_ethercat_stop_feedback,
 };
 use crate::procbuf::{
     AxisEvidenceError, LifecycleEventCursor, LifecycleEventError, axis_stops_to_procbuf,
-    cyclic_quality_to_procbuf, ethercat_cycle_to_procbuf, lifecycle_events_to_procbuf,
-    lifecycle_to_procbuf, scheduled_ethercat_cycle_to_procbuf,
+    controlled_axis_stops_to_procbuf, cyclic_quality_to_procbuf, ethercat_cycle_to_procbuf,
+    lifecycle_events_to_procbuf, lifecycle_to_procbuf, scheduled_ethercat_cycle_to_procbuf,
 };
 use crate::{
     CyclicQuality, GateId, LifecycleAction, LifecycleError, LifecycleGuard, MAX_MOTION_AXES,
@@ -62,6 +64,15 @@ pub struct StopCycleOutcome<E> {
     pub action: LifecycleAction,
     /// Original active TX failure if a stop was attempted in its place.
     pub active_failure: Option<StopFrameError<E>>,
+    /// The product-controlled path accepted the motion Domain frame. This is
+    /// transport evidence only; drive execution still requires later input.
+    pub controlled_stop_used: bool,
+    /// The controlled runtime is latched to the default fail-closed stop for
+    /// this MLG transition sequence.
+    pub controlled_stop_fallback: bool,
+    /// First controlled-path error that caused this cycle to latch fallback.
+    /// The final `transmission` result describes the fallback frame.
+    pub controlled_stop_failure: Option<StopFrameError<E>>,
     /// Accepted auxiliary frames, even if a later auxiliary frame failed.
     pub auxiliary_frames_sent: usize,
     pub auxiliary_failure: Option<AuxiliaryOutputFailure<E>>,
@@ -175,6 +186,8 @@ pub struct ScheduledProductionRelease {
     pub final_deadline_met: bool,
     pub state_published: bool,
     pub events_published: bool,
+    pub controlled_stop_used: bool,
+    pub controlled_stop_fallback: bool,
 }
 
 impl ScheduledProductionRelease {
@@ -183,6 +196,64 @@ impl ScheduledProductionRelease {
             && self.final_deadline_met
             && self.state_published
             && self.events_published
+    }
+}
+
+/// Caller-owned, allocation-free state for one product-configured controlled
+/// stop path. Limits are frozen at construction. A controlled validation,
+/// build, or TX failure latches the current MLG transition sequence to the
+/// default Disable/QuickStop path, so later cycles cannot re-enable a Hold or
+/// RampToZero target after a fallback frame was already accepted.
+pub struct ControlledStopCycleState<const AXES: usize> {
+    planners: [ControlledStopPlanner; AXES],
+    limits: [ControlledStopLimits; AXES],
+    sequence: Option<u64>,
+    fallback_latched: bool,
+}
+
+impl<const AXES: usize> ControlledStopCycleState<AXES> {
+    pub const fn new(limits: [ControlledStopLimits; AXES]) -> Self {
+        Self {
+            planners: [ControlledStopPlanner::new(); AXES],
+            limits,
+            sequence: None,
+            fallback_latched: false,
+        }
+    }
+
+    pub const fn sequence(&self) -> Option<u64> {
+        self.sequence
+    }
+
+    pub const fn fallback_latched(&self) -> bool {
+        self.fallback_latched
+    }
+
+    pub fn phase(&self, axis: usize) -> Option<ControlledStopPhase> {
+        self.planners.get(axis).map(ControlledStopPlanner::phase)
+    }
+
+    fn prepare(&mut self, sequence: u64) {
+        if self.sequence != Some(sequence) {
+            self.planners = [ControlledStopPlanner::new(); AXES];
+            self.sequence = Some(sequence);
+            self.fallback_latched = false;
+        }
+    }
+
+    fn latch_fallback(&mut self, sequence: u64) {
+        self.prepare(sequence);
+        self.planners = [ControlledStopPlanner::new(); AXES];
+        self.fallback_latched = true;
+    }
+
+    fn parts(
+        &mut self,
+    ) -> (
+        &mut [ControlledStopPlanner; AXES],
+        &[ControlledStopLimits; AXES],
+    ) {
+        (&mut self.planners, &self.limits)
     }
 }
 
@@ -409,6 +480,33 @@ impl<
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LIMITS: [ControlledStopLimits; 1] = [ControlledStopLimits {
+        max_velocity_step: 10,
+        max_torque_step: 5,
+        max_stationary_velocity: 1,
+        max_zero_torque: 1,
+    }];
+
+    #[test]
+    fn controlled_stop_fallback_is_latched_only_for_its_transition_sequence() {
+        let mut controlled = ControlledStopCycleState::new(LIMITS);
+
+        controlled.latch_fallback(7);
+        controlled.prepare(7);
+        assert_eq!(controlled.sequence(), Some(7));
+        assert!(controlled.fallback_latched());
+
+        controlled.prepare(8);
+        assert_eq!(controlled.sequence(), Some(8));
+        assert!(!controlled.fallback_latched());
+        assert_eq!(controlled.phase(0), Some(ControlledStopPhase::Idle));
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ScheduledProductionState {
     PrimingRequired,
@@ -579,6 +677,8 @@ impl<'a, const DOMAINS: usize, const SCHEDULE_SLOTS: usize>
                 && outcome.deadline_correction_publish.is_none(),
             events_published: matches!(outcome.event_publish, Some(Ok(_)))
                 && outcome.deadline_correction_events.is_none(),
+            controlled_stop_used: outcome.controlled_stop_used,
+            controlled_stop_fallback: outcome.controlled_stop_fallback,
         };
         self.state = ScheduledProductionState::ReceiveArmed(handoff);
         Ok(release)
@@ -665,7 +765,7 @@ impl<
     /// means this stop-only entry needs `run_with_motion` for an active cycle;
     /// no frame or State is published on that path.
     pub fn run(&mut self) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
-        self.run_inner::<1>(None, None, None)
+        self.run_inner::<1>(None, None, None, None)
     }
 
     /// As `run`, with an absolute deadline on the same monotonic clock as the
@@ -676,7 +776,25 @@ impl<
         &mut self,
         cycle_deadline_ns: u64,
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
-        self.run_inner::<1>(None, None, Some(cycle_deadline_ns))
+        self.run_inner::<1>(None, None, None, Some(cycle_deadline_ns))
+    }
+
+    /// Stop-only entry with product-configured Hold/RampToZero. A controlled
+    /// failure latches this MLG transition sequence to the default stop path.
+    pub fn run_with_controlled_stop(
+        &mut self,
+        controlled: &mut ControlledStopCycleState<AXES>,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        self.run_inner::<1>(None, None, Some(controlled), None)
+    }
+
+    /// Deadline-checked variant of `run_with_controlled_stop`.
+    pub fn run_with_controlled_stop_until(
+        &mut self,
+        controlled: &mut ControlledStopCycleState<AXES>,
+        cycle_deadline_ns: u64,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        self.run_inner::<1>(None, None, Some(controlled), Some(cycle_deadline_ns))
     }
 
     /// Run all lifecycle branches. Guards are reset on a new Active
@@ -695,6 +813,7 @@ impl<
                 guards,
                 limits,
             }),
+            None,
             None,
         )
     }
@@ -716,6 +835,7 @@ impl<
                 guards,
                 limits,
             }),
+            None,
             Some(cycle_deadline_ns),
         )
     }
@@ -730,7 +850,12 @@ impl<
         domains: &[ScheduledDomainQuality; DOMAINS],
         motion_domain_id: u8,
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
-        self.run_inner(Some((schedule, domains, motion_domain_id)), None, None)
+        self.run_inner(
+            Some((schedule, domains, motion_domain_id)),
+            None,
+            None,
+            None,
+        )
     }
 
     /// Combine frozen multi-Domain quality and a measured post-TX deadline.
@@ -743,6 +868,7 @@ impl<
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
         self.run_inner(
             Some((schedule, domains, motion_domain_id)),
+            None,
             None,
             Some(cycle_deadline_ns),
         )
@@ -766,6 +892,7 @@ impl<
                 limits,
             }),
             None,
+            None,
         )
     }
 
@@ -788,6 +915,7 @@ impl<
                 guards,
                 limits,
             }),
+            None,
             Some(cycle_deadline_ns),
         )
     }
@@ -816,6 +944,7 @@ impl<
                 guards,
                 limits,
             }),
+            None,
             Some(cycle_deadline_ns),
             Some(outputs),
             other,
@@ -849,6 +978,43 @@ impl<
                 guards,
                 limits,
             }),
+            None,
+            Some(cycle_deadline_ns),
+            Some(outputs),
+            other,
+        )
+    }
+
+    /// Stable-cycle variant with a product-configured controlled stop runtime.
+    /// Active cycles still use the normal setpoint guard. Once the MLG enters
+    /// Stopping, Hold/RampToZero are attempted transactionally; any controlled
+    /// error latches this transition sequence to the default fail-closed stop.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_received_with_controlled_stop_until<
+        const SCHEDULE_SLOTS: usize,
+        const FRAMES: usize,
+    >(
+        &mut self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        received: &ScheduledReceiveReport<P::Error, DOMAINS>,
+        motion_domain_id: u8,
+        outputs: &ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
+        targets: &[Option<Cia402Target>; AXES],
+        guards: &mut [CyclicSetpointGuard; AXES],
+        limits: &[CyclicLimits; AXES],
+        controlled: &mut ControlledStopCycleState<AXES>,
+        cycle_deadline_ns: u64,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        let domains = self.received_domains(domain_bank, received, motion_domain_id, outputs)?;
+        let other = self.other;
+        self.run_inner_with_outputs(
+            Some((outputs.schedule, &domains, motion_domain_id)),
+            Some(MotionInputs {
+                targets,
+                guards,
+                limits,
+            }),
+            Some(controlled),
             Some(cycle_deadline_ns),
             Some(outputs),
             other,
@@ -883,6 +1049,7 @@ impl<
                 guards,
                 limits,
             }),
+            None,
             Some(cycle_deadline_ns),
             Some(outputs),
             other,
@@ -924,6 +1091,49 @@ impl<
                 guards,
                 limits,
             }),
+            None,
+            Some(cycle_deadline_ns),
+            Some(outputs),
+            other,
+        )
+    }
+
+    /// Control-service stable-cycle entry with controlled Hold/RampToZero and
+    /// a sequence-latched fail-closed fallback.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_control_cycle_with_controlled_stop_until<
+        const SCHEDULE_SLOTS: usize,
+        const FRAMES: usize,
+    >(
+        &mut self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        cycle: &ScheduledControlCycleReport<P::Error, DOMAINS>,
+        gate: ScheduledControlGate,
+        service_ready: bool,
+        motion_domain_id: u8,
+        outputs: &ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
+        targets: &[Option<Cia402Target>; AXES],
+        guards: &mut [CyclicSetpointGuard; AXES],
+        limits: &[CyclicLimits; AXES],
+        controlled: &mut ControlledStopCycleState<AXES>,
+        cycle_deadline_ns: u64,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        let (domains, other) = self.control_cycle_inputs(
+            domain_bank,
+            cycle,
+            gate,
+            service_ready,
+            motion_domain_id,
+            outputs,
+        )?;
+        self.run_inner_with_outputs(
+            Some((outputs.schedule, &domains, motion_domain_id)),
+            Some(MotionInputs {
+                targets,
+                guards,
+                limits,
+            }),
+            Some(controlled),
             Some(cycle_deadline_ns),
             Some(outputs),
             other,
@@ -957,6 +1167,43 @@ impl<
                 guards,
                 limits,
             }),
+            None,
+            Some(cycle_deadline_ns),
+            Some(outputs),
+            other,
+        )
+    }
+
+    /// Unified production-service entry with product-configured controlled
+    /// stopping. The returned outcome and `ScheduledProductionRelease` expose
+    /// whether the controlled frame was used or the transition is latched to
+    /// the default stop path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_service_cycle_with_controlled_stop_until<
+        const SCHEDULE_SLOTS: usize,
+        const FRAMES: usize,
+    >(
+        &mut self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        cycle: &ScheduledProductionServiceCycleReport<P::Error, DOMAINS>,
+        motion_domain_id: u8,
+        outputs: &ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
+        targets: &[Option<Cia402Target>; AXES],
+        guards: &mut [CyclicSetpointGuard; AXES],
+        limits: &[CyclicLimits; AXES],
+        controlled: &mut ControlledStopCycleState<AXES>,
+        cycle_deadline_ns: u64,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        let (domains, other) =
+            self.service_cycle_inputs(domain_bank, cycle, motion_domain_id, outputs)?;
+        self.run_inner_with_outputs(
+            Some((outputs.schedule, &domains, motion_domain_id)),
+            Some(MotionInputs {
+                targets,
+                guards,
+                limits,
+            }),
+            Some(controlled),
             Some(cycle_deadline_ns),
             Some(outputs),
             other,
@@ -1006,6 +1253,7 @@ impl<
                 guards,
                 limits,
             }),
+            None,
             Some(cycle_deadline_ns),
             Some(outputs),
             other,
@@ -1061,6 +1309,7 @@ impl<
                 guards,
                 limits,
             }),
+            None,
             Some(cycle_deadline_ns),
             Some(outputs),
             other,
@@ -1108,6 +1357,7 @@ impl<
                 guards,
                 limits,
             }),
+            None,
             Some(cycle_deadline_ns),
             Some(outputs),
             other,
@@ -1216,12 +1466,14 @@ impl<
         &mut self,
         scheduled: Option<ScheduledInputs<'_, DOMAINS, SCHEDULE_SLOTS>>,
         motion: Option<MotionInputs<'_, AXES>>,
+        controlled: Option<&mut ControlledStopCycleState<AXES>>,
         cycle_deadline_ns: Option<u64>,
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
         let other = self.other;
         self.run_inner_with_outputs::<SCHEDULE_SLOTS, 1>(
             scheduled,
             motion,
+            controlled,
             cycle_deadline_ns,
             None,
             other,
@@ -1232,6 +1484,7 @@ impl<
         &mut self,
         scheduled: Option<ScheduledInputs<'_, DOMAINS, SCHEDULE_SLOTS>>,
         motion: Option<MotionInputs<'_, AXES>>,
+        mut controlled: Option<&mut ControlledStopCycleState<AXES>>,
         cycle_deadline_ns: Option<u64>,
         outputs: Option<&ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>>,
         other: OtherCycleFacts,
@@ -1384,7 +1637,15 @@ impl<
             }
         });
         let activation = (self.guard.boot_id, self.guard.transition_sequence);
-        let (mut action, mut transmission, feedback, mut stop_mask) = {
+        let (
+            mut action,
+            mut transmission,
+            feedback,
+            mut stop_mask,
+            mut controlled_stop_used,
+            mut controlled_stop_fallback,
+            controlled_stop_failure,
+        ) = {
             let mut decision = self.guard.cycle_axes(self.report.cycle, decision_now_ns);
             let action = decision.action();
             if matches!(action, LifecycleAction::EnableAllowed) && motion.is_none() {
@@ -1408,20 +1669,92 @@ impl<
             } else {
                 None
             };
+            let mut controlled_report: Option<ControlledStopFrameReport<AXES>> = None;
+            let mut controlled_stop_used = false;
+            let mut controlled_stop_fallback = false;
+            let mut controlled_stop_failure = None;
             let transmission = match (action, motion) {
-                (LifecycleAction::Stop(_), _) => submit_stopping_frame(
-                    &mut decision,
-                    &outputs,
-                    self.maps,
-                    self.modes,
-                    self.safe_process_image,
-                    self.domain,
-                    self.plan,
-                    self.master,
-                    self.port,
-                    self.next_generation,
-                    self.deadline_ns,
-                ),
+                (LifecycleAction::Stop(_), _) => {
+                    if let Some(controlled) = controlled.as_deref_mut() {
+                        let sequence = decision.transition_sequence();
+                        controlled.prepare(sequence);
+                        if controlled.fallback_latched() {
+                            controlled_stop_fallback = true;
+                            submit_stopping_frame(
+                                &mut decision,
+                                &outputs,
+                                self.maps,
+                                self.modes,
+                                self.safe_process_image,
+                                self.domain,
+                                self.plan,
+                                self.master,
+                                self.port,
+                                self.next_generation,
+                                self.deadline_ns,
+                            )
+                        } else {
+                            let attempt = {
+                                let (planners, limits) = controlled.parts();
+                                submit_controlled_stopping_frame(
+                                    &mut decision,
+                                    self.report,
+                                    planners,
+                                    limits,
+                                    self.maps,
+                                    self.modes,
+                                    self.safe_process_image,
+                                    self.domain,
+                                    self.plan,
+                                    self.master,
+                                    self.port,
+                                    self.next_generation,
+                                    self.deadline_ns,
+                                )
+                            };
+                            match attempt {
+                                Ok(report) => {
+                                    controlled_stop_used = true;
+                                    let length = report.length;
+                                    controlled_report = Some(report);
+                                    Ok(length)
+                                }
+                                Err(error) => {
+                                    controlled.latch_fallback(sequence);
+                                    controlled_stop_fallback = true;
+                                    controlled_stop_failure = Some(error);
+                                    submit_stopping_frame(
+                                        &mut decision,
+                                        &outputs,
+                                        self.maps,
+                                        self.modes,
+                                        self.safe_process_image,
+                                        self.domain,
+                                        self.plan,
+                                        self.master,
+                                        self.port,
+                                        self.next_generation,
+                                        self.deadline_ns,
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        submit_stopping_frame(
+                            &mut decision,
+                            &outputs,
+                            self.maps,
+                            self.modes,
+                            self.safe_process_image,
+                            self.domain,
+                            self.plan,
+                            self.master,
+                            self.port,
+                            self.next_generation,
+                            self.deadline_ns,
+                        )
+                    }
+                }
                 (LifecycleAction::EnableAllowed, Some(motion)) => {
                     let mut next_guards = *motion.guards;
                     for guard in &mut next_guards {
@@ -1469,14 +1802,22 @@ impl<
                 }
             };
             if !matches!(action, LifecycleAction::EnableAllowed) || transmission.is_ok() {
-                axis_stops_to_procbuf(self.state, &decision, &outputs, feedback)
-                    .map_err(StopCycleError::Evidence)?;
+                if let Some(report) = controlled_report.as_ref() {
+                    controlled_axis_stops_to_procbuf(self.state, &decision, report, feedback)
+                        .map_err(StopCycleError::Evidence)?;
+                } else {
+                    axis_stops_to_procbuf(self.state, &decision, &outputs, feedback)
+                        .map_err(StopCycleError::Evidence)?;
+                }
             }
             (
                 action,
                 transmission,
                 feedback,
                 decision.stopping_axis_mask(),
+                controlled_stop_used,
+                controlled_stop_fallback,
+                controlled_stop_failure,
             )
         };
         let mut active_failure = None;
@@ -1487,6 +1828,11 @@ impl<
                 .map_err(StopCycleError::Abort)?;
             let mut stop_decision = self.guard.cycle_axes(self.report.cycle, decision_now_ns);
             action = stop_decision.action();
+            if let Some(controlled) = controlled {
+                controlled.latch_fallback(stop_decision.transition_sequence());
+                controlled_stop_used = false;
+                controlled_stop_fallback = true;
+            }
             let stop_outputs = step_axis_bank(
                 self.bank,
                 &stop_decision,
@@ -1633,6 +1979,9 @@ impl<
         Ok(StopCycleOutcome {
             action,
             active_failure,
+            controlled_stop_used,
+            controlled_stop_fallback,
+            controlled_stop_failure,
             auxiliary_frames_sent,
             auxiliary_failure,
             post_tx_deadline_met,

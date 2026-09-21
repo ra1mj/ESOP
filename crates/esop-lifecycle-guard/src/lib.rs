@@ -372,13 +372,19 @@ impl AxisCycleDecision<'_> {
         self.stop_transmitted
     }
 
+    /// Whether this borrowed decision can record an accepted stop frame.
+    /// Submission helpers use this as a preflight so an invalid decision is
+    /// rejected before the port can accept a frame.
+    pub const fn can_mark_stop_transmitted(&self) -> bool {
+        matches!(self.action, LifecycleAction::Stop(_))
+            && self.guard.motion_axes_mask != 0
+            && self.guard.stop_started_cycle.is_some()
+    }
+
     /// Call only after the stop PDO was submitted successfully to the port.
     /// A prepared controlword or failed TX is not evidence of issuance.
     pub fn mark_stop_transmitted(&mut self) -> Result<(), LifecycleError> {
-        if !matches!(self.action, LifecycleAction::Stop(_))
-            || self.guard.motion_axes_mask == 0
-            || self.guard.stop_started_cycle.is_none()
-        {
+        if !self.can_mark_stop_transmitted() {
             return Err(LifecycleError::InvalidState);
         }
         if self.guard.stop_issued_cycle.is_none() {
