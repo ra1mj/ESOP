@@ -278,6 +278,8 @@ ProcBuf ABI v4 在 State 页增加固定容量的 `axis_stops[AXES]`：`request_
 
 `ScheduledDomainBank` 可在激活期绑定不同映像大小的真实 Domain，校验冻结调度的 ID 顺序和数据报索引独占关系，运行时以固定索引表分发已由主站验证的数据报。每个 tick 由同一 RX 所有者调用 `begin_due` 和 `finish_due`；即使收帧失败或到期 Domain 无响应，也必须完成该次接收，使旧输入不能继续冒充有效样本。返回的真实质量数组可按冻结 ID 顺序投影到 MLG/ProcBuf；只读、类型校验的 `domain` 访问口可在 `finish_due` 后交给现有运动生命周期分支。模拟回归已贯通双 Domain 实收、非到期复用、辅助 Domain 到期漏收与停机输出。调用者仍负责发送计划与到期 Domain 的输出、DC/控制数据报接收、整个周期的最终 deadline 和实物 HIL 资格证据。
 
+可选 `ScheduledAuxiliaryOutputs` 将按调度顺序排列的辅助 Domain 安全镜像及分帧计划在激活时与真实 Domain 段绑定，拒绝索引复用、镜像越界、跨 Domain 可写地址重叠。`run_scheduled_with_outputs_until` 在同一生命周期分支中先提交到期辅助帧再决定运动帧；辅助发送失败或跨越周期绝对 deadline 会停止后续辅助帧、撤销运动许可、尝试停机并发布失败位置与接受帧计数。发送成功只证明端口接受，不能代替新输入或停稳证明；安全镜像的内容仍需调用者独立核实，DC/控制接收、State/事件发布后的最终 deadline 和实物 HIL 均尚未闭环。上段描述的是先前仅实现 RX 时的范围。
+
 可选的 `run_until` / `run_with_motion_until` 及对应 `run_scheduled_until` / `run_scheduled_with_motion_until` 接收**当前周期**的绝对 deadline（与下一代帧的 RX `deadline_ns` 不同），用端口单调时钟检查发送前及最后一次 TX 尝试后、State 发布前的时间。发送前超时禁止活动输出并请求停机；活动帧虽提交成功但 TX 后超时时，本周期立刻撤销 permit、使预算门槛失效、发布 Stopping 和未发出的停机请求。`post_tx_deadline_met=false` 与 `active_tx_before_deadline_miss=true` 明确标出此帧**仍是活动帧**，不可伪造停机控制字已发送的证明；该帧可能仍占有 RX 索引，下周期收妥或过期后才可提交停机帧。该检查无法覆盖 State/事件发布、其他 Domain TX 和任务释放，因此不能作为整个生产周期的最终 deadline 判定；周期所有者仍须负责其余工作和资格证明。
 
 ## 9. 配置与可观测性

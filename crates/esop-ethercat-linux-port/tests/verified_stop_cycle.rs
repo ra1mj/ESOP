@@ -1,8 +1,8 @@
 use esop_ethercat_core::wire::{Command, MAX_ETHERNET_FRAME_LEN};
 use esop_ethercat_core::{
     CycleError, CycleReport, DatagramPlan, DcCyclicConfig, DcCyclicSync, DcMonitor, Domain,
-    DomainSegment, EthercatMaster, EthercatPort, FramePlan, LinkState, MasterConfig, PdoDirection,
-    PdoEntry, PortError, RxPoll, ScheduleDomain, ScheduleTable, ScheduledDomainBank,
+    DomainSegment, EthercatMaster, EthercatPort, FramePlan, FramePlanSet, LinkState, MasterConfig,
+    PdoDirection, PdoEntry, PortError, RxPoll, ScheduleDomain, ScheduleTable, ScheduledDomainBank,
     ScheduledDomainEntry,
 };
 use esop_ethercat_linux_port::SimulatedPort;
@@ -15,7 +15,10 @@ use esop_lifecycle_guard::ethercat::{
 use esop_lifecycle_guard::procbuf::{
     LifecycleEventCursor, axis_stops_to_procbuf, lifecycle_events_to_procbuf, lifecycle_to_procbuf,
 };
-use esop_lifecycle_guard::stop_cycle::{StopCycleContext, StopCycleError};
+use esop_lifecycle_guard::stop_cycle::{
+    AuxiliaryOutputEntry, AuxiliaryOutputPlanError, ScheduledAuxiliaryOutputs, StopCycleContext,
+    StopCycleError,
+};
 use esop_lifecycle_guard::{
     GateId, GuardPolicy, LifecycleAction, LifecycleError, LifecycleGuard, LifecycleState,
     MotionPermit,
@@ -2213,6 +2216,17 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
         .unwrap();
     let mut motion_plan = FramePlan::<1>::new();
     motion_plan.push(motion_datagram).unwrap();
+    let mut auxiliary_plans = FramePlanSet::<1, 1>::new();
+    auxiliary_plans
+        .push(DatagramPlan {
+            command: Command::Lrw,
+            index: 13,
+            address: 0x2000,
+            payload_offset: 0,
+            payload_len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
     let schedule = ScheduleTable::<2, 2>::build(
         100_000,
         &[
@@ -2289,6 +2303,22 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
             quality: received[1],
         },
     ];
+    let auxiliary_image = [0xAB, 0xCD];
+    let auxiliary_outputs = ScheduledAuxiliaryOutputs::new(
+        &domain_bank,
+        &schedule,
+        9,
+        &motion_plan,
+        [
+            None,
+            Some(AuxiliaryOutputEntry {
+                id: 10,
+                image: &auxiliary_image,
+                plans: &auxiliary_plans,
+            }),
+        ],
+    )
+    .unwrap();
 
     let mut guard = LifecycleGuard::new(
         GateId::Domain.bit() | GateId::Link.bit(),
@@ -2430,10 +2460,11 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
         assert_eq!(context.port.tx_frames(), 1);
 
         let sent = context
-            .run_scheduled_with_motion_until(
+            .run_scheduled_with_outputs_until(
                 &schedule,
                 &snapshots,
                 9,
+                &auxiliary_outputs,
                 &[None],
                 &mut guards,
                 &limits,
@@ -2442,6 +2473,8 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
             .unwrap();
         assert_eq!(sent.action, LifecycleAction::EnableAllowed);
         assert!(sent.transmission.is_ok());
+        assert_eq!(sent.auxiliary_frames_sent, 1);
+        assert!(sent.auxiliary_failure.is_none());
         assert!(sent.quality.domain_valid);
         assert_eq!(sent.post_tx_deadline_met, Some(true));
         assert_eq!(sent.state_publish, Ok(1));
@@ -2479,10 +2512,11 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
         now_ns: 200_000,
         transition_time_ns: 100_000,
     }
-    .run_scheduled_with_motion_until(
+    .run_scheduled_with_outputs_until(
         &schedule,
         &snapshots,
         9,
+        &auxiliary_outputs,
         &[None],
         &mut guards,
         &limits,
@@ -2491,6 +2525,7 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
     .unwrap();
     assert_eq!(idle.action, LifecycleAction::EnableAllowed);
     assert!(idle.transmission.is_ok());
+    assert_eq!(idle.auxiliary_frames_sent, 0);
     assert!(idle.quality.domain_valid);
     assert_eq!(idle.post_tx_deadline_met, Some(true));
     assert_eq!(
@@ -2530,10 +2565,11 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
         now_ns: 300_000,
         transition_time_ns: 100_000,
     }
-    .run_scheduled_with_motion_until(
+    .run_scheduled_with_outputs_until(
         &schedule,
         &snapshots,
         9,
+        &auxiliary_outputs,
         &[None],
         &mut guards,
         &limits,
@@ -2542,6 +2578,7 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
     .unwrap();
     assert!(matches!(failed.action, LifecycleAction::Stop(_)));
     assert!(failed.transmission.is_ok());
+    assert_eq!(failed.auxiliary_frames_sent, 1);
     assert!(!failed.quality.domain_valid);
     assert_eq!(failed.post_tx_deadline_met, Some(true));
     assert!(guard.permit().is_none());
@@ -2550,6 +2587,292 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
     assert_eq!(published.quality.domains[1].input_age_cycles, 2);
     assert_ne!(published.axis_stops[0].issued_action, 0);
     assert_eq!(published.lifecycle.first_blocking_code, 0x444F_0001);
+}
+
+#[test]
+fn due_auxiliary_output_failure_or_overrun_blocks_active_motion() {
+    for (fail_tx, tx_duration_ns, cycle_deadline_ns) in
+        [(true, 0, 150_000), (false, 10_000, 105_000)]
+    {
+        let mut master = EthercatMaster::<1, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+            [0xFF; 6],
+            [1, 2, 3, 4, 5, 6],
+        ));
+        let mut motion = Domain::<IMAGE_BYTES, 1>::new(0x1000);
+        motion
+            .add_segment(DomainSegment {
+                datagram_index: 12,
+                input_offset: 0,
+                len: IMAGE_BYTES,
+                expected_wkc: 1,
+            })
+            .unwrap();
+        let mut auxiliary = Domain::<2, 2>::new(0x2000);
+        for (index, offset) in [(13, 0), (14, 1)] {
+            auxiliary
+                .add_segment(DomainSegment {
+                    datagram_index: index,
+                    input_offset: offset,
+                    len: 1,
+                    expected_wkc: 1,
+                })
+                .unwrap();
+        }
+        let motion_datagram = DatagramPlan {
+            command: Command::Lrw,
+            index: 12,
+            address: 0x1000,
+            payload_offset: 0,
+            payload_len: IMAGE_BYTES,
+            expected_wkc: 1,
+        };
+        let mut motion_plan = FramePlan::<1>::new();
+        motion_plan.push(motion_datagram).unwrap();
+        let mut initial_plan = FramePlan::<3>::new();
+        initial_plan.push(motion_datagram).unwrap();
+        let mut auxiliary_plans = FramePlanSet::<2, 1>::new();
+        for (index, offset) in [(13, 0), (14, 1)] {
+            initial_plan
+                .push(DatagramPlan {
+                    command: Command::Lrw,
+                    index,
+                    address: 0x2000 + offset as u32,
+                    payload_offset: IMAGE_BYTES + offset,
+                    payload_len: 1,
+                    expected_wkc: 1,
+                })
+                .unwrap();
+            auxiliary_plans
+                .push(DatagramPlan {
+                    command: Command::Lrw,
+                    index,
+                    address: 0x2000 + offset as u32,
+                    payload_offset: offset,
+                    payload_len: 1,
+                    expected_wkc: 1,
+                })
+                .unwrap();
+        }
+        assert_eq!(auxiliary_plans.frame_count(), 2);
+        let schedule = ScheduleTable::<2, 2>::build(
+            100_000,
+            &[
+                ScheduleDomain {
+                    id: 9,
+                    period_ticks: 1,
+                    phase_ticks: 0,
+                },
+                ScheduleDomain {
+                    id: 10,
+                    period_ticks: 2,
+                    phase_ticks: 0,
+                },
+            ],
+        )
+        .unwrap();
+        let mut domain_bank = ScheduledDomainBank::new(
+            &schedule,
+            [
+                ScheduledDomainEntry {
+                    id: 9,
+                    domain: &mut motion,
+                },
+                ScheduledDomainEntry {
+                    id: 10,
+                    domain: &mut auxiliary,
+                },
+            ],
+        )
+        .unwrap();
+        let safe_image = input_image(0x0040, 0);
+        let auxiliary_image = [0xAB, 0xCD];
+        assert!(matches!(
+            ScheduledAuxiliaryOutputs::new(
+                &domain_bank,
+                &schedule,
+                9,
+                &motion_plan,
+                [
+                    None,
+                    Some(AuxiliaryOutputEntry {
+                        id: 10,
+                        image: &[0],
+                        plans: &auxiliary_plans
+                    })
+                ],
+            ),
+            Err(AuxiliaryOutputPlanError::InvalidPlan(10))
+        ));
+        let outputs = ScheduledAuxiliaryOutputs::new(
+            &domain_bank,
+            &schedule,
+            9,
+            &motion_plan,
+            [
+                None,
+                Some(AuxiliaryOutputEntry {
+                    id: 10,
+                    image: &auxiliary_image,
+                    plans: &auxiliary_plans,
+                }),
+            ],
+        )
+        .unwrap();
+
+        let mut port = SimulatedPort::new(1);
+        port.set_now_ns(100_000);
+        domain_bank.begin_due(1, 1).unwrap();
+        let mut initial_image = [0; IMAGE_BYTES + 2];
+        initial_image[..IMAGE_BYTES].copy_from_slice(&safe_image);
+        initial_image[IMAGE_BYTES..].copy_from_slice(&auxiliary_image);
+        let frame = master.acquire_frame(1, 150_000).unwrap();
+        master
+            .build_and_arm_frame_from_plan(frame, &initial_plan, &initial_image)
+            .unwrap();
+        master.submit_frame(&mut port, frame).unwrap();
+        let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+        let report = master
+            .cycle_receive_with_consumer(&mut port, &mut scratch, 1, &mut domain_bank)
+            .unwrap();
+        let received = domain_bank.finish_due(report.cycle, 1).unwrap();
+        let snapshots = [
+            ScheduledDomainQuality {
+                id: 9,
+                quality: received[0],
+            },
+            ScheduledDomainQuality {
+                id: 10,
+                quality: received[1],
+            },
+        ];
+        let dc = DcCyclicSync::new(
+            DcCyclicConfig::new(0x3000, 14, 0),
+            DcMonitor::new(50, 10, 1, 2),
+        );
+        let other = OtherCycleFacts {
+            platform_ready: true,
+            coe_ready: true,
+            topology_valid: true,
+            drive_ready: true,
+            command_current: true,
+            supervisor_healthy: true,
+            external_safety_clear: true,
+            deadline_met: true,
+        };
+        let mut guard = LifecycleGuard::new(
+            GateId::Domain.bit() | GateId::Link.bit(),
+            7,
+            GuardPolicy {
+                enter_good_cycles: 1,
+                allowed_axis_mask: 1,
+                ..GuardPolicy::conservative()
+            },
+        );
+        guard.update_cyclic_quality(
+            cyclic_quality_from_schedule(report, &schedule, &snapshots, &dc, other),
+            report.cycle,
+        );
+        guard
+            .request_rearm(
+                MotionPermit {
+                    boot_id: 7,
+                    source_id: 1,
+                    permit_epoch: 1,
+                    sequence: 1,
+                    expires_at_ns: 400_000,
+                    axis_mask: 1,
+                    authority: 1,
+                    reserved: [0; 3],
+                    policy_version: 1,
+                },
+                report.cycle,
+                100_000,
+            )
+            .unwrap();
+        let mut cursor = LifecycleEventCursor::new(&guard);
+        let buffer = ProcBuf::<1, 0, 2, 8>::new(1, 7);
+        let mut bank = Cia402AxisBank::<1>::new();
+        let maps = [map()];
+        let modes = [OperatingMode::Csp];
+        let limits = [CyclicLimits {
+            max_position_step: 2.0,
+            max_velocity: 2.0,
+            max_torque: 2.0,
+        }];
+        let mut guards = [CyclicSetpointGuard::new()];
+        let mut state = StatePage::<1, 0, 2>::new(7);
+        state.sequence = report.cycle;
+        if fail_tx {
+            port.fail_next_tx();
+        }
+        let mut timed_port = AdvancingTxPort {
+            inner: &mut port,
+            tx_duration_ns,
+        };
+        let outcome = StopCycleContext {
+            guard: &mut guard,
+            bank: &mut bank,
+            master: &mut master,
+            port: &mut timed_port,
+            domain: domain_bank.domain::<IMAGE_BYTES, 1>(9).unwrap(),
+            dc: &dc,
+            buffer: &buffer,
+            event_cursor: &mut cursor,
+            state: &mut state,
+            report,
+            other,
+            maps: &maps,
+            modes: &modes,
+            max_stationary_velocities: &[1],
+            safe_process_image: &safe_image,
+            plan: &motion_plan,
+            next_generation: 2,
+            deadline_ns: 250_000,
+            now_ns: 100_000,
+            transition_time_ns: 100_000,
+        }
+        .run_scheduled_with_outputs_until(
+            &schedule,
+            &snapshots,
+            9,
+            &outputs,
+            &[None],
+            &mut guards,
+            &limits,
+            cycle_deadline_ns,
+        )
+        .unwrap();
+        assert!(matches!(outcome.action, LifecycleAction::Stop(_)));
+        assert!(outcome.transmission.is_ok());
+        assert!(guard.permit().is_none());
+        assert_eq!(guard.state(), LifecycleState::Stopping);
+        assert_eq!(outcome.state_publish, Ok(1));
+        let published = buffer.read_state().unwrap().state;
+        assert_ne!(published.axis_stops[0].issued_action, 0);
+        if fail_tx {
+            let failure = outcome.auxiliary_failure.unwrap();
+            assert_eq!(failure.domain_id, 10);
+            assert_eq!(failure.frame_index, 0);
+            assert!(matches!(
+                failure.error,
+                StopFrameError::Transmit(CycleError::Port(PortError::HardwareFault))
+            ));
+            assert_eq!(outcome.auxiliary_frames_sent, 0);
+            assert_eq!(outcome.post_tx_deadline_met, Some(true));
+            assert_eq!(published.lifecycle.first_blocking_code, 0x5458_0002);
+            assert_eq!(port.tx_frames(), 2);
+        } else {
+            let failure = outcome.auxiliary_failure.unwrap();
+            assert_eq!(failure.domain_id, 10);
+            assert_eq!(failure.frame_index, 1);
+            assert!(matches!(failure.error, StopFrameError::InvalidDeadline));
+            assert_eq!(outcome.auxiliary_frames_sent, 1);
+            assert_eq!(outcome.post_tx_deadline_met, Some(false));
+            assert!(!outcome.quality.cycle_within_budget);
+            assert!(!guard.gate(GateId::Budget).valid);
+            assert_eq!(port.tx_frames(), 3);
+        }
+    }
 }
 
 #[test]

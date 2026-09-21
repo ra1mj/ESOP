@@ -319,6 +319,8 @@ R2 后续增量：可选的实测 deadline 入口在活动 TX 前后采样端口
 
 R2 多 Domain RX 增量：固定容量 `ScheduledDomainBank` 将冻结 ID 顺序和独占数据报索引绑定到实际 Domain；每周期仅接收到期 Domain，并在漏收时使其质量失效。软件模拟已验证真实辅助 Domain 到期漏收会撤销运动许可，且运动 Domain 的已提交输入与真实质量由同一接收所有者提供给生命周期停机分支。发送计划、辅助 Domain 输出、DC/控制接收以及最终 deadline 仍由完整周期所有者接线；本增量不满足 R2 的 HIL 与实时资格出口条件。
 
+R2 辅助 TX 增量：可选的 `ScheduledAuxiliaryOutputs` 在激活时将运动与辅助分帧计划绑定到 `ScheduledDomainBank` 的真实段，拒绝索引复用、镜像越界及可写地址重叠。`run_scheduled_with_outputs_until` 只提交到期辅助 Domain 的调用者核实安全镜像；首次 TX 失败或发送跨过当前周期截止时间时，同周期撤销运动许可并尝试发送停机帧，State 保留已接受帧数量、失败位置和预算结果。软件模拟覆盖非到期不发、到期发送、TX 失败与跨期截止时间；安全镜像来源、DC/控制接收、完整生产周期最终 deadline（包括 State/事件发布）、实物 HIL 仍未闭环，R2 出口条件不变。以上前述未接线描述为先前 RX 阶段的进展，不代表本增量的现状。
+
 ### 11.1 发布阻塞条件
 
 任何发布候选必须满足：

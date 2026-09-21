@@ -2,6 +2,7 @@
 
 use crate::domain::{Domain, DomainError, DomainQuality, DomainSegment};
 use crate::engine::RxDatagramConsumer;
+use crate::plan::{FramePlan, FramePlanSet};
 use crate::rx_index::RxMatch;
 use crate::schedule::ScheduleTable;
 use crate::wire::DatagramHeader;
@@ -16,6 +17,7 @@ mod private {
 /// cannot bypass the activation-time segment and receive-state checks.
 pub trait ScheduledDomainRx: private::Sealed + RxDatagramConsumer {
     fn as_any(&self) -> &dyn Any;
+    fn logical_address(&self) -> u32;
     fn segments(&self) -> &[DomainSegment];
     fn receive_generation(&self) -> Option<u16>;
     fn begin_receive(&mut self, generation: u16) -> Result<(), DomainError>;
@@ -28,6 +30,10 @@ impl<const BYTES: usize, const SEGMENTS: usize> private::Sealed for Domain<BYTES
 impl<const BYTES: usize, const SEGMENTS: usize> ScheduledDomainRx for Domain<BYTES, SEGMENTS> {
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn logical_address(&self) -> u32 {
+        Domain::logical_address(self)
     }
 
     fn segments(&self) -> &[DomainSegment] {
@@ -83,6 +89,10 @@ pub struct ScheduledDomainBank<'a, const DOMAINS: usize, const SLOTS: usize> {
 }
 
 impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAINS, SLOTS> {
+    pub fn uses_schedule(&self, schedule: &ScheduleTable<DOMAINS, SLOTS>) -> bool {
+        core::ptr::eq(self.schedule, schedule)
+    }
+
     /// Validate the ID order and exclusive datagram-index ownership once at
     /// activation, not on the cyclic RX path.
     pub fn new(
@@ -141,6 +151,60 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
             .domain
             .as_any()
             .downcast_ref()
+    }
+
+    /// Bind every TX datagram to exactly one actual RX segment of this Domain.
+    /// A split frame plan may rearrange frame boundaries but not addresses,
+    /// indices, offsets, lengths, or WKC ownership.
+    pub fn matches_frame_plans<const FRAMES: usize, const DATAGRAMS: usize>(
+        &self,
+        id: u8,
+        plans: &FramePlanSet<FRAMES, DATAGRAMS>,
+    ) -> bool {
+        let Some(entry) = self.domains.iter().find(|entry| entry.id == id) else {
+            return false;
+        };
+        let segments = entry.domain.segments();
+        plans.datagram_count() == segments.len()
+            && segments.iter().all(|segment| {
+                plans
+                    .plans()
+                    .iter()
+                    .flat_map(|plan| plan.datagrams())
+                    .any(|datagram| {
+                        datagram.index == segment.datagram_index
+                            && datagram.payload_offset == segment.input_offset
+                            && datagram.payload_len == segment.len
+                            && datagram.expected_wkc == segment.expected_wkc
+                            && u32::try_from(segment.input_offset).ok().and_then(|offset| {
+                                entry.domain.logical_address().checked_add(offset)
+                            }) == Some(datagram.address)
+                    })
+            })
+    }
+
+    pub fn matches_frame_plan<const DATAGRAMS: usize>(
+        &self,
+        id: u8,
+        plan: &FramePlan<DATAGRAMS>,
+    ) -> bool {
+        let Some(entry) = self.domains.iter().find(|entry| entry.id == id) else {
+            return false;
+        };
+        let segments = entry.domain.segments();
+        plan.len() == segments.len()
+            && segments.iter().all(|segment| {
+                plan.datagrams().iter().any(|datagram| {
+                    datagram.index == segment.datagram_index
+                        && datagram.payload_offset == segment.input_offset
+                        && datagram.payload_len == segment.len
+                        && datagram.expected_wkc == segment.expected_wkc
+                        && u32::try_from(segment.input_offset)
+                            .ok()
+                            .and_then(|offset| entry.domain.logical_address().checked_add(offset))
+                            == Some(datagram.address)
+                })
+            })
     }
 
     pub fn begin_due(&mut self, cycle: u64, generation: u16) -> Result<(), ScheduledDomainError> {
@@ -230,6 +294,7 @@ impl<const DOMAINS: usize, const SLOTS: usize> RxDatagramConsumer
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plan::{DatagramPlan, FramePlanSet};
     use crate::schedule::ScheduleDomain;
     use crate::wire::Command;
 
@@ -387,5 +452,76 @@ mod tests {
         assert!(!qualities[1].valid);
         assert!(!qualities[1].complete);
         assert_eq!(qualities[1].last_valid_cycle, 1);
+    }
+
+    #[test]
+    fn split_output_plans_must_match_every_bound_domain_segment() {
+        let schedule = ScheduleTable::<2, 2>::build(
+            100_000,
+            &[
+                ScheduleDomain {
+                    id: 9,
+                    period_ticks: 1,
+                    phase_ticks: 0,
+                },
+                ScheduleDomain {
+                    id: 10,
+                    period_ticks: 2,
+                    phase_ticks: 0,
+                },
+            ],
+        )
+        .unwrap();
+        let mut motion = domain::<2>(12);
+        let mut auxiliary = Domain::<2, 2>::new(0x2000);
+        for (index, offset) in [(13, 0), (14, 1)] {
+            auxiliary
+                .add_segment(DomainSegment {
+                    datagram_index: index,
+                    input_offset: offset,
+                    len: 1,
+                    expected_wkc: 1,
+                })
+                .unwrap();
+        }
+        let bank = ScheduledDomainBank::new(
+            &schedule,
+            [
+                ScheduledDomainEntry {
+                    id: 9,
+                    domain: &mut motion,
+                },
+                ScheduledDomainEntry {
+                    id: 10,
+                    domain: &mut auxiliary,
+                },
+            ],
+        )
+        .unwrap();
+        let mut plans = FramePlanSet::<2, 1>::new();
+        for (index, offset) in [(13, 0), (14, 1)] {
+            plans
+                .push(DatagramPlan {
+                    command: Command::Lrw,
+                    index,
+                    address: 0x2000 + offset as u32,
+                    payload_offset: offset,
+                    payload_len: 1,
+                    expected_wkc: 1,
+                })
+                .unwrap();
+        }
+        assert_eq!(plans.frame_count(), 2);
+        assert!(bank.matches_frame_plans(10, &plans));
+        assert!(!bank.matches_frame_plans(9, &plans));
+        let mut wrong = FramePlanSet::<2, 1>::new();
+        wrong
+            .push(DatagramPlan {
+                address: 0x2002,
+                ..plans.plan(0).unwrap().datagrams()[0]
+            })
+            .unwrap();
+        wrong.push(plans.plan(1).unwrap().datagrams()[0]).unwrap();
+        assert!(!bank.matches_frame_plans(10, &wrong));
     }
 }

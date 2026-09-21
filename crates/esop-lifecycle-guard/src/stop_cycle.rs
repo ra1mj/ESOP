@@ -19,7 +19,8 @@ use crate::{
     StopFeedback,
 };
 use esop_ethercat_core::{
-    CycleReport, DcCyclicSync, Domain, EthercatMaster, EthercatPort, FramePlan, ScheduleTable,
+    CycleReport, DcCyclicSync, Domain, EthercatMaster, EthercatPort, FramePlan, FramePlanSet,
+    ScheduleTable, ScheduledDomainBank, wire::Command,
 };
 use esop_procbuf::{HeaderError, ProcBuf, StatePage, StatePublishError};
 use esop_profile_cia402::{
@@ -35,6 +36,7 @@ pub enum StopCycleError {
     InvalidSchedule,
     MotionDomainMismatch,
     InvalidCycleDeadline,
+    InvalidAuxiliaryOutputs,
     Header(HeaderError),
     NotStopping(LifecycleAction),
     Evidence(AxisEvidenceError),
@@ -52,6 +54,9 @@ pub struct StopCycleOutcome<E> {
     pub action: LifecycleAction,
     /// Original active TX failure if a stop was attempted in its place.
     pub active_failure: Option<StopFrameError<E>>,
+    /// Accepted auxiliary frames, even if a later auxiliary frame failed.
+    pub auxiliary_frames_sent: usize,
+    pub auxiliary_failure: Option<AuxiliaryOutputFailure<E>>,
     /// `None` for caller-owned deadline facts; checked entries sample the port
     /// after TX and before publishing State/events.
     pub post_tx_deadline_met: Option<bool>,
@@ -65,6 +70,221 @@ pub struct StopCycleOutcome<E> {
     pub transmission: Result<usize, StopFrameError<E>>,
     pub state_publish: Result<u64, StatePublishError>,
     pub event_publish: Option<Result<usize, LifecycleEventError>>,
+}
+
+/// A frozen safe image for one non-motion Domain. The caller must prove that
+/// every writable output in this image is safe even while motion is stopped.
+pub struct AuxiliaryOutputEntry<'a, const FRAMES: usize, const DATAGRAMS: usize> {
+    pub id: u8,
+    pub image: &'a [u8],
+    pub plans: &'a FramePlanSet<FRAMES, DATAGRAMS>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuxiliaryOutputPlanError {
+    InvalidSchedule,
+    MissingDomain(u8),
+    UnexpectedMotionOutput,
+    InvalidPlan(u8),
+    DuplicateIndex(u8),
+    OverlappingWrite(u8, u8),
+}
+
+#[derive(Debug)]
+pub struct AuxiliaryOutputFailure<E> {
+    pub domain_id: u8,
+    pub frame_index: usize,
+    pub error: StopFrameError<E>,
+}
+
+struct AuxiliaryOutputReport<E> {
+    sent_frames: usize,
+    failure: Option<AuxiliaryOutputFailure<E>>,
+}
+
+/// Bind the frozen schedule, verified receive Domains, safe images, and split
+/// TX plans once at activation. No allocation or plan search is needed per tick.
+pub struct ScheduledAuxiliaryOutputs<
+    'a,
+    const DOMAINS: usize,
+    const SCHEDULE_SLOTS: usize,
+    const FRAMES: usize,
+    const DATAGRAMS: usize,
+> {
+    schedule: &'a ScheduleTable<DOMAINS, SCHEDULE_SLOTS>,
+    motion_domain_id: u8,
+    motion_plan: FramePlan<DATAGRAMS>,
+    entries: [Option<AuxiliaryOutputEntry<'a, FRAMES, DATAGRAMS>>; DOMAINS],
+}
+
+impl<
+    'a,
+    const DOMAINS: usize,
+    const SCHEDULE_SLOTS: usize,
+    const FRAMES: usize,
+    const DATAGRAMS: usize,
+> ScheduledAuxiliaryOutputs<'a, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>
+{
+    pub fn new(
+        bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        schedule: &'a ScheduleTable<DOMAINS, SCHEDULE_SLOTS>,
+        motion_domain_id: u8,
+        motion_plan: &FramePlan<DATAGRAMS>,
+        entries: [Option<AuxiliaryOutputEntry<'a, FRAMES, DATAGRAMS>>; DOMAINS],
+    ) -> Result<Self, AuxiliaryOutputPlanError> {
+        if !bank.uses_schedule(schedule)
+            || schedule.domain_count() != DOMAINS
+            || !schedule
+                .domains()
+                .iter()
+                .any(|domain| domain.id == motion_domain_id)
+            || motion_plan.is_empty()
+            || !bank.matches_frame_plan(motion_domain_id, motion_plan)
+        {
+            return Err(AuxiliaryOutputPlanError::InvalidSchedule);
+        }
+        let mut indices = [false; 256];
+        for datagram in motion_plan.datagrams() {
+            indices[datagram.index as usize] = true;
+        }
+        for (slot, configured) in schedule.domains().iter().enumerate() {
+            let Some(entry) = entries[slot].as_ref() else {
+                if configured.id == motion_domain_id {
+                    continue;
+                }
+                return Err(AuxiliaryOutputPlanError::MissingDomain(configured.id));
+            };
+            if configured.id == motion_domain_id {
+                return Err(AuxiliaryOutputPlanError::UnexpectedMotionOutput);
+            }
+            if entry.id != configured.id
+                || entry.plans.is_empty()
+                || !bank.matches_frame_plans(entry.id, entry.plans)
+            {
+                return Err(AuxiliaryOutputPlanError::InvalidPlan(configured.id));
+            }
+            for plan in entry.plans.plans() {
+                for datagram in plan.datagrams() {
+                    if !matches!(datagram.command, Command::Lrd | Command::Lwr | Command::Lrw)
+                        || datagram.payload_len == 0
+                        || datagram.expected_wkc == 0
+                        || datagram
+                            .payload_offset
+                            .checked_add(datagram.payload_len)
+                            .is_none_or(|end| end > entry.image.len())
+                    {
+                        return Err(AuxiliaryOutputPlanError::InvalidPlan(entry.id));
+                    }
+                    if indices[datagram.index as usize] {
+                        return Err(AuxiliaryOutputPlanError::DuplicateIndex(datagram.index));
+                    }
+                    indices[datagram.index as usize] = true;
+                    if !matches!(datagram.command, Command::Lwr | Command::Lrw) {
+                        continue;
+                    }
+                    for motion in motion_plan.datagrams() {
+                        if writable_overlap(datagram, motion) {
+                            return Err(AuxiliaryOutputPlanError::OverlappingWrite(
+                                entry.id,
+                                motion_domain_id,
+                            ));
+                        }
+                    }
+                    for earlier in entry.plans.plans().iter().flat_map(|plan| plan.datagrams()) {
+                        if earlier.index != datagram.index && writable_overlap(datagram, earlier) {
+                            return Err(AuxiliaryOutputPlanError::OverlappingWrite(
+                                entry.id, entry.id,
+                            ));
+                        }
+                    }
+                    for prior in entries[..slot].iter().flatten() {
+                        for earlier in prior.plans.plans().iter().flat_map(|plan| plan.datagrams())
+                        {
+                            if writable_overlap(datagram, earlier) {
+                                return Err(AuxiliaryOutputPlanError::OverlappingWrite(
+                                    entry.id, prior.id,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            schedule,
+            motion_domain_id,
+            motion_plan: *motion_plan,
+            entries,
+        })
+    }
+
+    fn submit_due<P: EthercatPort, const SLOTS: usize, const MTU: usize>(
+        &self,
+        cycle: u64,
+        master: &mut EthercatMaster<SLOTS, MTU>,
+        port: &mut P,
+        generation: u16,
+        rx_deadline_ns: u64,
+        cycle_deadline_ns: Option<u64>,
+    ) -> AuxiliaryOutputReport<P::Error> {
+        let due = self
+            .schedule
+            .due_mask(((cycle - 1) % u64::from(self.schedule.hyperperiod_ticks())) as u32);
+        let mut sent_frames = 0;
+        for entry in self.entries.iter().flatten() {
+            if due & (1u64 << entry.id) == 0 {
+                continue;
+            }
+            for (frame_index, plan) in entry.plans.plans().iter().enumerate() {
+                let now_ns = port.now_ns();
+                let result = if now_ns >= rx_deadline_ns
+                    || cycle_deadline_ns.is_some_and(|deadline| now_ns >= deadline)
+                {
+                    Err(StopFrameError::InvalidDeadline)
+                } else {
+                    master.reap_expired_rx_before_tx(now_ns);
+                    match master.acquire_frame(generation, rx_deadline_ns) {
+                        Err(error) => Err(StopFrameError::FramePool(error)),
+                        Ok(handle) => {
+                            match master.build_and_arm_frame_from_plan(handle, plan, entry.image) {
+                                Err(error) => {
+                                    let _ = master.release_unarmed_frame(handle);
+                                    Err(StopFrameError::Build(error))
+                                }
+                                Ok(_) => master
+                                    .submit_frame(port, handle)
+                                    .map_err(StopFrameError::Transmit),
+                            }
+                        }
+                    }
+                };
+                if let Err(error) = result {
+                    return AuxiliaryOutputReport {
+                        sent_frames,
+                        failure: Some(AuxiliaryOutputFailure {
+                            domain_id: entry.id,
+                            frame_index,
+                            error,
+                        }),
+                    };
+                }
+                sent_frames += 1;
+            }
+        }
+        AuxiliaryOutputReport {
+            sent_frames,
+            failure: None,
+        }
+    }
+}
+
+fn writable_overlap(
+    left: &esop_ethercat_core::DatagramPlan,
+    right: &esop_ethercat_core::DatagramPlan,
+) -> bool {
+    matches!(right.command, Command::Lwr | Command::Lrw)
+        && left.address < right.address.saturating_add(right.payload_len as u32)
+        && right.address < left.address.saturating_add(left.payload_len as u32)
 }
 
 /// All non-CiA 402 outputs in `safe_process_image` must be independently
@@ -264,11 +484,48 @@ impl<
         )
     }
 
+    /// Submit each due safe auxiliary Domain before considering active motion
+    /// output. An auxiliary failure stops remaining auxiliary TX, revokes
+    /// motion authority, and still attempts the motion Domain's stop frame.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_scheduled_with_outputs_until<const SCHEDULE_SLOTS: usize, const FRAMES: usize>(
+        &mut self,
+        schedule: &ScheduleTable<DOMAINS, SCHEDULE_SLOTS>,
+        domains: &[ScheduledDomainQuality; DOMAINS],
+        motion_domain_id: u8,
+        outputs: &ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
+        targets: &[Option<Cia402Target>; AXES],
+        guards: &mut [CyclicSetpointGuard; AXES],
+        limits: &[CyclicLimits; AXES],
+        cycle_deadline_ns: u64,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        self.run_inner_with_outputs(
+            Some((schedule, domains, motion_domain_id)),
+            Some(MotionInputs {
+                targets,
+                guards,
+                limits,
+            }),
+            Some(cycle_deadline_ns),
+            Some(outputs),
+        )
+    }
+
     fn run_inner<const SCHEDULE_SLOTS: usize>(
         &mut self,
         scheduled: Option<ScheduledInputs<'_, DOMAINS, SCHEDULE_SLOTS>>,
         motion: Option<MotionInputs<'_, AXES>>,
         cycle_deadline_ns: Option<u64>,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        self.run_inner_with_outputs::<SCHEDULE_SLOTS, 1>(scheduled, motion, cycle_deadline_ns, None)
+    }
+
+    fn run_inner_with_outputs<const SCHEDULE_SLOTS: usize, const FRAMES: usize>(
+        &mut self,
+        scheduled: Option<ScheduledInputs<'_, DOMAINS, SCHEDULE_SLOTS>>,
+        motion: Option<MotionInputs<'_, AXES>>,
+        cycle_deadline_ns: Option<u64>,
+        outputs: Option<&ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>>,
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
         if self.report.cycle == 0
             || self.state.sequence != self.report.cycle
@@ -317,12 +574,23 @@ impl<
         } else if DOMAINS != 1 {
             return Err(StopCycleError::ScheduleRequired);
         }
+        if let Some(outputs) = outputs {
+            let Some((schedule, _, motion_domain_id)) = scheduled else {
+                return Err(StopCycleError::InvalidAuxiliaryOutputs);
+            };
+            if !core::ptr::eq(outputs.schedule, schedule)
+                || outputs.motion_domain_id != motion_domain_id
+                || outputs.motion_plan != *self.plan
+            {
+                return Err(StopCycleError::InvalidAuxiliaryOutputs);
+            }
+        }
         if cycle_deadline_ns == Some(0) {
             return Err(StopCycleError::InvalidCycleDeadline);
         }
 
         let previous_transition_sequence = self.guard.transition_sequence;
-        let decision_now_ns = cycle_deadline_ns
+        let mut decision_now_ns = cycle_deadline_ns
             .map(|_| self.port.now_ns().max(self.now_ns))
             .unwrap_or(self.now_ns);
         let mut other = self.other;
@@ -348,9 +616,34 @@ impl<
                 other,
             )
         };
+        let mut auxiliary_frames_sent = 0;
+        let mut auxiliary_failure = None;
+        if let Some(outputs) = outputs {
+            // A failed pre-TX deadline must not emit auxiliary outputs either.
+            if quality.cycle_within_budget {
+                let sent = outputs.submit_due(
+                    self.report.cycle,
+                    self.master,
+                    self.port,
+                    self.next_generation,
+                    self.deadline_ns,
+                    cycle_deadline_ns,
+                );
+                auxiliary_frames_sent = sent.sent_frames;
+                auxiliary_failure = sent.failure;
+            }
+            decision_now_ns = self.port.now_ns().max(decision_now_ns);
+            if cycle_deadline_ns.is_some_and(|deadline| decision_now_ns >= deadline) {
+                quality.cycle_within_budget = false;
+                cyclic_quality_to_procbuf(self.state, quality);
+            }
+        }
         self.guard.update_cyclic_quality(quality, self.report.cycle);
         if cycle_deadline_ns.is_some() && !quality.cycle_within_budget {
             self.guard.latch_fault(0x4255_0001, self.report.cycle);
+        }
+        if auxiliary_failure.is_some() {
+            self.guard.latch_fault(0x5458_0002, self.report.cycle);
         }
         let statuswords = core::array::from_fn(|axis| {
             if quality.domain_valid && quality.wkc_valid {
@@ -550,6 +843,8 @@ impl<
         Ok(StopCycleOutcome {
             action,
             active_failure,
+            auxiliary_frames_sent,
+            auxiliary_failure,
             post_tx_deadline_met,
             active_tx_before_deadline_miss,
             quality,
