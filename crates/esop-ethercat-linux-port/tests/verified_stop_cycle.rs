@@ -18,8 +18,9 @@ use esop_lifecycle_guard::procbuf::{
     LifecycleEventCursor, axis_stops_to_procbuf, lifecycle_events_to_procbuf, lifecycle_to_procbuf,
 };
 use esop_lifecycle_guard::stop_cycle::{
-    AuxiliaryOutputEntry, AuxiliaryOutputPlanError, ScheduledAuxiliaryOutputs, StopCycleContext,
-    StopCycleError,
+    AuxiliaryOutputEntry, AuxiliaryOutputPlanError, ScheduledAuxiliaryOutputs,
+    ScheduledProductionCycleError, ScheduledProductionCycleOwner, ScheduledProductionPhase,
+    StopCycleContext, StopCycleError,
 };
 use esop_lifecycle_guard::{
     GateId, GuardPolicy, LifecycleAction, LifecycleError, LifecycleGuard, LifecycleState,
@@ -252,15 +253,20 @@ fn rejected_process_submission_is_bound_to_the_invalidated_receive_cycle() {
     let mut port = SimulatedPort::new(1);
     port.set_now_ns(100_000);
     port.fail_next_tx();
-    let process = bank
+    let mut process = bank
         .submit_due_process_inputs(&inputs, &mut master, &mut port, 1, 150_000, 150_000)
         .unwrap();
     assert_eq!(process.expected_frames, 1);
     assert_eq!(process.sent_frames, 0);
     assert!(process.failure.is_some());
     assert!(process.post_tx_deadline_met);
+    assert!(bank.accepts_process_tx(&inputs, &process));
+    process.rx_deadline_ns = 0;
+    assert!(!bank.accepts_process_tx(&inputs, &process));
+    process.rx_deadline_ns = 150_000;
 
     bank.begin_due(1, 1).unwrap();
+    assert!(!bank.accepts_process_tx(&inputs, &process));
     let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
     let received = master
         .cycle_receive_with_consumer(&mut port, &mut scratch, 1, &mut bank)
@@ -412,6 +418,28 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
     assert_eq!(process.expected_frames, 2);
     assert_eq!(process.sent_frames, 2);
     assert!(process.failure.is_none() && process.post_tx_deadline_met);
+    let mut production = ScheduledProductionCycleOwner::new(&auxiliary_outputs);
+    assert_eq!(
+        production.phase(),
+        ScheduledProductionPhase::PrimingRequired
+    );
+    process.generation = 2;
+    assert_eq!(
+        production.arm_priming(&domain_bank, &process_inputs, &process, 1, 150_000),
+        Err(ScheduledProductionCycleError::ProcessMismatch)
+    );
+    process.generation = 1;
+    let primed = production
+        .arm_priming(&domain_bank, &process_inputs, &process, 1, 150_000)
+        .unwrap();
+    assert_eq!(primed.cycle(), 1);
+    assert_eq!(primed.generation(), 1);
+    assert!(primed.complete());
+    assert_eq!(production.phase(), ScheduledProductionPhase::ReceiveArmed);
+    assert_eq!(
+        production.arm_priming(&domain_bank, &process_inputs, &process, 1, 150_000),
+        Err(ScheduledProductionCycleError::InvalidPhase)
+    );
     let mut dc_image = [0u8; 8];
     let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
     let mut service_cycle = domain_bank
@@ -445,6 +473,13 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
     );
     assert_eq!(service_cycle.request, None);
     assert_eq!(controls.in_use(), 0);
+    service_cycle.receive.received.generation = 2;
+    assert!(!domain_bank.confirms_receive(&service_cycle.receive.received));
+    service_cycle.receive.received.generation = 1;
+    production
+        .complete_mailbox_cycle(&domain_bank, &service_cycle)
+        .unwrap();
+    assert_eq!(production.phase(), ScheduledProductionPhase::OutputPending);
 
     let other = OtherCycleFacts {
         platform_ready: true,
@@ -652,6 +687,20 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         assert_eq!(outcome.state_publish, Ok(1));
         assert_eq!(buffer.read_state().unwrap().state.sequence, 1);
         assert_eq!(context.port.tx_frames(), 6);
+        assert_eq!(
+            production.settle_output(&auxiliary_outputs, &outcome, 249_999),
+            Err(ScheduledProductionCycleError::OutputMismatch)
+        );
+        assert_eq!(production.phase(), ScheduledProductionPhase::OutputPending);
+        let release = production
+            .settle_output(&auxiliary_outputs, &outcome, 250_000)
+            .unwrap();
+        assert!(release.task_released());
+        assert_eq!(release.cycle, 1);
+        assert_eq!(release.next.cycle(), 2);
+        assert_eq!(release.next.generation(), 2);
+        assert_eq!(release.next.sent_frames(), 2);
+        assert_eq!(production.phase(), ScheduledProductionPhase::ReceiveArmed);
     }
     port.inner.set_now_ns(200_000);
     dc.prepare(2, 200_000, &mut dc_image).unwrap();
@@ -2885,12 +2934,17 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
         ],
     )
     .unwrap();
-    let mut port = SimulatedPort::new(1);
+    let mut port = QueuedRxPort {
+        inner: SimulatedPort::new(1),
+        pending: [None; 4],
+        read: 0,
+        written: 0,
+    };
     let safe_image = input_image(0x0040, 0);
     let mut initial_image = [0u8; IMAGE_BYTES + 2];
     initial_image[..IMAGE_BYTES].copy_from_slice(&safe_image);
     initial_image[IMAGE_BYTES..].copy_from_slice(&[0xAB, 0xCD]);
-    port.set_now_ns(100_000);
+    port.inner.set_now_ns(100_000);
     domain_bank.begin_due(1, 1).unwrap();
     let frame = master.acquire_frame(1, 150_000).unwrap();
     master
@@ -3087,14 +3141,14 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
             .unwrap();
         assert_eq!(sent.action, LifecycleAction::EnableAllowed);
         assert!(sent.transmission.is_ok());
-        assert_eq!(sent.auxiliary_frames_sent, 1);
+        assert_eq!(sent.auxiliary_frames_sent, 0);
         assert!(sent.auxiliary_failure.is_none());
         assert!(sent.quality.domain_valid);
         assert_eq!(sent.post_tx_deadline_met, Some(true));
         assert_eq!(sent.state_publish, Ok(1));
     }
 
-    port.set_now_ns(200_000);
+    port.inner.set_now_ns(200_000);
     domain_bank.begin_due(2, 2).unwrap();
     let second = master
         .cycle_receive_with_consumer(&mut port, &mut scratch, 2, &mut domain_bank)
@@ -3104,6 +3158,9 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
     snapshots[1].quality = received[1];
     let mut state = StatePage::<1, 0, 2>::new(7);
     state.sequence = second.cycle;
+    // Cycle 2 must arm the period-2 auxiliary frame for cycle 3. Drop that
+    // response while retaining the following motion response in the queue.
+    port.inner.drop_next_response();
     let idle = StopCycleContext {
         guard: &mut guard,
         bank: &mut bank,
@@ -3139,7 +3196,7 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
     .unwrap();
     assert_eq!(idle.action, LifecycleAction::EnableAllowed);
     assert!(idle.transmission.is_ok());
-    assert_eq!(idle.auxiliary_frames_sent, 0);
+    assert_eq!(idle.auxiliary_frames_sent, 1);
     assert!(idle.quality.domain_valid);
     assert_eq!(idle.post_tx_deadline_met, Some(true));
     assert_eq!(
@@ -3147,7 +3204,7 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
         1
     );
 
-    port.set_now_ns(300_000);
+    port.inner.set_now_ns(300_000);
     domain_bank.begin_due(3, 3).unwrap();
     let third = master
         .cycle_receive_with_consumer(&mut port, &mut scratch, 3, &mut domain_bank)
@@ -3192,7 +3249,7 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
     .unwrap();
     assert!(matches!(failed.action, LifecycleAction::Stop(_)));
     assert!(failed.transmission.is_ok());
-    assert_eq!(failed.auxiliary_frames_sent, 1);
+    assert_eq!(failed.auxiliary_frames_sent, 0);
     assert!(!failed.quality.domain_valid);
     assert_eq!(failed.post_tx_deadline_met, Some(true));
     assert!(guard.permit().is_none());
@@ -3278,7 +3335,7 @@ fn due_auxiliary_output_failure_or_overrun_blocks_active_motion() {
                 },
                 ScheduleDomain {
                     id: 10,
-                    period_ticks: 2,
+                    period_ticks: 1,
                     phase_ticks: 0,
                 },
             ],
@@ -3464,6 +3521,7 @@ fn due_auxiliary_output_failure_or_overrun_blocks_active_motion() {
         assert_eq!(outcome.state_publish, Ok(1));
         let published = buffer.read_state().unwrap().state;
         assert_ne!(published.axis_stops[0].issued_action, 0);
+        assert!(!outcome.process_handoff.unwrap().complete());
         if fail_tx {
             let failure = outcome.auxiliary_failure.unwrap();
             assert_eq!(failure.domain_id, 10);

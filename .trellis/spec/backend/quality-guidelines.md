@@ -282,6 +282,17 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   priming or explicit recovery). In steady state, carry the previous output
   stage into the next release; never resubmit an armed Domain index merely to
   satisfy the ordering API.
+- In the stable scheduled cycle, use `ScheduledProductionCycleOwner` to make
+  `PrimingRequired -> ReceiveArmed -> OutputPending -> ReceiveArmed` explicit.
+  Bind priming to the scheduler's expected generation and RX deadline, then
+  confirm the same generation through the finalized bank report. Schedule
+  auxiliary outputs for the next receive cycle, not the cycle whose inputs
+  were just consumed. The next handoff generation must be exactly the wrapping
+  successor and its RX deadline must equal the scheduler's expected absolute
+  deadline. A partial handoff still owns its accepted RX indices and must be
+  drained; it never authorizes duplicate priming. Release the task only when
+  the handoff is complete, both final deadline observations pass, and State
+  plus lifecycle events were published.
 - Expire in-flight control requests only when `now > deadline`, matching the
   RX index boundary. Retain `Failed(Timeout)` until the matching service FSM
   consumes and releases it, and do not let a late completion erase terminal

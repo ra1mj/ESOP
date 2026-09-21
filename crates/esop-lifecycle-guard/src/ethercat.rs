@@ -821,6 +821,8 @@ mod tests {
     fn process_submission_failure_or_late_stage_clears_budget_fact() {
         let mut process = ScheduledProcessTxReport::<core::convert::Infallible> {
             cycle: 1,
+            generation: 1,
+            rx_deadline_ns: 100,
             due_mask: 1,
             expected_frames: 1,
             sent_frames: 1,

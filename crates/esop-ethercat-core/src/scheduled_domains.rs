@@ -129,11 +129,13 @@ pub struct ScheduledServiceTxReport<E> {
 
 /// Even an RX port error returns a cycle report tied to the real master
 /// cycle. The conservative budget miss blocks motion while retaining the
-/// precise transport error for diagnostics; Domain and DC pending state have
-/// already been finalized so they cannot leak into the next generation.
+/// precise transport error for diagnostics; `generation` is the generation
+/// actually finalized by the bank. Domain and DC pending state have already
+/// been finalized so they cannot leak into the next generation.
 #[derive(Debug)]
 pub struct ScheduledReceiveReport<E, const DOMAINS: usize> {
     pub report: CycleReport,
+    pub generation: u16,
     pub qualities: [DomainQuality; DOMAINS],
     pub dc_result: Result<(), DcCyclicError>,
     pub transport_error: Option<CycleError<E>>,
@@ -247,11 +249,15 @@ pub struct ScheduledProcessTxFailure<E> {
 }
 
 /// Evidence for the process-Domain submission stage preceding DC/control TX.
-/// `expected_frames` is derived from the frozen due mask. A failure identifies
-/// the first frame not accepted by the port; later due frames are not tried.
+/// `generation` and `rx_deadline_ns` identify the future shared RX armed by
+/// this submission. `expected_frames` is derived from the frozen due mask. A
+/// failure identifies the first frame not accepted by the port; later due
+/// frames are not tried.
 #[derive(Debug)]
 pub struct ScheduledProcessTxReport<E> {
     pub cycle: u64,
+    pub generation: u16,
+    pub rx_deadline_ns: u64,
     pub due_mask: u64,
     pub expected_frames: usize,
     pub sent_frames: usize,
@@ -378,6 +384,7 @@ pub struct ScheduledDomainBank<'a, const DOMAINS: usize, const SLOTS: usize> {
     index_owner: [u8; 256],
     active: Option<(u64, u16, u64)>,
     last_cycle: u64,
+    last_generation: u16,
 }
 
 impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAINS, SLOTS> {
@@ -832,6 +839,7 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
             .map_err(ScheduledReceiveError::Domain)?;
         Ok(ScheduledReceiveReport {
             report,
+            generation,
             qualities,
             dc_result,
             transport_error,
@@ -883,6 +891,8 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
             .sum();
         let mut report = ScheduledProcessTxReport {
             cycle,
+            generation,
+            rx_deadline_ns,
             due_mask,
             expected_frames,
             sent_frames: 0,
@@ -948,8 +958,35 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
         if self.active.is_some()
             || self.last_cycle == 0
             || self.last_cycle != report.cycle
+            || self.last_generation != report.generation
             || !core::ptr::eq(self.schedule, inputs.schedule)
         {
+            return false;
+        }
+        self.process_tx_shape_matches(inputs, report)
+    }
+
+    /// Validate a process submission before starting the next shared RX.
+    /// This is used by the production-cycle owner to record initial priming
+    /// without pretending the corresponding receive has already completed.
+    pub fn accepts_process_tx<E, const PROCESS_FRAMES: usize, const DATAGRAMS: usize>(
+        &self,
+        inputs: &ScheduledProcessInputs<'_, DOMAINS, SLOTS, PROCESS_FRAMES, DATAGRAMS>,
+        report: &ScheduledProcessTxReport<E>,
+    ) -> bool {
+        self.active.is_none()
+            && report.cycle != 0
+            && self.last_cycle.checked_add(1) == Some(report.cycle)
+            && core::ptr::eq(self.schedule, inputs.schedule)
+            && self.process_tx_shape_matches(inputs, report)
+    }
+
+    fn process_tx_shape_matches<E, const PROCESS_FRAMES: usize, const DATAGRAMS: usize>(
+        &self,
+        inputs: &ScheduledProcessInputs<'_, DOMAINS, SLOTS, PROCESS_FRAMES, DATAGRAMS>,
+        report: &ScheduledProcessTxReport<E>,
+    ) -> bool {
+        if report.rx_deadline_ns == 0 {
             return false;
         }
         let tick = (report.cycle - 1) % u64::from(self.schedule.hyperperiod_ticks());
@@ -995,6 +1032,7 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
         self.active.is_none()
             && self.last_cycle != 0
             && received.report.cycle == self.last_cycle
+            && received.generation == self.last_generation
             && self
                 .domains
                 .iter()
@@ -1041,6 +1079,7 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
             index_owner,
             active: None,
             last_cycle: 0,
+            last_generation: 0,
         })
     }
 
@@ -1165,6 +1204,7 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
             }
         }
         self.last_cycle = cycle;
+        self.last_generation = generation;
         Ok(core::array::from_fn(|slot| {
             self.domains[slot].domain.quality()
         }))

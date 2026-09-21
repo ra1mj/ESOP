@@ -78,12 +78,109 @@ pub struct StopCycleOutcome<E> {
     /// index may still be armed; `transmission` is that active submission, not
     /// proof that a stop frame was sent. The next cycle must send the stop.
     pub active_tx_before_deadline_miss: bool,
+    /// Exact process frames now owning the next shared RX generation. Present
+    /// only for the scheduled-output entries that can participate in the
+    /// stable production-cycle handoff.
+    pub process_handoff: Option<ScheduledProcessHandoff>,
     pub quality: CyclicQuality,
     pub feedback: Option<StopFeedback>,
     pub acknowledged: bool,
     pub transmission: Result<usize, StopFrameError<E>>,
     pub state_publish: Result<u64, StatePublishError>,
     pub event_publish: Option<Result<usize, LifecycleEventError>>,
+}
+
+/// Immutable evidence that accepted process outputs belong to one future
+/// shared RX cycle. A partial handoff must still be drained by that RX cycle;
+/// it is not permission to resubmit already armed indices.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScheduledProcessHandoff {
+    cycle: u64,
+    generation: u16,
+    rx_deadline_ns: u64,
+    due_mask: u64,
+    expected_frames: usize,
+    sent_frames: usize,
+}
+
+impl ScheduledProcessHandoff {
+    pub const fn cycle(self) -> u64 {
+        self.cycle
+    }
+
+    pub const fn generation(self) -> u16 {
+        self.generation
+    }
+
+    pub const fn rx_deadline_ns(self) -> u64 {
+        self.rx_deadline_ns
+    }
+
+    pub const fn due_mask(self) -> u64 {
+        self.due_mask
+    }
+
+    pub const fn expected_frames(self) -> usize {
+        self.expected_frames
+    }
+
+    pub const fn sent_frames(self) -> usize {
+        self.sent_frames
+    }
+
+    pub const fn complete(self) -> bool {
+        self.sent_frames == self.expected_frames
+    }
+
+    fn from_process_tx<E>(report: &ScheduledProcessTxReport<E>) -> Self {
+        Self {
+            cycle: report.cycle,
+            generation: report.generation,
+            rx_deadline_ns: report.rx_deadline_ns,
+            due_mask: report.due_mask,
+            expected_frames: report.expected_frames,
+            sent_frames: report.sent_frames,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScheduledProductionPhase {
+    PrimingRequired,
+    ReceiveArmed,
+    OutputPending,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScheduledProductionCycleError {
+    InvalidPhase,
+    InvalidBinding,
+    ProcessMismatch,
+    ReceiveMismatch,
+    OutputMismatch,
+}
+
+/// Final settlement of one production task. A cycle can safely advance to
+/// the next RX even when motion was stopped, but task release additionally
+/// requires a complete process handoff, final deadline, State, and event
+/// publication evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScheduledProductionRelease {
+    pub cycle: u64,
+    pub next: ScheduledProcessHandoff,
+    pub process_complete: bool,
+    pub final_deadline_met: bool,
+    pub state_published: bool,
+    pub events_published: bool,
+}
+
+impl ScheduledProductionRelease {
+    pub const fn task_released(self) -> bool {
+        self.process_complete
+            && self.final_deadline_met
+            && self.state_published
+            && self.events_published
+    }
 }
 
 /// A frozen safe image for one non-motion Domain. The caller must prove that
@@ -112,6 +209,8 @@ pub struct AuxiliaryOutputFailure<E> {
 }
 
 struct AuxiliaryOutputReport<E> {
+    due_mask: u64,
+    expected_frames: usize,
     sent_frames: usize,
     failure: Option<AuxiliaryOutputFailure<E>>,
 }
@@ -234,19 +333,17 @@ impl<
 
     fn submit_due<P: EthercatPort, const SLOTS: usize, const MTU: usize>(
         &self,
-        cycle: u64,
+        receive_cycle: u64,
         master: &mut EthercatMaster<SLOTS, MTU>,
         port: &mut P,
         generation: u16,
         rx_deadline_ns: u64,
         cycle_deadline_ns: Option<u64>,
     ) -> AuxiliaryOutputReport<P::Error> {
-        let due = self
-            .schedule
-            .due_mask(((cycle - 1) % u64::from(self.schedule.hyperperiod_ticks())) as u32);
+        let (due_mask, expected_frames) = self.due_summary(receive_cycle);
         let mut sent_frames = 0;
         for entry in self.entries.iter().flatten() {
-            if due & (1u64 << entry.id) == 0 {
+            if due_mask & (1u64 << entry.id) == 0 {
                 continue;
             }
             for (frame_index, plan) in entry.plans.plans().iter().enumerate() {
@@ -274,6 +371,8 @@ impl<
                 };
                 if let Err(error) = result {
                     return AuxiliaryOutputReport {
+                        due_mask,
+                        expected_frames,
                         sent_frames,
                         failure: Some(AuxiliaryOutputFailure {
                             domain_id: entry.id,
@@ -286,9 +385,178 @@ impl<
             }
         }
         AuxiliaryOutputReport {
+            due_mask,
+            expected_frames,
             sent_frames,
             failure: None,
         }
+    }
+
+    fn due_summary(&self, receive_cycle: u64) -> (u64, usize) {
+        let tick = (receive_cycle - 1) % u64::from(self.schedule.hyperperiod_ticks());
+        let due_mask = self.schedule.due_mask(tick as u32);
+        let expected_frames = self
+            .entries
+            .iter()
+            .flatten()
+            .filter(|entry| due_mask & (1u64 << entry.id) != 0)
+            .map(|entry| entry.plans.frame_count())
+            .sum();
+        (due_mask, expected_frames)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScheduledProductionState {
+    PrimingRequired,
+    ReceiveArmed(ScheduledProcessHandoff),
+    OutputPending { cycle: u64, generation: u16 },
+}
+
+/// Fixed-capacity owner for the stable process-cycle handoff. Initial
+/// priming records the only explicit pre-RX submission. Every later receive
+/// consumes the prior lifecycle output and every lifecycle settlement records
+/// the next in-flight generation, preventing duplicate index submission.
+pub struct ScheduledProductionCycleOwner<'a, const DOMAINS: usize, const SCHEDULE_SLOTS: usize> {
+    schedule: &'a ScheduleTable<DOMAINS, SCHEDULE_SLOTS>,
+    state: ScheduledProductionState,
+}
+
+impl<'a, const DOMAINS: usize, const SCHEDULE_SLOTS: usize>
+    ScheduledProductionCycleOwner<'a, DOMAINS, SCHEDULE_SLOTS>
+{
+    pub fn new<const FRAMES: usize, const DATAGRAMS: usize>(
+        outputs: &ScheduledAuxiliaryOutputs<'a, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
+    ) -> Self {
+        Self {
+            schedule: outputs.schedule,
+            state: ScheduledProductionState::PrimingRequired,
+        }
+    }
+
+    pub const fn phase(&self) -> ScheduledProductionPhase {
+        match self.state {
+            ScheduledProductionState::PrimingRequired => ScheduledProductionPhase::PrimingRequired,
+            ScheduledProductionState::ReceiveArmed(_) => ScheduledProductionPhase::ReceiveArmed,
+            ScheduledProductionState::OutputPending { .. } => {
+                ScheduledProductionPhase::OutputPending
+            }
+        }
+    }
+
+    pub const fn in_flight(&self) -> Option<ScheduledProcessHandoff> {
+        match self.state {
+            ScheduledProductionState::ReceiveArmed(handoff) => Some(handoff),
+            _ => None,
+        }
+    }
+
+    pub fn arm_priming<E, const PROCESS_FRAMES: usize, const PROCESS_DATAGRAMS: usize>(
+        &mut self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        inputs: &ScheduledProcessInputs<
+            '_,
+            DOMAINS,
+            SCHEDULE_SLOTS,
+            PROCESS_FRAMES,
+            PROCESS_DATAGRAMS,
+        >,
+        report: &ScheduledProcessTxReport<E>,
+        expected_generation: u16,
+        expected_rx_deadline_ns: u64,
+    ) -> Result<ScheduledProcessHandoff, ScheduledProductionCycleError> {
+        if !matches!(self.state, ScheduledProductionState::PrimingRequired) {
+            return Err(ScheduledProductionCycleError::InvalidPhase);
+        }
+        if !domain_bank.uses_schedule(self.schedule) {
+            return Err(ScheduledProductionCycleError::InvalidBinding);
+        }
+        if report.generation != expected_generation
+            || report.rx_deadline_ns != expected_rx_deadline_ns
+            || !domain_bank.accepts_process_tx(inputs, report)
+        {
+            return Err(ScheduledProductionCycleError::ProcessMismatch);
+        }
+        let handoff = ScheduledProcessHandoff::from_process_tx(report);
+        self.state = ScheduledProductionState::ReceiveArmed(handoff);
+        Ok(handoff)
+    }
+
+    pub fn complete_receive<E>(
+        &mut self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        received: &ScheduledReceiveReport<E, DOMAINS>,
+    ) -> Result<(), ScheduledProductionCycleError> {
+        let ScheduledProductionState::ReceiveArmed(handoff) = self.state else {
+            return Err(ScheduledProductionCycleError::InvalidPhase);
+        };
+        if !domain_bank.uses_schedule(self.schedule) {
+            return Err(ScheduledProductionCycleError::InvalidBinding);
+        }
+        if handoff.cycle != received.report.cycle
+            || handoff.generation != received.generation
+            || !domain_bank.confirms_receive(received)
+        {
+            return Err(ScheduledProductionCycleError::ReceiveMismatch);
+        }
+        self.state = ScheduledProductionState::OutputPending {
+            cycle: handoff.cycle,
+            generation: handoff.generation,
+        };
+        Ok(())
+    }
+
+    pub fn complete_mailbox_cycle<E>(
+        &mut self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        cycle: &ScheduledMailboxCycleReport<E, DOMAINS>,
+    ) -> Result<(), ScheduledProductionCycleError> {
+        self.complete_receive(domain_bank, &cycle.receive.received)
+    }
+
+    pub fn settle_output<E, const FRAMES: usize, const DATAGRAMS: usize>(
+        &mut self,
+        outputs: &ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
+        outcome: &StopCycleOutcome<E>,
+        expected_next_rx_deadline_ns: u64,
+    ) -> Result<ScheduledProductionRelease, ScheduledProductionCycleError> {
+        let ScheduledProductionState::OutputPending { cycle, generation } = self.state else {
+            return Err(ScheduledProductionCycleError::InvalidPhase);
+        };
+        if !core::ptr::eq(self.schedule, outputs.schedule) {
+            return Err(ScheduledProductionCycleError::InvalidBinding);
+        }
+        let Some(handoff) = outcome.process_handoff else {
+            return Err(ScheduledProductionCycleError::OutputMismatch);
+        };
+        let Some(expected_cycle) = cycle.checked_add(1) else {
+            return Err(ScheduledProductionCycleError::OutputMismatch);
+        };
+        let (due_mask, expected_auxiliary_frames) = outputs.due_summary(handoff.cycle);
+        if handoff.cycle != expected_cycle
+            || handoff.generation != generation.wrapping_add(1)
+            || expected_next_rx_deadline_ns == 0
+            || handoff.rx_deadline_ns != expected_next_rx_deadline_ns
+            || handoff.due_mask != due_mask
+            || handoff.expected_frames != expected_auxiliary_frames.saturating_add(1)
+            || handoff.sent_frames > handoff.expected_frames
+        {
+            return Err(ScheduledProductionCycleError::OutputMismatch);
+        }
+
+        let release = ScheduledProductionRelease {
+            cycle,
+            next: handoff,
+            process_complete: handoff.complete(),
+            final_deadline_met: outcome.post_tx_deadline_met == Some(true)
+                && outcome.post_publication_deadline_met == Some(true),
+            state_published: outcome.state_publish.is_ok()
+                && outcome.deadline_correction_publish.is_none(),
+            events_published: matches!(outcome.event_publish, Some(Ok(_)))
+                && outcome.deadline_correction_events.is_none(),
+        };
+        self.state = ScheduledProductionState::ReceiveArmed(handoff);
+        Ok(release)
     }
 }
 
@@ -499,9 +767,10 @@ impl<
         )
     }
 
-    /// Submit each due safe auxiliary Domain before considering active motion
-    /// output. An auxiliary failure stops remaining auxiliary TX, revokes
-    /// motion authority, and still attempts the motion Domain's stop frame.
+    /// Submit each safe auxiliary Domain due for the next shared RX before
+    /// considering active motion output. An auxiliary failure stops remaining
+    /// auxiliary TX, revokes motion authority, and still attempts the motion
+    /// Domain's stop frame.
     #[allow(clippy::too_many_arguments)]
     pub fn run_scheduled_with_outputs_until<const SCHEDULE_SLOTS: usize, const FRAMES: usize>(
         &mut self,
@@ -790,6 +1059,16 @@ impl<
                 return Err(StopCycleError::InvalidAuxiliaryOutputs);
             }
         }
+        let next_receive_cycle = if outputs.is_some() {
+            Some(
+                self.report
+                    .cycle
+                    .checked_add(1)
+                    .ok_or(StopCycleError::CycleMismatch)?,
+            )
+        } else {
+            None
+        };
         if cycle_deadline_ns == Some(0) {
             return Err(StopCycleError::InvalidCycleDeadline);
         }
@@ -823,17 +1102,27 @@ impl<
         };
         let mut auxiliary_frames_sent = 0;
         let mut auxiliary_failure = None;
+        let mut process_due_mask = 0;
+        let mut expected_auxiliary_frames = 0;
         if let Some(outputs) = outputs {
+            let Some(receive_cycle) = next_receive_cycle else {
+                return Err(StopCycleError::InvalidAuxiliaryOutputs);
+            };
+            let (due_mask, expected_frames) = outputs.due_summary(receive_cycle);
+            process_due_mask = due_mask;
+            expected_auxiliary_frames = expected_frames;
             // A failed pre-TX deadline must not emit auxiliary outputs either.
             if quality.cycle_within_budget {
                 let sent = outputs.submit_due(
-                    self.report.cycle,
+                    receive_cycle,
                     self.master,
                     self.port,
                     self.next_generation,
                     self.deadline_ns,
                     cycle_deadline_ns,
                 );
+                debug_assert_eq!(sent.due_mask, process_due_mask);
+                debug_assert_eq!(sent.expected_frames, expected_auxiliary_frames);
                 auxiliary_frames_sent = sent.sent_frames;
                 auxiliary_failure = sent.failure;
             }
@@ -1098,6 +1387,14 @@ impl<
         } else {
             None
         };
+        let process_handoff = next_receive_cycle.map(|cycle| ScheduledProcessHandoff {
+            cycle,
+            generation: self.next_generation,
+            rx_deadline_ns: self.deadline_ns,
+            due_mask: process_due_mask,
+            expected_frames: expected_auxiliary_frames.saturating_add(1),
+            sent_frames: auxiliary_frames_sent + usize::from(transmission.is_ok()),
+        });
         Ok(StopCycleOutcome {
             action,
             active_failure,
@@ -1108,6 +1405,7 @@ impl<
             deadline_correction_publish,
             deadline_correction_events,
             active_tx_before_deadline_miss,
+            process_handoff,
             quality,
             feedback,
             acknowledged,
