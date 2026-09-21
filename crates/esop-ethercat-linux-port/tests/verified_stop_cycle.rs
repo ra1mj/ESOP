@@ -544,6 +544,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
 struct AdvancingTxPort<'a> {
     inner: &'a mut SimulatedPort,
     tx_duration_ns: u64,
+    late_after_events: Option<(&'a ProcBuf<1, 0, 1, 8>, u64)>,
 }
 
 impl EthercatPort for AdvancingTxPort<'_> {
@@ -554,7 +555,9 @@ impl EthercatPort for AdvancingTxPort<'_> {
     }
 
     fn now_ns(&self) -> u64 {
-        self.inner.now_ns()
+        self.late_after_events
+            .filter(|(buffer, _)| buffer.pending_events() != 0)
+            .map_or_else(|| self.inner.now_ns(), |(_, late)| late)
     }
 
     fn tx_submit(&mut self, frame: &[u8]) -> Result<(), Self::Error> {
@@ -573,11 +576,12 @@ impl EthercatPort for AdvancingTxPort<'_> {
 
 #[test]
 fn checked_cycle_records_deadline_after_tx_without_claiming_a_stop_was_sent() {
-    for (final_deadline_ns, tx_duration_ns, failed_active_tx, expected_active_tx) in [
-        (100_000, 0, false, false),
-        (105_000, 10_000, false, true),
-        (115_000, 10_000, true, false),
-        (120_000, 0, false, false),
+    for (final_deadline_ns, tx_duration_ns, failed_active_tx, expected_active_tx, late_events) in [
+        (100_000, 0, false, false, false),
+        (105_000, 10_000, false, true, false),
+        (115_000, 10_000, true, false, false),
+        (120_000, 0, false, false, false),
+        (120_000, 0, false, true, true),
     ] {
         let mut master = EthercatMaster::<1, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
             [0xFF; 6],
@@ -669,6 +673,7 @@ fn checked_cycle_records_deadline_after_tx_without_claiming_a_stop_was_sent() {
         let mut timed_port = AdvancingTxPort {
             inner: &mut port,
             tx_duration_ns,
+            late_after_events: late_events.then_some((&buffer, final_deadline_ns)),
         };
         {
             let mut context = StopCycleContext {
@@ -709,8 +714,20 @@ fn checked_cycle_records_deadline_after_tx_without_claiming_a_stop_was_sent() {
                 Some(final_deadline_ns == 120_000)
             );
             assert_eq!(result.state_publish, Ok(1));
+            assert_eq!(
+                result.post_publication_deadline_met,
+                Some(final_deadline_ns == 120_000 && !late_events)
+            );
+            assert_eq!(
+                result.deadline_correction_publish,
+                late_events.then_some(Ok(2))
+            );
+            assert_eq!(
+                result.deadline_correction_events,
+                late_events.then_some(Ok(1))
+            );
             assert_eq!(context.port.inner.tx_frames(), 2);
-            if final_deadline_ns == 120_000 {
+            if final_deadline_ns == 120_000 && !late_events {
                 assert_eq!(result.action, LifecycleAction::EnableAllowed);
                 assert!(context.guard.permit().is_some());
             } else {
@@ -734,6 +751,33 @@ fn checked_cycle_records_deadline_after_tx_without_claiming_a_stop_was_sent() {
                     context.state.axis_stops[0].issued_action != 0,
                     !expected_active_tx
                 );
+                if late_events {
+                    let corrected = buffer.read_state().unwrap();
+                    assert_eq!(corrected.publish_sequence, 2);
+                    assert_eq!(
+                        corrected.state.lifecycle.state,
+                        LifecycleState::Stopping as u8
+                    );
+                    assert!(
+                        !corrected
+                            .state
+                            .quality
+                            .cyclic
+                            .good(QualityFact::CycleBudget)
+                    );
+                    assert_eq!(corrected.state.axis_stops[0].issued_action, 0);
+                    let mut last_event = None;
+                    while let Some(event) = buffer.pop_event() {
+                        last_event = Some(event);
+                    }
+                    let correction_event = last_event.expect("late stop transition must be sent");
+                    assert_eq!(
+                        correction_event.sequence,
+                        context.guard.transition_sequence()
+                    );
+                    assert_eq!(correction_event.timestamp_ns, final_deadline_ns);
+                    assert_eq!(correction_event.code, 2);
+                }
             }
         }
         if expected_active_tx {
@@ -746,6 +790,7 @@ fn checked_cycle_records_deadline_after_tx_without_claiming_a_stop_was_sent() {
             let mut timed_stop_port = AdvancingTxPort {
                 inner: &mut port,
                 tx_duration_ns: 40_000,
+                late_after_events: None,
             };
             let sent = StopCycleContext {
                 guard: &mut guard,
@@ -3206,6 +3251,7 @@ fn due_auxiliary_output_failure_or_overrun_blocks_active_motion() {
         let mut timed_port = AdvancingTxPort {
             inner: &mut port,
             tx_duration_ns,
+            late_after_events: None,
         };
         let outcome = StopCycleContext {
             guard: &mut guard,

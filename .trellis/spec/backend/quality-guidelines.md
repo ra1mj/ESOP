@@ -128,9 +128,14 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   permit and publish a blocked budget gate, Stopping, and an unissued stop
   request in that same cycle. The old TX may still own its RX index: report
   that active TX truthfully and send the stop once the next cycle can reuse
-  the index. Never treat a post-TX observation as the final full-cycle
-  deadline; State/event publication and any other Domain TX remain the
-  complete cycle owner's responsibility.
+  the index. Also sample after State/event publication attempts. If the
+  publication crossed the deadline, revoke the permit, block the budget,
+  stage an unissued stop request for any accepted active TX, and try a
+  corrected State before emitting newly pending events. Report both initial
+  and corrective publication errors explicitly; an already published Active
+  snapshot or event cannot be retracted, even when correction succeeds. The
+  full-cycle owner must handle corrective failure and include remaining TX,
+  scheduling, and hardware timing in its own qualification.
 - Freeze per-axis stop selections in `AxisStopPolicy` at guard construction.
   Assemble all axis outputs from one borrowed `cycle_axes` decision, use the
   originally armed mask for stop requests, and force every other axis to

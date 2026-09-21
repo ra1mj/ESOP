@@ -61,7 +61,16 @@ pub struct StopCycleOutcome<E> {
     /// `None` for caller-owned deadline facts; checked entries sample the port
     /// after TX and before publishing State/events.
     pub post_tx_deadline_met: Option<bool>,
-    /// An active frame was accepted before a post-TX miss was observed. Its RX
+    /// Checked entries sample again after attempting State and event publication.
+    /// An overrun here revokes motion authority and attempts a corrected State.
+    /// It cannot retract a previously published optimistic State snapshot.
+    pub post_publication_deadline_met: Option<bool>,
+    /// Result of the corrective State publication, only attempted when a new
+    /// deadline miss is first observed after State/event publication.
+    pub deadline_correction_publish: Option<Result<u64, StatePublishError>>,
+    /// Corrective events are attempted only after the corrected State succeeds.
+    pub deadline_correction_events: Option<Result<usize, LifecycleEventError>>,
+    /// An active frame was accepted before a deadline miss was observed. Its RX
     /// index may still be armed; `transmission` is that active submission, not
     /// proof that a stop frame was sent. The next cycle must send the stop.
     pub active_tx_before_deadline_miss: bool,
@@ -364,7 +373,8 @@ impl<
 
     /// As `run`, with an absolute deadline on the same monotonic clock as the
     /// port. A miss before TX inhibits output; a miss during TX faults before
-    /// State publication. This does not measure subsequent event publication.
+    /// State publication. A miss after publication attempts a correction, but
+    /// cannot revoke a snapshot already observed by a concurrent reader.
     pub fn run_until(
         &mut self,
         cycle_deadline_ns: u64,
@@ -890,12 +900,68 @@ impl<
         let event_publish = state_publish.as_ref().ok().map(|_| {
             lifecycle_events_to_procbuf(self.guard, self.buffer, self.event_cursor, publish_now_ns)
         });
+        let mut deadline_correction_publish = None;
+        let mut deadline_correction_events = None;
+        let post_publication_deadline_met = if let Some(deadline) = cycle_deadline_ns {
+            let final_now_ns = self.port.now_ns().max(publish_now_ns);
+            if final_now_ns >= deadline && quality.cycle_within_budget {
+                quality.cycle_within_budget = false;
+                cyclic_quality_to_procbuf(self.state, quality);
+                self.guard
+                    .update_gate(GateId::Budget, false, self.report.cycle, 0x4255_0001);
+                self.guard.latch_fault(0x4255_0001, self.report.cycle);
+                if matches!(action, LifecycleAction::EnableAllowed) && transmission.is_ok() {
+                    active_tx_before_deadline_miss = true;
+                    let stop_decision = self.guard.cycle_axes(self.report.cycle, final_now_ns);
+                    action = stop_decision.action();
+                    let stop_outputs = step_axis_bank(
+                        self.bank,
+                        &stop_decision,
+                        statuswords,
+                        [DriveRequest::Disable; AXES],
+                    );
+                    // No stop frame was sent: record the request, not issuance.
+                    axis_stops_to_procbuf(self.state, &stop_decision, &stop_outputs, None)
+                        .map_err(StopCycleError::Evidence)?;
+                } else if matches!(action, LifecycleAction::Hold) {
+                    action = self
+                        .guard
+                        .cycle_axes(self.report.cycle, final_now_ns)
+                        .action();
+                }
+                self.state.lifecycle = lifecycle_to_procbuf(
+                    self.guard.snapshot(self.report.cycle, final_now_ns),
+                    if self.guard.transition_sequence != self.state.lifecycle.transition_sequence {
+                        final_now_ns
+                    } else {
+                        self.state.lifecycle.transition_time_ns
+                    },
+                );
+                self.state.monotonic_time_ns = final_now_ns;
+                let corrected = self.buffer.publish_state(*self.state);
+                deadline_correction_events = corrected.as_ref().ok().map(|_| {
+                    lifecycle_events_to_procbuf(
+                        self.guard,
+                        self.buffer,
+                        self.event_cursor,
+                        final_now_ns,
+                    )
+                });
+                deadline_correction_publish = Some(corrected);
+            }
+            Some(quality.cycle_within_budget && final_now_ns < deadline)
+        } else {
+            None
+        };
         Ok(StopCycleOutcome {
             action,
             active_failure,
             auxiliary_frames_sent,
             auxiliary_failure,
             post_tx_deadline_met,
+            post_publication_deadline_met,
+            deadline_correction_publish,
+            deadline_correction_events,
             active_tx_before_deadline_miss,
             quality,
             feedback,

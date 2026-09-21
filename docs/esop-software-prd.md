@@ -331,6 +331,8 @@ R2 控制服务 RX 接线增量：`receive_with_dc_and_control` 已在本次 RX�
 
 R2 接收结果与输出绑定增量：`StopCycleContext::run_received_with_outputs_until` 在发送辅助或运动帧之前，核对共享 RX 报告是否属于当前 `ScheduledDomainBank` 刚结束的周期、真实 Domain 质量、当前主站报告、运动 Domain 实例及 DC 收尾结果，并按冻结调度顺序生成生命周期质量快照。模拟集成测试让运动 Domain、IO Domain、DC 和控制请求在同一次共享 RX 完成，随后发送到期辅助与运动输出；修改报告质量或周期均在新 TX 前拒绝。下一周期即使运动 Domain 正常，到期 IO 与 DC 缺帧仍撤销许可并进入停止，旧报告不可复用。此入口仍依赖外层提供非总线安全事实、DC/控制 TX、安全镜像及 State/事件发布后的最终周期 deadline；并非完整生产周期所有者，也不替代双厂商伺服与 IO 实物 HIL 资格。
 
+R2 发布后 deadline 观测增量：受检输出入口在首次 State/事件发布尝试结束后再次采样端口单调时钟，单独返回 `post_publication_deadline_met`。若 TX 后仍在预算内、发布后才越界，则同周期撤销许可、锁存预算故障、清除 CycleBudget 质量并尝试第二次发布更正 State，再发送新转换事件；`deadline_correction_publish` / `deadline_correction_events` 将更正失败显式暴露，已接受的活动帧不会冒充停机帧。此前首次 State 或 Active 事件可能已经被并发读者观测，无法撤回；消费者不能单靠首次发布判定整个周期合格。外层周期所有者仍须管理全部 DC/控制发送、非总线安全事实与任务释放、对更正失败执行安全升级，并完成真实目标平台的 WCET/截止时间资格验证。因此本增量仅补充观测和补救，不宣称全周期原子发布或满足 R2 出口。
+
 ### 11.1 发布阻塞条件
 
 任何发布候选必须满足：

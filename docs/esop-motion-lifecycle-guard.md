@@ -290,7 +290,7 @@ ProcBuf ABI v4 在 State 页增加固定容量的 `axis_stops[AXES]`：`request_
 
 新增受检的共享 RX 到输出路径：`run_received_with_outputs_until` 从同一 `ScheduledDomainBank` 刚结束的接收报告生成冻结顺序的 Domain 质量，检查报告周期、当前 Domain 实际质量、运动 Domain 身份和 DC 收尾结果，然后才允许生命周期门槛决策和到期辅助/运动 TX。软件模拟验证运动与 IO Domain、DC、控制请求同周期完成，错误报告在发送前失败；后续周期的到期 IO/DC 缺帧撤销运动许可、进入停止，旧报告无法复用。外部事实、DC/控制 TX、发布完成后的 deadline 和实物 HIL 仍由上层周期所有者负责。
 
-可选的 `run_until` / `run_with_motion_until` 及对应 `run_scheduled_until` / `run_scheduled_with_motion_until` 接收**当前周期**的绝对 deadline（与下一代帧的 RX `deadline_ns` 不同），用端口单调时钟检查发送前及最后一次 TX 尝试后、State 发布前的时间。发送前超时禁止活动输出并请求停机；活动帧虽提交成功但 TX 后超时时，本周期立刻撤销 permit、使预算门槛失效、发布 Stopping 和未发出的停机请求。`post_tx_deadline_met=false` 与 `active_tx_before_deadline_miss=true` 明确标出此帧**仍是活动帧**，不可伪造停机控制字已发送的证明；该帧可能仍占有 RX 索引，下周期收妥或过期后才可提交停机帧。该检查无法覆盖 State/事件发布、其他 Domain TX 和任务释放，因此不能作为整个生产周期的最终 deadline 判定；周期所有者仍须负责其余工作和资格证明。
+可选的 `run_until` / `run_with_motion_until` 及对应 `run_scheduled_until` / `run_scheduled_with_motion_until` 接收**当前周期**的绝对 deadline（与下一代帧的 RX `deadline_ns` 不同），用端口单调时钟检查发送前及最后一次 TX 尝试后、State 发布前的时间。发送前超时禁止活动输出并请求停机；活动帧虽提交成功但 TX 后超时时，本周期立刻撤销 permit、使预算门槛失效、发布 Stopping 和未发出的停机请求。`post_tx_deadline_met=false` 与 `active_tx_before_deadline_miss=true` 明确标出此帧**仍是活动帧**，不可伪造停机控制字已发送的证明；该帧可能仍占有 RX 索引，下周期收妥或过期后才可提交停机帧。受检入口还在 State/事件发布尝试后采样时钟，报告 `post_publication_deadline_met`。若此前的 TX 后检查合格而此时越界，锁存预算故障、撤销许可并尝试更正 State 和后续事件；各自的结果由 `deadline_correction_publish`、`deadline_correction_events` 显式暴露，失败需由调用方升级处理。此前的首次 State 和转换事件无法从并发读者或事件队列撤回，更正成功也不是原子事务；尤其不应把首次 Active 快照当作全周期 deadline 的安全证明。外层周期所有者还须覆盖 DC/控制 TX、其他应用工作和任务释放，并在目标硬件上验证最坏执行时间与截止时间，当前分支不是完整生产周期保证。
 
 ## 9. 配置与可观测性
 
