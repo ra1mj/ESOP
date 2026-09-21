@@ -695,6 +695,9 @@ impl MailboxController {
                 if error == ControlError::Timeout {
                     return self.timeout(action, now_ns);
                 }
+                if error == ControlError::TransmitFailed {
+                    return self.retry_or_fail(MailboxError::Control(error), now_ns);
+                }
                 return self.fail(MailboxError::Control(error));
             }
             Some(_) => return Err(MailboxError::Control(ControlError::InvalidState)),

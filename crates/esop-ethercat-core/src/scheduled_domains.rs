@@ -7,6 +7,7 @@ use crate::dc::{DcCyclicError, DcCyclicSync};
 use crate::domain::{Domain, DomainError, DomainQuality, DomainSegment};
 use crate::engine::{CycleError, CycleReport, EthercatMaster, RxConsumerMux, RxDatagramConsumer};
 use crate::frame_pool::FramePoolError;
+use crate::mailbox::{MailboxController, MailboxError, MailboxProgress};
 use crate::plan::{FramePlan, FramePlanSet};
 use crate::port::{EthercatPort, LinkState};
 use crate::rx_index::RxMatch;
@@ -85,6 +86,7 @@ pub enum ScheduledReceiveError {
     DcIndexConflict(u8),
     DcGenerationMismatch,
     ControlIndexConflict(u8),
+    MailboxRequestMismatch,
     Domain(ScheduledDomainError),
 }
 
@@ -138,6 +140,17 @@ pub struct ScheduledReceiveReport<E, const DOMAINS: usize> {
     /// Newly expired control requests, empty for `receive_with_dc`.
     /// Their owners must consume and release the failed requests.
     pub control_expiry: ControlExpiry,
+}
+
+/// A terminal mailbox request is consumed after the shared RX finalizer, so
+/// its service FSM sees the completed response or the precise failure reason.
+/// `mailbox_progress` is None while its request remains Prepared/InFlight or
+/// when no mailbox request was supplied. Its error must not be ignored by the
+/// lifecycle owner when determining non-bus readiness.
+#[derive(Debug)]
+pub struct ScheduledMailboxReceiveReport<E, const DOMAINS: usize> {
+    pub received: ScheduledReceiveReport<E, DOMAINS>,
+    pub mailbox_progress: Option<Result<MailboxProgress, MailboxError>>,
 }
 
 /// Owns the receive borrow for all configured Domains. A single master RX
@@ -213,6 +226,65 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
             master.reap_expired_rx_before_tx(now_ns);
         }
         Ok(received)
+    }
+
+    /// Complete one mailbox request after the common Domain/DC/control RX.
+    /// Check action ownership before starting RX; an unrelated pool handle
+    /// must not fault the mailbox FSM or consume a different service's slot.
+    /// Prepared requests (e.g. skipped after a DC TX failure) remain owned by
+    /// the caller, and an in-flight request is retained until it completes or
+    /// expires. A terminal request is consumed and released by the mailbox.
+    #[allow(clippy::too_many_arguments)]
+    pub fn receive_with_dc_and_mailbox<
+        P: EthercatPort,
+        const FRAMES: usize,
+        const MTU: usize,
+        const REQUESTS: usize,
+    >(
+        &mut self,
+        master: &mut EthercatMaster<FRAMES, MTU>,
+        port: &mut P,
+        scratch: &mut [u8; MAX_ETHERNET_FRAME_LEN],
+        generation: u16,
+        dc: &mut DcCyclicSync,
+        controls: &mut ControlRequestPool<REQUESTS>,
+        mailbox: &mut MailboxController,
+        request: Option<RequestHandle>,
+    ) -> Result<ScheduledMailboxReceiveReport<P::Error, DOMAINS>, ScheduledReceiveError> {
+        if let Some(handle) = request {
+            let action = mailbox
+                .pending()
+                .ok_or(ScheduledReceiveError::MailboxRequestMismatch)?;
+            let item = controls
+                .get(handle)
+                .ok_or(ScheduledReceiveError::MailboxRequestMismatch)?;
+            if item.datagram_index != action.datagram_index
+                || item.generation != action.generation
+                || item.address != action.address
+                || item.operation != action.operation
+                || item.response_length != action.datagram_len()
+                || item.deadline_ns != action.deadline_ns
+                || (matches!(item.state, RequestState::Prepared | RequestState::InFlight)
+                    && (item.payload().len() != action.datagram_len()
+                        || !item.payload().starts_with(action.payload())
+                        || item.payload()[action.payload().len()..]
+                            .iter()
+                            .any(|byte| *byte != 0)))
+            {
+                return Err(ScheduledReceiveError::MailboxRequestMismatch);
+            }
+        }
+        let received =
+            self.receive_with_dc_and_control(master, port, scratch, generation, dc, controls)?;
+        let mailbox_progress = request.and_then(|handle| {
+            let state = controls.get(handle)?.state;
+            matches!(state, RequestState::Complete | RequestState::Failed)
+                .then(|| mailbox.accept_completed(controls, handle, port.now_ns()))
+        });
+        Ok(ScheduledMailboxReceiveReport {
+            received,
+            mailbox_progress,
+        })
     }
 
     /// Submit the DC sample and optionally one prepared control request for

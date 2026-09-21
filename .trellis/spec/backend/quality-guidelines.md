@@ -221,6 +221,17 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   Project both the reported send failure and post-TX deadline into safety
   facts before allowing motion; neither accepted TX nor a previous DC lock
   establishes current-cycle qualification.
+- Use `receive_with_dc_and_mailbox` only with the matching mailbox pending
+  action and request handle. Reject an index/generation/address/operation/
+  length/deadline mismatch, or a changed Prepared/InFlight send payload
+  (including its zero-padded read/write wire area),
+  before RX so a foreign request cannot fault the
+  mailbox FSM. After the common RX finalizes Domain/DC/control, consume only
+  terminal Complete/Failed mailbox requests; keep Prepared or InFlight
+  requests owned by the caller. Preserve both the full RX report and the
+  optional mailbox FSM outcome so callers can project failures into safety
+  facts. A rejected TX may take the configured mailbox retry/delay path, but
+  successful retry is not evidence that current-cycle motion is safe.
 - A successfully submitted frame may still await RX after its frame-pool slot
   or DMA descriptor is recycled. Track the exact indices armed by each frame
   along with its RX generation, and on rejected TX or partial arm failure

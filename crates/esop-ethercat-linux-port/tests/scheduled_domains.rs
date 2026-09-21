@@ -892,30 +892,90 @@ fn mailbox_service_uses_shared_rx_expiry_to_retry_after_a_missing_poll() {
             .build_and_arm_frame_from_plan(frame, &plan, &image)
             .unwrap();
         master.submit_frame(&mut port, frame).unwrap();
-        let received = bank
-            .receive_with_dc_and_control(
+        if tick == 1 {
+            let request = sent.unwrap();
+            let datagram_index = controls.get(request).unwrap().datagram_index;
+            controls.get_mut(request).unwrap().datagram_index = 99;
+            assert!(matches!(
+                bank.receive_with_dc_and_mailbox(
+                    &mut master,
+                    &mut port,
+                    &mut scratch,
+                    7,
+                    &mut dc,
+                    &mut controls,
+                    &mut mailbox,
+                    Some(request),
+                ),
+                Err(ScheduledReceiveError::MailboxRequestMismatch)
+            ));
+            assert_eq!(master.cycle_number(), 0);
+            assert_eq!(dc.pending_generation(), Some(7));
+            controls.get_mut(request).unwrap().datagram_index = datagram_index;
+            controls.get_mut(request).unwrap().payload_mut()[0] ^= 1;
+            assert!(matches!(
+                bank.receive_with_dc_and_mailbox(
+                    &mut master,
+                    &mut port,
+                    &mut scratch,
+                    7,
+                    &mut dc,
+                    &mut controls,
+                    &mut mailbox,
+                    Some(request),
+                ),
+                Err(ScheduledReceiveError::MailboxRequestMismatch)
+            ));
+            assert_eq!(master.cycle_number(), 0);
+            assert_eq!(dc.pending_generation(), Some(7));
+            controls.get_mut(request).unwrap().payload_mut()[0] ^= 1;
+        } else if tick == 2 {
+            let request = sent.unwrap();
+            controls.get_mut(request).unwrap().payload_mut()[0] = 1;
+            assert!(matches!(
+                bank.receive_with_dc_and_mailbox(
+                    &mut master,
+                    &mut port,
+                    &mut scratch,
+                    7,
+                    &mut dc,
+                    &mut controls,
+                    &mut mailbox,
+                    Some(request),
+                ),
+                Err(ScheduledReceiveError::MailboxRequestMismatch)
+            ));
+            assert_eq!(master.cycle_number(), 1);
+            assert_eq!(dc.pending_generation(), Some(7));
+            controls.get_mut(request).unwrap().payload_mut()[0] = 0;
+        }
+        let mailbox_received = bank
+            .receive_with_dc_and_mailbox(
                 &mut master,
                 &mut port,
                 &mut scratch,
                 7,
                 &mut dc,
                 &mut controls,
+                &mut mailbox,
+                sent.or(missing),
             )
             .unwrap();
+        let received = &mailbox_received.received;
         assert_eq!(received.report.cycle, tick);
         assert!(received.qualities[0].valid);
         assert_eq!(received.dc_result, Ok(()));
         assert!(received.transport_error.is_none());
         if tick == 1 {
-            let request = sent.unwrap();
-            assert_eq!(controls.get(request).unwrap().state, RequestState::Complete);
             assert_eq!(
-                mailbox.accept_completed(&mut controls, request, now_ns),
-                Ok(MailboxProgress::Advanced)
+                mailbox_received.mailbox_progress,
+                Some(Ok(MailboxProgress::Advanced))
             );
+            assert_eq!(controls.in_use(), 0);
             assert_eq!(mailbox.phase(), MailboxPhase::Polling);
             assert!(received.control_expiry.is_empty());
         } else if tick == 2 {
+            assert_eq!(mailbox_received.mailbox_progress, None);
             assert!(received.control_expiry.is_empty());
             assert_eq!(
                 controls.get(missing.unwrap()).unwrap().state,
@@ -925,12 +985,8 @@ fn mailbox_service_uses_shared_rx_expiry_to_retry_after_a_missing_poll() {
             let missing = missing.unwrap();
             assert_eq!(received.control_expiry.handles().next(), Some(missing));
             assert_eq!(
-                controls.get(missing).unwrap().last_error(),
-                Some(ControlError::Timeout)
-            );
-            assert_eq!(
-                mailbox.accept_completed(&mut controls, missing, now_ns),
-                Ok(MailboxProgress::RetryScheduled)
+                mailbox_received.mailbox_progress,
+                Some(Ok(MailboxProgress::RetryScheduled))
             );
             assert_eq!(
                 mailbox.last_retry_error(),
@@ -1312,4 +1368,63 @@ fn service_tx_preflights_indices_and_retires_failed_transmissions_in_shared_rx()
     assert_eq!(retired.dc_result, Err(DcCyclicError::MissingResponse));
     assert_eq!(dc.pending_generation(), None);
     controls.release(next).unwrap();
+
+    port.inner.set_now_ns(300_000);
+    let mut config = MailboxConfig::new(0x1000, 32, 0x1100, 32)
+        .with_retry_policy(MailboxRetryPolicy::new(1, 10));
+    config.timeout_ns = 500_000;
+    let mut mailbox = MailboxController::new();
+    mailbox
+        .start(config, 0x1000, 3, 300_000, MailboxProtocol::CoE, &[1])
+        .unwrap();
+    mailbox.next_action(300_000).unwrap().unwrap();
+    let mailbox_request = mailbox.enqueue_pending(&mut controls).unwrap();
+    port.fail_on = 5;
+    let failed_control = bank
+        .submit_dc_and_control(
+            &mut master,
+            &mut port,
+            &mut dc,
+            &mut dc_image,
+            300_000,
+            &mut controls,
+            Some(mailbox_request),
+            3,
+            350_000,
+            350_000,
+        )
+        .unwrap();
+    assert!(failed_control.dc_sent && !failed_control.control_sent);
+    assert!(matches!(
+        failed_control.failure,
+        Some(ScheduledServiceTxFailure::Control(
+            ScheduledServiceFrameError::Transmit(CycleError::Port(PortError::HardwareFault))
+        ))
+    ));
+    let consumed = bank
+        .receive_with_dc_and_mailbox(
+            &mut master,
+            &mut port,
+            &mut scratch,
+            3,
+            &mut dc,
+            &mut controls,
+            &mut mailbox,
+            Some(mailbox_request),
+        )
+        .unwrap();
+    assert_eq!(consumed.received.dc_result, Ok(()));
+    assert_eq!(
+        consumed.mailbox_progress,
+        Some(Ok(MailboxProgress::RetryScheduled))
+    );
+    assert_eq!(
+        mailbox.last_retry_error(),
+        Some(esop_ethercat_core::MailboxError::Control(
+            ControlError::TransmitFailed
+        ))
+    );
+    assert_eq!(controls.in_use(), 0);
+    assert!(mailbox.next_action(300_009).unwrap().is_none());
+    assert!(mailbox.next_action(300_010).unwrap().is_some());
 }
