@@ -1,7 +1,7 @@
 //! Fixed-capacity receive ownership for a frozen multi-rate Domain schedule.
 
 use crate::control::{
-    ControlExpiry, ControlRequestPool, ControlRxConsumer, RequestHandle, RequestState,
+    ControlError, ControlExpiry, ControlRequestPool, ControlRxConsumer, RequestHandle, RequestState,
 };
 use crate::dc::{DcCyclicError, DcCyclicSync};
 use crate::domain::{Domain, DomainError, DomainQuality, DomainSegment};
@@ -153,6 +153,23 @@ pub struct ScheduledMailboxReceiveReport<E, const DOMAINS: usize> {
     pub mailbox_progress: Option<Result<MailboxProgress, MailboxError>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScheduledMailboxTxError {
+    Mailbox(MailboxError),
+    Control(ControlError),
+    Service(ScheduledServiceTxError),
+    RequestMismatch,
+}
+
+/// Carries the mailbox request across cycles until the shared RX owner
+/// consumes it. A None request means no mailbox action was due or a Prepared
+/// request was released because it never reached the wire.
+#[derive(Debug)]
+pub struct ScheduledMailboxTxReport<E> {
+    pub service: ScheduledServiceTxReport<E>,
+    pub request: Option<RequestHandle>,
+}
+
 /// Owns the receive borrow for all configured Domains. A single master RX
 /// session dispatches only verified datagrams to Domains due on this tick.
 /// Use `receive_with_dc` when DC is enabled so a port error cannot skip
@@ -252,25 +269,7 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
         request: Option<RequestHandle>,
     ) -> Result<ScheduledMailboxReceiveReport<P::Error, DOMAINS>, ScheduledReceiveError> {
         if let Some(handle) = request {
-            let action = mailbox
-                .pending()
-                .ok_or(ScheduledReceiveError::MailboxRequestMismatch)?;
-            let item = controls
-                .get(handle)
-                .ok_or(ScheduledReceiveError::MailboxRequestMismatch)?;
-            if item.datagram_index != action.datagram_index
-                || item.generation != action.generation
-                || item.address != action.address
-                || item.operation != action.operation
-                || item.response_length != action.datagram_len()
-                || item.deadline_ns != action.deadline_ns
-                || (matches!(item.state, RequestState::Prepared | RequestState::InFlight)
-                    && (item.payload().len() != action.datagram_len()
-                        || !item.payload().starts_with(action.payload())
-                        || item.payload()[action.payload().len()..]
-                            .iter()
-                            .any(|byte| *byte != 0)))
-            {
+            if !mailbox_request_matches(mailbox, controls, handle) {
                 return Err(ScheduledReceiveError::MailboxRequestMismatch);
             }
         }
@@ -285,6 +284,98 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
             received,
             mailbox_progress,
         })
+    }
+
+    /// Prepare at most one mailbox request and submit it with this cycle's DC
+    /// sample. An existing InFlight request is retained without retransmit.
+    /// A request created here is released on preflight failure. After a valid
+    /// service attempt, any request left Prepared is released and returned as
+    /// None; the mailbox action remains pending and can be re-enqueued. A
+    /// caller-owned request is preserved when preflight returns an error.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_dc_and_mailbox<
+        P: EthercatPort,
+        const FRAMES: usize,
+        const MTU: usize,
+        const REQUESTS: usize,
+    >(
+        &self,
+        master: &mut EthercatMaster<FRAMES, MTU>,
+        port: &mut P,
+        dc: &mut DcCyclicSync,
+        dc_image: &mut [u8],
+        application_time_ns: u64,
+        controls: &mut ControlRequestPool<REQUESTS>,
+        mailbox: &mut MailboxController,
+        request: Option<RequestHandle>,
+        generation: u16,
+        rx_deadline_ns: u64,
+        cycle_deadline_ns: u64,
+    ) -> Result<ScheduledMailboxTxReport<P::Error>, ScheduledMailboxTxError> {
+        let mut created = false;
+        let mut request = if let Some(handle) = request {
+            if !mailbox_request_matches(mailbox, controls, handle)
+                || !matches!(
+                    controls.get(handle).map(|item| item.state),
+                    Some(RequestState::Prepared | RequestState::InFlight)
+                )
+            {
+                return Err(ScheduledMailboxTxError::RequestMismatch);
+            }
+            Some(handle)
+        } else if mailbox
+            .next_action(port.now_ns())
+            .map_err(ScheduledMailboxTxError::Mailbox)?
+            .is_some()
+        {
+            created = true;
+            Some(
+                mailbox
+                    .enqueue_pending(controls)
+                    .map_err(ScheduledMailboxTxError::Control)?,
+            )
+        } else {
+            None
+        };
+        let prepared = request.filter(|handle| {
+            controls
+                .get(*handle)
+                .is_some_and(|item| item.state == RequestState::Prepared)
+        });
+        let service = match self.submit_dc_and_control(
+            master,
+            port,
+            dc,
+            dc_image,
+            application_time_ns,
+            controls,
+            prepared,
+            generation,
+            rx_deadline_ns,
+            cycle_deadline_ns,
+        ) {
+            Ok(report) => report,
+            Err(error) => {
+                if created && let Some(handle) = prepared {
+                    controls
+                        .release(handle)
+                        .map_err(ScheduledMailboxTxError::Control)?;
+                }
+                return Err(ScheduledMailboxTxError::Service(error));
+            }
+        };
+        if let Some(handle) = request {
+            if controls
+                .get(handle)
+                .is_some_and(|item| item.state == RequestState::Prepared)
+            {
+                controls
+                    .release(handle)
+                    .map_err(ScheduledMailboxTxError::Control)?;
+                request = None;
+            }
+        }
+        Ok(ScheduledMailboxTxReport { service, request })
     }
 
     /// Submit the DC sample and optionally one prepared control request for
@@ -672,6 +763,31 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
             self.domains[slot].domain.quality()
         }))
     }
+}
+
+fn mailbox_request_matches<const REQUESTS: usize>(
+    mailbox: &MailboxController,
+    controls: &ControlRequestPool<REQUESTS>,
+    handle: RequestHandle,
+) -> bool {
+    let Some(action) = mailbox.pending() else {
+        return false;
+    };
+    let Some(item) = controls.get(handle) else {
+        return false;
+    };
+    item.datagram_index == action.datagram_index
+        && item.generation == action.generation
+        && item.address == action.address
+        && item.operation == action.operation
+        && item.response_length == action.datagram_len()
+        && item.deadline_ns == action.deadline_ns
+        && (!matches!(item.state, RequestState::Prepared | RequestState::InFlight)
+            || (item.payload().len() == action.datagram_len()
+                && item.payload().starts_with(action.payload())
+                && item.payload()[action.payload().len()..]
+                    .iter()
+                    .all(|byte| *byte == 0)))
 }
 
 fn submit_dc_frame<P: EthercatPort, const FRAMES: usize, const MTU: usize>(

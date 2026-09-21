@@ -5,8 +5,8 @@ use esop_ethercat_core::{
     LinkState, MailboxConfig, MailboxController, MailboxPhase, MailboxProgress, MailboxProtocol,
     MailboxRetryPolicy, MasterConfig, PortError, RegisterOperation, RequestHandle, RequestState,
     RxPoll, RxSlotState, ScheduleDomain, ScheduleTable, ScheduledDomainBank, ScheduledDomainEntry,
-    ScheduledReceiveError, ScheduledServiceFrameError, ScheduledServiceTxError,
-    ScheduledServiceTxFailure,
+    ScheduledMailboxTxError, ScheduledReceiveError, ScheduledServiceFrameError,
+    ScheduledServiceTxError, ScheduledServiceTxFailure,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::ethercat::{
@@ -853,9 +853,9 @@ fn mailbox_service_uses_shared_rx_expiry_to_retry_after_a_missing_poll() {
     let mut controls = ControlRequestPool::<1>::new();
     let mut port = TwoFrameSimPort::new();
     let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
-    let mut image = [0u8; 10];
-    image[..2].copy_from_slice(&[0x40, 0]);
-    let mut plan = FramePlan::<2>::new();
+    let mut domain_image = [0x40, 0];
+    let mut dc_image = [0u8; 10];
+    let mut plan = FramePlan::<1>::new();
     plan.push(DatagramPlan {
         command: Command::Lrw,
         index: 12,
@@ -865,35 +865,38 @@ fn mailbox_service_uses_shared_rx_expiry_to_retry_after_a_missing_poll() {
         expected_wkc: 1,
     })
     .unwrap();
-    plan.push(dc.datagram_plan()).unwrap();
-
-    let mut missing = None;
+    let mut mailbox_request = None;
     for tick in 1..=3u64 {
         let now_ns = tick * 100_000;
         port.set_now_ns(now_ns);
-        dc.prepare(7, now_ns, &mut image).unwrap();
-        let mut sent = None;
-        if tick <= 2 {
-            let action = mailbox.next_action(now_ns).unwrap().unwrap();
-            let request = mailbox.enqueue_pending(&mut controls).unwrap();
-            sent = Some(request);
-            let frame = master.acquire_frame(7, action.deadline_ns).unwrap();
-            master
-                .build_control_request(&mut controls, request, frame)
-                .unwrap();
-            if tick == 2 {
-                port.drop_next_response();
-                missing = Some(request);
-            }
-            master.submit_frame(&mut port, frame).unwrap();
+        if tick == 2 {
+            port.drop_nth_next_response(2);
         }
+        let submitted = bank
+            .submit_dc_and_mailbox(
+                &mut master,
+                &mut port,
+                &mut dc,
+                &mut dc_image,
+                now_ns,
+                &mut controls,
+                &mut mailbox,
+                mailbox_request,
+                7,
+                now_ns + 50_000,
+                now_ns + 50_000,
+            )
+            .unwrap();
+        assert!(submitted.service.dc_sent);
+        assert_eq!(submitted.service.control_sent, tick <= 2);
+        mailbox_request = submitted.request;
         let frame = master.acquire_frame(7, now_ns + 50_000).unwrap();
         master
-            .build_and_arm_frame_from_plan(frame, &plan, &image)
+            .build_and_arm_frame_from_plan(frame, &plan, &domain_image)
             .unwrap();
         master.submit_frame(&mut port, frame).unwrap();
         if tick == 1 {
-            let request = sent.unwrap();
+            let request = mailbox_request.unwrap();
             let datagram_index = controls.get(request).unwrap().datagram_index;
             controls.get_mut(request).unwrap().datagram_index = 99;
             assert!(matches!(
@@ -930,7 +933,7 @@ fn mailbox_service_uses_shared_rx_expiry_to_retry_after_a_missing_poll() {
             assert_eq!(dc.pending_generation(), Some(7));
             controls.get_mut(request).unwrap().payload_mut()[0] ^= 1;
         } else if tick == 2 {
-            let request = sent.unwrap();
+            let request = mailbox_request.unwrap();
             controls.get_mut(request).unwrap().payload_mut()[0] = 1;
             assert!(matches!(
                 bank.receive_with_dc_and_mailbox(
@@ -958,7 +961,7 @@ fn mailbox_service_uses_shared_rx_expiry_to_retry_after_a_missing_poll() {
                 &mut dc,
                 &mut controls,
                 &mut mailbox,
-                sent.or(missing),
+                mailbox_request,
             )
             .unwrap();
         let received = &mailbox_received.received;
@@ -974,15 +977,16 @@ fn mailbox_service_uses_shared_rx_expiry_to_retry_after_a_missing_poll() {
             assert_eq!(controls.in_use(), 0);
             assert_eq!(mailbox.phase(), MailboxPhase::Polling);
             assert!(received.control_expiry.is_empty());
+            mailbox_request = None;
         } else if tick == 2 {
             assert_eq!(mailbox_received.mailbox_progress, None);
             assert!(received.control_expiry.is_empty());
             assert_eq!(
-                controls.get(missing.unwrap()).unwrap().state,
+                controls.get(mailbox_request.unwrap()).unwrap().state,
                 RequestState::InFlight
             );
         } else {
-            let missing = missing.unwrap();
+            let missing = mailbox_request.unwrap();
             assert_eq!(received.control_expiry.handles().next(), Some(missing));
             assert_eq!(
                 mailbox_received.mailbox_progress,
@@ -995,24 +999,30 @@ fn mailbox_service_uses_shared_rx_expiry_to_retry_after_a_missing_poll() {
             assert_eq!(controls.in_use(), 0);
             assert!(mailbox.next_action(now_ns + 9).unwrap().is_none());
             assert!(mailbox.next_action(now_ns + 10).unwrap().is_some());
+            mailbox_request = None;
         }
+        domain_image[0] = domain_image[0].wrapping_add(1);
     }
 }
 
 struct TwoFrameSimPort {
     inner: SimulatedPort,
-    frames: [[u8; MAX_ETHERNET_FRAME_LEN]; 2],
-    lengths: [usize; 2],
+    frames: [[u8; MAX_ETHERNET_FRAME_LEN]; 4],
+    lengths: [usize; 4],
     count: usize,
+    tx_attempts: usize,
+    drop_on_attempt: Option<usize>,
 }
 
 impl TwoFrameSimPort {
     fn new() -> Self {
         Self {
             inner: SimulatedPort::new(1),
-            frames: [[0; MAX_ETHERNET_FRAME_LEN]; 2],
-            lengths: [0; 2],
+            frames: [[0; MAX_ETHERNET_FRAME_LEN]; 4],
+            lengths: [0; 4],
             count: 0,
+            tx_attempts: 0,
+            drop_on_attempt: None,
         }
     }
 
@@ -1021,7 +1031,12 @@ impl TwoFrameSimPort {
     }
 
     fn drop_next_response(&mut self) {
-        self.inner.drop_next_response();
+        self.drop_nth_next_response(1);
+    }
+
+    fn drop_nth_next_response(&mut self, n: usize) {
+        assert!(n > 0);
+        self.drop_on_attempt = Some(self.tx_attempts + n);
     }
 }
 
@@ -1040,6 +1055,11 @@ impl EthercatPort for TwoFrameSimPort {
         if self.count == self.frames.len() {
             return Err(PortError::HardwareFault);
         }
+        self.tx_attempts += 1;
+        if self.drop_on_attempt == Some(self.tx_attempts) {
+            self.inner.drop_next_response();
+            self.drop_on_attempt = None;
+        }
         self.inner.tx_submit(frame)?;
         if let RxPoll::Frame(len) = self.inner.rx_poll(&mut self.frames[self.count])? {
             self.lengths[self.count] = len;
@@ -1057,8 +1077,8 @@ impl EthercatPort for TwoFrameSimPort {
         }
         let len = self.lengths[0];
         scratch[..len].copy_from_slice(&self.frames[0][..len]);
-        self.frames[0] = self.frames[1];
-        self.lengths[0] = self.lengths[1];
+        self.frames.rotate_left(1);
+        self.lengths.rotate_left(1);
         self.count -= 1;
         Ok(RxPoll::Frame(len))
     }
@@ -1377,30 +1397,30 @@ fn service_tx_preflights_indices_and_retires_failed_transmissions_in_shared_rx()
     mailbox
         .start(config, 0x1000, 3, 300_000, MailboxProtocol::CoE, &[1])
         .unwrap();
-    mailbox.next_action(300_000).unwrap().unwrap();
-    let mailbox_request = mailbox.enqueue_pending(&mut controls).unwrap();
     port.fail_on = 5;
     let failed_control = bank
-        .submit_dc_and_control(
+        .submit_dc_and_mailbox(
             &mut master,
             &mut port,
             &mut dc,
             &mut dc_image,
             300_000,
             &mut controls,
-            Some(mailbox_request),
+            &mut mailbox,
+            None,
             3,
             350_000,
             350_000,
         )
         .unwrap();
-    assert!(failed_control.dc_sent && !failed_control.control_sent);
+    assert!(failed_control.service.dc_sent && !failed_control.service.control_sent);
     assert!(matches!(
-        failed_control.failure,
+        failed_control.service.failure,
         Some(ScheduledServiceTxFailure::Control(
             ScheduledServiceFrameError::Transmit(CycleError::Port(PortError::HardwareFault))
         ))
     ));
+    let mailbox_request = failed_control.request.unwrap();
     let consumed = bank
         .receive_with_dc_and_mailbox(
             &mut master,
@@ -1427,4 +1447,79 @@ fn service_tx_preflights_indices_and_retires_failed_transmissions_in_shared_rx()
     assert_eq!(controls.in_use(), 0);
     assert!(mailbox.next_action(300_009).unwrap().is_none());
     assert!(mailbox.next_action(300_010).unwrap().is_some());
+
+    port.inner.set_now_ns(400_000);
+    let mut second_mailbox = MailboxController::new();
+    second_mailbox
+        .start(config, 0x1000, 4, 400_000, MailboxProtocol::CoE, &[1])
+        .unwrap();
+    second_mailbox.next_action(400_000).unwrap().unwrap();
+    let retained = second_mailbox.enqueue_pending(&mut controls).unwrap();
+    assert!(matches!(
+        bank.submit_dc_and_mailbox(
+            &mut master,
+            &mut port,
+            &mut dc,
+            &mut dc_image,
+            400_000,
+            &mut controls,
+            &mut second_mailbox,
+            Some(retained),
+            5,
+            450_000,
+            450_000,
+        ),
+        Err(ScheduledMailboxTxError::Service(
+            ScheduledServiceTxError::ControlGenerationMismatch
+        ))
+    ));
+    assert_eq!(
+        controls.get(retained).unwrap().state,
+        RequestState::Prepared
+    );
+    controls.release(retained).unwrap();
+    port.fail_on = 6;
+    let failed_dc = bank
+        .submit_dc_and_mailbox(
+            &mut master,
+            &mut port,
+            &mut dc,
+            &mut dc_image,
+            400_000,
+            &mut controls,
+            &mut second_mailbox,
+            None,
+            4,
+            450_000,
+            450_000,
+        )
+        .unwrap();
+    assert!(!failed_dc.service.dc_sent && !failed_dc.service.control_sent);
+    assert!(matches!(
+        failed_dc.service.failure,
+        Some(ScheduledServiceTxFailure::Dc(
+            ScheduledServiceFrameError::Transmit(CycleError::Port(PortError::HardwareFault))
+        ))
+    ));
+    assert_eq!(failed_dc.request, None);
+    assert_eq!(controls.in_use(), 0);
+    assert!(second_mailbox.pending().is_some());
+    let retired = bank
+        .receive_with_dc_and_mailbox(
+            &mut master,
+            &mut port,
+            &mut scratch,
+            4,
+            &mut dc,
+            &mut controls,
+            &mut second_mailbox,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        retired.received.dc_result,
+        Err(DcCyclicError::MissingResponse)
+    );
+    assert_eq!(retired.mailbox_progress, None);
+    assert!(second_mailbox.next_action(400_000).unwrap().is_some());
 }
