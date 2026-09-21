@@ -203,6 +203,13 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   match the request's index and command as well as the master-verified
   response; a frame slot ID alone never identifies its datagram owner.
   The caller still owns control request timeout and service-state progression.
+- After the bounded RX finishes, explicitly expire missing in-flight control
+  requests with the port's monotonic clock. Use the RX index table's strict
+  `now > deadline` boundary, retain `Failed(Timeout)` until the matching
+  service FSM consumes and releases it, and do not let a late completion erase
+  terminal diagnostics. A mailbox send retry must honor its configured delay
+  just like a receive retry; never release a foreign failed request as though
+  it belonged to the pending mailbox action.
 - Build slave-to-slave copy plans from an active Domain registry, not ad hoc
   offsets. Bind the source TxPDO, target RxPDO, and target quality RxPDO to
   verified datagram coverage. At the target's scheduled send cycle, accept a

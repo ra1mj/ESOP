@@ -325,6 +325,8 @@ R2 同周期 DC RX 增量：固定容量 `ScheduledDomainBank::receive_with_dc` 
 
 R2 控制 RX 增量：`receive_with_dc_and_control` 在同一有界主站 RX 中接收到期 Domain、DC 与在途控制请求，前置检查拒绝与 Domain/DC 或另一控制请求复用索引。控制请求完成时再次核对数据报索引和命令，防止共享帧槽的无关数据报误投递。固定容量模拟测试覆盖三类同周期响应、仅丢控制响应时请求仍待处理及冲突在接收前拒绝。调用方仍负责控制请求期限、状态机结果与安全事实、DC/控制 TX、最终周期 deadline、实物 HIL；该增量不能视为完成 R2 出口。上述早期阶段的“控制接收未接线”不代表当前状态。
 
+R2 控制超时增量：`ControlRequestPool::expire_in_flight` 在 RX 完成后以单调时间扫描最多 64 个在途请求，仅在 `now_ns > deadline_ns` 时一次性置为 `Failed(Timeout)` 并返回固定容量句柄位图；准时完成、Prepared 和既有失败不被覆盖，迟到响应不得擦除超时诊断。调用方须在主站回收同期限 RX 索引后消费超时句柄，并为每个请求调用所属服务状态机再释放；邮箱 `accept_completed` 已将匹配的超时请求接入现有重试预算，耗尽则锁存 `MailboxError::Timeout`。模拟端验证缺帧、索引回收与请求失败一致。本增量仍需完整周期所有者实际调用超时扫描并推进其他控制服务；安全事实、DC/控制 TX、最终 deadline 与实物 HIL 尚未闭环，R2 出口条件不变。
+
 ### 11.1 发布阻塞条件
 
 任何发布候选必须满足：

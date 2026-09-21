@@ -284,6 +284,8 @@ ProcBuf ABI v4 在 State 页增加固定容量的 `axis_stops[AXES]`：`request_
 
 `receive_with_dc_and_control` 在上述收尾边界中接入在途 `ControlRequestPool`，接收前拒绝控制索引与 Domain、DC 或其他在途控制请求重用，使用同一次有界主站 RX 分发控制响应。控制消费者除了帧槽还核对请求数据报索引/命令；无关数据报不能误完成请求。模拟双帧回归验证控制与 Domain/DC 同周期完成，单独缺失控制响应时请求仍保持 `InFlight`。这不是控制请求的超时与状态机服务：调用方仍须在其期限内判定缺失响应，并负责控制请求发送、业务状态推进与安全事实；本 RX 入口也不提供整周期最终 deadline 或 HIL 证明。上段“其他控制接收”对应前一增量状态。
 
+控制请求池现提供显式 `expire_in_flight(now_ns)`：在主站 RX 结束并完成同期限 RX 索引回收后，以固定 64 槽位图报告新过期请求，仅对超过而非等于期限的 `InFlight` 请求置 `Failed`，保留 `ControlError::Timeout` 诊断与原请求内容。扫描重复调用不重报；迟到的直接完成与 RX 消费均不可覆盖终态。调用者迭代返回句柄并将失败交给对应服务状态机，随后释放请求；邮箱 `accept_completed` 会核对动作身份并将超时导入原有的重试/耗尽路径。该接口没有自行调度或发送控制请求，其他服务状态机仍需调用者推进；完整周期所有者、安全事实、最终 deadline 和实物 HIL 均未因此完成。
+
 可选的 `run_until` / `run_with_motion_until` 及对应 `run_scheduled_until` / `run_scheduled_with_motion_until` 接收**当前周期**的绝对 deadline（与下一代帧的 RX `deadline_ns` 不同），用端口单调时钟检查发送前及最后一次 TX 尝试后、State 发布前的时间。发送前超时禁止活动输出并请求停机；活动帧虽提交成功但 TX 后超时时，本周期立刻撤销 permit、使预算门槛失效、发布 Stopping 和未发出的停机请求。`post_tx_deadline_met=false` 与 `active_tx_before_deadline_miss=true` 明确标出此帧**仍是活动帧**，不可伪造停机控制字已发送的证明；该帧可能仍占有 RX 索引，下周期收妥或过期后才可提交停机帧。该检查无法覆盖 State/事件发布、其他 Domain TX 和任务释放，因此不能作为整个生产周期的最终 deadline 判定；周期所有者仍须负责其余工作和资格证明。
 
 ## 9. 配置与可观测性

@@ -428,11 +428,7 @@ impl MailboxController {
         if now_ns >= self.configuration_deadline_ns {
             return self.fail(MailboxError::Timeout);
         }
-        if matches!(
-            self.phase,
-            MailboxPhase::CheckingStatus | MailboxPhase::Polling
-        ) && now_ns < self.poll_due_ns
-        {
+        if now_ns < self.poll_due_ns {
             return Ok(None);
         }
 
@@ -683,10 +679,21 @@ impl MailboxController {
                 (request.generation, request.actual_wkc, response)
             }
             Some(request) if request.state == RequestState::Failed => {
+                if request.datagram_index != action.datagram_index
+                    || request.generation != action.generation
+                    || request.address != action.address
+                    || request.response_length != action.datagram_len()
+                    || request.deadline_ns != action.deadline_ns
+                {
+                    return self.fail(MailboxError::ActionMismatch);
+                }
                 let error = request.last_error().unwrap_or(ControlError::InvalidState);
                 let _ = pool.release(handle);
                 if error == ControlError::WorkingCounterMismatch {
                     return self.retry_or_fail(MailboxError::UnexpectedWorkingCounter, now_ns);
+                }
+                if error == ControlError::Timeout {
+                    return self.timeout(action, now_ns);
                 }
                 return self.fail(MailboxError::Control(error));
             }
@@ -1061,5 +1068,99 @@ mod tests {
         assert_eq!(pool.in_use(), 0);
         assert_eq!(controller.retry_count(), 1);
         assert_eq!(controller.phase(), MailboxPhase::Sending);
+    }
+
+    #[test]
+    fn expired_control_response_retries_then_faults_without_leaking_pool_slots() {
+        let mut config = MailboxConfig::new(0x1000, 32, 0x1100, 32)
+            .with_retry_policy(MailboxRetryPolicy::new(1, 2));
+        config.request_timeout_ns = 10;
+        config.timeout_ns = 100;
+        let mut controller = MailboxController::new();
+        controller
+            .start(config, 0x1000, 7, 0, MailboxProtocol::CoE, &[1])
+            .unwrap();
+        let mut pool = ControlRequestPool::<1>::new();
+        let mut frame = [0; crate::wire::MAX_ETHERNET_FRAME_LEN];
+
+        let action = controller.next_action(1).unwrap().unwrap();
+        let handle = controller.enqueue_pending(&mut pool).unwrap();
+        pool.build_into_buffer(handle, &mut frame, [0; 6], [0; 6])
+            .unwrap();
+        assert!(pool.expire_in_flight(action.deadline_ns).is_empty());
+        let expiry = pool.expire_in_flight(action.deadline_ns + 1);
+        assert_eq!(expiry.handles().next(), Some(handle));
+        assert_eq!(
+            pool.get(handle).unwrap().last_error(),
+            Some(ControlError::Timeout)
+        );
+        assert_eq!(
+            controller.accept_completed(&mut pool, handle, action.deadline_ns + 1),
+            Ok(MailboxProgress::RetryScheduled)
+        );
+        assert_eq!(pool.in_use(), 0);
+        assert_eq!(controller.last_retry_error(), Some(MailboxError::Timeout));
+        assert_eq!(controller.retry_count(), 1);
+        assert!(
+            controller
+                .next_action(action.deadline_ns + 2)
+                .unwrap()
+                .is_none()
+        );
+
+        let retry = controller
+            .next_action(action.deadline_ns + 3)
+            .unwrap()
+            .unwrap();
+        let retry_handle = controller.enqueue_pending(&mut pool).unwrap();
+        pool.build_into_buffer(retry_handle, &mut frame, [0; 6], [0; 6])
+            .unwrap();
+        assert_eq!(pool.expire_in_flight(retry.deadline_ns + 1).count(), 1);
+        assert_eq!(
+            controller.accept_completed(&mut pool, retry_handle, retry.deadline_ns + 1),
+            Err(MailboxError::Timeout)
+        );
+        assert_eq!(pool.in_use(), 0);
+        assert_eq!(controller.phase(), MailboxPhase::Faulted);
+        assert_eq!(controller.last_error(), Some(MailboxError::Timeout));
+    }
+
+    #[test]
+    fn expired_foreign_control_handle_cannot_advance_or_release_mailbox_action() {
+        let mut config = MailboxConfig::new(0x1000, 32, 0x1100, 32);
+        config.request_timeout_ns = 10;
+        let mut controller = MailboxController::new();
+        controller
+            .start(config, 0x1000, 7, 0, MailboxProtocol::CoE, &[1])
+            .unwrap();
+        let action = controller.next_action(1).unwrap().unwrap();
+        let mut pool = ControlRequestPool::<1>::new();
+        let foreign = pool
+            .acquire(
+                44,
+                7,
+                action.address,
+                action.operation,
+                &[0; 7],
+                action.deadline_ns,
+            )
+            .unwrap();
+        pool.build_into_buffer(
+            foreign,
+            &mut [0; crate::wire::MAX_ETHERNET_FRAME_LEN],
+            [0; 6],
+            [0; 6],
+        )
+        .unwrap();
+        assert_eq!(pool.expire_in_flight(action.deadline_ns + 1).count(), 1);
+        assert_eq!(
+            controller.accept_completed(&mut pool, foreign, action.deadline_ns + 1),
+            Err(MailboxError::ActionMismatch)
+        );
+        assert_eq!(
+            pool.get(foreign).unwrap().last_error(),
+            Some(ControlError::Timeout)
+        );
+        assert_eq!(pool.in_use(), 1);
     }
 }

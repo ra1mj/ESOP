@@ -134,6 +134,9 @@ impl ControlRequest {
         working_counter: u16,
     ) -> Result<(), ControlError> {
         if self.state != RequestState::InFlight {
+            if matches!(self.state, RequestState::Complete | RequestState::Failed) {
+                return Err(ControlError::InvalidState);
+            }
             return self.fail(ControlError::InvalidState);
         }
         if self.generation != generation {
@@ -178,7 +181,46 @@ pub enum ControlError {
     AddressMismatch,
     LengthMismatch,
     WorkingCounterMismatch,
+    Timeout,
     RxIndex(RxIndexError),
+}
+
+/// Handles that became overdue in one bounded control-request sweep. Failed
+/// requests remain owned by the caller until their service FSM consumes them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControlExpiry(u64);
+
+impl ControlExpiry {
+    pub const fn count(self) -> usize {
+        self.0.count_ones() as usize
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub const fn contains(self, handle: RequestHandle) -> bool {
+        self.0 & (1u64 << handle.index()) != 0
+    }
+
+    pub const fn handles(self) -> ControlExpiryHandles {
+        ControlExpiryHandles(self.0)
+    }
+}
+
+pub struct ControlExpiryHandles(u64);
+
+impl Iterator for ControlExpiryHandles {
+    type Item = RequestHandle;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.0 == 0 {
+            return None;
+        }
+        let index = self.0.trailing_zeros() as usize;
+        self.0 &= !(1u64 << index);
+        RequestHandle::from_index(index)
+    }
 }
 
 pub struct ControlRequestPool<const REQUESTS: usize> {
@@ -338,6 +380,27 @@ impl<const REQUESTS: usize> ControlRequestPool<REQUESTS> {
 
     pub const fn in_use(&self) -> usize {
         self.used.count_ones() as usize
+    }
+
+    /// Finalize only missing in-flight responses after the RX owner has
+    /// finished polling. A response received at the deadline is still valid;
+    /// expiry uses the same strict boundary as `RxIndexTable::expire_armed`.
+    /// Call the matching service FSM for each returned handle, then release it.
+    pub fn expire_in_flight(&mut self, now_ns: u64) -> ControlExpiry {
+        let mut expired = 0u64;
+        let mut remaining = self.used;
+        while remaining != 0 {
+            let index = remaining.trailing_zeros() as usize;
+            let bit = 1u64 << index;
+            remaining &= !bit;
+            let request = &mut self.requests[index];
+            if request.state == RequestState::InFlight && now_ns > request.deadline_ns {
+                request.state = RequestState::Failed;
+                request.last_error = Some(ControlError::Timeout);
+                expired |= bit;
+            }
+        }
+        ControlExpiry(expired)
     }
 
     pub fn build_into_buffer(
@@ -529,5 +592,91 @@ mod tests {
         assert_eq!(consumer.rejected(), 0);
         assert_eq!(pool.get(handle).unwrap().state, RequestState::Complete);
         assert_eq!(pool.get(handle).unwrap().payload(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn expiry_is_bounded_once_and_preserves_terminal_requests_and_payloads() {
+        let mut pool = ControlRequestPool::<64>::new();
+        let prepared = pool
+            .acquire(1, 7, 0x1000, RegisterOperation::Read, &[0; 2], 10)
+            .unwrap();
+        let overdue = pool
+            .acquire(2, 7, 0x1001, RegisterOperation::Read, &[0; 2], 10)
+            .unwrap();
+        let on_boundary = pool
+            .acquire(3, 7, 0x1002, RegisterOperation::Read, &[0; 2], 11)
+            .unwrap();
+        let completed = pool
+            .acquire(4, 7, 0x1003, RegisterOperation::Read, &[0; 2], 10)
+            .unwrap();
+        let mut frame = [0; MAX_ETHERNET_FRAME_LEN];
+        for handle in [overdue, on_boundary, completed] {
+            pool.build_into_buffer(handle, &mut frame, [0; 6], [0; 6])
+                .unwrap();
+        }
+        pool.complete(completed, 7, 0x1003, &[8, 9], 1).unwrap();
+
+        assert!(pool.expire_in_flight(10).is_empty());
+        let expired = pool.expire_in_flight(11);
+        assert_eq!(expired.count(), 1);
+        assert_eq!(expired.handles().collect::<std::vec::Vec<_>>(), [overdue]);
+        assert!(expired.contains(overdue));
+        assert!(!expired.contains(on_boundary));
+        assert_eq!(pool.get(prepared).unwrap().state, RequestState::Prepared);
+        assert_eq!(pool.get(overdue).unwrap().state, RequestState::Failed);
+        assert_eq!(
+            pool.get(overdue).unwrap().last_error(),
+            Some(ControlError::Timeout)
+        );
+        assert_eq!(pool.get(overdue).unwrap().payload(), &[0, 0]);
+        assert_eq!(pool.get(completed).unwrap().payload(), &[8, 9]);
+        assert!(pool.expire_in_flight(11).is_empty());
+        assert_eq!(
+            pool.expire_in_flight(12).handles().next(),
+            Some(on_boundary)
+        );
+        assert!(pool.expire_in_flight(20).is_empty());
+        assert_eq!(pool.in_use(), 4);
+
+        let completion = RxMatch {
+            slot_id: overdue.index() as u16,
+            generation: 7,
+            working_counter: 1,
+        };
+        let header = DatagramHeader::new(Command::Fprd, 2, 0x1001, 2);
+        let mut consumer = ControlRxConsumer::new(&mut pool);
+        assert!(!consumer.accept(2, 20, completion, header, &[1, 2]));
+        assert_eq!(consumer.rejected(), 0);
+        assert_eq!(
+            pool.complete_match(completion, header, &[1, 2]),
+            Err(ControlError::InvalidState)
+        );
+        assert_eq!(
+            pool.get(overdue).unwrap().last_error(),
+            Some(ControlError::Timeout)
+        );
+        assert_eq!(pool.get(overdue).unwrap().payload(), &[0, 0]);
+        assert_eq!(
+            pool.complete(completed, 7, 0x1003, &[1, 2], 1),
+            Err(ControlError::InvalidState)
+        );
+        assert_eq!(pool.get(completed).unwrap().payload(), &[8, 9]);
+    }
+
+    #[test]
+    fn expiry_reports_last_pool_slot_without_allocating() {
+        let mut pool = ControlRequestPool::<64>::new();
+        let mut last = None;
+        for index in 0..64 {
+            last = Some(
+                pool.acquire(index, 1, 0x1000, RegisterOperation::Read, &[], 1)
+                    .unwrap(),
+            );
+        }
+        let last = last.unwrap();
+        pool.build_into_buffer(last, &mut [0; MAX_ETHERNET_FRAME_LEN], [0; 6], [0; 6])
+            .unwrap();
+        assert_eq!(last.index(), 63);
+        assert_eq!(pool.expire_in_flight(2).handles().next(), Some(last));
     }
 }

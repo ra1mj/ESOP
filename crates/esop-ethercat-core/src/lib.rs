@@ -43,8 +43,8 @@ pub use coe::{
     SdoResponse, SdoTransfer,
 };
 pub use control::{
-    ControlError, ControlRequest, ControlRequestPool, ControlRxConsumer, MAX_CONTROL_PAYLOAD,
-    RegisterOperation, RequestHandle, RequestState,
+    ControlError, ControlExpiry, ControlExpiryHandles, ControlRequest, ControlRequestPool,
+    ControlRxConsumer, MAX_CONTROL_PAYLOAD, RegisterOperation, RequestHandle, RequestState,
 };
 pub use dc::{
     DC_SYNC_DELAY_NS, DcAction, DcActionKind, DcConfig, DcController, DcCyclicConfig,

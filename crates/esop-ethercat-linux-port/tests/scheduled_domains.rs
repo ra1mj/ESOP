@@ -1,9 +1,10 @@
 use esop_ethercat_core::wire::{Command, MAX_ETHERNET_FRAME_LEN};
 use esop_ethercat_core::{
-    ControlRequestPool, CycleError, DatagramPlan, DcCyclicConfig, DcCyclicError, DcCyclicSync,
-    DcMonitor, Domain, DomainSegment, EthercatMaster, EthercatPort, FramePlan, LinkState,
-    MasterConfig, PortError, RegisterOperation, RequestState, RxPoll, ScheduleDomain,
-    ScheduleTable, ScheduledDomainBank, ScheduledDomainEntry, ScheduledReceiveError,
+    ControlError, ControlRequestPool, CycleError, DatagramPlan, DcCyclicConfig, DcCyclicError,
+    DcCyclicSync, DcMonitor, Domain, DomainSegment, EthercatMaster, EthercatPort, FramePlan,
+    LinkState, MasterConfig, PortError, RegisterOperation, RequestHandle, RequestState, RxPoll,
+    RxSlotState, ScheduleDomain, ScheduleTable, ScheduledDomainBank, ScheduledDomainEntry,
+    ScheduledReceiveError,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::ethercat::{
@@ -666,6 +667,22 @@ fn scheduled_rx_shares_one_poll_for_domains_dc_and_control_without_claiming_cont
             assert_eq!(controls.get(request).unwrap().state, RequestState::InFlight);
         }
     }
+    let missing = RequestHandle::from_index(0).unwrap();
+    assert!(controls.expire_in_flight(250_000).is_empty());
+    assert_eq!(master.rx_entry(15).state, RxSlotState::Armed);
+    port.set_now_ns(250_001);
+    assert_eq!(master.reap_expired_rx_before_tx(port.now_ns()), 1);
+    let expiry = controls.expire_in_flight(port.now_ns());
+    assert_eq!(expiry.handles().next(), Some(missing));
+    assert_eq!(controls.get(missing).unwrap().state, RequestState::Failed);
+    assert_eq!(
+        controls.get(missing).unwrap().last_error(),
+        Some(ControlError::Timeout)
+    );
+    assert!(controls.expire_in_flight(port.now_ns()).is_empty());
+    assert_eq!(master.rx_entry(15).state, RxSlotState::Empty);
+    controls.release(missing).unwrap();
+    assert_eq!(controls.in_use(), 0);
 }
 
 struct TwoFrameSimPort {
