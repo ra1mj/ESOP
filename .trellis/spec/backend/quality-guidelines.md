@@ -140,14 +140,40 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   Assemble all axis outputs from one borrowed `cycle_axes` decision, use the
   originally armed mask for stop requests, and force every other axis to
   inhibit. Maintenance overrides every armed axis to Disable. The CiA 402
-  adapter implements QuickStop/Disable; until a validated controlled target
-  generator exists, Hold/RampToZero must fail closed as Disable. ProcBuf v4
-  carries per-axis requested and issued actions plus fresh, quality-checked
-  feedback proof bits. Bind every sample to the guard decision and State
-  sequence, require observed stop feedback strictly after the first stop
-  issuance cycle, stage the fixed array before publication, and never infer drive
-  execution from a sent controlword. The scalar `stop_action` remains only a
-  legacy default/summary; old ABI attachments must fail validation.
+  adapter's default path implements QuickStop/Disable and continues to degrade
+  Hold/RampToZero to Disable. The opt-in controlled path may use
+  `ControlledStopPlanner` only with product-frozen raw-unit limits and a
+  current, completed Domain: Hold is CSP-only and locks the first verified
+  actual position; RampToZero is CSV/CST-only and approaches zero from current
+  verified velocity/torque. Freeze action, mode, limits, and guard transition
+  sequence for the entire stop. Preview planner state transactionally, commit
+  only after the complete frame is accepted by the port, and arm the next
+  Domain receive only after that submission. A missing mode/feedback/target
+  mapping, stale cycle, changed limits, build failure, or TX failure must leave
+  planners and stop-issued evidence unchanged so the caller can fall back to
+  Disable/QuickStop. ProcBuf v4 carries per-axis requested and issued actions
+  plus fresh, quality-checked feedback proof bits. Use the controlled evidence
+  projector for a controlled frame so an enabled Hold/Ramp target is recorded
+  as the policy action and its terminal Disable is recorded as Disable. Bind
+  every sample to the guard decision and State sequence, require observed stop
+  feedback strictly after the first stop issuance cycle, stage the fixed array
+  before publication, and never infer drive execution from a sent controlword.
+  The scalar `stop_action` remains only a legacy default/summary; old ABI
+  attachments must fail validation.
+- Controlled-stop contract: **Scope**: opt-in CiA 402 stopping only; the
+  production owner remains fail-closed until explicit integration and HIL.
+  **Inputs**: one borrowed stop decision, matching current `CycleReport`,
+  completed Domain inputs, frozen maps/modes/limits, safe process image, and
+  writable frame plan. **Outputs**: one accepted frame report with per-axis
+  outputs and optional controlled commands, followed by matching ProcBuf
+  evidence. **Invariants**: no allocation, no replay, no cross-axis alias,
+  fixed action/mode/limits/transition sequence, and no normal motion permit.
+  **Failure**: reject before TX where possible; build/TX failure commits neither
+  planner state nor issuance evidence; callers explicitly fall back or escalate.
+  **Boundaries**: raw-unit limits, mechanical suitability, braking, STO, WCET,
+  and real drive behavior belong to product qualification. **Tests**: cover
+  Hold capture, CSV/CST ramp bounds, minimum integer values, changed policy,
+  missing feedback, failed TX retry, PDO bytes, terminal Disable, and evidence.
 - On stop timeout, snapshot the original armed axis mask and the selected
   per-axis stop actions before clearing motion authority. Publish each axis's
   Disable escalation as a bounded ProcBuf event with the full fault code,

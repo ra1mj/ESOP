@@ -364,6 +364,10 @@ impl AxisCycleDecision<'_> {
         self.guard.stop_issued_cycle
     }
 
+    pub const fn transition_sequence(&self) -> u64 {
+        self.guard.transition_sequence
+    }
+
     pub const fn stop_transmitted(&self) -> bool {
         self.stop_transmitted
     }

@@ -10,7 +10,10 @@ use esop_ethercat_core::{
 #[cfg(feature = "cia402")]
 use crate::{
     AxisCycleDecision, AxisDirective, LifecycleAction, MAX_MOTION_AXES, StopAction, StopFeedback,
-    cia402::stop_feedback_from_cia402,
+    cia402::{
+        ControlledStopCommand, ControlledStopError, ControlledStopLimits, ControlledStopPhase,
+        ControlledStopPlanner, stop_feedback_from_cia402,
+    },
 };
 #[cfg(feature = "cia402")]
 use esop_ethercat_core::{
@@ -18,10 +21,10 @@ use esop_ethercat_core::{
 };
 #[cfg(feature = "cia402")]
 use esop_profile_cia402::{
-    CONTROLWORD_DISABLE_VOLTAGE, CONTROLWORD_QUICK_STOP, Cia402Controller, Cia402MotionGate,
-    Cia402Output, Cia402PdoCommand, Cia402PdoError, Cia402PdoField, Cia402PdoMap, Cia402Target,
-    CyclicLimits, CyclicSetpoint, CyclicSetpointError, CyclicSetpointGuard, DriveRequest,
-    DriveState, OperatingMode,
+    CONTROLWORD_DISABLE_VOLTAGE, CONTROLWORD_QUICK_STOP, Cia402ControlledStopGate,
+    Cia402Controller, Cia402MotionGate, Cia402Output, Cia402PdoCommand, Cia402PdoError,
+    Cia402PdoField, Cia402PdoMap, Cia402Target, CyclicLimits, CyclicSetpoint, CyclicSetpointError,
+    CyclicSetpointGuard, DriveRequest, DriveState, OperatingMode,
 };
 
 /// A stopped-axis frame is prepared but does not count as issued until the
@@ -38,12 +41,21 @@ pub enum StopFrameError<E> {
     MissingTarget(usize),
     UnexpectedTarget(usize),
     InvalidTarget(usize, CyclicSetpointError),
+    ControlledStop(usize, ControlledStopError),
     UncoveredOutput(usize, Cia402PdoField),
     OverlappingOutput(usize, usize),
     Pdo(usize, Cia402PdoError),
     FramePool(FramePoolError),
     Build(CycleError<core::convert::Infallible>),
     Transmit(CycleError<E>),
+}
+
+#[cfg(feature = "cia402")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControlledStopFrameReport<const AXES: usize> {
+    pub length: usize,
+    pub outputs: [Cia402Output; AXES],
+    pub controlled_commands: [Option<ControlledStopCommand>; AXES],
 }
 
 /// Submit an active, single-Domain cycle only after the completed receive and
@@ -309,6 +321,206 @@ pub fn submit_stopping_frame<
         .mark_stop_transmitted()
         .map_err(|_| StopFrameError::InvalidDecision)?;
     Ok(length)
+}
+
+/// Submit an opt-in, product-qualified controlled stop frame.
+///
+/// Hold captures the first verified CSP position; RampToZero emits bounded CSV
+/// or CST targets. Planner previews are committed only after the complete frame
+/// is accepted by the port. Any validation error leaves every planner and the
+/// guard's stop-issued evidence unchanged, so the caller can immediately fall
+/// back to `submit_stopping_frame` with Disable/QuickStop outputs. Call this
+/// while the completed input Domain still exposes the current report; arm the
+/// next `Domain::begin_receive` only after this function returns successfully.
+#[cfg(feature = "cia402")]
+#[allow(clippy::too_many_arguments)]
+pub fn submit_controlled_stopping_frame<
+    P: EthercatPort,
+    const AXES: usize,
+    const BYTES: usize,
+    const SEGMENTS: usize,
+    const DATAGRAMS: usize,
+    const SLOTS: usize,
+    const MTU: usize,
+>(
+    decision: &mut AxisCycleDecision<'_>,
+    report: CycleReport,
+    planners: &mut [ControlledStopPlanner; AXES],
+    limits: &[ControlledStopLimits; AXES],
+    maps: &[Cia402PdoMap; AXES],
+    modes: &[OperatingMode; AXES],
+    safe_process_image: &[u8; BYTES],
+    domain: &Domain<BYTES, SEGMENTS>,
+    plan: &FramePlan<DATAGRAMS>,
+    master: &mut EthercatMaster<SLOTS, MTU>,
+    port: &mut P,
+    generation: u16,
+    deadline_ns: u64,
+) -> Result<ControlledStopFrameReport<AXES>, StopFrameError<P::Error>> {
+    let stopping = decision.stopping_axis_mask();
+    if !matches!(decision.action(), LifecycleAction::Stop(_)) || stopping == 0 {
+        return Err(StopFrameError::InvalidDecision);
+    }
+    if AXES > MAX_MOTION_AXES || (AXES < MAX_MOTION_AXES && stopping >> AXES != 0) {
+        return Err(StopFrameError::AxisCapacityExceeded);
+    }
+    if decision.cycle() != report.cycle
+        || report.budget_exhausted
+        || !rx_current(report)
+        || !domain_current(report, domain.quality())
+    {
+        return Err(StopFrameError::UnverifiedInput);
+    }
+    if deadline_ns <= port.now_ns() {
+        return Err(StopFrameError::InvalidDeadline);
+    }
+
+    const OUTPUT_FIELDS: [Cia402PdoField; 5] = [
+        Cia402PdoField::Controlword,
+        Cia402PdoField::ModeOfOperation,
+        Cia402PdoField::TargetPosition,
+        Cia402PdoField::TargetVelocity,
+        Cia402PdoField::TargetTorque,
+    ];
+    for (axis, map) in maps.iter().enumerate() {
+        for (prior_axis, prior) in maps.iter().enumerate().take(axis) {
+            for field in OUTPUT_FIELDS {
+                let Some(entry) = map.entry(field) else {
+                    continue;
+                };
+                for prior_field in OUTPUT_FIELDS {
+                    if prior.entry(prior_field).is_some_and(|earlier| {
+                        entry.bit_offset
+                            < earlier
+                                .bit_offset
+                                .saturating_add(earlier.bit_length as usize)
+                            && earlier.bit_offset
+                                < entry.bit_offset.saturating_add(entry.bit_length as usize)
+                    }) {
+                        return Err(StopFrameError::OverlappingOutput(prior_axis, axis));
+                    }
+                }
+            }
+        }
+    }
+
+    let disabled = Cia402Output {
+        state: DriveState::Unknown,
+        statusword: u16::MAX,
+        controlword: CONTROLWORD_DISABLE_VOLTAGE,
+        operation_enabled: false,
+        motion_allowed: false,
+        fault_reset_pulse: false,
+    };
+    let mut outputs = [disabled; AXES];
+    let mut commands = [None; AXES];
+    let mut next_planners = *planners;
+    let mut image = *safe_process_image;
+
+    for axis in 0..AXES {
+        let inputs = maps[axis]
+            .read_inputs_for(domain.input(), modes[axis])
+            .map_err(|error| StopFrameError::Pdo(axis, error))?;
+        let state = DriveState::from_statusword(inputs.statusword);
+        let command = match decision.axis(axis) {
+            AxisDirective::Stop(action @ (StopAction::Hold | StopAction::RampToZero)) => {
+                let preview = next_planners[axis]
+                    .preview(
+                        decision.transition_sequence(),
+                        decision.cycle(),
+                        action,
+                        modes[axis],
+                        inputs,
+                        limits[axis],
+                    )
+                    .map_err(|error| StopFrameError::ControlledStop(axis, error))?;
+                let command = preview.command();
+                next_planners[axis].commit(preview);
+                commands[axis] = Some(command);
+                command
+            }
+            AxisDirective::Stop(StopAction::QuickStop) => {
+                next_planners[axis].reset();
+                ControlledStopCommand {
+                    controlword: CONTROLWORD_QUICK_STOP,
+                    mode: modes[axis],
+                    target: None,
+                    action: StopAction::QuickStop,
+                    phase: ControlledStopPhase::DisableRequested,
+                }
+            }
+            AxisDirective::Stop(StopAction::Disable) | AxisDirective::Inhibit => {
+                next_planners[axis].reset();
+                ControlledStopCommand {
+                    controlword: CONTROLWORD_DISABLE_VOLTAGE,
+                    mode: modes[axis],
+                    target: None,
+                    action: StopAction::Disable,
+                    phase: ControlledStopPhase::DisableRequested,
+                }
+            }
+            AxisDirective::EnableAllowed => return Err(StopFrameError::InvalidDecision),
+        };
+        outputs[axis] = Cia402Output {
+            state,
+            statusword: inputs.statusword,
+            controlword: command.controlword,
+            operation_enabled: state.is_operation_enabled(),
+            motion_allowed: false,
+            fault_reset_pulse: false,
+        };
+
+        let mut fields = [
+            Cia402PdoField::Controlword,
+            Cia402PdoField::ModeOfOperation,
+            Cia402PdoField::Controlword,
+        ];
+        let field_count = if let Some(target) = command.target {
+            maps[axis]
+                .write_controlled_stop(
+                    &mut image,
+                    Cia402PdoCommand {
+                        controlword: command.controlword,
+                        mode: command.mode,
+                        target,
+                    },
+                    Cia402ControlledStopGate {
+                        lifecycle_stopping: true,
+                        mode_confirmed: inputs.actual_mode == command.mode,
+                        operation_enabled: state.is_operation_enabled(),
+                        target_valid: command.controlled(),
+                    },
+                )
+                .map_err(|error| StopFrameError::Pdo(axis, error))?;
+            fields[2] = match target {
+                Cia402Target::Position(_) => Cia402PdoField::TargetPosition,
+                Cia402Target::Velocity(_) => Cia402PdoField::TargetVelocity,
+                Cia402Target::Torque(_) => Cia402PdoField::TargetTorque,
+            };
+            3
+        } else {
+            maps[axis]
+                .write_control(&mut image, modes[axis], command.controlword)
+                .map_err(|error| StopFrameError::Pdo(axis, error))?;
+            2
+        };
+        for field in fields.iter().take(field_count) {
+            if !writable_domain_field(&maps[axis], *field, domain, plan) {
+                return Err(StopFrameError::UncoveredOutput(axis, *field));
+            }
+        }
+    }
+
+    let length = transmit_image(&image, plan, master, port, generation, deadline_ns)?;
+    *planners = next_planners;
+    decision
+        .mark_stop_transmitted()
+        .map_err(|_| StopFrameError::InvalidDecision)?;
+    Ok(ControlledStopFrameReport {
+        length,
+        outputs,
+        controlled_commands: commands,
+    })
 }
 
 /// Submit a Disable-only frame while the guard holds or has latched a fault.

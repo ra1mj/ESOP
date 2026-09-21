@@ -13,6 +13,11 @@ use esop_procbuf::AxisStopEvidence;
 #[cfg(feature = "cia402")]
 use esop_profile_cia402::{CONTROLWORD_DISABLE_VOLTAGE, CONTROLWORD_QUICK_STOP, Cia402Output};
 
+#[cfg(all(feature = "cia402", feature = "ethercat"))]
+use crate::ethercat::ControlledStopFrameReport;
+#[cfg(all(feature = "cia402", feature = "ethercat"))]
+use esop_profile_cia402::CONTROLWORD_ENABLE_OPERATION;
+
 #[cfg(feature = "ethercat")]
 use crate::ethercat::{
     OtherCycleFacts, ScheduledDomainQuality, cyclic_quality_from_domains,
@@ -487,6 +492,158 @@ pub fn axis_stops_to_procbuf<const AXES: usize, const IO: usize, const DOMAINS: 
                 }
             }
             AxisDirective::EnableAllowed => {}
+        }
+    }
+    state.axis_stops = evidence;
+    Ok(())
+}
+
+/// Stage stop evidence for a frame submitted by
+/// `submit_controlled_stopping_frame`.
+///
+/// A controlled target records Hold or RampToZero as the issued action even
+/// though CiA 402 keeps Operation Enabled while applying the target. Once the
+/// planner requests Disable, the issued action becomes Disable. The report is
+/// accepted only when its command and output agree for every stopping axis.
+#[cfg(all(feature = "cia402", feature = "ethercat"))]
+pub fn controlled_axis_stops_to_procbuf<
+    const AXES: usize,
+    const IO: usize,
+    const DOMAINS: usize,
+>(
+    state: &mut StatePage<AXES, IO, DOMAINS>,
+    decision: &AxisCycleDecision<'_>,
+    report: &ControlledStopFrameReport<AXES>,
+    feedback: Option<StopFeedback>,
+) -> Result<(), AxisEvidenceError> {
+    if AXES > MAX_MOTION_AXES {
+        return Err(AxisEvidenceError::AxisCapacityExceeded);
+    }
+    if state.sequence == 0 || state.sequence != decision.cycle() {
+        return Err(AxisEvidenceError::CycleMismatch);
+    }
+    let axes_mask = if AXES == MAX_MOTION_AXES {
+        u32::MAX
+    } else {
+        (1u32 << AXES) - 1
+    };
+    let stopping_mask = decision.stopping_axis_mask();
+    if stopping_mask & !axes_mask != 0 || decision.permitted_axis_mask() & !axes_mask != 0 {
+        return Err(AxisEvidenceError::AxisCapacityExceeded);
+    }
+    if let Some(sample) = feedback {
+        if sample.cycle != state.sequence {
+            return Err(AxisEvidenceError::CycleMismatch);
+        }
+        if sample.observed_axis_mask & !stopping_mask != 0
+            || (sample.stationary_axis_mask | sample.non_enabled_axis_mask)
+                & !sample.observed_axis_mask
+                != 0
+        {
+            return Err(AxisEvidenceError::InvalidFeedback);
+        }
+        if sample.observed_axis_mask != 0
+            && !decision
+                .stop_issued_cycle()
+                .is_some_and(|issued| sample.cycle > issued)
+        {
+            return Err(AxisEvidenceError::FeedbackBeforeStop);
+        }
+    }
+
+    let mut evidence = [AxisStopEvidence::EMPTY; AXES];
+    for (axis, evidence_slot) in evidence.iter_mut().enumerate() {
+        let output = report.outputs[axis];
+        let command = report.controlled_commands[axis];
+        match decision.axis(axis) {
+            AxisDirective::Stop(requested @ (StopAction::Hold | StopAction::RampToZero)) => {
+                let Some(command) = command else {
+                    return Err(AxisEvidenceError::UnsafeOutput(axis));
+                };
+                if command.action != requested
+                    || command.controlword != output.controlword
+                    || output.motion_allowed
+                    || output.fault_reset_pulse
+                {
+                    return Err(AxisEvidenceError::UnsafeOutput(axis));
+                }
+                let issued =
+                    if command.controlled() && output.controlword == CONTROLWORD_ENABLE_OPERATION {
+                        requested
+                    } else if command.target.is_none()
+                        && output.controlword == CONTROLWORD_DISABLE_VOLTAGE
+                    {
+                        StopAction::Disable
+                    } else {
+                        return Err(AxisEvidenceError::UnsafeOutput(axis));
+                    };
+                let bit = 1u32 << axis;
+                let observed = feedback.is_some_and(|sample| sample.observed_axis_mask & bit != 0);
+                *evidence_slot = AxisStopEvidence {
+                    request_cycle: state.sequence,
+                    feedback_cycle: if observed { state.sequence } else { 0 },
+                    requested_action: requested as u8 + 1,
+                    issued_action: if decision.stop_transmitted() {
+                        issued as u8 + 1
+                    } else {
+                        0
+                    },
+                    feedback_valid: observed as u8,
+                    stationary: feedback
+                        .is_some_and(|sample| observed && sample.stationary_axis_mask & bit != 0)
+                        as u8,
+                    non_enabled: feedback
+                        .is_some_and(|sample| observed && sample.non_enabled_axis_mask & bit != 0)
+                        as u8,
+                    reserved: [0; 3],
+                };
+            }
+            AxisDirective::Stop(requested @ (StopAction::QuickStop | StopAction::Disable)) => {
+                if command.is_some() {
+                    return Err(AxisEvidenceError::UnsafeOutput(axis));
+                }
+                let expected = if requested == StopAction::QuickStop {
+                    CONTROLWORD_QUICK_STOP
+                } else {
+                    CONTROLWORD_DISABLE_VOLTAGE
+                };
+                if output.controlword != expected
+                    || output.motion_allowed
+                    || output.fault_reset_pulse
+                {
+                    return Err(AxisEvidenceError::UnsafeOutput(axis));
+                }
+                let bit = 1u32 << axis;
+                let observed = feedback.is_some_and(|sample| sample.observed_axis_mask & bit != 0);
+                *evidence_slot = AxisStopEvidence {
+                    request_cycle: state.sequence,
+                    feedback_cycle: if observed { state.sequence } else { 0 },
+                    requested_action: requested as u8 + 1,
+                    issued_action: if decision.stop_transmitted() {
+                        requested as u8 + 1
+                    } else {
+                        0
+                    },
+                    feedback_valid: observed as u8,
+                    stationary: feedback
+                        .is_some_and(|sample| observed && sample.stationary_axis_mask & bit != 0)
+                        as u8,
+                    non_enabled: feedback
+                        .is_some_and(|sample| observed && sample.non_enabled_axis_mask & bit != 0)
+                        as u8,
+                    reserved: [0; 3],
+                };
+            }
+            AxisDirective::Inhibit => {
+                if command.is_some()
+                    || output.controlword != CONTROLWORD_DISABLE_VOLTAGE
+                    || output.motion_allowed
+                    || output.fault_reset_pulse
+                {
+                    return Err(AxisEvidenceError::UnsafeOutput(axis));
+                }
+            }
+            AxisDirective::EnableAllowed => return Err(AxisEvidenceError::UnsafeOutput(axis)),
         }
     }
     state.axis_stops = evidence;

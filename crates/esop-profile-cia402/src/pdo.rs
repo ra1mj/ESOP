@@ -207,6 +207,23 @@ pub struct Cia402MotionGate {
     pub setpoint_valid: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Cia402ControlledStopGate {
+    pub lifecycle_stopping: bool,
+    pub mode_confirmed: bool,
+    pub operation_enabled: bool,
+    pub target_valid: bool,
+}
+
+impl Cia402ControlledStopGate {
+    pub const fn allows_controlled_stop(self) -> bool {
+        self.lifecycle_stopping
+            && self.mode_confirmed
+            && self.operation_enabled
+            && self.target_valid
+    }
+}
+
 impl Cia402MotionGate {
     pub const fn allows_motion(self) -> bool {
         self.lifecycle_permit
@@ -418,6 +435,42 @@ impl Cia402PdoMap {
             return Err(Cia402PdoError::TargetModeMismatch);
         }
         if command.controlword & 0x000F != CONTROLWORD_ENABLE_OPERATION {
+            return Err(Cia402PdoError::ControlwordNotOperationEnabled);
+        }
+        self.validate_for(command.mode)?;
+        let target_field = target_field(command.mode);
+        self.preflight_output(
+            image,
+            &[
+                Cia402PdoField::Controlword,
+                Cia402PdoField::ModeOfOperation,
+                target_field,
+            ],
+        )?;
+        self.write_validated_command(image, command, target_field)
+    }
+
+    /// Write a bounded target while the lifecycle guard is stopping.
+    ///
+    /// This is deliberately separate from `write_cyclic`: it never grants
+    /// normal motion permission, and callers must prove the current drive mode,
+    /// Operation Enabled state, and target validity for the controlled stop.
+    pub fn write_controlled_stop(
+        &self,
+        image: &mut [u8],
+        command: Cia402PdoCommand,
+        gate: Cia402ControlledStopGate,
+    ) -> Result<(), Cia402PdoError> {
+        if !command.mode.is_cyclic() {
+            return Err(Cia402PdoError::InvalidMode);
+        }
+        if !gate.allows_controlled_stop() {
+            return Err(Cia402PdoError::MotionNotAllowed);
+        }
+        if command.target.mode() != command.mode {
+            return Err(Cia402PdoError::TargetModeMismatch);
+        }
+        if command.controlword != CONTROLWORD_ENABLE_OPERATION {
             return Err(Cia402PdoError::ControlwordNotOperationEnabled);
         }
         self.validate_for(command.mode)?;

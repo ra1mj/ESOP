@@ -174,7 +174,7 @@ MLG 每周期读取一个固定大小的 `lifecycle_evidence` 快照。每项门
 
 MLG 记录请求动作、实际驱动状态、停止开始/结束时间、超时和升级路径。若在 `stop_deadline` 内没有得到预期驱动状态，必须锁存故障。
 
-当前固定容量 RT 实现支持在构造 `LifecycleGuard` 时通过 `AxisStopPolicy` 冻结最多 32 轴的动作；`cycle_axes` 对同一周期返回受守卫借用约束的逐轴决策，停机轴掩码保持为原已激活 permit 的轴集合，其他轴保持 inhibit。CiA 402 多轴适配器 `step_axis_bank` 对已停机轴分别输出 `QUICK_STOP` 或 `DISABLE`，维护模式与停止超时强制禁用普通运动使能；任何未授权轴都不能借旧的 Enable/FaultReset 请求启动。`HOLD` 和 `RAMP_TO_ZERO` 虽可在策略中表达，但当前尚无经过产品标定、输入质量验证和限幅的受控目标生成器；CiA 402 适配器将其降级为 `DISABLE`，不得把此降级称为已实现受控保持/减速。以上均为软件仿真验证，真实驱动、制动器和安全链的 HIL 仍是 FR-042 的待验收项。
+当前固定容量 RT 实现支持在构造 `LifecycleGuard` 时通过 `AxisStopPolicy` 冻结最多 32 轴的动作；`cycle_axes` 对同一周期返回受守卫借用约束的逐轴决策，停机轴掩码保持为原已激活 permit 的轴集合，其他轴保持 inhibit。默认 CiA 402 多轴适配器 `step_axis_bank` 对已停机轴分别输出 `QUICK_STOP` 或 `DISABLE`，并继续将 `HOLD`/`RAMP_TO_ZERO` 降级为 `DISABLE`，因此现有生产周期路径的失效安全行为不变。新增的显式 `ControlledStopPlanner` 与 `submit_controlled_stopping_frame` 提供可选受控路径：`HOLD` 仅支持 CSP，并锁定停车序列第一份合格实际位置；`RAMP_TO_ZERO` 仅支持 CSV/CST，并按产品冻结的原始单位每周期步长，从当前合格速度/转矩反馈收敛到零。动作、模式、限幅和 MLG 转换序号在同一停车序列中不可变化；规划器先预演，只有整帧被端口接受后才提交状态和首次发送证据。缺模式确认、缺反馈、PDO 不完整/别名、周期重放、限幅变化、构帧失败或 TX 失败均不推进斜坡，调用方必须显式回退 `DISABLE`/`QUICK_STOP` 或升级故障。该可选入口尚未接入统一生产周期所有者，原始单位限幅也仍需按具体驱动缩放、机械、周期时间和制动策略完成产品冻结。以上均为软件仿真验证，真实驱动、制动器和安全链的 HIL 仍是 FR-042 的待验收项。
 
 ## 7. Motion Permit 与恢复协议
 
@@ -226,6 +226,8 @@ RT 端 `GuardPolicy.allowed_axis_mask` 是随生命周期策略冻结的本地�
 
 可选 `ethercat` + `cia402` 的 `submit_stopping_frame` 为停机 TX 提供固定容量提交入口：周期所有者传入同一个可变借用的逐轴决策、由该决策生成的 CiA 402 输出、全部轴映射、预先核实非 CiA 402 输出均安全的冻结过程映像、Domain 与冻结的 FramePlan。发送前检查每轴停止控制字/模式字段位于匹配的可写 Domain 段、不同轴的输出字段不重叠，且后续可写 datagram 不会以不一致的过程映像偏移覆盖停机字段；无效控制字、只读或错地址计划、构帧失败和端口拒绝均不记 `issued_action`/首次发出周期，构帧失败释放未提交帧槽。只有端口接受完整帧后才在同一决策上记发送证据；调用方仍需按策略发布失败周期、重试或升级故障。该入口不负责周期调度、其他输出的安全校验、端口 DMA 所有权或实物停机证明，不能替代生产周期所有者与 HIL。
 
+受控路径的 `submit_controlled_stopping_frame` 必须在当前输入 Domain 仍保留已完成质量时调用，下一代 `Domain::begin_receive` 只能在成功提交后武装。入口重新核对当前 `CycleReport`、Domain 完整/WKC/年龄、绝对 deadline、每轴模式和目标映射、可写计划覆盖及跨轴输出别名；每轴规划器在本地副本上预演，端口拒绝时原规划器和 `stop_issued_cycle` 均保持不变。返回的 `ControlledStopFrameReport` 含实际输出和受控命令；`controlled_axis_stops_to_procbuf` 核对两者后，受控目标阶段把 `issued_action` 记录为 Hold/Ramp，终端 Disable 阶段记录为 Disable。该证据仍只证明端口接受命令，不证明驱动执行或机械静止。
+
 同一可写 Domain/FramePlan 校验还供 `submit_inhibited_frame` 使用：仅接受 `Hold` 或 `FaultLatched` 决策，全轴 Controlword 必须为 Disable 且无运动许可/复位脉冲；成功发送也**不**记作停机发出或驱动已执行。在无法继续运动的状态下，即使停机确认超时锁存，也需要显式发送禁止输出并发布本周期 State/有序事件；TX 失败仍发布零发送证据，不能隐瞒故障或假装硬件已停稳。
 
 ## 8. 实时执行与数据契约
@@ -266,9 +268,9 @@ ProcBuf 应包含固定大小的 lifecycle 区域：
 
 所有固定事件记录必须带 lifecycle state、gate/fault code、axis/device、transition sequence 和 monotonic timestamp。
 
-ProcBuf ABI v4 在 State 页增加固定容量的 `axis_stops[AXES]`：`request_cycle` 标记当周期请求，`requested_action` 为策略动作，`issued_action` 仅在本周期停机帧成功提交端口后记录相应 CiA 402 控制字动作；发送失败或尚未提交为 0。对于缺乏受控目标发生器的 Hold/Ramp，成功提交后的 `issued_action=Disable`。只有从完成帧、WKC 与年龄合格且**晚于首次成功提交停机控制字的周期**的输入生成的 `StopFeedback` 才能填写 `feedback_cycle` 与 `feedback_valid/stationary/non_enabled`；首次提交的同周期输入不能冒充停机响应，缺失速度或未知驱动状态也不能证明已停稳。写入 API 校验决策、状态和反馈周期/轴掩码，并在失败时保持旧记录不变；下一周期无停止请求时清空旧证据。Protobuf v1 使用新增的可选 `LifecycleSummary.axis_stops` 字段承载同一语义，旧读者忽略该字段且经其重新编码会丢失。单值 `stop_action` 仍仅是旧接口的全局默认/摘要，**不是**逐轴实际反馈。需要停止旧 RT 与监督进程、重建共享区域，再以 v4 同版本重启；v1/v2/v3 header 均被拒绝。
+ProcBuf ABI v4 在 State 页增加固定容量的 `axis_stops[AXES]`：`request_cycle` 标记当周期请求，`requested_action` 为策略动作，`issued_action` 仅在本周期停机帧成功提交端口后记录实际发送动作；发送失败或尚未提交为 0。默认适配器将 Hold/Ramp 降级为 Disable，因此普通 `axis_stops_to_procbuf` 记录 Disable；显式受控帧必须使用 `controlled_axis_stops_to_procbuf`，受控目标阶段记录 Hold/Ramp，规划器终端禁用阶段记录 Disable。只有从完成帧、WKC 与年龄合格且**晚于首次成功提交停机动作的周期**的输入生成的 `StopFeedback` 才能填写 `feedback_cycle` 与 `feedback_valid/stationary/non_enabled`；首次提交的同周期输入不能冒充停机响应，缺失速度或未知驱动状态也不能证明已停稳。写入 API 校验决策、状态和反馈周期/轴掩码，并在失败时保持旧记录不变；下一周期无停止请求时清空旧证据。Protobuf v1 使用新增的可选 `LifecycleSummary.axis_stops` 字段承载同一语义，旧读者忽略该字段且经其重新编码会丢失。单值 `stop_action` 仍仅是旧接口的全局默认/摘要，**不是**逐轴实际反馈。需要停止旧 RT 与监督进程、重建共享区域，再以 v4 同版本重启；v1/v2/v3 header 均被拒绝。
 
-停机超时在 `LifecycleGuard.stop_timeout_record()` 中保留超时周期、原轴掩码、首次发出停机的周期（可能缺失）、转换序号和升级当时每轴请求动作；进入 `FaultLatched` 后所有轴仍保持 inhibit，CiA 402 输出 Disable，但本周期 `axis_stops` 清空，因为没有新的可确认停机反馈。已提供 `stop_timeout_events_to_procbuf` 接口，供周期所有者将原轴集合逐轴写入 SPSC 事件环：`source=0x4D4C`、`code=1`、`severity=Fault`、`sequence=transition_sequence`、`value=0x53540001`、`axis_or_device=0` 起的轴号；`aux` 低两字节分别是 Protobuf 请求/发出动作（1..4），bit 16 表示此前确实发过停机控制字，高字节是 `FaultLatched` 状态值。事件时间戳是调用方提供的**写入时**单调时间，重试时可能晚于真实转换时间；应用可用相同的 boot ID 和转换序号关联 State 页的 `transition_cycle/time_ns` 和首个阻塞码。环满会返回错误并计入 `lost_events`，已写轴不重发，剩余轴下次调用再写；调用方应持续消费并重试，且避免在排空前覆盖旧超时记录。事件不证明机械静止，不改变既有 ABI 或 Protobuf 布局。完整生产周期所有者、受控 Hold/Ramp 与实物 HIL 仍待完成。
+停机超时在 `LifecycleGuard.stop_timeout_record()` 中保留超时周期、原轴掩码、首次发出停机的周期（可能缺失）、转换序号和升级当时每轴请求动作；进入 `FaultLatched` 后所有轴仍保持 inhibit，CiA 402 输出 Disable，但本周期 `axis_stops` 清空，因为没有新的可确认停机反馈。已提供 `stop_timeout_events_to_procbuf` 接口，供周期所有者将原轴集合逐轴写入 SPSC 事件环：`source=0x4D4C`、`code=1`、`severity=Fault`、`sequence=transition_sequence`、`value=0x53540001`、`axis_or_device=0` 起的轴号；`aux` 低两字节分别是 Protobuf 请求/发出动作（1..4），bit 16 表示此前确实发过停机控制字，高字节是 `FaultLatched` 状态值。事件时间戳是调用方提供的**写入时**单调时间，重试时可能晚于真实转换时间；应用可用相同的 boot ID 和转换序号关联 State 页的 `transition_cycle/time_ns` 和首个阻塞码。环满会返回错误并计入 `lost_events`，已写轴不重发，剩余轴下次调用再写；调用方应持续消费并重试，且避免在排空前覆盖旧超时记录。事件不证明机械静止，不改变既有 ABI 或 Protobuf 布局。完整生产周期所有者中的受控停车接线、产品限幅冻结与实物 HIL 仍待完成。
 
 `LifecycleEventCursor::new(&guard)` 绑定启动实例，`lifecycle_events_to_procbuf` 先将守卫固定转换环中尚未发布的转换按序写入事件环，再尝试写入上面的逐轴超时事件；调用方只应选择这个组合接口或分别调用两个接口中的一个发布路径，避免事件乱序。转换事件使用 `source=0x4D4C`、`code=2`、`sequence=transition_sequence`、`axis_or_device=0xFFFF`、`value=transition.fault_code`，`aux` 低字节为原始 MLG `from_state`，第二字节为原始 MLG `to_state`。超时事件的高字节同样是原始 MLG 状态值，**不是** Protobuf `LifecycleState` 值（后者为未指定状态保留 0）；接收方应依据事件 code 分别解码。`FaultLatched` 事件为 Fault，Stopping/Maintenance 为 Warning，其余转换为 Info。环满时游标仅推进已写成功的转换，重试不会重复提交；若尚未写入的转换被 16 条历史覆盖，接口返回明确的 `HistoryOverrun { missed }`，调用方记录缺失量后才调用 `acknowledge_history_loss` 跳到最早可用转换。单调时间参数是实际写入时刻，不得冒充历史转换时刻；可选单 Domain 活动、停机及禁止输出分支均在 State 成功发布后调用组合事件发布。
 
@@ -290,7 +292,7 @@ ProcBuf ABI v4 在 State 页增加固定容量的 `axis_stops[AXES]`：`request_
 
 新增受检的共享 RX 到输出路径：`run_received_with_outputs_until` 从同一 `ScheduledDomainBank` 刚结束的接收报告生成冻结顺序的 Domain 质量，检查报告周期、当前 Domain 实际质量、运动 Domain 身份和 DC 收尾结果，然后才允许生命周期门槛决策和到期辅助/运动 TX。软件模拟验证运动与 IO Domain、DC、控制请求同周期完成，错误报告在发送前失败；后续周期的到期 IO/DC 缺帧撤销运动许可、进入停止，旧报告无法复用。外部事实和 DC/控制 TX 仍由上层周期所有者负责；传入绝对 deadline 时，本入口会在 State/事件发布后再次采样，但仍不能替代完整任务释放与目标硬件 WCET/HIL 资格。
 
-服务阶段与生命周期现可通过 `run_mailbox_cycle_with_outputs_until` 直接绑定。该入口只接受 `run_dc_and_mailbox_cycle` 的完整 `ScheduledMailboxCycleReport`，在任何门槛更新或过程 TX 前核对跨阶段请求句柄、终态邮箱结果、DC/控制发送形状及 TX/RX deadline 单调关系；不允许调用方从零散 `sent` 位重建一个看似健康的周期。任一服务 TX 失败、邮箱错误或 `RetryScheduled` 都会把本周期 CoE/配置事实置为失败，RX 后阶段 deadline 失败只会清除、不会恢复调用方预算事实；之后复用受检共享 RX 路径完成到期辅助/运动输出、State/事件发布和发布后的最终 deadline 观测。模拟回归覆盖聚合报告篡改在新 TX 前拒绝，以及失败、重试、超时和阶段越界的保守投影。过程 Domain 帧仍须在服务入口前由外层提交，任务释放、其他服务、受控 Hold/Ramp 与实物 HIL 仍未闭环，因此这只是完整生产周期所有者的下一层接线。
+服务阶段与生命周期现可通过 `run_mailbox_cycle_with_outputs_until` 直接绑定。该入口只接受 `run_dc_and_mailbox_cycle` 的完整 `ScheduledMailboxCycleReport`，在任何门槛更新或过程 TX 前核对跨阶段请求句柄、终态邮箱结果、DC/控制发送形状及 TX/RX deadline 单调关系；不允许调用方从零散 `sent` 位重建一个看似健康的周期。任一服务 TX 失败、邮箱错误或 `RetryScheduled` 都会把本周期 CoE/配置事实置为失败，RX 后阶段 deadline 失败只会清除、不会恢复调用方预算事实；之后复用受检共享 RX 路径完成到期辅助/运动输出、State/事件发布和发布后的最终 deadline 观测。模拟回归覆盖聚合报告篡改在新 TX 前拒绝，以及失败、重试、超时和阶段越界的保守投影。过程 Domain 帧仍须在服务入口前由外层提交，任务释放、其他服务、受控停车的生产接线与实物 HIL 仍未闭环，因此这只是完整生产周期所有者的下一层接线。
 
 显式预 RX 过程阶段现在可使用 `ScheduledProcessInputs`：激活时将调度顺序、真实 Domain 段、只读过程镜像和分帧计划固定绑定，运行时由 `submit_due_process_inputs` 定长提交当前到期帧，并保留逻辑周期、generation、RX deadline、到期掩码、预期/接受帧数、首个失败位置及阶段 deadline。`run_process_mailbox_cycle_with_outputs_until` 会把这份报告与同一 `ScheduledDomainBank` 刚完成的邮箱/DC 共享 RX 一起核对；过程发送失败或超时会先清除 CycleBudget，再进入既有停止分支，报告篡改则在新 TX 前拒绝。该提交器只用于首次启动、恢复或其他确认没有上一轮输出在途的阶段。
 

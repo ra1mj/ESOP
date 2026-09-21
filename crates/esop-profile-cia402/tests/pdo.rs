@@ -2,8 +2,8 @@
 
 use esop_ethercat_core::{PdoDirection, PdoEntry};
 use esop_profile_cia402::{
-    CONTROLWORD_ENABLE_OPERATION, Cia402MotionGate, Cia402PdoCommand, Cia402PdoField, Cia402PdoMap,
-    Cia402Target, OperatingMode,
+    CONTROLWORD_ENABLE_OPERATION, Cia402ControlledStopGate, Cia402MotionGate, Cia402PdoCommand,
+    Cia402PdoError, Cia402PdoField, Cia402PdoMap, Cia402Target, OperatingMode,
 };
 
 fn entry(field: Cia402PdoField, bit_offset: usize) -> PdoEntry {
@@ -128,6 +128,37 @@ fn public_adapter_binds_all_three_robot_modes() {
             .unwrap()
             .read_signed(&image),
         Ok(-3)
+    );
+}
+
+#[test]
+fn controlled_stop_write_requires_a_complete_stopping_gate() {
+    let map = map();
+    let command = Cia402PdoCommand {
+        controlword: CONTROLWORD_ENABLE_OPERATION,
+        mode: OperatingMode::Csv,
+        target: Cia402Target::Velocity(12),
+    };
+    let mut image = [0_u8; 20];
+    let mut gate = Cia402ControlledStopGate {
+        lifecycle_stopping: true,
+        mode_confirmed: true,
+        operation_enabled: true,
+        target_valid: true,
+    };
+    map.write_controlled_stop(&mut image, command, gate)
+        .unwrap();
+    assert_eq!(
+        map.entry(Cia402PdoField::TargetVelocity)
+            .unwrap()
+            .read_signed(&image),
+        Ok(12)
+    );
+
+    gate.lifecycle_stopping = false;
+    assert_eq!(
+        map.write_controlled_stop(&mut image, command, gate),
+        Err(Cia402PdoError::MotionNotAllowed)
     );
 }
 

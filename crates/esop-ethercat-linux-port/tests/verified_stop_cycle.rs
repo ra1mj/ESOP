@@ -9,15 +9,18 @@ use esop_ethercat_core::{
     ScheduledServiceTxFailure,
 };
 use esop_ethercat_linux_port::SimulatedPort;
-use esop_lifecycle_guard::cia402::step_axis_bank;
+use esop_lifecycle_guard::cia402::{
+    ControlledStopLimits, ControlledStopPhase, ControlledStopPlanner, step_axis_bank,
+};
 use esop_lifecycle_guard::ethercat::{
     OtherCycleFacts, ScheduledControlGate, ScheduledDomainQuality, StopFrameError,
     cyclic_quality_from_ethercat, cyclic_quality_from_schedule,
-    other_cycle_facts_from_mailbox_cycle, submit_active_frame, submit_inhibited_frame,
-    submit_stopping_frame, verified_ethercat_stop_feedback,
+    other_cycle_facts_from_mailbox_cycle, submit_active_frame, submit_controlled_stopping_frame,
+    submit_inhibited_frame, submit_stopping_frame, verified_ethercat_stop_feedback,
 };
 use esop_lifecycle_guard::procbuf::{
-    LifecycleEventCursor, axis_stops_to_procbuf, lifecycle_events_to_procbuf, lifecycle_to_procbuf,
+    LifecycleEventCursor, axis_stops_to_procbuf, controlled_axis_stops_to_procbuf,
+    lifecycle_events_to_procbuf, lifecycle_to_procbuf,
 };
 use esop_lifecycle_guard::stop_cycle::{
     AuxiliaryOutputEntry, AuxiliaryOutputPlanError, ScheduledAuxiliaryOutputs,
@@ -25,8 +28,8 @@ use esop_lifecycle_guard::stop_cycle::{
     StopCycleContext, StopCycleError,
 };
 use esop_lifecycle_guard::{
-    GateId, GuardPolicy, LifecycleAction, LifecycleError, LifecycleGuard, LifecycleState,
-    MotionPermit,
+    AxisStopPolicy, GateId, GuardPolicy, LifecycleAction, LifecycleError, LifecycleGuard,
+    LifecycleState, MotionPermit, StopAction,
 };
 use esop_procbuf::{ProcBuf, QualityFact, StatePage};
 use esop_profile_cia402::{
@@ -104,6 +107,12 @@ fn input_image(statusword: u16, velocity: i32) -> [u8; IMAGE_BYTES] {
     image[..2].copy_from_slice(&statusword.to_le_bytes());
     image[2] = OperatingMode::Csp.raw() as u8;
     image[9..13].copy_from_slice(&velocity.to_le_bytes());
+    image
+}
+
+fn csp_input_image(statusword: u16, position: i32, velocity: i32) -> [u8; IMAGE_BYTES] {
+    let mut image = input_image(statusword, velocity);
+    image[5..9].copy_from_slice(&position.to_le_bytes());
     image
 }
 
@@ -2676,6 +2685,181 @@ fn failed_stop_tx_never_becomes_stop_proof_and_retry_requires_a_new_response() {
     .unwrap();
     guard.acknowledge_stopped(third.cycle, feedback).unwrap();
     assert_eq!(guard.state(), LifecycleState::Ready);
+}
+
+#[test]
+fn controlled_hold_commits_only_after_tx_and_publishes_the_actual_action() {
+    let mut master = EthercatMaster::<1, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut domain = Domain::<IMAGE_BYTES, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: IMAGE_BYTES,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut plan = FramePlan::<1>::new();
+    plan.push(DatagramPlan {
+        command: Command::Lrw,
+        index: 12,
+        address: 0x1000,
+        payload_offset: 0,
+        payload_len: IMAGE_BYTES,
+        expected_wkc: 1,
+    })
+    .unwrap();
+    let map = map();
+    let mut port = SimulatedPort::new(1);
+    let mut guard = LifecycleGuard::new_with_axis_stop_policy(
+        GateId::Link.bit(),
+        7,
+        GuardPolicy {
+            enter_good_cycles: 1,
+            allowed_axis_mask: 1,
+            ..GuardPolicy::conservative()
+        },
+        AxisStopPolicy::uniform(StopAction::Hold),
+    );
+    let permit = MotionPermit {
+        boot_id: 7,
+        source_id: 1,
+        permit_epoch: 1,
+        sequence: 1,
+        expires_at_ns: 10_000,
+        axis_mask: 1,
+        authority: 1,
+        reserved: [0; 3],
+        policy_version: 1,
+    };
+
+    submit(
+        &mut master,
+        &mut port,
+        &mut domain,
+        &plan,
+        1,
+        &csp_input_image(0x0027, 120, 10),
+        false,
+    );
+    let first = receive(&mut master, &mut port, &mut domain, 1);
+    guard.update_gate(GateId::Link, true, first.cycle, 0);
+    guard.request_rearm(permit, first.cycle, 100).unwrap();
+
+    submit(
+        &mut master,
+        &mut port,
+        &mut domain,
+        &plan,
+        2,
+        &csp_input_image(0x0027, 120, 10),
+        false,
+    );
+    let second = receive(&mut master, &mut port, &mut domain, 2);
+    guard.update_gate(GateId::Link, false, second.cycle, 0xCAFE);
+    let mut decision = guard.cycle_axes(second.cycle, 200);
+    assert_eq!(
+        decision.axis(0),
+        esop_lifecycle_guard::AxisDirective::Stop(StopAction::Hold)
+    );
+
+    let limits = [ControlledStopLimits {
+        max_velocity_step: 1,
+        max_torque_step: 1,
+        max_stationary_velocity: 1,
+        max_zero_torque: 1,
+    }];
+    let mut planners = [ControlledStopPlanner::new()];
+    let safe_image = csp_input_image(0x0027, 120, 0);
+    port.set_now_ns(300_000);
+    port.fail_next_tx();
+    let failed = submit_controlled_stopping_frame(
+        &mut decision,
+        second,
+        &mut planners,
+        &limits,
+        &[map],
+        &[OperatingMode::Csp],
+        &safe_image,
+        &domain,
+        &plan,
+        &mut master,
+        &mut port,
+        3,
+        350_000,
+    );
+    assert!(
+        matches!(failed, Err(StopFrameError::Transmit(CycleError::Port(_)))),
+        "unexpected controlled-stop failure: {failed:?}"
+    );
+    assert_eq!(planners[0].phase(), ControlledStopPhase::Idle);
+    assert_eq!(decision.stop_issued_cycle(), None);
+
+    let submitted = submit_controlled_stopping_frame(
+        &mut decision,
+        second,
+        &mut planners,
+        &limits,
+        &[map],
+        &[OperatingMode::Csp],
+        &safe_image,
+        &domain,
+        &plan,
+        &mut master,
+        &mut port,
+        3,
+        350_000,
+    )
+    .unwrap();
+    domain.begin_receive(3).unwrap();
+    assert_eq!(planners[0].phase(), ControlledStopPhase::Applying);
+    assert_eq!(decision.stop_issued_cycle(), Some(second.cycle));
+    assert_eq!(
+        submitted.controlled_commands[0].unwrap().target,
+        Some(Cia402Target::Position(120))
+    );
+    let mut state = StatePage::<1, 0, 1>::new(7);
+    state.sequence = second.cycle;
+    controlled_axis_stops_to_procbuf(&mut state, &decision, &submitted, None).unwrap();
+    assert_eq!(
+        state.axis_stops[0].requested_action,
+        StopAction::Hold as u8 + 1
+    );
+    assert_eq!(
+        state.axis_stops[0].issued_action,
+        StopAction::Hold as u8 + 1
+    );
+
+    let third = receive(&mut master, &mut port, &mut domain, 3);
+    assert_eq!(&domain.input()[16..18], &0x000Fu16.to_le_bytes());
+    assert_eq!(domain.input()[18], OperatingMode::Csp.raw() as u8);
+    assert_eq!(&domain.input()[19..23], &120i32.to_le_bytes());
+
+    let mut terminal = guard.cycle_axes(third.cycle, 300);
+    port.set_now_ns(400_000);
+    let disabled = submit_controlled_stopping_frame(
+        &mut terminal,
+        third,
+        &mut planners,
+        &limits,
+        &[map],
+        &[OperatingMode::Csp],
+        &safe_image,
+        &domain,
+        &plan,
+        &mut master,
+        &mut port,
+        4,
+        450_000,
+    )
+    .unwrap();
+    domain.begin_receive(4).unwrap();
+    assert_eq!(planners[0].phase(), ControlledStopPhase::DisableRequested);
+    assert_eq!(disabled.controlled_commands[0].unwrap().target, None);
+    assert_eq!(disabled.outputs[0].controlword, CONTROLWORD_DISABLE_VOLTAGE);
 }
 
 #[test]
