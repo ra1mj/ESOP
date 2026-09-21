@@ -20,7 +20,7 @@ use crate::{
 };
 use esop_ethercat_core::{
     CycleReport, DcCyclicSync, Domain, EthercatMaster, EthercatPort, FramePlan, FramePlanSet,
-    ScheduleTable, ScheduledDomainBank, wire::Command,
+    ScheduleTable, ScheduledDomainBank, ScheduledReceiveReport, wire::Command,
 };
 use esop_procbuf::{HeaderError, ProcBuf, StatePage, StatePublishError};
 use esop_profile_cia402::{
@@ -37,6 +37,7 @@ pub enum StopCycleError {
     MotionDomainMismatch,
     InvalidCycleDeadline,
     InvalidAuxiliaryOutputs,
+    ReceiveMismatch,
     Header(HeaderError),
     NotStopping(LifecycleAction),
     Evidence(AxisEvidenceError),
@@ -508,6 +509,55 @@ impl<
             }),
             Some(cycle_deadline_ns),
             Some(outputs),
+        )
+    }
+
+    /// Bind the output decision to the same finalized shared RX report that
+    /// supplied the motion Domain. The bank supplies the frozen Domain order;
+    /// callers cannot substitute a stale or rearranged quality array. This
+    /// still leaves DC/control TX and the final post-publication deadline with
+    /// the outer cycle owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_received_with_outputs_until<const SCHEDULE_SLOTS: usize, const FRAMES: usize>(
+        &mut self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        received: &ScheduledReceiveReport<P::Error, DOMAINS>,
+        motion_domain_id: u8,
+        outputs: &ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
+        targets: &[Option<Cia402Target>; AXES],
+        guards: &mut [CyclicSetpointGuard; AXES],
+        limits: &[CyclicLimits; AXES],
+        cycle_deadline_ns: u64,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        if !domain_bank.uses_schedule(outputs.schedule)
+            || !domain_bank.confirms_receive(received)
+            || self.report != received.report
+            || !domain_bank
+                .domain::<BYTES, SEGMENTS>(motion_domain_id)
+                .is_some_and(|domain| core::ptr::eq(domain, self.domain))
+            || match received.dc_result {
+                Ok(()) => {
+                    self.dc.last_sync_cycle() != received.report.cycle
+                        || self.dc.last_error().is_some()
+                }
+                Err(error) => self.dc.last_error() != Some(error),
+            }
+        {
+            return Err(StopCycleError::ReceiveMismatch);
+        }
+        let domains = core::array::from_fn(|slot| ScheduledDomainQuality {
+            id: outputs.schedule.domains()[slot].id,
+            quality: received.qualities[slot],
+        });
+        self.run_scheduled_with_outputs_until(
+            outputs.schedule,
+            &domains,
+            motion_domain_id,
+            outputs,
+            targets,
+            guards,
+            limits,
+            cycle_deadline_ns,
         )
     }
 

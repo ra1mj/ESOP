@@ -288,6 +288,8 @@ ProcBuf ABI v4 在 State 页增加固定容量的 `axis_stops[AXES]`：`request_
 
 共用 RX 入口现自动调用上述超时扫描：`ScheduledReceiveReport.control_expiry` 只记录本次新超时的句柄，调用方仍需遍历消费，未过期的请求可跨服务周期保持在途。收包成功、链路断开及端口错误都会完成 Domain/DC 收尾；若有新过期控制请求，则以同一时刻回收主站 RX 索引，避免服务处理完请求后旧索引仍占用。完成与失败请求的业务状态推进、发送、所有其他安全事实和最后一次发布后的周期截止时间仍由完整周期所有者负责。前段“调用方负责判定缺失响应”仅指此前未接线的阶段；实物 HIL 证据仍未取得。
 
+新增受检的共享 RX 到输出路径：`run_received_with_outputs_until` 从同一 `ScheduledDomainBank` 刚结束的接收报告生成冻结顺序的 Domain 质量，检查报告周期、当前 Domain 实际质量、运动 Domain 身份和 DC 收尾结果，然后才允许生命周期门槛决策和到期辅助/运动 TX。软件模拟验证运动与 IO Domain、DC、控制请求同周期完成，错误报告在发送前失败；后续周期的到期 IO/DC 缺帧撤销运动许可、进入停止，旧报告无法复用。外部事实、DC/控制 TX、发布完成后的 deadline 和实物 HIL 仍由上层周期所有者负责。
+
 可选的 `run_until` / `run_with_motion_until` 及对应 `run_scheduled_until` / `run_scheduled_with_motion_until` 接收**当前周期**的绝对 deadline（与下一代帧的 RX `deadline_ns` 不同），用端口单调时钟检查发送前及最后一次 TX 尝试后、State 发布前的时间。发送前超时禁止活动输出并请求停机；活动帧虽提交成功但 TX 后超时时，本周期立刻撤销 permit、使预算门槛失效、发布 Stopping 和未发出的停机请求。`post_tx_deadline_met=false` 与 `active_tx_before_deadline_miss=true` 明确标出此帧**仍是活动帧**，不可伪造停机控制字已发送的证明；该帧可能仍占有 RX 索引，下周期收妥或过期后才可提交停机帧。该检查无法覆盖 State/事件发布、其他 Domain TX 和任务释放，因此不能作为整个生产周期的最终 deadline 判定；周期所有者仍须负责其余工作和资格证明。
 
 ## 9. 配置与可观测性

@@ -1,9 +1,9 @@
 use esop_ethercat_core::wire::{Command, MAX_ETHERNET_FRAME_LEN};
 use esop_ethercat_core::{
-    CycleError, CycleReport, DatagramPlan, DcCyclicConfig, DcCyclicSync, DcMonitor, Domain,
-    DomainSegment, EthercatMaster, EthercatPort, FramePlan, FramePlanSet, LinkState, MasterConfig,
-    PdoDirection, PdoEntry, PortError, RxPoll, ScheduleDomain, ScheduleTable, ScheduledDomainBank,
-    ScheduledDomainEntry,
+    ControlRequestPool, CycleError, CycleReport, DatagramPlan, DcCyclicConfig, DcCyclicError,
+    DcCyclicSync, DcMonitor, Domain, DomainSegment, EthercatMaster, EthercatPort, FramePlan,
+    FramePlanSet, LinkState, MasterConfig, PdoDirection, PdoEntry, PortError, RegisterOperation,
+    RequestState, RxPoll, ScheduleDomain, ScheduleTable, ScheduledDomainBank, ScheduledDomainEntry,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::cia402::step_axis_bank;
@@ -141,6 +141,404 @@ fn receive<const BYTES: usize>(
         .unwrap();
     domain.finish_receive(generation, report.cycle).unwrap();
     report
+}
+
+struct BufferedRxPort {
+    inner: SimulatedPort,
+    first: Option<(usize, [u8; MAX_ETHERNET_FRAME_LEN])>,
+}
+
+impl EthercatPort for BufferedRxPort {
+    type Error = PortError;
+
+    fn link_state(&self) -> LinkState {
+        self.inner.link_state()
+    }
+
+    fn now_ns(&self) -> u64 {
+        self.inner.now_ns()
+    }
+
+    fn tx_submit(&mut self, frame: &[u8]) -> Result<(), Self::Error> {
+        self.inner.tx_submit(frame)
+    }
+
+    fn rx_poll(
+        &mut self,
+        destination: &mut [u8; MAX_ETHERNET_FRAME_LEN],
+    ) -> Result<RxPoll, Self::Error> {
+        if let Some((length, frame)) = self.first.take() {
+            destination[..length].copy_from_slice(&frame[..length]);
+            return Ok(RxPoll::Frame(length));
+        }
+        self.inner.rx_poll(destination)
+    }
+}
+
+impl BufferedRxPort {
+    fn buffer_first_response(&mut self) {
+        let mut frame = [0; MAX_ETHERNET_FRAME_LEN];
+        let RxPoll::Frame(length) = self.inner.rx_poll(&mut frame).unwrap() else {
+            panic!("control response must be queued");
+        };
+        self.first = Some((length, frame));
+    }
+
+    fn tx_frames(&self) -> usize {
+        self.inner.tx_frames()
+    }
+}
+
+#[test]
+fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
+    let schedule = ScheduleTable::<2, 1>::build(
+        100_000,
+        &[
+            ScheduleDomain {
+                id: 9,
+                period_ticks: 1,
+                phase_ticks: 0,
+            },
+            ScheduleDomain {
+                id: 10,
+                period_ticks: 1,
+                phase_ticks: 0,
+            },
+        ],
+    )
+    .unwrap();
+    let mut motion = Domain::<IMAGE_BYTES, 1>::new(0x1000);
+    motion
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: IMAGE_BYTES,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut auxiliary = Domain::<2, 1>::new(0x2000);
+    auxiliary
+        .add_segment(DomainSegment {
+            datagram_index: 13,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut domain_bank = ScheduledDomainBank::new(
+        &schedule,
+        [
+            ScheduledDomainEntry {
+                id: 9,
+                domain: &mut motion,
+            },
+            ScheduledDomainEntry {
+                id: 10,
+                domain: &mut auxiliary,
+            },
+        ],
+    )
+    .unwrap();
+    let mut motion_plan = FramePlan::<3>::new();
+    motion_plan
+        .push(DatagramPlan {
+            command: Command::Lrw,
+            index: 12,
+            address: 0x1000,
+            payload_offset: 0,
+            payload_len: IMAGE_BYTES,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut auxiliary_plans = FramePlanSet::<1, 3>::new();
+    auxiliary_plans
+        .push(DatagramPlan {
+            command: Command::Lrw,
+            index: 13,
+            address: 0x2000,
+            payload_offset: 0,
+            payload_len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 14, IMAGE_BYTES + 2),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let mut receive_plan = FramePlan::<3>::new();
+    receive_plan.push(motion_plan.datagrams()[0]).unwrap();
+    receive_plan
+        .push(DatagramPlan {
+            command: Command::Lrw,
+            index: 13,
+            address: 0x2000,
+            payload_offset: IMAGE_BYTES,
+            payload_len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    receive_plan.push(dc.datagram_plan()).unwrap();
+    let safe_image = input_image(0x0040, 0);
+    let auxiliary_image = [0xAA, 0xBB];
+    let auxiliary_outputs = ScheduledAuxiliaryOutputs::new(
+        &domain_bank,
+        &schedule,
+        9,
+        &motion_plan,
+        [
+            None,
+            Some(AuxiliaryOutputEntry {
+                id: 10,
+                image: &auxiliary_image,
+                plans: &auxiliary_plans,
+            }),
+        ],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<2, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut port = BufferedRxPort {
+        inner: SimulatedPort::new(1),
+        first: None,
+    };
+    port.inner.set_now_ns(100_000);
+    let mut controls = ControlRequestPool::<1>::new();
+    let request = controls
+        .acquire(15, 1, 0x5000, RegisterOperation::Read, &[0; 4], 150_000)
+        .unwrap();
+    let frame = master.acquire_frame(1, 150_000).unwrap();
+    master
+        .build_control_request(&mut controls, request, frame)
+        .unwrap();
+    master.submit_frame(&mut port, frame).unwrap();
+    port.buffer_first_response();
+    let mut receive_image = [0u8; IMAGE_BYTES + 2 + 8];
+    receive_image[..IMAGE_BYTES].copy_from_slice(&safe_image);
+    receive_image[IMAGE_BYTES..IMAGE_BYTES + 2].copy_from_slice(&auxiliary_image);
+    dc.prepare(1, 100_000, &mut receive_image).unwrap();
+    let frame = master.acquire_frame(1, 150_000).unwrap();
+    master
+        .build_and_arm_frame_from_plan(frame, &receive_plan, &receive_image)
+        .unwrap();
+    master.submit_frame(&mut port, frame).unwrap();
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut received = domain_bank
+        .receive_with_dc_and_control(
+            &mut master,
+            &mut port,
+            &mut scratch,
+            1,
+            &mut dc,
+            &mut controls,
+        )
+        .unwrap();
+    assert_eq!(received.dc_result, Ok(()));
+    assert!(received.transport_error.is_none());
+    assert!(received.qualities.iter().all(|quality| quality.valid));
+    assert!(domain_bank.confirms_receive(&received));
+    assert_eq!(controls.get(request).unwrap().state, RequestState::Complete);
+
+    let other = OtherCycleFacts {
+        platform_ready: true,
+        coe_ready: true,
+        topology_valid: true,
+        drive_ready: true,
+        command_current: true,
+        supervisor_healthy: true,
+        external_safety_clear: true,
+        deadline_met: true,
+    };
+    let snapshots = [
+        ScheduledDomainQuality {
+            id: 9,
+            quality: received.qualities[0],
+        },
+        ScheduledDomainQuality {
+            id: 10,
+            quality: received.qualities[1],
+        },
+    ];
+    let mut guard = LifecycleGuard::new(
+        GateId::Domain.bit() | GateId::Link.bit(),
+        7,
+        GuardPolicy {
+            enter_good_cycles: 1,
+            allowed_axis_mask: 1,
+            ..GuardPolicy::conservative()
+        },
+    );
+    guard.update_cyclic_quality(
+        cyclic_quality_from_schedule(received.report, &schedule, &snapshots, &dc, other),
+        received.report.cycle,
+    );
+    guard
+        .request_rearm(
+            MotionPermit {
+                boot_id: 7,
+                source_id: 1,
+                permit_epoch: 1,
+                sequence: 1,
+                expires_at_ns: 400_000,
+                axis_mask: 1,
+                authority: 1,
+                reserved: [0; 3],
+                policy_version: 1,
+            },
+            received.report.cycle,
+            100_000,
+        )
+        .unwrap();
+    let mut cursor = LifecycleEventCursor::new(&guard);
+    let buffer = ProcBuf::<1, 0, 2, 8>::new(1, 7);
+    let mut axis_bank = Cia402AxisBank::<1>::new();
+    let maps = [map()];
+    let modes = [OperatingMode::Csp];
+    let limits = [CyclicLimits {
+        max_position_step: 2.0,
+        max_velocity: 2.0,
+        max_torque: 2.0,
+    }];
+    let mut guards = [CyclicSetpointGuard::new()];
+    let mut state = StatePage::<1, 0, 2>::new(7);
+    state.sequence = received.report.cycle;
+    {
+        let mut context = StopCycleContext {
+            guard: &mut guard,
+            bank: &mut axis_bank,
+            master: &mut master,
+            port: &mut port,
+            domain: domain_bank.domain::<IMAGE_BYTES, 1>(9).unwrap(),
+            dc: &dc,
+            buffer: &buffer,
+            event_cursor: &mut cursor,
+            state: &mut state,
+            report: received.report,
+            other,
+            maps: &maps,
+            modes: &modes,
+            max_stationary_velocities: &[1],
+            safe_process_image: &safe_image,
+            plan: &motion_plan,
+            next_generation: 2,
+            deadline_ns: 250_000,
+            now_ns: 100_000,
+            transition_time_ns: 100_000,
+        };
+        received.qualities[1].actual_wkc = 0;
+        assert!(!domain_bank.confirms_receive(&received));
+        assert!(matches!(
+            context.run_received_with_outputs_until(
+                &domain_bank,
+                &received,
+                9,
+                &auxiliary_outputs,
+                &[None],
+                &mut guards,
+                &limits,
+                150_000,
+            ),
+            Err(StopCycleError::ReceiveMismatch)
+        ));
+        received.qualities[1].actual_wkc = 1;
+        received.report.cycle = 0;
+        assert!(matches!(
+            context.run_received_with_outputs_until(
+                &domain_bank,
+                &received,
+                9,
+                &auxiliary_outputs,
+                &[None],
+                &mut guards,
+                &limits,
+                150_000,
+            ),
+            Err(StopCycleError::ReceiveMismatch)
+        ));
+        received.report.cycle = 1;
+        assert_eq!(context.port.tx_frames(), 2);
+        assert_eq!(context.state.quality.sequence, 0);
+        let outcome = context
+            .run_received_with_outputs_until(
+                &domain_bank,
+                &received,
+                9,
+                &auxiliary_outputs,
+                &[None],
+                &mut guards,
+                &limits,
+                150_000,
+            )
+            .unwrap();
+        assert_eq!(outcome.action, LifecycleAction::EnableAllowed);
+        assert!(outcome.transmission.is_ok());
+        assert_eq!(outcome.auxiliary_frames_sent, 1);
+        assert!(outcome.quality.distributed_clock_locked);
+        assert_eq!(outcome.post_tx_deadline_met, Some(true));
+        assert_eq!(outcome.state_publish, Ok(1));
+        assert_eq!(buffer.read_state().unwrap().state.sequence, 1);
+        assert_eq!(context.port.tx_frames(), 4);
+    }
+    controls.release(request).unwrap();
+
+    port.inner.set_now_ns(200_000);
+    dc.prepare(2, 200_000, &mut receive_image).unwrap();
+    let missing = domain_bank
+        .receive_with_dc_and_control(
+            &mut master,
+            &mut port,
+            &mut scratch,
+            2,
+            &mut dc,
+            &mut controls,
+        )
+        .unwrap();
+    assert!(missing.qualities[0].valid);
+    assert!(!missing.qualities[1].valid);
+    assert_eq!(missing.dc_result, Err(DcCyclicError::MissingResponse));
+    assert!(!domain_bank.confirms_receive(&received));
+    let mut state = StatePage::<1, 0, 2>::new(7);
+    state.sequence = missing.report.cycle;
+    let stopped = StopCycleContext {
+        guard: &mut guard,
+        bank: &mut axis_bank,
+        master: &mut master,
+        port: &mut port,
+        domain: domain_bank.domain::<IMAGE_BYTES, 1>(9).unwrap(),
+        dc: &dc,
+        buffer: &buffer,
+        event_cursor: &mut cursor,
+        state: &mut state,
+        report: missing.report,
+        other,
+        maps: &maps,
+        modes: &modes,
+        max_stationary_velocities: &[1],
+        safe_process_image: &safe_image,
+        plan: &motion_plan,
+        next_generation: 3,
+        deadline_ns: 350_000,
+        now_ns: 200_000,
+        transition_time_ns: 100_000,
+    }
+    .run_received_with_outputs_until(
+        &domain_bank,
+        &missing,
+        9,
+        &auxiliary_outputs,
+        &[None],
+        &mut guards,
+        &limits,
+        250_000,
+    )
+    .unwrap();
+    assert!(matches!(stopped.action, LifecycleAction::Stop(_)));
+    assert!(!stopped.quality.domain_valid);
+    assert!(!stopped.quality.distributed_clock_locked);
+    assert_eq!(guard.state(), LifecycleState::Stopping);
+    assert!(guard.permit().is_none());
+    assert_eq!(buffer.read_state().unwrap().state.sequence, 2);
 }
 
 struct AdvancingTxPort<'a> {

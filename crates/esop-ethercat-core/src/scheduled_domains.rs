@@ -246,6 +246,19 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
         core::ptr::eq(self.schedule, schedule)
     }
 
+    /// Confirm that a shared RX report still describes this bank's most
+    /// recently finalized cycle and its actual Domain qualities.
+    pub fn confirms_receive<E>(&self, received: &ScheduledReceiveReport<E, DOMAINS>) -> bool {
+        self.active.is_none()
+            && self.last_cycle != 0
+            && received.report.cycle == self.last_cycle
+            && self
+                .domains
+                .iter()
+                .zip(received.qualities)
+                .all(|(entry, quality)| entry.domain.quality() == quality)
+    }
+
     /// Validate the ID order and exclusive datagram-index ownership once at
     /// activation, not on the cyclic RX path.
     pub fn new(

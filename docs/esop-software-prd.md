@@ -329,6 +329,8 @@ R2 控制超时增量：`ControlRequestPool::expire_in_flight` 在 RX 完成后�
 
 R2 控制服务 RX 接线增量：`receive_with_dc_and_control` 已在本次 RX、Domain/DC 收尾完成后，以同一个端口单调时间自动将新过期控制请求放进 `ScheduledReceiveReport.control_expiry`；有新过期请求时，返回前回收其主站 RX 索引。链路断开和端口收包错误的提前返回同样执行该收尾；无新过期请求时不额外扫描 256 个 RX 索引。三周期模拟覆盖发送确认、轮询缺帧、后续同源接收超时与邮箱延迟重试，同时保持 Domain/DC 接收资格；预检拒绝仍不改变请求状态。调用者仍负责消费完成/失败请求、配置安全事实、控制/DC 发送和完整周期最终 deadline，软件模拟不替代实物 HIL，R2 出口未达成。
 
+R2 接收结果与输出绑定增量：`StopCycleContext::run_received_with_outputs_until` 在发送辅助或运动帧之前，核对共享 RX 报告是否属于当前 `ScheduledDomainBank` 刚结束的周期、真实 Domain 质量、当前主站报告、运动 Domain 实例及 DC 收尾结果，并按冻结调度顺序生成生命周期质量快照。模拟集成测试让运动 Domain、IO Domain、DC 和控制请求在同一次共享 RX 完成，随后发送到期辅助与运动输出；修改报告质量或周期均在新 TX 前拒绝。下一周期即使运动 Domain 正常，到期 IO 与 DC 缺帧仍撤销许可并进入停止，旧报告不可复用。此入口仍依赖外层提供非总线安全事实、DC/控制 TX、安全镜像及 State/事件发布后的最终周期 deadline；并非完整生产周期所有者，也不替代双厂商伺服与 IO 实物 HIL 资格。
+
 ### 11.1 发布阻塞条件
 
 任何发布候选必须满足：

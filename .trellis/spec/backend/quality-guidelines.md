@@ -207,6 +207,14 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   their RX indices with the same port clock before returning. Skip the extra
   index sweep when no request newly expired. The caller still owns control
   service-state progression and the final cycle deadline.
+- For the shared-RX-to-output path, prefer
+  `StopCycleContext::run_received_with_outputs_until`: confirm the report
+  against the bank's just-finalized cycle and current Domain qualities, the
+  context's actual motion Domain instance and master report, and the DC
+  completion result before deriving frozen-order quality snapshots. Reject a
+  stale, altered, or foreign report before gate mutation or auxiliary TX.
+  This does not replace the outer owner's control/DC TX or final deadline
+  check after State and event publication.
 - Expire in-flight control requests only when `now > deadline`, matching the
   RX index boundary. Retain `Failed(Timeout)` until the matching service FSM
   consumes and releases it, and do not let a late completion erase terminal
