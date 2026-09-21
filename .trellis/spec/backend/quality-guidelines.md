@@ -196,8 +196,13 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   budget-missed report plus the original transport error on port failure.
   Treat a preflight conflict or generation mismatch as a caller safety
   failure; the rejected call has not started RX. The caller still owns
-  matching output plans, control RX, lifecycle output submission, and the
-  full-cycle deadline.
+  matching output plans, lifecycle output submission, and the full-cycle
+  deadline. `receive_with_dc_and_control` may share the same RX poll with
+  in-flight `ControlRequestPool` entries only when all indices are disjoint
+  from Domain, DC, and other in-flight controls. The control consumer must
+  match the request's index and command as well as the master-verified
+  response; a frame slot ID alone never identifies its datagram owner.
+  The caller still owns control request timeout and service-state progression.
 - Build slave-to-slave copy plans from an active Domain registry, not ad hoc
   offsets. Bind the source TxPDO, target RxPDO, and target quality RxPDO to
   verified datagram coverage. At the target's scheduled send cycle, accept a

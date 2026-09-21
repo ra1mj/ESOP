@@ -282,6 +282,8 @@ ProcBuf ABI v4 在 State 页增加固定容量的 `axis_stops[AXES]`：`request_
 
 `ScheduledDomainBank::receive_with_dc` 为已准备并已按冻结计划发送的 DC 提供固定容量的同周期 RX 入口：先验证 DC 索引与 Domain 不冲突、世代匹配，再在一次主站 RX 中分发到期 Domain 和 DC，最后无论缺帧或端口接收错误都结束两者的接收状态。端口错误返回保守的预算失败报告和原始错误，不得用可能已部分提交的输入重新放行运动；DC 缺响应清除 pending、保持旧 `last_sync_cycle`，不能沿用上周期锁定资格。软件模拟覆盖双 Domain 不同速率、仅丢 DC 帧时同周期撤销许可、后续新鲜 DC 恢复仍需重臂，以及端口失败后的保守质量。前置校验失败则尚未开始接收，调用方必须按安全失败处理。调用方仍负责 DC 准备/发送、其他控制接收、安全输出镜像、完整周期终点 deadline 和实物 HIL。
 
+`receive_with_dc_and_control` 在上述收尾边界中接入在途 `ControlRequestPool`，接收前拒绝控制索引与 Domain、DC 或其他在途控制请求重用，使用同一次有界主站 RX 分发控制响应。控制消费者除了帧槽还核对请求数据报索引/命令；无关数据报不能误完成请求。模拟双帧回归验证控制与 Domain/DC 同周期完成，单独缺失控制响应时请求仍保持 `InFlight`。这不是控制请求的超时与状态机服务：调用方仍须在其期限内判定缺失响应，并负责控制请求发送、业务状态推进与安全事实；本 RX 入口也不提供整周期最终 deadline 或 HIL 证明。上段“其他控制接收”对应前一增量状态。
+
 可选的 `run_until` / `run_with_motion_until` 及对应 `run_scheduled_until` / `run_scheduled_with_motion_until` 接收**当前周期**的绝对 deadline（与下一代帧的 RX `deadline_ns` 不同），用端口单调时钟检查发送前及最后一次 TX 尝试后、State 发布前的时间。发送前超时禁止活动输出并请求停机；活动帧虽提交成功但 TX 后超时时，本周期立刻撤销 permit、使预算门槛失效、发布 Stopping 和未发出的停机请求。`post_tx_deadline_met=false` 与 `active_tx_before_deadline_miss=true` 明确标出此帧**仍是活动帧**，不可伪造停机控制字已发送的证明；该帧可能仍占有 RX 索引，下周期收妥或过期后才可提交停机帧。该检查无法覆盖 State/事件发布、其他 Domain TX 和任务释放，因此不能作为整个生产周期的最终 deadline 判定；周期所有者仍须负责其余工作和资格证明。
 
 ## 9. 配置与可观测性

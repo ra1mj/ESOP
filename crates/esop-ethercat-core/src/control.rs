@@ -173,6 +173,8 @@ pub enum ControlError {
     ResponseTooLarge,
     Wire(WireError),
     GenerationMismatch,
+    DatagramIndexMismatch,
+    TypeMismatch,
     AddressMismatch,
     LengthMismatch,
     WorkingCounterMismatch,
@@ -308,6 +310,13 @@ impl<const REQUESTS: usize> ControlRequestPool<REQUESTS> {
     ) -> Result<(), ControlError> {
         let handle = RequestHandle::from_index(completion.slot_id as usize)
             .ok_or(ControlError::InvalidHandle)?;
+        let request = self.get(handle).ok_or(ControlError::InvalidHandle)?;
+        if request.datagram_index != header.index {
+            return Err(ControlError::DatagramIndexMismatch);
+        }
+        if request.operation.command() != header.command {
+            return Err(ControlError::TypeMismatch);
+        }
         self.complete(
             handle,
             completion.generation,
@@ -371,6 +380,14 @@ impl<const REQUESTS: usize> crate::engine::RxDatagramConsumer for ControlRxConsu
         header: crate::wire::DatagramHeader,
         payload: &[u8],
     ) -> bool {
+        let Some(handle) = RequestHandle::from_index(completion.slot_id as usize) else {
+            return false;
+        };
+        if !self.pool.get(handle).is_some_and(|request| {
+            request.state == RequestState::InFlight && request.datagram_index == header.index
+        }) {
+            return false;
+        }
         if self
             .pool
             .complete_match(completion, header, payload)
@@ -393,7 +410,9 @@ impl<const REQUESTS: usize> Default for ControlRequestPool<REQUESTS> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::{FrameView, MAX_ETHERNET_FRAME_LEN};
+    use crate::engine::RxDatagramConsumer;
+    use crate::rx_index::RxMatch;
+    use crate::wire::{DatagramHeader, FrameView, MAX_ETHERNET_FRAME_LEN};
 
     #[test]
     fn fixed_request_pool_builds_and_completes_register_read() {
@@ -464,5 +483,51 @@ mod tests {
             pool.get(handle).unwrap().last_error(),
             Some(ControlError::WorkingCounterMismatch)
         );
+    }
+
+    #[test]
+    fn unrelated_datagram_cannot_complete_a_control_request_with_the_same_slot_id() {
+        let mut pool = ControlRequestPool::<1>::new();
+        let handle = pool
+            .acquire(15, 2, 0x5000, RegisterOperation::Read, &[0; 4], 250_000)
+            .unwrap();
+        let mut frame = [0; MAX_ETHERNET_FRAME_LEN];
+        pool.get_mut(handle)
+            .unwrap()
+            .build_frame(&mut frame, [0xFF; 6], [1, 2, 3, 4, 5, 6])
+            .unwrap();
+        let completion = RxMatch {
+            slot_id: handle.index() as u16,
+            generation: 2,
+            working_counter: 1,
+        };
+        let other_index = DatagramHeader::new(Command::Fprd, 12, 0x5000, 4);
+        let other_command = DatagramHeader::new(Command::Fpwr, 15, 0x5000, 4);
+        assert_eq!(
+            pool.complete_match(completion, other_index, &[1, 2, 3, 4]),
+            Err(ControlError::DatagramIndexMismatch)
+        );
+        assert_eq!(
+            pool.complete_match(completion, other_command, &[1, 2, 3, 4]),
+            Err(ControlError::TypeMismatch)
+        );
+        let mut consumer = ControlRxConsumer::new(&mut pool);
+        assert!(!consumer.accept(1, 200_000, completion, other_index, &[1, 2, 3, 4]));
+        assert_eq!(consumer.rejected(), 0);
+        assert!(!consumer.accept(1, 200_000, completion, other_command, &[1, 2, 3, 4]));
+        assert_eq!(consumer.rejected(), 1);
+        assert_eq!(pool.get(handle).unwrap().state, RequestState::InFlight);
+        assert_eq!(pool.get(handle).unwrap().payload(), &[0; 4]);
+        let expected = DatagramHeader::new(Command::Fprd, 15, 0x5000, 4);
+        assert!(
+            pool.complete_match(completion, expected, &[1, 2, 3, 4])
+                .is_ok()
+        );
+        assert_eq!(pool.get(handle).unwrap().state, RequestState::Complete);
+        let mut consumer = ControlRxConsumer::new(&mut pool);
+        assert!(!consumer.accept(2, 210_000, completion, expected, &[9, 9, 9, 9]));
+        assert_eq!(consumer.rejected(), 0);
+        assert_eq!(pool.get(handle).unwrap().state, RequestState::Complete);
+        assert_eq!(pool.get(handle).unwrap().payload(), &[1, 2, 3, 4]);
     }
 }

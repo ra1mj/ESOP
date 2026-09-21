@@ -1,5 +1,6 @@
 //! Fixed-capacity receive ownership for a frozen multi-rate Domain schedule.
 
+use crate::control::{ControlRequestPool, ControlRxConsumer, RequestHandle, RequestState};
 use crate::dc::{DcCyclicError, DcCyclicSync};
 use crate::domain::{Domain, DomainError, DomainQuality, DomainSegment};
 use crate::engine::{CycleError, CycleReport, EthercatMaster, RxConsumerMux, RxDatagramConsumer};
@@ -79,6 +80,7 @@ pub enum ScheduledDomainError {
 pub enum ScheduledReceiveError {
     DcIndexConflict(u8),
     DcGenerationMismatch,
+    ControlIndexConflict(u8),
     Domain(ScheduledDomainError),
 }
 
@@ -97,10 +99,12 @@ pub struct ScheduledReceiveReport<E, const DOMAINS: usize> {
 /// Owns the receive borrow for all configured Domains. A single master RX
 /// session dispatches only verified datagrams to Domains due on this tick.
 /// Use `receive_with_dc` when DC is enabled so a port error cannot skip
-/// Domain or DC receive finalization. For other receive arrangements the
+/// Domain or DC receive finalization. `receive_with_dc_and_control` also
+/// dispatches in-flight control requests through that RX session. For other
+/// receive arrangements the
 /// caller must pair `begin_due` and `finish_due`, including on RX errors.
-/// The caller still owns verified TX plans, control RX, and the final cycle
-/// deadline. Pass the resulting qualities to the lifecycle schedule
+/// The caller still owns verified TX plans, control request timeouts, and the
+/// final cycle deadline. Pass the resulting qualities to the lifecycle schedule
 /// projection in the same order.
 pub struct ScheduledDomainBank<'a, const DOMAINS: usize, const SLOTS: usize> {
     schedule: &'a ScheduleTable<DOMAINS, SLOTS>,
@@ -123,6 +127,63 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
         generation: u16,
         dc: &mut DcCyclicSync,
     ) -> Result<ScheduledReceiveReport<P::Error, DOMAINS>, ScheduledReceiveError> {
+        self.receive_with_dc_consumer(master, port, scratch, generation, dc, &mut ())
+    }
+
+    /// Share the same bounded RX poll with in-flight control requests. The
+    /// control owner remains responsible for interpreting completed requests
+    /// and timing out missing ones. A concurrent control index must never
+    /// alias a Domain, DC, or another in-flight control request.
+    pub fn receive_with_dc_and_control<
+        P: EthercatPort,
+        const FRAMES: usize,
+        const MTU: usize,
+        const REQUESTS: usize,
+    >(
+        &mut self,
+        master: &mut EthercatMaster<FRAMES, MTU>,
+        port: &mut P,
+        scratch: &mut [u8; MAX_ETHERNET_FRAME_LEN],
+        generation: u16,
+        dc: &mut DcCyclicSync,
+        controls: &mut ControlRequestPool<REQUESTS>,
+    ) -> Result<ScheduledReceiveReport<P::Error, DOMAINS>, ScheduledReceiveError> {
+        let dc_index = dc.datagram_plan().index;
+        let mut claimed = [false; 256];
+        for slot in 0..REQUESTS.min(64) {
+            let Some(handle) = RequestHandle::from_index(slot) else {
+                continue;
+            };
+            let Some(request) = controls.get(handle) else {
+                continue;
+            };
+            if request.state != RequestState::InFlight {
+                continue;
+            }
+            let index = request.datagram_index as usize;
+            if self.index_owner[index] != 0 || index == dc_index as usize || claimed[index] {
+                return Err(ScheduledReceiveError::ControlIndexConflict(index as u8));
+            }
+            claimed[index] = true;
+        }
+        let mut control_consumer = ControlRxConsumer::new(controls);
+        self.receive_with_dc_consumer(master, port, scratch, generation, dc, &mut control_consumer)
+    }
+
+    fn receive_with_dc_consumer<
+        P: EthercatPort,
+        C: RxDatagramConsumer,
+        const FRAMES: usize,
+        const MTU: usize,
+    >(
+        &mut self,
+        master: &mut EthercatMaster<FRAMES, MTU>,
+        port: &mut P,
+        scratch: &mut [u8; MAX_ETHERNET_FRAME_LEN],
+        generation: u16,
+        dc: &mut DcCyclicSync,
+        control: &mut C,
+    ) -> Result<ScheduledReceiveReport<P::Error, DOMAINS>, ScheduledReceiveError> {
         let dc_index = dc.datagram_plan().index;
         if self.index_owner[dc_index as usize] != 0 {
             return Err(ScheduledReceiveError::DcIndexConflict(dc_index));
@@ -134,7 +195,8 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
         self.begin_due(cycle, generation)
             .map_err(ScheduledReceiveError::Domain)?;
         let rx = {
-            let mut consumers = RxConsumerMux::new(&mut *self, &mut *dc);
+            let mut domain_dc = RxConsumerMux::new(&mut *self, &mut *dc);
+            let mut consumers = RxConsumerMux::new(&mut domain_dc, control);
             master.cycle_receive_with_consumer(port, scratch, generation, &mut consumers)
         };
         let (report, transport_error) = match rx {
