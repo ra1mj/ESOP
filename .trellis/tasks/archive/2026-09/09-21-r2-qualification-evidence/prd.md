@@ -42,7 +42,7 @@ Add a fail-closed product, HIL topology, controlled-stop limit, compatibility, a
       `build/r2_qualification_report.json` for GitHub artifact upload.
 - [x] Capability, README, PRD, lifecycle, and Trellis quality documentation
       describe the new gate and preserve the remaining real-hardware blockers.
-- [ ] The full local quality gate passes before the implementation commit and
+- [x] The full local quality gate passes before the implementation commit and
       GitHub Actions passes after it is pushed.
 
 ## Notes
