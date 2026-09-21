@@ -21,6 +21,7 @@ mod pdo;
 mod pdo_config;
 mod plan;
 mod port;
+mod production_service;
 mod registers;
 mod ring;
 mod rx_index;
@@ -91,6 +92,12 @@ pub use pdo_config::{
 };
 pub use plan::{DatagramPlan, FramePlan, FramePlanSet, FramePlanSetError, PlanError};
 pub use port::{EthercatDmaTxPort, EthercatPort, LinkState, PortError, RxPoll};
+pub use production_service::{
+    ScheduledProductionServiceCycleError, ScheduledProductionServiceCycleReport,
+    ScheduledProductionServiceFault, ScheduledProductionServiceKind,
+    ScheduledProductionServiceProgress, ScheduledProductionServiceRecovery,
+    ScheduledProductionServiceScheduler, ScheduledProductionServices,
+};
 pub use registers::{
     AL_STATUS_WITH_CODE_LEN, BASIC_ESC_INFO_LEN, ESC_AL_CONTROL, ESC_AL_STATUS, ESC_AL_STATUS_CODE,
     ESC_BUILD, ESC_DC_CUC, ESC_DC_CYCLE0, ESC_DC_CYCLE1, ESC_DC_START0, ESC_DC_SYNC_ACTIVATION,

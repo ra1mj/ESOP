@@ -186,6 +186,26 @@ pub struct ScheduledMailboxCycleReport<E, const DOMAINS: usize> {
     pub post_receive_deadline_met: bool,
 }
 
+impl<E, const DOMAINS: usize> ScheduledMailboxCycleReport<E, DOMAINS> {
+    fn shape_valid(&self) -> bool {
+        let service = &self.tx.service;
+        self.request == self.tx.request
+            && !(self.receive.mailbox_progress.is_some() && self.request.is_some())
+            && !(self.post_receive_deadline_met && !service.post_tx_deadline_met)
+            && (service.failure.is_some() || service.dc_sent)
+            && (!service.control_sent || service.dc_sent)
+            && !matches!(
+                service.failure,
+                Some(ScheduledServiceTxFailure::Dc(_)) if service.dc_sent
+            )
+            && !matches!(
+                service.failure,
+                Some(ScheduledServiceTxFailure::Control(_))
+                    if !service.dc_sent || service.control_sent
+            )
+    }
+}
+
 /// A submit rejection has not prepared DC and leaves any caller-owned request
 /// with the caller. A receive rejection after a valid submit retains the TX
 /// report (including its request handle), but represents a violated cyclic
@@ -921,13 +941,10 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
             if control.state != RequestState::Prepared {
                 return Err(ScheduledServiceTxError::InvalidControlRequest);
             }
-            if control.generation != generation {
-                return Err(ScheduledServiceTxError::ControlGenerationMismatch);
-            }
             if control.deadline_ns <= now_ns {
                 return Err(ScheduledServiceTxError::ControlDeadlineExpired);
             }
-            Some(control.deadline_ns)
+            Some((control.generation, control.deadline_ns))
         } else {
             None
         };
@@ -956,7 +973,9 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
             report.failure = Some(ScheduledServiceTxFailure::Deadline);
         }
         if report.failure.is_none() {
-            if let Some((handle, control_deadline_ns)) = request.zip(control_deadline_ns) {
+            if let Some((handle, (control_generation, control_deadline_ns))) =
+                request.zip(control_deadline_ns)
+            {
                 if port.now_ns() >= control_deadline_ns {
                     // The request is still Prepared; the service can consume
                     // the terminal error without waiting for an RX timeout.
@@ -964,7 +983,7 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
                     report.failure = Some(ScheduledServiceTxFailure::Deadline);
                 } else {
                     master.reap_expired_rx_before_tx(port.now_ns());
-                    let sent = match master.acquire_frame(generation, control_deadline_ns) {
+                    let sent = match master.acquire_frame(control_generation, control_deadline_ns) {
                         Ok(frame) => match master.build_control_request(controls, handle, frame) {
                             Ok(_) => master
                                 .submit_frame(port, frame)
@@ -1275,6 +1294,24 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
         self.confirms_receive(cycle.received()) && cycle.shape_valid()
     }
 
+    /// Confirm that a mailbox cycle was produced by this bank's latest
+    /// shared RX and obeys the single-request service transition shape.
+    pub fn confirms_mailbox_cycle<E>(
+        &self,
+        cycle: &ScheduledMailboxCycleReport<E, DOMAINS>,
+    ) -> bool {
+        self.confirms_receive(&cycle.receive.received) && cycle.shape_valid()
+    }
+
+    /// Confirm the low-level transport evidence wrapped by the unified
+    /// production service scheduler.
+    pub fn confirms_production_service_cycle<E>(
+        &self,
+        cycle: &crate::production_service::ScheduledProductionServiceCycleReport<E, DOMAINS>,
+    ) -> bool {
+        cycle.confirmed_by(self)
+    }
+
     /// Validate the ID order and exclusive datagram-index ownership once at
     /// activation, not on the cyclic RX path.
     pub fn new(
@@ -1457,18 +1494,15 @@ fn mailbox_request_matches<const REQUESTS: usize>(
     let Some(item) = controls.get(handle) else {
         return false;
     };
-    item.datagram_index == action.datagram_index
-        && item.generation == action.generation
-        && item.address == action.address
-        && item.operation == action.operation
-        && item.response_length == action.datagram_len()
-        && item.deadline_ns == action.deadline_ns
-        && (!matches!(item.state, RequestState::Prepared | RequestState::InFlight)
-            || (item.payload().len() == action.datagram_len()
-                && item.payload().starts_with(action.payload())
-                && item.payload()[action.payload().len()..]
-                    .iter()
-                    .all(|byte| *byte == 0)))
+    item.matches_action(
+        action.datagram_index,
+        action.generation,
+        action.address,
+        action.operation,
+        action.payload(),
+        action.datagram_len(),
+        action.deadline_ns,
+    )
 }
 
 fn submit_dc_frame<P: EthercatPort, const FRAMES: usize, const MTU: usize>(

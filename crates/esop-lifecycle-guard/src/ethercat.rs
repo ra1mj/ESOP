@@ -4,6 +4,7 @@ use crate::CyclicQuality;
 use esop_ethercat_core::{
     CycleReport, DcCyclicSync, DomainQuality, MailboxProgress, RequestState, ScheduleTable,
     ScheduledControlCycleReport, ScheduledMailboxCycleReport, ScheduledProcessTxReport,
+    ScheduledProductionServiceCycleReport, ScheduledProductionServiceKind,
 };
 
 #[cfg(feature = "cia402")]
@@ -609,6 +610,28 @@ pub fn other_cycle_facts_from_mailbox_cycle<E, const DOMAINS: usize>(
     );
     other.coe_ready &= service_ready && mailbox_ready;
     other.deadline_met &= cycle.post_receive_deadline_met;
+    other
+}
+
+/// Project the scheduler-owned service selection into its fixed lifecycle
+/// gate. The selected controller and its readiness are carried by the report,
+/// so callers cannot qualify an unrelated gate or override a controller fault.
+pub fn other_cycle_facts_from_production_service_cycle<E, const DOMAINS: usize>(
+    cycle: &ScheduledProductionServiceCycleReport<E, DOMAINS>,
+    mut other: OtherCycleFacts,
+) -> OtherCycleFacts {
+    match cycle.selected() {
+        ScheduledProductionServiceKind::Idle => {}
+        ScheduledProductionServiceKind::Startup => {
+            other.topology_valid &= cycle.service_ready();
+        }
+        ScheduledProductionServiceKind::Mapping
+        | ScheduledProductionServiceKind::DcConfiguration
+        | ScheduledProductionServiceKind::Mailbox => {
+            other.coe_ready &= cycle.service_ready();
+        }
+    }
+    other.deadline_met &= cycle.post_receive_deadline_met();
     other
 }
 

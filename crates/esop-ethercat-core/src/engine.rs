@@ -10,6 +10,15 @@ use crate::rx_index::{
 use crate::wire::{DatagramHeader, FrameBuilder, FrameView, MAX_ETHERNET_FRAME_LEN, WireError};
 
 pub trait RxDatagramConsumer {
+    /// Authorize a response for an expectation armed by an earlier cyclic
+    /// generation. The default keeps Domain/DC traffic strictly bound to the
+    /// current receive generation. Long-lived control requests may opt in
+    /// only while the same pool slot, datagram index, and generation remain
+    /// in flight.
+    fn accepts_prior_generation(&self, _: u8, _: u16, _: u16, _: u16) -> bool {
+        false
+    }
+
     /// Returns false when a verified RX datagram cannot be consumed by the
     /// caller's staging model. The master records this separately from wire
     /// corruption because the frame itself was valid. `cycle` and
@@ -32,6 +41,16 @@ impl RxDatagramConsumer for () {
 }
 
 impl<T: RxDatagramConsumer + ?Sized> RxDatagramConsumer for &mut T {
+    fn accepts_prior_generation(
+        &self,
+        index: u8,
+        slot_id: u16,
+        expected_generation: u16,
+        current_generation: u16,
+    ) -> bool {
+        (**self).accepts_prior_generation(index, slot_id, expected_generation, current_generation)
+    }
+
     fn accept(
         &mut self,
         cycle: u64,
@@ -83,6 +102,23 @@ impl<FIRST, SECOND> RxConsumerMux<FIRST, SECOND> {
 impl<FIRST: RxDatagramConsumer, SECOND: RxDatagramConsumer> RxDatagramConsumer
     for RxConsumerMux<FIRST, SECOND>
 {
+    fn accepts_prior_generation(
+        &self,
+        index: u8,
+        slot_id: u16,
+        expected_generation: u16,
+        current_generation: u16,
+    ) -> bool {
+        self.first
+            .accepts_prior_generation(index, slot_id, expected_generation, current_generation)
+            || self.second.accepts_prior_generation(
+                index,
+                slot_id,
+                expected_generation,
+                current_generation,
+            )
+    }
+
     fn accept(
         &mut self,
         cycle: u64,
@@ -876,10 +912,21 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
                 ));
                 continue;
             }
+            let response_generation = if entry.generation == generation
+                || consumer.accepts_prior_generation(
+                    datagram.header.index,
+                    entry.slot_id,
+                    entry.generation,
+                    generation,
+                ) {
+                entry.generation
+            } else {
+                generation
+            };
             match self.rx_index.validate_and_complete(
                 datagram.header.index,
                 RxResponse {
-                    generation,
+                    generation: response_generation,
                     address: datagram.header.address,
                     payload_size: datagram.payload.len() as u16,
                     command: datagram.header.command as u8,

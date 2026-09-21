@@ -2,17 +2,24 @@ use esop_ethercat_core::wire::{Command, MAX_ETHERNET_FRAME_LEN};
 use esop_ethercat_core::{
     ControlError, ControlRequestPool, CycleError, DatagramPlan, DcCyclicConfig, DcCyclicError,
     DcCyclicSync, DcMonitor, Domain, DomainSegment, EthercatMaster, EthercatPort, FramePlan,
-    LinkState, MailboxConfig, MailboxController, MailboxPhase, MailboxProgress, MailboxProtocol,
-    MailboxRetryPolicy, MappingConfigController, MappingConfigPhase, MappingConfigProgress,
-    MappingTable, MasterConfig, PortError, RegisterOperation, RequestHandle, RequestState, RxPoll,
-    RxSlotState, ScheduleDomain, ScheduleTable, ScheduledDomainBank, ScheduledDomainEntry,
-    ScheduledMailboxTxError, ScheduledReceiveError, ScheduledServiceFrameError,
+    FramePlanSet, LinkState, MailboxConfig, MailboxController, MailboxPhase, MailboxProgress,
+    MailboxProtocol, MailboxRetryPolicy, MappingConfigController, MappingConfigPhase,
+    MappingConfigProgress, MappingTable, MasterConfig, PortError, RegisterOperation, RequestHandle,
+    RequestState, RxPoll, RxSlotState, ScheduleDomain, ScheduleTable, ScheduledControlCycleError,
+    ScheduledDomainBank, ScheduledDomainEntry, ScheduledProcessInputEntry, ScheduledProcessInputs,
+    ScheduledProductionServiceCycleError, ScheduledProductionServiceFault,
+    ScheduledProductionServiceKind, ScheduledProductionServiceProgress,
+    ScheduledProductionServiceRecovery, ScheduledProductionServiceScheduler,
+    ScheduledProductionServices, ScheduledReceiveError, ScheduledServiceFrameError,
     ScheduledServiceTxError, ScheduledServiceTxFailure, SyncManagerConfig,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::ethercat::{
     OtherCycleFacts, ScheduledControlGate, ScheduledDomainQuality, cyclic_quality_from_schedule,
-    other_cycle_facts_from_control_cycle,
+    other_cycle_facts_from_control_cycle, other_cycle_facts_from_production_service_cycle,
+};
+use esop_lifecycle_guard::stop_cycle::{
+    ScheduledAuxiliaryOutputs, ScheduledProductionCycleOwner, ScheduledProductionPhase,
 };
 use esop_lifecycle_guard::{GateId, GuardPolicy, LifecycleAction, LifecycleGuard, MotionPermit};
 
@@ -182,6 +189,442 @@ fn real_multi_domain_receive_quality_revokes_motion_on_a_missing_due_sample() {
             assert!(facts.domain_valid && facts.wkc_valid);
             assert_eq!(action, LifecycleAction::EnableAllowed);
         }
+    }
+}
+#[test]
+fn production_service_scheduler_prioritizes_mapping_and_accepts_its_own_generation() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<2, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let mut table = MappingTable::<1, 0>::new();
+    table
+        .add_sync_manager(SyncManagerConfig {
+            index: 2,
+            physical_start: 0x1000,
+            length: 2,
+            control: 0x24,
+            status: 0,
+            enable: true,
+        })
+        .unwrap();
+    let mut mapping = MappingConfigController::<1, 0>::new();
+    mapping
+        .start(1, 41, 100_000, 500_000, 100_000, &table)
+        .unwrap();
+    let mailbox_config = MailboxConfig::new(0x1000, 16, 0x1100, 16);
+    let mut mailbox = MailboxController::new();
+    mailbox
+        .start(mailbox_config, 1, 52, 100_000, MailboxProtocol::CoE, &[1])
+        .unwrap();
+    let mut scheduler = ScheduledProductionServiceScheduler::new();
+    let mut controls = ControlRequestPool::<2>::new();
+    let mut port = TwoFrameSimPort::new();
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut dc_image = [0; 8];
+    let process_image = [0x40, 0];
+    let mut process_plan = FramePlan::<1>::new();
+    process_plan
+        .push(DatagramPlan {
+            command: Command::Lrw,
+            index: 12,
+            address: 0x1000,
+            payload_offset: 0,
+            payload_len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut process_plans = FramePlanSet::<1, 1>::new();
+    process_plans.push(process_plan.datagrams()[0]).unwrap();
+    let process_inputs = ScheduledProcessInputs::new(
+        &bank,
+        &schedule,
+        [ScheduledProcessInputEntry {
+            id: 9,
+            image: &process_image,
+            plans: &process_plans,
+        }],
+    )
+    .unwrap();
+    let outputs =
+        ScheduledAuxiliaryOutputs::<1, 1, 1, 1>::new(&bank, &schedule, 9, &process_plan, [None])
+            .unwrap();
+    let mut production = ScheduledProductionCycleOwner::new(&outputs);
+
+    port.set_now_ns(100_000);
+    let process = bank
+        .submit_due_process_inputs(&process_inputs, &mut master, &mut port, 1, 150_000, 150_000)
+        .unwrap();
+    production
+        .arm_priming(&bank, &process_inputs, &process, 1, 150_000)
+        .unwrap();
+    let first = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            100_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                Some(&mut mailbox),
+            ),
+            1,
+            150_000,
+            150_000,
+        )
+        .unwrap();
+    assert_eq!(first.selected(), ScheduledProductionServiceKind::Mapping);
+    assert_eq!(
+        first.progress(),
+        ScheduledProductionServiceProgress::Mapping(MappingConfigProgress::Advanced)
+    );
+    assert_eq!(first.request(), None);
+    assert_eq!(first.recovery(), ScheduledProductionServiceRecovery::None);
+    assert!(!first.service_ready());
+    assert!(bank.confirms_production_service_cycle(&first));
+    production.complete_service_cycle(&bank, &first).unwrap();
+    assert_eq!(production.phase(), ScheduledProductionPhase::OutputPending);
+    assert!(
+        !other_cycle_facts_from_production_service_cycle(&first, ready_other_cycle_facts(),)
+            .coe_ready
+    );
+    assert_eq!(controls.in_use(), 0);
+
+    port.set_now_ns(200_000);
+    let second = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            200_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                Some(&mut mailbox),
+            ),
+            2,
+            250_000,
+            250_000,
+        )
+        .unwrap();
+    assert_eq!(second.selected(), ScheduledProductionServiceKind::Mapping);
+    assert_eq!(
+        second.fault(),
+        Some(ScheduledProductionServiceFault::Mapping(
+            esop_ethercat_core::MappingConfigError::ReadbackMismatch
+        ))
+    );
+    assert_eq!(
+        second.progress(),
+        ScheduledProductionServiceProgress::Waiting
+    );
+    assert!(!second.service_ready());
+    assert_eq!(mapping.phase(), MappingConfigPhase::Faulted);
+
+    let empty = MappingTable::<1, 0>::new();
+    mapping
+        .start(1, 42, 250_000, 500_000, 100_000, &empty)
+        .unwrap();
+    assert_eq!(mapping.phase(), MappingConfigPhase::Complete);
+
+    port.set_now_ns(300_000);
+    let third = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            300_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                Some(&mut mailbox),
+            ),
+            3,
+            350_000,
+            350_000,
+        )
+        .unwrap();
+    assert_eq!(third.selected(), ScheduledProductionServiceKind::Mailbox);
+    assert_eq!(
+        third.progress(),
+        ScheduledProductionServiceProgress::Mailbox(MailboxProgress::Advanced)
+    );
+    assert!(third.service_ready());
+    assert_eq!(controls.in_use(), 0);
+}
+
+#[test]
+fn production_service_scheduler_rebuilds_prepared_and_never_retransmits_inflight() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<2, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let mut table = MappingTable::<1, 0>::new();
+    table
+        .add_sync_manager(SyncManagerConfig {
+            index: 2,
+            physical_start: 0x1000,
+            length: 2,
+            control: 0x24,
+            status: 0,
+            enable: true,
+        })
+        .unwrap();
+    let mut mapping = MappingConfigController::<1, 0>::new();
+    mapping
+        .start(1, 41, 100_000, 500_000, 50_000, &table)
+        .unwrap();
+    let mut scheduler = ScheduledProductionServiceScheduler::new();
+    let mut controls = ControlRequestPool::<1>::new();
+    let mut port = TwoFrameSimPort::new();
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut dc_image = [0; 8];
+
+    port.set_now_ns(100_000);
+    let invalid_deadline = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            100_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0>::new(None, Some(&mut mapping), None, None),
+            1,
+            100_000,
+            150_000,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        invalid_deadline,
+        ScheduledProductionServiceCycleError::ControlCycle(ScheduledControlCycleError::Submit(
+            ScheduledServiceTxError::InvalidDeadline
+        ))
+    ));
+    assert_eq!(scheduler.request(), None);
+    assert_eq!(controls.in_use(), 0);
+
+    port.fail_nth_next_transmission(1);
+    let rebuild = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            100_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0>::new(None, Some(&mut mapping), None, None),
+            1,
+            150_000,
+            150_000,
+        )
+        .unwrap();
+    assert_eq!(
+        rebuild.recovery(),
+        ScheduledProductionServiceRecovery::RebuildRequest
+    );
+    assert_eq!(rebuild.request(), None);
+    assert_eq!(controls.in_use(), 0);
+    assert!(mapping.pending().is_some());
+
+    port.set_now_ns(150_001);
+    let expired_rebuild = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            150_001,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0>::new(None, Some(&mut mapping), None, None),
+            2,
+            200_000,
+            200_000,
+        )
+        .unwrap();
+    assert_eq!(expired_rebuild.request(), None);
+    assert_eq!(
+        expired_rebuild.fault(),
+        Some(ScheduledProductionServiceFault::Mapping(
+            esop_ethercat_core::MappingConfigError::Timeout
+        ))
+    );
+    assert_eq!(controls.in_use(), 0);
+    assert_eq!(mapping.phase(), MappingConfigPhase::Faulted);
+
+    mapping
+        .start(1, 42, 160_000, 500_000, 50_000, &table)
+        .unwrap();
+    port.set_now_ns(160_000);
+    port.drop_nth_next_response(2);
+    let waiting = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            160_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0>::new(None, Some(&mut mapping), None, None),
+            3,
+            210_000,
+            210_000,
+        )
+        .unwrap();
+    let request = waiting.request().unwrap();
+    assert_eq!(
+        waiting.recovery(),
+        ScheduledProductionServiceRecovery::AwaitingResponse
+    );
+    assert_eq!(controls.get(request).unwrap().state, RequestState::InFlight);
+    let attempts_after_first_send = port.tx_attempts;
+
+    port.set_now_ns(170_000);
+    let retained = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            170_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0>::new(None, Some(&mut mapping), None, None),
+            4,
+            220_000,
+            220_000,
+        )
+        .unwrap();
+    assert_eq!(retained.request(), Some(request));
+    assert_eq!(port.tx_attempts, attempts_after_first_send + 1);
+
+    port.set_now_ns(210_001);
+    let timed_out = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            210_001,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0>::new(None, Some(&mut mapping), None, None),
+            5,
+            260_000,
+            260_000,
+        )
+        .unwrap();
+    assert_eq!(timed_out.request(), None);
+    assert_eq!(
+        timed_out.fault(),
+        Some(ScheduledProductionServiceFault::Mapping(
+            esop_ethercat_core::MappingConfigError::Timeout
+        ))
+    );
+    assert_eq!(
+        timed_out.recovery(),
+        ScheduledProductionServiceRecovery::Faulted
+    );
+    assert_eq!(mapping.phase(), MappingConfigPhase::Faulted);
+    assert_eq!(controls.in_use(), 0);
+}
+
+fn ready_other_cycle_facts() -> OtherCycleFacts {
+    OtherCycleFacts {
+        platform_ready: true,
+        coe_ready: true,
+        topology_valid: true,
+        drive_ready: true,
+        command_current: true,
+        supervisor_healthy: true,
+        external_safety_clear: true,
+        deadline_met: true,
     }
 }
 
@@ -1392,6 +1835,7 @@ struct TwoFrameSimPort {
     count: usize,
     tx_attempts: usize,
     drop_on_attempt: Option<usize>,
+    fail_on_attempt: Option<usize>,
     rx_polls: usize,
     reported_now_after_rx_polls: Option<(usize, u64)>,
 }
@@ -1405,6 +1849,7 @@ impl TwoFrameSimPort {
             count: 0,
             tx_attempts: 0,
             drop_on_attempt: None,
+            fail_on_attempt: None,
             rx_polls: 0,
             reported_now_after_rx_polls: None,
         }
@@ -1422,6 +1867,11 @@ impl TwoFrameSimPort {
     fn drop_nth_next_response(&mut self, n: usize) {
         assert!(n > 0);
         self.drop_on_attempt = Some(self.tx_attempts + n);
+    }
+
+    fn fail_nth_next_transmission(&mut self, n: usize) {
+        assert!(n > 0);
+        self.fail_on_attempt = Some(self.tx_attempts + n);
     }
 
     fn report_now_after_next_rx_polls(&mut self, polls: usize, now_ns: u64) {
@@ -1448,6 +1898,10 @@ impl EthercatPort for TwoFrameSimPort {
             return Err(PortError::HardwareFault);
         }
         self.tx_attempts += 1;
+        if self.fail_on_attempt == Some(self.tx_attempts) {
+            self.fail_on_attempt = None;
+            return Err(PortError::HardwareFault);
+        }
         if self.drop_on_attempt == Some(self.tx_attempts) {
             self.inner.drop_next_response();
             self.drop_on_attempt = None;
@@ -1682,23 +2136,6 @@ fn service_tx_preflights_indices_and_retires_failed_transmissions_in_shared_rx()
     let handle = controls
         .acquire(14, 1, 0x5000, RegisterOperation::Read, &[0; 4], 150_000)
         .unwrap();
-    assert!(matches!(
-        bank.submit_dc_and_control(
-            &mut master,
-            &mut port,
-            &mut dc,
-            &mut dc_image,
-            100_000,
-            &mut controls,
-            Some(handle),
-            2,
-            150_000,
-            150_000,
-        ),
-        Err(ScheduledServiceTxError::ControlGenerationMismatch)
-    ));
-    assert_eq!(port.attempts, 0);
-
     let sent = bank
         .submit_dc_and_control(
             &mut master,
@@ -1708,7 +2145,7 @@ fn service_tx_preflights_indices_and_retires_failed_transmissions_in_shared_rx()
             100_000,
             &mut controls,
             Some(handle),
-            1,
+            2,
             150_000,
             150_000,
         )
@@ -1730,7 +2167,7 @@ fn service_tx_preflights_indices_and_retires_failed_transmissions_in_shared_rx()
             &mut master,
             &mut port,
             &mut scratch,
-            1,
+            2,
             &mut dc,
             &mut controls,
         )
@@ -1848,24 +2285,6 @@ fn service_tx_preflights_indices_and_retires_failed_transmissions_in_shared_rx()
         .unwrap();
     second_mailbox.next_action(400_000).unwrap().unwrap();
     let retained = second_mailbox.enqueue_pending(&mut controls).unwrap();
-    assert!(matches!(
-        bank.submit_dc_and_mailbox(
-            &mut master,
-            &mut port,
-            &mut dc,
-            &mut dc_image,
-            400_000,
-            &mut controls,
-            &mut second_mailbox,
-            Some(retained),
-            5,
-            450_000,
-            450_000,
-        ),
-        Err(ScheduledMailboxTxError::Service(
-            ScheduledServiceTxError::ControlGenerationMismatch
-        ))
-    ));
     assert_eq!(
         controls.get(retained).unwrap().state,
         RequestState::Prepared

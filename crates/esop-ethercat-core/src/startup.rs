@@ -436,11 +436,15 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         };
         let (generation, actual_wkc, wire_length, response) = match pool.get(handle) {
             Some(request) if request.state == RequestState::Complete => {
-                if request.datagram_index != action.datagram_index()
-                    || request.generation != action.generation()
-                    || request.address != action.address()
-                    || request.response_length != action.datagram_len()
-                    || request.length < action.response_len()
+                if !request.matches_action(
+                    action.datagram_index(),
+                    action.generation(),
+                    action.address(),
+                    action.operation(),
+                    action.payload(),
+                    action.datagram_len(),
+                    action.deadline_ns(),
+                ) || request.length < action.response_len()
                 {
                     let _ = pool.release(handle);
                     return self.fail(StartupError::ActionMismatch);
@@ -455,8 +459,26 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                 )
             }
             Some(request) if request.state == RequestState::Failed => {
-                let _ = pool.release(handle);
-                return self.fail(StartupError::Control(ControlError::InvalidState));
+                if !request.matches_action(
+                    action.datagram_index(),
+                    action.generation(),
+                    action.address(),
+                    action.operation(),
+                    action.payload(),
+                    action.datagram_len(),
+                    action.deadline_ns(),
+                ) {
+                    let _ = pool.release(handle);
+                    return self.fail(StartupError::ActionMismatch);
+                }
+                let error = request.last_error().unwrap_or(ControlError::InvalidState);
+                if let Err(release_error) = pool.release(handle) {
+                    return self.fail(StartupError::Control(release_error));
+                }
+                if error == ControlError::Timeout {
+                    return self.timeout(action, now_ns);
+                }
+                return self.fail(StartupError::Control(error));
             }
             Some(_) => return Err(StartupError::Control(ControlError::InvalidState)),
             None => return self.fail(StartupError::Control(ControlError::InvalidHandle)),
@@ -910,5 +932,38 @@ mod tests {
         );
         assert_eq!(pool.in_use(), 0);
         assert_eq!(startup.phase(), StartupPhase::Scanning);
+    }
+
+    #[test]
+    fn expired_control_request_reaches_startup_as_timeout_and_releases_pool_slot() {
+        let expected = [ExpectedSlave {
+            position: 0,
+            station_address: 0x1000,
+            identity: SlaveIdentity::EMPTY,
+        }];
+        let mut startup = StartupController::<2>::new(0x1000);
+        startup
+            .start(3, 0, StartupConfig::new(EthercatState::PreOp), &expected)
+            .unwrap();
+        let probe = startup.next_action(1).unwrap().unwrap();
+        startup
+            .accept(probe, probe.generation(), &[0x88, 0x02], 1, 2)
+            .unwrap();
+        let action = startup.next_action(3).unwrap().unwrap();
+
+        let mut pool = ControlRequestPool::<1>::new();
+        let handle = startup.enqueue_pending(&mut pool).unwrap();
+        let mut frame = [0; crate::wire::MAX_ETHERNET_FRAME_LEN];
+        pool.build_into_buffer(handle, &mut frame, [0xFF; 6], [1, 2, 3, 4, 5, 6])
+            .unwrap();
+        let expired_at = action.deadline_ns().saturating_add(1);
+        assert!(pool.expire_in_flight(expired_at).contains(handle));
+
+        assert_eq!(
+            startup.accept_completed(&mut pool, handle, expired_at),
+            Err(StartupError::Scan(ScanError::Timeout))
+        );
+        assert_eq!(pool.in_use(), 0);
+        assert_eq!(startup.phase(), StartupPhase::Faulted);
     }
 }

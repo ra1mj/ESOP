@@ -445,12 +445,15 @@ impl DcController {
         };
         let (generation, actual_wkc, response) = match pool.get(handle) {
             Some(request) if request.state == RequestState::Complete => {
-                if request.datagram_index != action.datagram_index
-                    || request.generation != action.generation
-                    || request.address != action.address
-                    || request.response_length != action.datagram_len()
-                    || request.length != action.datagram_len()
-                {
+                if !request.matches_action(
+                    action.datagram_index,
+                    action.generation,
+                    action.address,
+                    action.operation,
+                    action.payload(),
+                    action.datagram_len(),
+                    action.deadline_ns,
+                ) {
                     let _ = pool.release(handle);
                     return self.fail(DcError::ActionMismatch);
                 }
@@ -459,8 +462,26 @@ impl DcController {
                 (request.generation, request.actual_wkc, response)
             }
             Some(request) if request.state == RequestState::Failed => {
-                let _ = pool.release(handle);
-                return self.fail(DcError::Control(ControlError::InvalidState));
+                if !request.matches_action(
+                    action.datagram_index,
+                    action.generation,
+                    action.address,
+                    action.operation,
+                    action.payload(),
+                    action.datagram_len(),
+                    action.deadline_ns,
+                ) {
+                    let _ = pool.release(handle);
+                    return self.fail(DcError::ActionMismatch);
+                }
+                let error = request.last_error().unwrap_or(ControlError::InvalidState);
+                if let Err(release_error) = pool.release(handle) {
+                    return self.fail(DcError::Control(release_error));
+                }
+                if error == ControlError::Timeout {
+                    return self.timeout(action, now_ns);
+                }
+                return self.fail(DcError::Control(error));
             }
             Some(_) => return Err(DcError::Control(ControlError::InvalidState)),
             None => return self.fail(DcError::Control(ControlError::InvalidHandle)),
@@ -1113,6 +1134,29 @@ mod tests {
             Ok(DcProgress::Advanced)
         );
         assert_eq!(pool.in_use(), 0);
+    }
+
+    #[test]
+    fn expired_control_request_reaches_dc_controller_as_timeout() {
+        let mut controller = DcController::new();
+        controller
+            .start(DcConfig::sync0(1_000_000, 0), 0x1000, 9, 0)
+            .unwrap();
+        let action = controller.next_action(1).unwrap().unwrap();
+        let mut pool = ControlRequestPool::<1>::new();
+        let handle = controller.enqueue_pending(&mut pool).unwrap();
+        let mut frame = [0; crate::wire::MAX_ETHERNET_FRAME_LEN];
+        pool.build_into_buffer(handle, &mut frame, [0xFF; 6], [1, 2, 3, 4, 5, 6])
+            .unwrap();
+        let expired_at = action.deadline_ns.saturating_add(1);
+        assert!(pool.expire_in_flight(expired_at).contains(handle));
+
+        assert_eq!(
+            controller.accept_completed(&mut pool, handle, expired_at),
+            Err(DcError::Timeout)
+        );
+        assert_eq!(pool.in_use(), 0);
+        assert_eq!(controller.phase(), DcPhase::Faulted);
     }
 
     #[test]

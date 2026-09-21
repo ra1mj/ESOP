@@ -91,6 +91,35 @@ impl ControlRequest {
         self.last_error
     }
 
+    /// Match this pool entry to the immutable action still owned by a service
+    /// FSM. Read/write datagrams share one EtherCAT data area, so the request
+    /// may contain a zero-padded suffix beyond the action's write payload.
+    #[allow(clippy::too_many_arguments)]
+    pub fn matches_action(
+        &self,
+        datagram_index: u8,
+        generation: u16,
+        address: u32,
+        operation: RegisterOperation,
+        payload: &[u8],
+        datagram_len: usize,
+        deadline_ns: u64,
+    ) -> bool {
+        self.datagram_index == datagram_index
+            && self.generation == generation
+            && self.address == address
+            && self.operation == operation
+            && self.length == datagram_len
+            && self.response_length == datagram_len
+            && self.deadline_ns == deadline_ns
+            && (!matches!(self.state, RequestState::Prepared | RequestState::InFlight)
+                || (payload.len() <= self.length
+                    && self.payload()[..payload.len()] == *payload
+                    && self.payload()[payload.len()..]
+                        .iter()
+                        .all(|byte| *byte == 0)))
+    }
+
     pub const fn expectation(&self) -> RxExpectation {
         RxExpectation {
             generation: self.generation,
@@ -453,6 +482,23 @@ impl<'a, const REQUESTS: usize> ControlRxConsumer<'a, REQUESTS> {
 }
 
 impl<const REQUESTS: usize> crate::engine::RxDatagramConsumer for ControlRxConsumer<'_, REQUESTS> {
+    fn accepts_prior_generation(
+        &self,
+        index: u8,
+        slot_id: u16,
+        expected_generation: u16,
+        current_generation: u16,
+    ) -> bool {
+        expected_generation != current_generation
+            && RequestHandle::from_index(slot_id as usize).is_some_and(|handle| {
+                self.pool.get(handle).is_some_and(|request| {
+                    request.state == RequestState::InFlight
+                        && request.datagram_index == index
+                        && request.generation == expected_generation
+                })
+            })
+    }
+
     fn accept(
         &mut self,
         _: u64,

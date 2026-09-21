@@ -213,8 +213,11 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   index sweep when no request newly expired. The caller still owns control
   service-state progression and the final cycle deadline.
 - Prepare DC and at most one control TX through the scheduled bank only after
-  validating the current master cycle, absolute deadlines, request generation
-  and Prepared state, and the Domain/DC/in-flight control index partition.
+  validating the current master cycle, absolute deadlines, the control
+  request's owned generation and Prepared state, and the Domain/DC/in-flight
+  control index partition. Do not require a control request's generation to
+  equal the current cyclic generation; the matching control consumer verifies
+  that owned generation when the request remains InFlight across cycles.
   A prepared DC generation must be finalized by the shared RX owner even if
   its send fails. Retire a failed control send as `Failed(TransmitFailed)`;
   an unsent Prepared request remains the service owner's responsibility.
@@ -355,6 +358,104 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   `passed` scenario only with complete cycle/max-accumulator coverage, matching
   Q1-Q4 load and thresholds, zero fault-free errors, and trace/topology hashes;
   a structurally valid JSON report is not proof of real hardware qualification.
+
+## Scenario: Unified Production Service Scheduling
+
+### 1. Scope / Trigger
+
+- Trigger: adding or changing the cyclic selection of startup, mapping, DC
+  configuration, or mailbox state machines and their lifecycle projection.
+
+### 2. Signatures
+
+- Core entry: `ScheduledProductionServiceScheduler::run_cycle(...)`.
+- Service set: `ScheduledProductionServices<MAX_SLAVES, SMS, FMMUS>`.
+- Evidence: `ScheduledProductionServiceCycleReport<E, DOMAINS>`.
+- Lifecycle entries: `run_service_cycle_with_outputs_until`,
+  `run_process_service_cycle_with_outputs_until`, and
+  `ScheduledProductionCycleOwner::complete_service_cycle`.
+
+### 3. Contracts
+
+- Selection priority is fixed: Startup, Mapping, DC Configuration, Mailbox.
+- The scheduler owns at most one `RequestHandle`; a live request pins the
+  selected service until terminal consumption.
+- A carried request must match the selected FSM's pending action in index,
+  generation, address, operation, wire length, deadline, and prepared payload.
+- `Prepared` may transmit once. If it never reaches the wire, release it and
+  report `RebuildRequest`; retain the FSM pending action. Before re-enqueueing,
+  compare that action's immutable deadline to the current port clock. An
+  expired pending action must run the matching FSM timeout path without
+  allocating a new pool slot.
+- `InFlight` is never retransmitted. It reports `AwaitingResponse` until the
+  shared RX completes it or strict `now > deadline` expiry makes it terminal.
+- Control requests retain their own generation across cyclic generations.
+  Only `ControlRxConsumer::accepts_prior_generation` may authorize this, and
+  only for the same InFlight pool slot/index/generation. Domain and DC
+  consumers keep the default current-generation-only rule.
+- Startup readiness owns the Topology gate. Mapping, DC configuration, and
+  Mailbox readiness own the Configuration gate. Callers do not override this
+  mapping or supply a replacement readiness boolean.
+
+### 4. Validation & Error Matrix
+
+- Missing/foreign carried handle -> `RequestMismatch(service)` before TX/RX.
+- Pool allocation/release failure -> `Control(ControlError)`.
+- Low-level control/mailbox submit or receive invariant -> wrapped typed cycle
+  error; do not manufacture partial service evidence. If submit rejects before
+  a newly prepared request reaches the wire, release that Prepared handle
+  before returning the error; preserve only an already InFlight handle.
+- Complete/Failed request with action mismatch -> matching controller faults
+  with `ActionMismatch` and releases only that owned handle.
+- `Failed(Timeout)` -> matching controller timeout path, preserving the exact
+  timeout rather than replacing it with `InvalidState`.
+- Faulted selected controller -> `service_ready = false`, recovery `Faulted`,
+  and no lower-priority service selection until explicit controller restart.
+
+### 5. Good/Base/Bad Cases
+
+- Good: Mapping request generation 41 completes during cyclic generation 2;
+  the control consumer authorizes it, the FSM advances, and the handle frees.
+- Base: no service is active; DC/Domain shared RX still runs with `Idle`
+  evidence and no service gate is changed.
+- Bad: a dropped control response leaves the request InFlight; sending it
+  again on the next production cycle is a contract violation.
+- Bad: a DC TX failure leaves a newly prepared request in the pool; carrying
+  that stale Prepared handle instead of releasing/rebuilding it is a leak.
+
+### 6. Tests Required
+
+- Public integration: Mapping outranks Mailbox, and explicit Mapping restart
+  is required before Mailbox can run after a Mapping fault.
+- Public integration: a request generation different from the current cyclic
+  generation completes only through the matching control consumer.
+- Public integration: DC failure yields `RebuildRequest` and zero pool usage.
+- Public integration: a rebuilt action that expires before the next cycle
+  reaches the matching FSM as Timeout without occupying a pool slot.
+- Public integration: submit preflight rejection releases the scheduler-owned
+  Prepared handle while retaining the FSM pending action.
+- Public integration: dropped response remains InFlight with no control
+  retransmit, then expires once and reaches the controller as exact Timeout.
+- Lifecycle integration: the unified report clears Topology or Configuration
+  according to selected service and is accepted by the stable cycle owner only
+  when `ScheduledDomainBank` confirms its underlying RX evidence.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+// Re-enqueues every tick and lets the caller choose a convenient safety gate.
+let request = controller.enqueue_pending(&mut pool)?;
+let facts = other_cycle_facts_from_control_cycle(&cycle, caller_gate, true, facts);
+```
+
+#### Correct
+
+```rust
+let cycle = scheduler.run_cycle(/* fixed service set and shared RX owners */)?;
+let facts = other_cycle_facts_from_production_service_cycle(&cycle, facts);
+```
 
 ## Testing Requirements
 

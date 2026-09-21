@@ -425,11 +425,15 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
         };
         let (generation, actual_wkc, response) = match pool.get(handle) {
             Some(request) if request.state == RequestState::Complete => {
-                if request.datagram_index != action.datagram_index
-                    || request.generation != action.generation
-                    || request.address != action.address
-                    || request.response_length != action.datagram_len()
-                    || request.length < action.response_len()
+                if !request.matches_action(
+                    action.datagram_index,
+                    action.generation,
+                    action.address,
+                    action.operation,
+                    action.payload(),
+                    action.datagram_len(),
+                    action.deadline_ns,
+                ) || request.length < action.response_len()
                 {
                     let _ = pool.release(handle);
                     return self.fail(MappingConfigError::ActionMismatch);
@@ -439,8 +443,26 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
                 (request.generation, request.actual_wkc, response)
             }
             Some(request) if request.state == RequestState::Failed => {
-                let _ = pool.release(handle);
-                return self.fail(MappingConfigError::Control(ControlError::InvalidState));
+                if !request.matches_action(
+                    action.datagram_index,
+                    action.generation,
+                    action.address,
+                    action.operation,
+                    action.payload(),
+                    action.datagram_len(),
+                    action.deadline_ns,
+                ) {
+                    let _ = pool.release(handle);
+                    return self.fail(MappingConfigError::ActionMismatch);
+                }
+                let error = request.last_error().unwrap_or(ControlError::InvalidState);
+                if let Err(release_error) = pool.release(handle) {
+                    return self.fail(MappingConfigError::Control(release_error));
+                }
+                if error == ControlError::Timeout {
+                    return self.timeout(action, now_ns);
+                }
+                return self.fail(MappingConfigError::Control(error));
             }
             Some(_) => return Err(MappingConfigError::Control(ControlError::InvalidState)),
             None => return self.fail(MappingConfigError::Control(ControlError::InvalidHandle)),

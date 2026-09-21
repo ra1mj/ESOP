@@ -8,8 +8,9 @@ use crate::cia402::step_axis_bank;
 use crate::ethercat::{
     OtherCycleFacts, ScheduledControlGate, ScheduledDomainQuality, StopFrameError,
     other_cycle_facts_from_control_cycle, other_cycle_facts_from_mailbox_cycle,
-    other_cycle_facts_from_process_tx, submit_active_frame, submit_inhibited_frame,
-    submit_stopping_frame, verified_ethercat_stop_feedback,
+    other_cycle_facts_from_process_tx, other_cycle_facts_from_production_service_cycle,
+    submit_active_frame, submit_inhibited_frame, submit_stopping_frame,
+    verified_ethercat_stop_feedback,
 };
 use crate::procbuf::{
     AxisEvidenceError, LifecycleEventCursor, LifecycleEventError, axis_stops_to_procbuf,
@@ -23,8 +24,8 @@ use crate::{
 use esop_ethercat_core::{
     CycleReport, DcCyclicSync, Domain, EthercatMaster, EthercatPort, FramePlan, FramePlanSet,
     ScheduleTable, ScheduledControlCycleReport, ScheduledDomainBank, ScheduledMailboxCycleReport,
-    ScheduledProcessInputs, ScheduledProcessTxReport, ScheduledReceiveReport,
-    ScheduledServiceTxFailure, wire::Command,
+    ScheduledProcessInputs, ScheduledProcessTxReport, ScheduledProductionServiceCycleReport,
+    ScheduledReceiveReport, ScheduledServiceTxFailure, wire::Command,
 };
 use esop_procbuf::{HeaderError, ProcBuf, StatePage, StatePublishError};
 use esop_profile_cia402::{
@@ -527,6 +528,17 @@ impl<'a, const DOMAINS: usize, const SCHEDULE_SLOTS: usize>
         self.complete_receive(domain_bank, cycle.received())
     }
 
+    pub fn complete_service_cycle<E>(
+        &mut self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        cycle: &ScheduledProductionServiceCycleReport<E, DOMAINS>,
+    ) -> Result<(), ScheduledProductionCycleError> {
+        if !domain_bank.confirms_production_service_cycle(cycle) {
+            return Err(ScheduledProductionCycleError::ReceiveMismatch);
+        }
+        self.complete_receive(domain_bank, cycle.received())
+    }
+
     pub fn settle_output<E, const FRAMES: usize, const DATAGRAMS: usize>(
         &mut self,
         outputs: &ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
@@ -918,6 +930,39 @@ impl<
         )
     }
 
+    /// Consume one scheduler-owned startup/configuration/mailbox service
+    /// cycle. Service selection and readiness are part of the verified report;
+    /// the caller supplies only motion/output ownership and the final deadline.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_service_cycle_with_outputs_until<
+        const SCHEDULE_SLOTS: usize,
+        const FRAMES: usize,
+    >(
+        &mut self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        cycle: &ScheduledProductionServiceCycleReport<P::Error, DOMAINS>,
+        motion_domain_id: u8,
+        outputs: &ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
+        targets: &[Option<Cia402Target>; AXES],
+        guards: &mut [CyclicSetpointGuard; AXES],
+        limits: &[CyclicLimits; AXES],
+        cycle_deadline_ns: u64,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        let (domains, other) =
+            self.service_cycle_inputs(domain_bank, cycle, motion_domain_id, outputs)?;
+        self.run_inner_with_outputs(
+            Some((outputs.schedule, &domains, motion_domain_id)),
+            Some(MotionInputs {
+                targets,
+                guards,
+                limits,
+            }),
+            Some(cycle_deadline_ns),
+            Some(outputs),
+            other,
+        )
+    }
+
     /// Consume both bounded pre-RX stages as one causal input. The process
     /// submission report must match the frozen due traversal and the same
     /// finalized bank cycle as the mailbox/DC report. A rejected process frame
@@ -1022,6 +1067,53 @@ impl<
         )
     }
 
+    /// Initial priming variant of `run_service_cycle_with_outputs_until`.
+    /// Process submission and service transport must describe the same
+    /// finalized bank cycle before lifecycle publication starts.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_process_service_cycle_with_outputs_until<
+        const SCHEDULE_SLOTS: usize,
+        const FRAMES: usize,
+        const PROCESS_FRAMES: usize,
+        const PROCESS_DATAGRAMS: usize,
+    >(
+        &mut self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        process_inputs: &ScheduledProcessInputs<
+            '_,
+            DOMAINS,
+            SCHEDULE_SLOTS,
+            PROCESS_FRAMES,
+            PROCESS_DATAGRAMS,
+        >,
+        process: &ScheduledProcessTxReport<P::Error>,
+        cycle: &ScheduledProductionServiceCycleReport<P::Error, DOMAINS>,
+        motion_domain_id: u8,
+        outputs: &ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
+        targets: &[Option<Cia402Target>; AXES],
+        guards: &mut [CyclicSetpointGuard; AXES],
+        limits: &[CyclicLimits; AXES],
+        cycle_deadline_ns: u64,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        if !domain_bank.confirms_process_tx(process_inputs, process) {
+            return Err(StopCycleError::ProcessCycleMismatch);
+        }
+        let (domains, other) =
+            self.service_cycle_inputs(domain_bank, cycle, motion_domain_id, outputs)?;
+        let other = other_cycle_facts_from_process_tx(process, other);
+        self.run_inner_with_outputs(
+            Some((outputs.schedule, &domains, motion_domain_id)),
+            Some(MotionInputs {
+                targets,
+                guards,
+                limits,
+            }),
+            Some(cycle_deadline_ns),
+            Some(outputs),
+            other,
+        )
+    }
+
     fn control_cycle_inputs<const SCHEDULE_SLOTS: usize, const FRAMES: usize>(
         &self,
         domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
@@ -1037,6 +1129,22 @@ impl<
         let domains =
             self.received_domains(domain_bank, cycle.received(), motion_domain_id, outputs)?;
         let other = other_cycle_facts_from_control_cycle(cycle, gate, service_ready, self.other);
+        Ok((domains, other))
+    }
+
+    fn service_cycle_inputs<const SCHEDULE_SLOTS: usize, const FRAMES: usize>(
+        &self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        cycle: &ScheduledProductionServiceCycleReport<P::Error, DOMAINS>,
+        motion_domain_id: u8,
+        outputs: &ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
+    ) -> Result<([ScheduledDomainQuality; DOMAINS], OtherCycleFacts), StopCycleError> {
+        if !domain_bank.confirms_production_service_cycle(cycle) {
+            return Err(StopCycleError::ServiceCycleMismatch);
+        }
+        let domains =
+            self.received_domains(domain_bank, cycle.received(), motion_domain_id, outputs)?;
+        let other = other_cycle_facts_from_production_service_cycle(cycle, self.other);
         Ok((domains, other))
     }
 
