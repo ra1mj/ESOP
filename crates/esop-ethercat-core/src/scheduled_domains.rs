@@ -1,6 +1,8 @@
 //! Fixed-capacity receive ownership for a frozen multi-rate Domain schedule.
 
-use crate::control::{ControlRequestPool, ControlRxConsumer, RequestHandle, RequestState};
+use crate::control::{
+    ControlExpiry, ControlRequestPool, ControlRxConsumer, RequestHandle, RequestState,
+};
 use crate::dc::{DcCyclicError, DcCyclicSync};
 use crate::domain::{Domain, DomainError, DomainQuality, DomainSegment};
 use crate::engine::{CycleError, CycleReport, EthercatMaster, RxConsumerMux, RxDatagramConsumer};
@@ -94,6 +96,9 @@ pub struct ScheduledReceiveReport<E, const DOMAINS: usize> {
     pub qualities: [DomainQuality; DOMAINS],
     pub dc_result: Result<(), DcCyclicError>,
     pub transport_error: Option<CycleError<E>>,
+    /// Newly expired control requests, empty for `receive_with_dc`.
+    /// Their owners must consume and release the failed requests.
+    pub control_expiry: ControlExpiry,
 }
 
 /// Owns the receive borrow for all configured Domains. A single master RX
@@ -103,8 +108,8 @@ pub struct ScheduledReceiveReport<E, const DOMAINS: usize> {
 /// dispatches in-flight control requests through that RX session. For other
 /// receive arrangements the
 /// caller must pair `begin_due` and `finish_due`, including on RX errors.
-/// The caller still owns verified TX plans, control request timeouts, and the
-/// final cycle deadline. Pass the resulting qualities to the lifecycle schedule
+/// The caller still owns verified TX plans, control service progression, and
+/// the final cycle deadline. Pass the resulting qualities to the lifecycle schedule
 /// projection in the same order.
 pub struct ScheduledDomainBank<'a, const DOMAINS: usize, const SLOTS: usize> {
     schedule: &'a ScheduleTable<DOMAINS, SLOTS>,
@@ -131,8 +136,9 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
     }
 
     /// Share the same bounded RX poll with in-flight control requests. The
-    /// control owner remains responsible for interpreting completed requests
-    /// and timing out missing ones. A concurrent control index must never
+    /// control owner remains responsible for interpreting completed/failed
+    /// requests and consuming `control_expiry` before reusing their slots.
+    /// A concurrent control index must never
     /// alias a Domain, DC, or another in-flight control request.
     pub fn receive_with_dc_and_control<
         P: EthercatPort,
@@ -166,8 +172,23 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
             }
             claimed[index] = true;
         }
-        let mut control_consumer = ControlRxConsumer::new(controls);
-        self.receive_with_dc_consumer(master, port, scratch, generation, dc, &mut control_consumer)
+        let mut received = {
+            let mut control_consumer = ControlRxConsumer::new(controls);
+            self.receive_with_dc_consumer(
+                master,
+                port,
+                scratch,
+                generation,
+                dc,
+                &mut control_consumer,
+            )?
+        };
+        let now_ns = port.now_ns();
+        received.control_expiry = controls.expire_in_flight(now_ns);
+        if !received.control_expiry.is_empty() {
+            master.reap_expired_rx_before_tx(now_ns);
+        }
+        Ok(received)
     }
 
     fn receive_with_dc_consumer<
@@ -217,6 +238,7 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
             qualities,
             dc_result,
             transport_error,
+            control_expiry: ControlExpiry::EMPTY,
         })
     }
 

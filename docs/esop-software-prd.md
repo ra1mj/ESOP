@@ -327,6 +327,8 @@ R2 控制 RX 增量：`receive_with_dc_and_control` 在同一有界主站 RX 中
 
 R2 控制超时增量：`ControlRequestPool::expire_in_flight` 在 RX 完成后以单调时间扫描最多 64 个在途请求，仅在 `now_ns > deadline_ns` 时一次性置为 `Failed(Timeout)` 并返回固定容量句柄位图；准时完成、Prepared 和既有失败不被覆盖，迟到响应不得擦除超时诊断。调用方须在主站回收同期限 RX 索引后消费超时句柄，并为每个请求调用所属服务状态机再释放；邮箱 `accept_completed` 已将匹配的超时请求接入现有重试预算，耗尽则锁存 `MailboxError::Timeout`。模拟端验证缺帧、索引回收与请求失败一致。本增量仍需完整周期所有者实际调用超时扫描并推进其他控制服务；安全事实、DC/控制 TX、最终 deadline 与实物 HIL 尚未闭环，R2 出口条件不变。
 
+R2 控制服务 RX 接线增量：`receive_with_dc_and_control` 已在本次 RX、Domain/DC 收尾完成后，以同一个端口单调时间自动将新过期控制请求放进 `ScheduledReceiveReport.control_expiry`；有新过期请求时，返回前回收其主站 RX 索引。链路断开和端口收包错误的提前返回同样执行该收尾；无新过期请求时不额外扫描 256 个 RX 索引。三周期模拟覆盖发送确认、轮询缺帧、后续同源接收超时与邮箱延迟重试，同时保持 Domain/DC 接收资格；预检拒绝仍不改变请求状态。调用者仍负责消费完成/失败请求、配置安全事实、控制/DC 发送和完整周期最终 deadline，软件模拟不替代实物 HIL，R2 出口未达成。
+
 ### 11.1 发布阻塞条件
 
 任何发布候选必须满足：

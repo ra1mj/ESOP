@@ -2,8 +2,9 @@ use esop_ethercat_core::wire::{Command, MAX_ETHERNET_FRAME_LEN};
 use esop_ethercat_core::{
     ControlError, ControlRequestPool, CycleError, DatagramPlan, DcCyclicConfig, DcCyclicError,
     DcCyclicSync, DcMonitor, Domain, DomainSegment, EthercatMaster, EthercatPort, FramePlan,
-    LinkState, MasterConfig, PortError, RegisterOperation, RequestHandle, RequestState, RxPoll,
-    RxSlotState, ScheduleDomain, ScheduleTable, ScheduledDomainBank, ScheduledDomainEntry,
+    LinkState, MailboxConfig, MailboxController, MailboxPhase, MailboxProgress, MailboxProtocol,
+    MailboxRetryPolicy, MasterConfig, PortError, RegisterOperation, RequestHandle, RequestState,
+    RxPoll, RxSlotState, ScheduleDomain, ScheduleTable, ScheduledDomainBank, ScheduledDomainEntry,
     ScheduledReceiveError,
 };
 use esop_ethercat_linux_port::SimulatedPort;
@@ -450,6 +451,7 @@ fn scheduled_rx_port_error_returns_a_fail_closed_report_and_releases_dc_pending(
         )
         .unwrap();
     assert!(failed.report.budget_exhausted);
+    assert!(failed.control_expiry.is_empty());
     assert_eq!(failed.report.cycle, master.cycle_number());
     assert!(matches!(
         failed.transport_error,
@@ -554,12 +556,31 @@ fn scheduled_rx_port_error_returns_a_fail_closed_report_and_releases_dc_pending(
         ),
         Err(ScheduledReceiveError::ControlIndexConflict(15))
     ));
+    port.set_now_ns(250_001);
+    assert!(matches!(
+        bank.receive_with_dc_and_control(
+            &mut master,
+            &mut port,
+            &mut scratch,
+            2,
+            &mut dc,
+            &mut controls
+        ),
+        Err(ScheduledReceiveError::ControlIndexConflict(15))
+    ));
+    assert_eq!(
+        controls
+            .get(RequestHandle::from_index(0).unwrap())
+            .unwrap()
+            .state,
+        RequestState::InFlight
+    );
     assert_eq!(dc.pending_generation(), Some(2));
     assert_eq!(master.cycle_number(), 1);
 }
 
 #[test]
-fn scheduled_rx_shares_one_poll_for_domains_dc_and_control_without_claiming_control_timeout() {
+fn scheduled_rx_retains_in_flight_control_then_expires_it_without_losing_domain_dc() {
     let schedule = ScheduleTable::<1, 1>::build(
         100_000,
         &[ScheduleDomain {
@@ -610,34 +631,48 @@ fn scheduled_rx_shares_one_poll_for_domains_dc_and_control_without_claiming_cont
     })
     .unwrap();
     plan.push(dc.datagram_plan()).unwrap();
-    for generation in 1..=2u16 {
+    let mut missing = None;
+    for generation in 1..=3u16 {
         let now_ns = u64::from(generation) * 100_000;
         port.set_now_ns(now_ns);
-        master.reap_expired_rx_before_tx(now_ns);
-        dc.prepare(generation, now_ns, &mut image).unwrap();
-        let request = controls
-            .acquire(
-                15,
-                generation,
-                0x5000,
-                RegisterOperation::Read,
-                &[0; 4],
-                now_ns + 50_000,
-            )
-            .unwrap();
-        let control_frame = master.acquire_frame(generation, now_ns + 50_000).unwrap();
-        master
-            .build_control_request(&mut controls, request, control_frame)
-            .unwrap();
-        if generation == 2 {
-            port.drop_next_response();
+        if generation != 3 {
+            master.reap_expired_rx_before_tx(now_ns);
         }
-        master.submit_frame(&mut port, control_frame).unwrap();
+        dc.prepare(generation, now_ns, &mut image).unwrap();
+        let request = if generation <= 2 {
+            let request = controls
+                .acquire(
+                    15,
+                    generation,
+                    0x5000,
+                    RegisterOperation::Read,
+                    &[0; 4],
+                    now_ns + 50_000,
+                )
+                .unwrap();
+            let control_frame = master.acquire_frame(generation, now_ns + 50_000).unwrap();
+            master
+                .build_control_request(&mut controls, request, control_frame)
+                .unwrap();
+            if generation == 2 {
+                port.drop_next_response();
+            }
+            master.submit_frame(&mut port, control_frame).unwrap();
+            Some(request)
+        } else {
+            None
+        };
+        if generation == 2 {
+            missing = request;
+        }
         let data_frame = master.acquire_frame(generation, now_ns + 50_000).unwrap();
         master
             .build_and_arm_frame_from_plan(data_frame, &plan, &image)
             .unwrap();
         master.submit_frame(&mut port, data_frame).unwrap();
+        if generation == 2 {
+            port.set_now_ns(now_ns + 50_000);
+        }
         let received = bank
             .receive_with_dc_and_control(
                 &mut master,
@@ -660,29 +695,251 @@ fn scheduled_rx_shares_one_poll_for_domains_dc_and_control_without_claiming_cont
         assert_eq!(dc.last_sync_cycle(), u64::from(generation));
         if generation == 1 {
             assert_eq!(received.report.parsed_datagrams, 3);
+            assert!(received.control_expiry.is_empty());
+            let request = request.unwrap();
             assert_eq!(controls.get(request).unwrap().state, RequestState::Complete);
             controls.release(request).unwrap();
+        } else if generation == 2 {
+            assert_eq!(received.report.parsed_datagrams, 2);
+            assert!(received.control_expiry.is_empty());
+            assert_eq!(
+                controls.get(request.unwrap()).unwrap().state,
+                RequestState::InFlight
+            );
+            assert_eq!(master.rx_entry(15).state, RxSlotState::Armed);
         } else {
             assert_eq!(received.report.parsed_datagrams, 2);
-            assert_eq!(controls.get(request).unwrap().state, RequestState::InFlight);
+            assert_eq!(received.report.timed_out_datagrams, 1);
+            let missing = missing.unwrap();
+            assert_eq!(received.control_expiry.handles().next(), Some(missing));
+            assert_eq!(controls.get(missing).unwrap().state, RequestState::Failed);
+            assert_eq!(
+                controls.get(missing).unwrap().last_error(),
+                Some(ControlError::Timeout)
+            );
+            assert!(controls.expire_in_flight(port.now_ns()).is_empty());
+            assert_eq!(master.rx_entry(15).state, RxSlotState::Empty);
+            controls.release(missing).unwrap();
         }
     }
-    let missing = RequestHandle::from_index(0).unwrap();
-    assert!(controls.expire_in_flight(250_000).is_empty());
-    assert_eq!(master.rx_entry(15).state, RxSlotState::Armed);
-    port.set_now_ns(250_001);
-    assert_eq!(master.reap_expired_rx_before_tx(port.now_ns()), 1);
-    let expiry = controls.expire_in_flight(port.now_ns());
-    assert_eq!(expiry.handles().next(), Some(missing));
-    assert_eq!(controls.get(missing).unwrap().state, RequestState::Failed);
-    assert_eq!(
-        controls.get(missing).unwrap().last_error(),
-        Some(ControlError::Timeout)
-    );
-    assert!(controls.expire_in_flight(port.now_ns()).is_empty());
-    assert_eq!(master.rx_entry(15).state, RxSlotState::Empty);
-    controls.release(missing).unwrap();
     assert_eq!(controls.in_use(), 0);
+}
+
+#[test]
+fn scheduled_control_expiry_finalizes_early_link_and_port_failures() {
+    for link_down in [false, true] {
+        let schedule = ScheduleTable::<1, 1>::build(
+            100_000,
+            &[ScheduleDomain {
+                id: 9,
+                period_ticks: 1,
+                phase_ticks: 0,
+            }],
+        )
+        .unwrap();
+        let mut domain = Domain::<2, 1>::new(0x1000);
+        domain
+            .add_segment(DomainSegment {
+                datagram_index: 12,
+                input_offset: 0,
+                len: 2,
+                expected_wkc: 1,
+            })
+            .unwrap();
+        let mut bank = ScheduledDomainBank::new(
+            &schedule,
+            [ScheduledDomainEntry {
+                id: 9,
+                domain: &mut domain,
+            }],
+        )
+        .unwrap();
+        let mut master = EthercatMaster::<1, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+            [0xFF; 6],
+            [1, 2, 3, 4, 5, 6],
+        ));
+        let mut dc = DcCyclicSync::new(
+            DcCyclicConfig::new(0x3000, 14, 2),
+            DcMonitor::new(50, 10, 1, 2),
+        );
+        let mut image = [0; 10];
+        dc.prepare(1, 100_000, &mut image).unwrap();
+        let mut controls = ControlRequestPool::<1>::new();
+        let request = controls
+            .acquire(15, 1, 0x5000, RegisterOperation::Read, &[0; 4], 105_000)
+            .unwrap();
+        let frame = master.acquire_frame(1, 105_000).unwrap();
+        master
+            .build_control_request(&mut controls, request, frame)
+            .unwrap();
+        let mut port = SimulatedPort::new(1);
+        port.set_now_ns(100_000);
+        master.submit_frame(&mut port, frame).unwrap();
+        port.set_now_ns(105_001);
+        if link_down {
+            port.set_link_state(LinkState::Down);
+        }
+        let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+        let result = bank
+            .receive_with_dc_and_control(
+                &mut master,
+                &mut FailingRxPort(&mut port, 0),
+                &mut scratch,
+                1,
+                &mut dc,
+                &mut controls,
+            )
+            .unwrap();
+        assert_eq!(result.report.link_down, link_down);
+        assert_eq!(result.transport_error.is_some(), !link_down);
+        assert!(!result.qualities[0].valid);
+        assert_eq!(result.dc_result, Err(DcCyclicError::MissingResponse));
+        assert_eq!(result.control_expiry.handles().next(), Some(request));
+        assert_eq!(
+            controls.get(request).unwrap().last_error(),
+            Some(ControlError::Timeout)
+        );
+        assert_eq!(master.rx_entry(15).state, RxSlotState::Empty);
+        assert_eq!(dc.pending_generation(), None);
+        controls.release(request).unwrap();
+    }
+}
+
+#[test]
+fn mailbox_service_uses_shared_rx_expiry_to_retry_after_a_missing_poll() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<1, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 14, 2),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let mut config = MailboxConfig::new(0x1000, 32, 0x1100, 32)
+        .with_retry_policy(MailboxRetryPolicy::new(1, 10));
+    config.request_timeout_ns = 50_000;
+    config.timeout_ns = 500_000;
+    let mut mailbox = MailboxController::new();
+    mailbox
+        .start(config, 0x1000, 7, 100_000, MailboxProtocol::CoE, &[1])
+        .unwrap();
+    let mut controls = ControlRequestPool::<1>::new();
+    let mut port = TwoFrameSimPort::new();
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut image = [0u8; 10];
+    image[..2].copy_from_slice(&[0x40, 0]);
+    let mut plan = FramePlan::<2>::new();
+    plan.push(DatagramPlan {
+        command: Command::Lrw,
+        index: 12,
+        address: 0x1000,
+        payload_offset: 0,
+        payload_len: 2,
+        expected_wkc: 1,
+    })
+    .unwrap();
+    plan.push(dc.datagram_plan()).unwrap();
+
+    let mut missing = None;
+    for tick in 1..=3u64 {
+        let now_ns = tick * 100_000;
+        port.set_now_ns(now_ns);
+        dc.prepare(7, now_ns, &mut image).unwrap();
+        let mut sent = None;
+        if tick <= 2 {
+            let action = mailbox.next_action(now_ns).unwrap().unwrap();
+            let request = mailbox.enqueue_pending(&mut controls).unwrap();
+            sent = Some(request);
+            let frame = master.acquire_frame(7, action.deadline_ns).unwrap();
+            master
+                .build_control_request(&mut controls, request, frame)
+                .unwrap();
+            if tick == 2 {
+                port.drop_next_response();
+                missing = Some(request);
+            }
+            master.submit_frame(&mut port, frame).unwrap();
+        }
+        let frame = master.acquire_frame(7, now_ns + 50_000).unwrap();
+        master
+            .build_and_arm_frame_from_plan(frame, &plan, &image)
+            .unwrap();
+        master.submit_frame(&mut port, frame).unwrap();
+        let received = bank
+            .receive_with_dc_and_control(
+                &mut master,
+                &mut port,
+                &mut scratch,
+                7,
+                &mut dc,
+                &mut controls,
+            )
+            .unwrap();
+        assert_eq!(received.report.cycle, tick);
+        assert!(received.qualities[0].valid);
+        assert_eq!(received.dc_result, Ok(()));
+        assert!(received.transport_error.is_none());
+        if tick == 1 {
+            let request = sent.unwrap();
+            assert_eq!(controls.get(request).unwrap().state, RequestState::Complete);
+            assert_eq!(
+                mailbox.accept_completed(&mut controls, request, now_ns),
+                Ok(MailboxProgress::Advanced)
+            );
+            assert_eq!(mailbox.phase(), MailboxPhase::Polling);
+            assert!(received.control_expiry.is_empty());
+        } else if tick == 2 {
+            assert!(received.control_expiry.is_empty());
+            assert_eq!(
+                controls.get(missing.unwrap()).unwrap().state,
+                RequestState::InFlight
+            );
+        } else {
+            let missing = missing.unwrap();
+            assert_eq!(received.control_expiry.handles().next(), Some(missing));
+            assert_eq!(
+                controls.get(missing).unwrap().last_error(),
+                Some(ControlError::Timeout)
+            );
+            assert_eq!(
+                mailbox.accept_completed(&mut controls, missing, now_ns),
+                Ok(MailboxProgress::RetryScheduled)
+            );
+            assert_eq!(
+                mailbox.last_retry_error(),
+                Some(esop_ethercat_core::MailboxError::Timeout)
+            );
+            assert_eq!(controls.in_use(), 0);
+            assert!(mailbox.next_action(now_ns + 9).unwrap().is_none());
+            assert!(mailbox.next_action(now_ns + 10).unwrap().is_some());
+        }
+    }
 }
 
 struct TwoFrameSimPort {

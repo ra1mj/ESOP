@@ -191,6 +191,8 @@ pub enum ControlError {
 pub struct ControlExpiry(u64);
 
 impl ControlExpiry {
+    pub(crate) const EMPTY: Self = Self(0);
+
     pub const fn count(self) -> usize {
         self.0.count_ones() as usize
     }
