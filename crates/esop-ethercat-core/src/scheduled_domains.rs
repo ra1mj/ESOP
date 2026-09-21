@@ -200,6 +200,131 @@ pub enum ScheduledMailboxCycleError<E> {
     },
 }
 
+/// Result of one non-mailbox control-service stage sharing the same bounded
+/// Domain/DC/control receive window. The matching service FSM still owns the
+/// request handle and must consume and release terminal requests after this
+/// method returns. Private evidence fields prevent callers from assembling a
+/// service report that did not pass through the scheduled bank.
+#[derive(Debug)]
+pub struct ScheduledControlCycleReport<E, const DOMAINS: usize> {
+    service: ScheduledServiceTxReport<E>,
+    received: ScheduledReceiveReport<E, DOMAINS>,
+    request: Option<RequestHandle>,
+    request_state_before_tx: Option<RequestState>,
+    request_state_after_rx: Option<RequestState>,
+    post_receive_deadline_met: bool,
+}
+
+impl<E, const DOMAINS: usize> ScheduledControlCycleReport<E, DOMAINS> {
+    pub const fn service(&self) -> &ScheduledServiceTxReport<E> {
+        &self.service
+    }
+
+    pub const fn received(&self) -> &ScheduledReceiveReport<E, DOMAINS> {
+        &self.received
+    }
+
+    pub const fn request(&self) -> Option<RequestHandle> {
+        self.request
+    }
+
+    pub const fn request_state_before_tx(&self) -> Option<RequestState> {
+        self.request_state_before_tx
+    }
+
+    pub const fn request_state_after_rx(&self) -> Option<RequestState> {
+        self.request_state_after_rx
+    }
+
+    pub const fn post_receive_deadline_met(&self) -> bool {
+        self.post_receive_deadline_met
+    }
+
+    fn shape_valid(&self) -> bool {
+        let service = &self.service;
+        if self.post_receive_deadline_met && !service.post_tx_deadline_met {
+            return false;
+        }
+        if service.failure.is_none() && !service.dc_sent {
+            return false;
+        }
+        if service.control_sent && !service.dc_sent {
+            return false;
+        }
+        if matches!(
+            service.failure,
+            Some(ScheduledServiceTxFailure::Dc(_)) if service.dc_sent
+        ) || matches!(
+            service.failure,
+            Some(ScheduledServiceTxFailure::Control(_))
+                if !service.dc_sent || service.control_sent
+        ) {
+            return false;
+        }
+
+        match (
+            self.request,
+            self.request_state_before_tx,
+            self.request_state_after_rx,
+        ) {
+            (None, None, None) => {
+                !service.control_sent
+                    && !matches!(service.failure, Some(ScheduledServiceTxFailure::Control(_)))
+            }
+            (Some(handle), Some(RequestState::Prepared), Some(after)) => {
+                let control_failure =
+                    matches!(service.failure, Some(ScheduledServiceTxFailure::Control(_)));
+                let state_valid = match after {
+                    RequestState::Prepared => {
+                        !service.control_sent && !control_failure && service.failure.is_some()
+                    }
+                    RequestState::InFlight | RequestState::Complete => service.control_sent,
+                    RequestState::Failed => {
+                        service.control_sent
+                            || control_failure
+                            || matches!(service.failure, Some(ScheduledServiceTxFailure::Deadline))
+                    }
+                    RequestState::Free => false,
+                };
+                state_valid
+                    && (!self.received.control_expiry.contains(handle)
+                        || after == RequestState::Failed)
+            }
+            (Some(handle), Some(RequestState::InFlight), Some(after)) => {
+                !service.control_sent
+                    && !matches!(service.failure, Some(ScheduledServiceTxFailure::Control(_)))
+                    && matches!(
+                        after,
+                        RequestState::InFlight | RequestState::Complete | RequestState::Failed
+                    )
+                    && (!self.received.control_expiry.contains(handle)
+                        || after == RequestState::Failed)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// A submit rejection leaves the caller-owned request untouched. A receive
+/// rejection retains the service report so the caller can diagnose which TX
+/// stages reached the wire before faulting or reinitializing the cycle.
+#[derive(Debug)]
+pub enum ScheduledControlCycleError<E, const DOMAINS: usize> {
+    Submit(ScheduledServiceTxError),
+    Receive {
+        service: ScheduledServiceTxReport<E>,
+        request: Option<RequestHandle>,
+        request_state_before_tx: Option<RequestState>,
+        error: ScheduledReceiveError,
+    },
+    RequestLost {
+        service: ScheduledServiceTxReport<E>,
+        received: ScheduledReceiveReport<E, DOMAINS>,
+        request: RequestHandle,
+        request_state_before_tx: RequestState,
+    },
+}
+
 /// Frozen process image and frame plans for one scheduled Domain. The image
 /// is read-only on the cyclic path; callers publish a new immutable binding
 /// only while the production cycle is stopped.
@@ -442,6 +567,106 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
             master.reap_expired_rx_before_tx(now_ns);
         }
         Ok(received)
+    }
+
+    /// Run one caller-owned non-mailbox control request with the cyclic DC
+    /// sample and the common Domain/DC/control RX finalizer. A Prepared request
+    /// is submitted once; an InFlight request is never retransmitted and only
+    /// participates in receive completion or timeout. Terminal requests remain
+    /// in the pool for their matching service FSM to consume and release.
+    ///
+    /// Process-Domain frames for `generation` must already be armed. Once the
+    /// service submit passes preflight, RX is always attempted even when the TX
+    /// report contains a DC, control, or deadline failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_dc_and_control_cycle<
+        P: EthercatPort,
+        const FRAMES: usize,
+        const MTU: usize,
+        const REQUESTS: usize,
+    >(
+        &mut self,
+        master: &mut EthercatMaster<FRAMES, MTU>,
+        port: &mut P,
+        scratch: &mut [u8; MAX_ETHERNET_FRAME_LEN],
+        dc: &mut DcCyclicSync,
+        dc_image: &mut [u8],
+        application_time_ns: u64,
+        controls: &mut ControlRequestPool<REQUESTS>,
+        request: Option<RequestHandle>,
+        generation: u16,
+        rx_deadline_ns: u64,
+        cycle_deadline_ns: u64,
+    ) -> Result<
+        ScheduledControlCycleReport<P::Error, DOMAINS>,
+        ScheduledControlCycleError<P::Error, DOMAINS>,
+    > {
+        let request_state_before_tx = match request {
+            Some(handle) => {
+                let state = controls.get(handle).map(|item| item.state).ok_or(
+                    ScheduledControlCycleError::Submit(
+                        ScheduledServiceTxError::InvalidControlRequest,
+                    ),
+                )?;
+                if !matches!(state, RequestState::Prepared | RequestState::InFlight) {
+                    return Err(ScheduledControlCycleError::Submit(
+                        ScheduledServiceTxError::InvalidControlRequest,
+                    ));
+                }
+                Some(state)
+            }
+            None => None,
+        };
+        let prepared = request.filter(|_| request_state_before_tx == Some(RequestState::Prepared));
+        let service = self
+            .submit_dc_and_control(
+                master,
+                port,
+                dc,
+                dc_image,
+                application_time_ns,
+                controls,
+                prepared,
+                generation,
+                rx_deadline_ns,
+                cycle_deadline_ns,
+            )
+            .map_err(ScheduledControlCycleError::Submit)?;
+        let received = match self
+            .receive_with_dc_and_control(master, port, scratch, generation, dc, controls)
+        {
+            Ok(received) => received,
+            Err(error) => {
+                return Err(ScheduledControlCycleError::Receive {
+                    service,
+                    request,
+                    request_state_before_tx,
+                    error,
+                });
+            }
+        };
+        let request_state_after_rx =
+            request.and_then(|handle| controls.get(handle).map(|item| item.state));
+        if let (Some(handle), Some(before), None) =
+            (request, request_state_before_tx, request_state_after_rx)
+        {
+            return Err(ScheduledControlCycleError::RequestLost {
+                service,
+                received,
+                request: handle,
+                request_state_before_tx: before,
+            });
+        }
+        let post_receive_deadline_met =
+            service.post_tx_deadline_met && port.now_ns() < cycle_deadline_ns;
+        Ok(ScheduledControlCycleReport {
+            service,
+            received,
+            request,
+            request_state_before_tx,
+            request_state_after_rx,
+            post_receive_deadline_met,
+        })
     }
 
     /// Complete one mailbox request after the common Domain/DC/control RX.
@@ -1038,6 +1263,16 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
                 .iter()
                 .zip(received.qualities)
                 .all(|(entry, quality)| entry.domain.quality() == quality)
+    }
+
+    /// Confirm that a non-mailbox control cycle was produced by this bank's
+    /// latest shared RX and that its private request-state evidence agrees with
+    /// the only legal single-send transitions.
+    pub fn confirms_control_cycle<E>(
+        &self,
+        cycle: &ScheduledControlCycleReport<E, DOMAINS>,
+    ) -> bool {
+        self.confirms_receive(cycle.received()) && cycle.shape_valid()
     }
 
     /// Validate the ID order and exclusive datagram-index ownership once at

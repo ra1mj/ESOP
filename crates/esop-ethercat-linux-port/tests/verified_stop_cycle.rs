@@ -3,16 +3,18 @@ use esop_ethercat_core::{
     ControlRequestPool, CycleError, CycleReport, DatagramPlan, DcCyclicConfig, DcCyclicError,
     DcCyclicSync, DcMonitor, Domain, DomainSegment, EthercatMaster, EthercatPort, FramePlan,
     FramePlanSet, LinkState, MailboxConfig, MailboxController, MailboxError, MailboxProgress,
-    MailboxProtocol, MasterConfig, PdoDirection, PdoEntry, PortError, RequestHandle, RxPoll,
-    ScheduleDomain, ScheduleTable, ScheduledDomainBank, ScheduledDomainEntry,
-    ScheduledProcessInputEntry, ScheduledProcessInputs, ScheduledServiceTxFailure,
+    MailboxProtocol, MasterConfig, PdoDirection, PdoEntry, PortError, RegisterOperation,
+    RequestHandle, RequestState, RxPoll, ScheduleDomain, ScheduleTable, ScheduledDomainBank,
+    ScheduledDomainEntry, ScheduledProcessInputEntry, ScheduledProcessInputs,
+    ScheduledServiceTxFailure,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::cia402::step_axis_bank;
 use esop_lifecycle_guard::ethercat::{
-    OtherCycleFacts, ScheduledDomainQuality, StopFrameError, cyclic_quality_from_ethercat,
-    cyclic_quality_from_schedule, other_cycle_facts_from_mailbox_cycle, submit_active_frame,
-    submit_inhibited_frame, submit_stopping_frame, verified_ethercat_stop_feedback,
+    OtherCycleFacts, ScheduledControlGate, ScheduledDomainQuality, StopFrameError,
+    cyclic_quality_from_ethercat, cyclic_quality_from_schedule,
+    other_cycle_facts_from_mailbox_cycle, submit_active_frame, submit_inhibited_frame,
+    submit_stopping_frame, verified_ethercat_stop_feedback,
 };
 use esop_lifecycle_guard::procbuf::{
     LifecycleEventCursor, axis_stops_to_procbuf, lifecycle_events_to_procbuf, lifecycle_to_procbuf,
@@ -703,23 +705,45 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         assert_eq!(production.phase(), ScheduledProductionPhase::ReceiveArmed);
     }
     port.inner.set_now_ns(200_000);
-    dc.prepare(2, 200_000, &mut dc_image).unwrap();
-    let missing = domain_bank
-        .receive_with_dc_and_control(
+    let control = controls
+        .acquire(15, 2, 0x5000, RegisterOperation::Read, &[0; 4], 250_000)
+        .unwrap();
+    // Drop only the newly submitted DC response. The motion response from the
+    // prior output handoff and this control response still share the same RX.
+    port.inner.drop_next_response();
+    let control_cycle = domain_bank
+        .run_dc_and_control_cycle(
             &mut master,
             &mut port,
             &mut scratch,
-            2,
             &mut dc,
+            &mut dc_image,
+            200_000,
             &mut controls,
+            Some(control),
+            2,
+            250_000,
+            250_000,
         )
         .unwrap();
-    assert!(missing.qualities[0].valid);
-    assert!(!missing.qualities[1].valid);
-    assert_eq!(missing.dc_result, Err(DcCyclicError::MissingResponse));
+    assert!(control_cycle.service().dc_sent && control_cycle.service().control_sent);
+    assert_eq!(
+        control_cycle.request_state_after_rx(),
+        Some(RequestState::Complete)
+    );
+    assert!(domain_bank.confirms_control_cycle(&control_cycle));
+    production
+        .complete_control_cycle(&domain_bank, &control_cycle)
+        .unwrap();
+    assert_eq!(production.phase(), ScheduledProductionPhase::OutputPending);
+    controls.release(control).unwrap();
+    let received = control_cycle.received();
+    assert!(received.qualities[0].valid);
+    assert!(!received.qualities[1].valid);
+    assert_eq!(received.dc_result, Err(DcCyclicError::MissingResponse));
     assert!(!domain_bank.confirms_receive(&service_cycle.receive.received));
     let mut state = StatePage::<1, 0, 2>::new(7);
-    state.sequence = missing.report.cycle;
+    state.sequence = received.report.cycle;
     let stopped = StopCycleContext {
         guard: &mut guard,
         bank: &mut axis_bank,
@@ -730,7 +754,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         buffer: &buffer,
         event_cursor: &mut cursor,
         state: &mut state,
-        report: missing.report,
+        report: received.report,
         other,
         maps: &maps,
         modes: &modes,
@@ -742,9 +766,11 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         now_ns: 200_000,
         transition_time_ns: 100_000,
     }
-    .run_received_with_outputs_until(
+    .run_control_cycle_with_outputs_until(
         &domain_bank,
-        &missing,
+        &control_cycle,
+        ScheduledControlGate::Configuration,
+        true,
         9,
         &auxiliary_outputs,
         &[None],

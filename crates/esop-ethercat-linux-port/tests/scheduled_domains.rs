@@ -3,14 +3,16 @@ use esop_ethercat_core::{
     ControlError, ControlRequestPool, CycleError, DatagramPlan, DcCyclicConfig, DcCyclicError,
     DcCyclicSync, DcMonitor, Domain, DomainSegment, EthercatMaster, EthercatPort, FramePlan,
     LinkState, MailboxConfig, MailboxController, MailboxPhase, MailboxProgress, MailboxProtocol,
-    MailboxRetryPolicy, MasterConfig, PortError, RegisterOperation, RequestHandle, RequestState,
-    RxPoll, RxSlotState, ScheduleDomain, ScheduleTable, ScheduledDomainBank, ScheduledDomainEntry,
+    MailboxRetryPolicy, MappingConfigController, MappingConfigPhase, MappingConfigProgress,
+    MappingTable, MasterConfig, PortError, RegisterOperation, RequestHandle, RequestState, RxPoll,
+    RxSlotState, ScheduleDomain, ScheduleTable, ScheduledDomainBank, ScheduledDomainEntry,
     ScheduledMailboxTxError, ScheduledReceiveError, ScheduledServiceFrameError,
-    ScheduledServiceTxError, ScheduledServiceTxFailure,
+    ScheduledServiceTxError, ScheduledServiceTxFailure, SyncManagerConfig,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::ethercat::{
-    OtherCycleFacts, ScheduledDomainQuality, cyclic_quality_from_schedule,
+    OtherCycleFacts, ScheduledControlGate, ScheduledDomainQuality, cyclic_quality_from_schedule,
+    other_cycle_facts_from_control_cycle,
 };
 use esop_lifecycle_guard::{GateId, GuardPolicy, LifecycleAction, LifecycleGuard, MotionPermit};
 
@@ -1141,6 +1143,246 @@ fn mailbox_cycle_owner_carries_only_live_requests_and_observes_rx_deadline() {
         }
         request = cycle.request;
     }
+}
+
+#[test]
+fn non_mailbox_control_cycle_advances_mapping_without_retransmitting_in_flight_requests() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<1, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 14, 2),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let mut table = MappingTable::<1, 0>::new();
+    table
+        .add_sync_manager(SyncManagerConfig {
+            index: 2,
+            physical_start: 0x1000,
+            length: 8,
+            control: 0x26,
+            status: 0,
+            enable: true,
+        })
+        .unwrap();
+    let mut mapping = MappingConfigController::<1, 0>::new();
+    mapping
+        .start(0x1000, 7, 100_000, 500_000, 50_000, &table)
+        .unwrap();
+    let mut controls = ControlRequestPool::<1>::new();
+    let mut port = TwoFrameSimPort::new();
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let domain_image = [0x40, 0];
+    let mut dc_image = [0u8; 10];
+    let mut plan = FramePlan::<1>::new();
+    plan.push(DatagramPlan {
+        command: Command::Lrw,
+        index: 12,
+        address: 0x1000,
+        payload_offset: 0,
+        payload_len: 2,
+        expected_wkc: 1,
+    })
+    .unwrap();
+    let other = OtherCycleFacts {
+        platform_ready: true,
+        coe_ready: true,
+        topology_valid: true,
+        drive_ready: true,
+        command_current: true,
+        supervisor_healthy: true,
+        external_safety_clear: true,
+        deadline_met: true,
+    };
+
+    port.set_now_ns(100_000);
+    mapping.next_action(port.now_ns()).unwrap().unwrap();
+    let write = mapping.enqueue_pending(&mut controls).unwrap();
+    let frame = master.acquire_frame(7, 150_000).unwrap();
+    master
+        .build_and_arm_frame_from_plan(frame, &plan, &domain_image)
+        .unwrap();
+    master.submit_frame(&mut port, frame).unwrap();
+    let write_cycle = bank
+        .run_dc_and_control_cycle(
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            100_000,
+            &mut controls,
+            Some(write),
+            7,
+            150_000,
+            150_000,
+        )
+        .unwrap();
+    assert!(bank.confirms_control_cycle(&write_cycle));
+    assert!(write_cycle.service().dc_sent && write_cycle.service().control_sent);
+    assert_eq!(
+        write_cycle.request_state_before_tx(),
+        Some(RequestState::Prepared)
+    );
+    assert_eq!(
+        write_cycle.request_state_after_rx(),
+        Some(RequestState::Complete)
+    );
+    assert_eq!(
+        mapping
+            .accept_completed(&mut controls, write, port.now_ns())
+            .unwrap(),
+        MappingConfigProgress::Advanced
+    );
+    assert_eq!(mapping.phase(), MappingConfigPhase::VerifyingSyncManager);
+    assert_eq!(controls.in_use(), 0);
+    assert_eq!(
+        other_cycle_facts_from_control_cycle(
+            &write_cycle,
+            ScheduledControlGate::Configuration,
+            true,
+            other,
+        ),
+        other
+    );
+    assert!(
+        !other_cycle_facts_from_control_cycle(
+            &write_cycle,
+            ScheduledControlGate::Configuration,
+            false,
+            other,
+        )
+        .coe_ready
+    );
+
+    port.set_now_ns(200_000);
+    mapping.next_action(port.now_ns()).unwrap().unwrap();
+    let verify = mapping.enqueue_pending(&mut controls).unwrap();
+    let frame = master.acquire_frame(7, 250_000).unwrap();
+    master
+        .build_and_arm_frame_from_plan(frame, &plan, &domain_image)
+        .unwrap();
+    master.submit_frame(&mut port, frame).unwrap();
+    port.drop_nth_next_response(2);
+    let missing = bank
+        .run_dc_and_control_cycle(
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            200_000,
+            &mut controls,
+            Some(verify),
+            7,
+            250_000,
+            250_000,
+        )
+        .unwrap();
+    assert!(missing.service().control_sent);
+    assert_eq!(
+        missing.request_state_after_rx(),
+        Some(RequestState::InFlight)
+    );
+
+    port.set_now_ns(240_000);
+    let frame = master.acquire_frame(7, 290_000).unwrap();
+    master
+        .build_and_arm_frame_from_plan(frame, &plan, &domain_image)
+        .unwrap();
+    master.submit_frame(&mut port, frame).unwrap();
+    let waiting = bank
+        .run_dc_and_control_cycle(
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            240_000,
+            &mut controls,
+            Some(verify),
+            7,
+            290_000,
+            290_000,
+        )
+        .unwrap();
+    assert!(!waiting.service().control_sent);
+    assert_eq!(
+        waiting.request_state_before_tx(),
+        Some(RequestState::InFlight)
+    );
+    assert_eq!(
+        waiting.request_state_after_rx(),
+        Some(RequestState::InFlight)
+    );
+
+    port.set_now_ns(260_000);
+    let frame = master.acquire_frame(7, 310_000).unwrap();
+    master
+        .build_and_arm_frame_from_plan(frame, &plan, &domain_image)
+        .unwrap();
+    master.submit_frame(&mut port, frame).unwrap();
+    let expired = bank
+        .run_dc_and_control_cycle(
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            260_000,
+            &mut controls,
+            Some(verify),
+            7,
+            310_000,
+            310_000,
+        )
+        .unwrap();
+    assert!(!expired.service().control_sent);
+    assert_eq!(expired.request_state_after_rx(), Some(RequestState::Failed));
+    assert!(expired.received().control_expiry.contains(verify));
+    assert!(
+        !other_cycle_facts_from_control_cycle(
+            &expired,
+            ScheduledControlGate::Configuration,
+            true,
+            other,
+        )
+        .coe_ready
+    );
+    assert!(
+        mapping
+            .accept_completed(&mut controls, verify, port.now_ns())
+            .is_err()
+    );
+    assert_eq!(mapping.phase(), MappingConfigPhase::Faulted);
+    assert_eq!(controls.in_use(), 0);
 }
 
 struct TwoFrameSimPort {

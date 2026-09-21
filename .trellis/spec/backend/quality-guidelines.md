@@ -221,6 +221,20 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   Project both the reported send failure and post-TX deadline into safety
   facts before allowing motion; neither accepted TX nor a previous DC lock
   establishes current-cycle qualification.
+- For startup, mapping, DC configuration, or another non-mailbox service,
+  keep the control request owned by its matching service FSM across the
+  scheduled transport stage. `Prepared` may be submitted once; `InFlight`
+  participates only in the common Domain/DC/control RX and timeout sweep and
+  must never be retransmitted. The transport owner records immutable before/
+  after request-state evidence, always finalizes RX after a valid submit, and
+  returns terminal requests without releasing them. Only the matching service
+  may validate action identity, advance business state, and release the slot.
+  Before lifecycle output, explicitly select the owned Platform,
+  Configuration, Topology, or Drive gate and combine the service FSM's actual
+  readiness with transport/request failure; a caller-supplied ready value
+  cannot override a failed TX or request. Treat submit/RX invariant errors as
+  fault or reinitialization boundaries, not as an invitation to rebuild a
+  healthy report from individual sent bits.
 - Use `receive_with_dc_and_mailbox` only with the matching mailbox pending
   action and request handle. Reject an index/generation/address/operation/
   length/deadline mismatch, or a changed Prepared/InFlight send payload

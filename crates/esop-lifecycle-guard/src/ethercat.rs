@@ -2,8 +2,8 @@
 
 use crate::CyclicQuality;
 use esop_ethercat_core::{
-    CycleReport, DcCyclicSync, DomainQuality, MailboxProgress, ScheduleTable,
-    ScheduledMailboxCycleReport, ScheduledProcessTxReport,
+    CycleReport, DcCyclicSync, DomainQuality, MailboxProgress, RequestState, ScheduleTable,
+    ScheduledControlCycleReport, ScheduledMailboxCycleReport, ScheduledProcessTxReport,
 };
 
 #[cfg(feature = "cia402")]
@@ -556,6 +556,41 @@ pub struct OtherCycleFacts {
     pub supervisor_healthy: bool,
     pub external_safety_clear: bool,
     pub deadline_met: bool,
+}
+
+/// The lifecycle readiness fact owned by one non-mailbox control service.
+/// Selecting the gate is explicit so a mapping, startup, or drive service
+/// cannot accidentally revoke or qualify an unrelated subsystem.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScheduledControlGate {
+    Platform,
+    Configuration,
+    Topology,
+    Drive,
+}
+
+/// Project one non-mailbox control service into its declared lifecycle gate.
+/// `service_ready` is sampled from the matching service FSM after it consumes
+/// any terminal request. Transport failures and failed requests always win;
+/// the caller cannot restore readiness by passing true. The post-RX deadline
+/// observation can likewise only clear an existing budget fact.
+pub fn other_cycle_facts_from_control_cycle<E, const DOMAINS: usize>(
+    cycle: &ScheduledControlCycleReport<E, DOMAINS>,
+    gate: ScheduledControlGate,
+    service_ready: bool,
+    mut other: OtherCycleFacts,
+) -> OtherCycleFacts {
+    let transport_ready = cycle.service().failure.is_none()
+        && cycle.request_state_after_rx() != Some(RequestState::Failed);
+    let ready = service_ready && transport_ready;
+    match gate {
+        ScheduledControlGate::Platform => other.platform_ready &= ready,
+        ScheduledControlGate::Configuration => other.coe_ready &= ready,
+        ScheduledControlGate::Topology => other.topology_valid &= ready,
+        ScheduledControlGate::Drive => other.drive_ready &= ready,
+    }
+    other.deadline_met &= cycle.post_receive_deadline_met();
+    other
 }
 
 /// Conservatively bind the bounded mailbox/DC service stage to lifecycle
