@@ -2,15 +2,17 @@ use esop_ethercat_core::wire::{Command, MAX_ETHERNET_FRAME_LEN};
 use esop_ethercat_core::{
     ControlRequestPool, CycleError, CycleReport, DatagramPlan, DcCyclicConfig, DcCyclicError,
     DcCyclicSync, DcMonitor, Domain, DomainSegment, EthercatMaster, EthercatPort, FramePlan,
-    FramePlanSet, LinkState, MasterConfig, PdoDirection, PdoEntry, PortError, RegisterOperation,
-    RequestState, RxPoll, ScheduleDomain, ScheduleTable, ScheduledDomainBank, ScheduledDomainEntry,
+    FramePlanSet, LinkState, MailboxConfig, MailboxController, MailboxError, MailboxProgress,
+    MailboxProtocol, MasterConfig, PdoDirection, PdoEntry, PortError, RequestHandle, RxPoll,
+    ScheduleDomain, ScheduleTable, ScheduledDomainBank, ScheduledDomainEntry,
+    ScheduledServiceTxFailure,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::cia402::step_axis_bank;
 use esop_lifecycle_guard::ethercat::{
     OtherCycleFacts, ScheduledDomainQuality, StopFrameError, cyclic_quality_from_ethercat,
-    cyclic_quality_from_schedule, submit_active_frame, submit_inhibited_frame,
-    submit_stopping_frame, verified_ethercat_stop_feedback,
+    cyclic_quality_from_schedule, other_cycle_facts_from_mailbox_cycle, submit_active_frame,
+    submit_inhibited_frame, submit_stopping_frame, verified_ethercat_stop_feedback,
 };
 use esop_lifecycle_guard::procbuf::{
     LifecycleEventCursor, axis_stops_to_procbuf, lifecycle_events_to_procbuf, lifecycle_to_procbuf,
@@ -310,8 +312,16 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
     };
     port.inner.set_now_ns(100_000);
     let mut controls = ControlRequestPool::<1>::new();
-    let request = controls
-        .acquire(15, 1, 0x5000, RegisterOperation::Read, &[0; 4], 150_000)
+    let mut mailbox = MailboxController::new();
+    mailbox
+        .start(
+            MailboxConfig::new(0x4000, 32, 0x4100, 32),
+            0x5000,
+            1,
+            100_000,
+            MailboxProtocol::CoE,
+            &[1],
+        )
         .unwrap();
     let mut receive_image = [0u8; IMAGE_BYTES + 2];
     receive_image[..IMAGE_BYTES].copy_from_slice(&safe_image);
@@ -322,38 +332,38 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         .unwrap();
     master.submit_frame(&mut port, frame).unwrap();
     let mut dc_image = [0u8; 8];
-    let services = domain_bank
-        .submit_dc_and_control(
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut service_cycle = domain_bank
+        .run_dc_and_mailbox_cycle(
             &mut master,
             &mut port,
+            &mut scratch,
             &mut dc,
             &mut dc_image,
             100_000,
             &mut controls,
-            Some(request),
+            &mut mailbox,
+            None,
             1,
             150_000,
             150_000,
         )
         .unwrap();
-    assert!(services.dc_sent && services.control_sent);
-    assert!(services.failure.is_none() && services.post_tx_deadline_met);
-    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
-    let mut received = domain_bank
-        .receive_with_dc_and_control(
-            &mut master,
-            &mut port,
-            &mut scratch,
-            1,
-            &mut dc,
-            &mut controls,
-        )
-        .unwrap();
+    assert!(service_cycle.tx.service.dc_sent && service_cycle.tx.service.control_sent);
+    assert!(
+        service_cycle.tx.service.failure.is_none() && service_cycle.tx.service.post_tx_deadline_met
+    );
+    let received = &service_cycle.receive.received;
     assert_eq!(received.dc_result, Ok(()));
     assert!(received.transport_error.is_none());
     assert!(received.qualities.iter().all(|quality| quality.valid));
-    assert!(domain_bank.confirms_receive(&received));
-    assert_eq!(controls.get(request).unwrap().state, RequestState::Complete);
+    assert!(domain_bank.confirms_receive(received));
+    assert_eq!(
+        service_cycle.receive.mailbox_progress,
+        Some(Ok(MailboxProgress::Advanced))
+    );
+    assert_eq!(service_cycle.request, None);
+    assert_eq!(controls.in_use(), 0);
 
     let other = OtherCycleFacts {
         platform_ready: true,
@@ -365,18 +375,36 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         external_safety_clear: true,
         deadline_met: true,
     };
+    assert_eq!(
+        other_cycle_facts_from_mailbox_cycle(&service_cycle, other),
+        other
+    );
+    service_cycle.tx.service.failure = Some(ScheduledServiceTxFailure::Deadline);
+    assert!(!other_cycle_facts_from_mailbox_cycle(&service_cycle, other).coe_ready);
+    service_cycle.tx.service.failure = None;
+    service_cycle.receive.mailbox_progress = Some(Ok(MailboxProgress::RetryScheduled));
+    assert!(!other_cycle_facts_from_mailbox_cycle(&service_cycle, other).coe_ready);
+    service_cycle.receive.mailbox_progress = Some(Err(MailboxError::Timeout));
+    assert!(!other_cycle_facts_from_mailbox_cycle(&service_cycle, other).coe_ready);
+    service_cycle.receive.mailbox_progress = Some(Ok(MailboxProgress::Advanced));
+    service_cycle.post_receive_deadline_met = false;
+    assert!(!other_cycle_facts_from_mailbox_cycle(&service_cycle, other).deadline_met);
+    service_cycle.post_receive_deadline_met = true;
     let snapshots = [
         ScheduledDomainQuality {
             id: 9,
-            quality: received.qualities[0],
+            quality: service_cycle.receive.received.qualities[0],
         },
         ScheduledDomainQuality {
             id: 10,
-            quality: received.qualities[1],
+            quality: service_cycle.receive.received.qualities[1],
         },
     ];
     let mut guard = LifecycleGuard::new(
-        GateId::Domain.bit() | GateId::Link.bit(),
+        GateId::Domain.bit()
+            | GateId::Link.bit()
+            | GateId::Configuration.bit()
+            | GateId::Budget.bit(),
         7,
         GuardPolicy {
             enter_good_cycles: 1,
@@ -385,8 +413,14 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         },
     );
     guard.update_cyclic_quality(
-        cyclic_quality_from_schedule(received.report, &schedule, &snapshots, &dc, other),
-        received.report.cycle,
+        cyclic_quality_from_schedule(
+            service_cycle.receive.received.report,
+            &schedule,
+            &snapshots,
+            &dc,
+            other,
+        ),
+        service_cycle.receive.received.report.cycle,
     );
     guard
         .request_rearm(
@@ -401,7 +435,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
                 reserved: [0; 3],
                 policy_version: 1,
             },
-            received.report.cycle,
+            service_cycle.receive.received.report.cycle,
             100_000,
         )
         .unwrap();
@@ -417,7 +451,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
     }];
     let mut guards = [CyclicSetpointGuard::new()];
     let mut state = StatePage::<1, 0, 2>::new(7);
-    state.sequence = received.report.cycle;
+    state.sequence = service_cycle.receive.received.report.cycle;
     // The auxiliary output is submitted first for the next cycle. Drop its
     // response deliberately instead of relying on a one-frame simulator queue.
     port.inner.drop_next_response();
@@ -432,7 +466,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
             buffer: &buffer,
             event_cursor: &mut cursor,
             state: &mut state,
-            report: received.report,
+            report: service_cycle.receive.received.report,
             other,
             maps: &maps,
             modes: &modes,
@@ -444,12 +478,12 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
             now_ns: 100_000,
             transition_time_ns: 100_000,
         };
-        received.qualities[1].actual_wkc = 0;
-        assert!(!domain_bank.confirms_receive(&received));
+        service_cycle.receive.received.qualities[1].actual_wkc = 0;
+        assert!(!domain_bank.confirms_receive(&service_cycle.receive.received));
         assert!(matches!(
-            context.run_received_with_outputs_until(
+            context.run_mailbox_cycle_with_outputs_until(
                 &domain_bank,
-                &received,
+                &service_cycle,
                 9,
                 &auxiliary_outputs,
                 &[None],
@@ -459,12 +493,12 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
             ),
             Err(StopCycleError::ReceiveMismatch)
         ));
-        received.qualities[1].actual_wkc = 1;
-        received.report.cycle = 0;
+        service_cycle.receive.received.qualities[1].actual_wkc = 1;
+        service_cycle.receive.received.report.cycle = 0;
         assert!(matches!(
-            context.run_received_with_outputs_until(
+            context.run_mailbox_cycle_with_outputs_until(
                 &domain_bank,
-                &received,
+                &service_cycle,
                 9,
                 &auxiliary_outputs,
                 &[None],
@@ -474,13 +508,28 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
             ),
             Err(StopCycleError::ReceiveMismatch)
         ));
-        received.report.cycle = 1;
+        service_cycle.receive.received.report.cycle = 1;
+        service_cycle.request = RequestHandle::from_index(0);
+        assert!(matches!(
+            context.run_mailbox_cycle_with_outputs_until(
+                &domain_bank,
+                &service_cycle,
+                9,
+                &auxiliary_outputs,
+                &[None],
+                &mut guards,
+                &limits,
+                150_000,
+            ),
+            Err(StopCycleError::ServiceCycleMismatch)
+        ));
+        service_cycle.request = None;
         assert_eq!(context.port.tx_frames(), 3);
         assert_eq!(context.state.quality.sequence, 0);
         let outcome = context
-            .run_received_with_outputs_until(
+            .run_mailbox_cycle_with_outputs_until(
                 &domain_bank,
-                &received,
+                &service_cycle,
                 9,
                 &auxiliary_outputs,
                 &[None],
@@ -498,8 +547,6 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         assert_eq!(buffer.read_state().unwrap().state.sequence, 1);
         assert_eq!(context.port.tx_frames(), 5);
     }
-    controls.release(request).unwrap();
-
     port.inner.set_now_ns(200_000);
     dc.prepare(2, 200_000, &mut dc_image).unwrap();
     let missing = domain_bank
@@ -515,7 +562,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
     assert!(missing.qualities[0].valid);
     assert!(!missing.qualities[1].valid);
     assert_eq!(missing.dc_result, Err(DcCyclicError::MissingResponse));
-    assert!(!domain_bank.confirms_receive(&received));
+    assert!(!domain_bank.confirms_receive(&service_cycle.receive.received));
     let mut state = StatePage::<1, 0, 2>::new(7);
     state.sequence = missing.report.cycle;
     let stopped = StopCycleContext {

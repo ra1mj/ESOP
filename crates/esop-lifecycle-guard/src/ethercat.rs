@@ -1,7 +1,10 @@
 //! Allocation-free projection of verified EtherCAT cycle evidence into MLG facts.
 
 use crate::CyclicQuality;
-use esop_ethercat_core::{CycleReport, DcCyclicSync, DomainQuality, ScheduleTable};
+use esop_ethercat_core::{
+    CycleReport, DcCyclicSync, DomainQuality, MailboxProgress, ScheduleTable,
+    ScheduledMailboxCycleReport,
+};
 
 #[cfg(feature = "cia402")]
 use crate::{
@@ -553,6 +556,25 @@ pub struct OtherCycleFacts {
     pub supervisor_healthy: bool,
     pub external_safety_clear: bool,
     pub deadline_met: bool,
+}
+
+/// Conservatively bind the bounded mailbox/DC service stage to lifecycle
+/// facts. A service TX failure, a terminal mailbox error, or a scheduled retry
+/// blocks configuration readiness for this cycle. The post-RX observation is
+/// an intermediate budget fact and can only clear, never restore, the caller's
+/// deadline qualification.
+pub fn other_cycle_facts_from_mailbox_cycle<E, const DOMAINS: usize>(
+    cycle: &ScheduledMailboxCycleReport<E, DOMAINS>,
+    mut other: OtherCycleFacts,
+) -> OtherCycleFacts {
+    let service_ready = cycle.tx.service.failure.is_none();
+    let mailbox_ready = !matches!(
+        cycle.receive.mailbox_progress,
+        Some(Ok(MailboxProgress::RetryScheduled)) | Some(Err(_))
+    );
+    other.coe_ready &= service_ready && mailbox_ready;
+    other.deadline_met &= cycle.post_receive_deadline_met;
+    other
 }
 
 /// Collect after `Domain::finish_receive` for every required, scheduled

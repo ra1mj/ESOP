@@ -6,8 +6,9 @@
 
 use crate::cia402::step_axis_bank;
 use crate::ethercat::{
-    OtherCycleFacts, ScheduledDomainQuality, StopFrameError, submit_active_frame,
-    submit_inhibited_frame, submit_stopping_frame, verified_ethercat_stop_feedback,
+    OtherCycleFacts, ScheduledDomainQuality, StopFrameError, other_cycle_facts_from_mailbox_cycle,
+    submit_active_frame, submit_inhibited_frame, submit_stopping_frame,
+    verified_ethercat_stop_feedback,
 };
 use crate::procbuf::{
     AxisEvidenceError, LifecycleEventCursor, LifecycleEventError, axis_stops_to_procbuf,
@@ -20,7 +21,8 @@ use crate::{
 };
 use esop_ethercat_core::{
     CycleReport, DcCyclicSync, Domain, EthercatMaster, EthercatPort, FramePlan, FramePlanSet,
-    ScheduleTable, ScheduledDomainBank, ScheduledReceiveReport, wire::Command,
+    ScheduleTable, ScheduledDomainBank, ScheduledMailboxCycleReport, ScheduledReceiveReport,
+    ScheduledServiceTxFailure, wire::Command,
 };
 use esop_procbuf::{HeaderError, ProcBuf, StatePage, StatePublishError};
 use esop_profile_cia402::{
@@ -38,6 +40,7 @@ pub enum StopCycleError {
     InvalidCycleDeadline,
     InvalidAuxiliaryOutputs,
     ReceiveMismatch,
+    ServiceCycleMismatch,
     Header(HeaderError),
     NotStopping(LifecycleAction),
     Evidence(AxisEvidenceError),
@@ -510,6 +513,7 @@ impl<
         limits: &[CyclicLimits; AXES],
         cycle_deadline_ns: u64,
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        let other = self.other;
         self.run_inner_with_outputs(
             Some((schedule, domains, motion_domain_id)),
             Some(MotionInputs {
@@ -519,14 +523,16 @@ impl<
             }),
             Some(cycle_deadline_ns),
             Some(outputs),
+            other,
         )
     }
 
     /// Bind the output decision to the same finalized shared RX report that
     /// supplied the motion Domain. The bank supplies the frozen Domain order;
     /// callers cannot substitute a stale or rearranged quality array. This
-    /// still leaves DC/control TX and the final post-publication deadline with
-    /// the outer cycle owner.
+    /// still leaves DC/control TX and its service-result projection with the
+    /// outer cycle owner. The supplied deadline is checked again after State
+    /// and event publication.
     #[allow(clippy::too_many_arguments)]
     pub fn run_received_with_outputs_until<const SCHEDULE_SLOTS: usize, const FRAMES: usize>(
         &mut self,
@@ -539,6 +545,85 @@ impl<
         limits: &[CyclicLimits; AXES],
         cycle_deadline_ns: u64,
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        let domains = self.received_domains(domain_bank, received, motion_domain_id, outputs)?;
+        let other = self.other;
+        self.run_inner_with_outputs(
+            Some((outputs.schedule, &domains, motion_domain_id)),
+            Some(MotionInputs {
+                targets,
+                guards,
+                limits,
+            }),
+            Some(cycle_deadline_ns),
+            Some(outputs),
+            other,
+        )
+    }
+
+    /// Consume the complete bounded mailbox/DC service result, project its
+    /// failures into lifecycle facts, and finish due auxiliary/motion output,
+    /// State/event publication, and the final deadline observation. Process
+    /// Domain submission and task release remain owned by the outer cycle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_mailbox_cycle_with_outputs_until<
+        const SCHEDULE_SLOTS: usize,
+        const FRAMES: usize,
+    >(
+        &mut self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        cycle: &ScheduledMailboxCycleReport<P::Error, DOMAINS>,
+        motion_domain_id: u8,
+        outputs: &ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
+        targets: &[Option<Cia402Target>; AXES],
+        guards: &mut [CyclicSetpointGuard; AXES],
+        limits: &[CyclicLimits; AXES],
+        cycle_deadline_ns: u64,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        let service = &cycle.tx.service;
+        let service_shape_invalid = cycle.request != cycle.tx.request
+            || (cycle.receive.mailbox_progress.is_some() && cycle.request.is_some())
+            || (cycle.post_receive_deadline_met && !service.post_tx_deadline_met)
+            || (service.failure.is_none() && !service.dc_sent)
+            || (service.control_sent && !service.dc_sent)
+            || matches!(
+                service.failure,
+                Some(ScheduledServiceTxFailure::Dc(_)) if service.dc_sent
+            )
+            || matches!(
+                service.failure,
+                Some(ScheduledServiceTxFailure::Control(_))
+                    if !service.dc_sent || service.control_sent
+            );
+        if service_shape_invalid {
+            return Err(StopCycleError::ServiceCycleMismatch);
+        }
+        let domains = self.received_domains(
+            domain_bank,
+            &cycle.receive.received,
+            motion_domain_id,
+            outputs,
+        )?;
+        let other = other_cycle_facts_from_mailbox_cycle(cycle, self.other);
+        self.run_inner_with_outputs(
+            Some((outputs.schedule, &domains, motion_domain_id)),
+            Some(MotionInputs {
+                targets,
+                guards,
+                limits,
+            }),
+            Some(cycle_deadline_ns),
+            Some(outputs),
+            other,
+        )
+    }
+
+    fn received_domains<const SCHEDULE_SLOTS: usize, const FRAMES: usize>(
+        &self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        received: &ScheduledReceiveReport<P::Error, DOMAINS>,
+        motion_domain_id: u8,
+        outputs: &ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
+    ) -> Result<[ScheduledDomainQuality; DOMAINS], StopCycleError> {
         if !domain_bank.uses_schedule(outputs.schedule)
             || !domain_bank.confirms_receive(received)
             || self.report != received.report
@@ -555,20 +640,10 @@ impl<
         {
             return Err(StopCycleError::ReceiveMismatch);
         }
-        let domains = core::array::from_fn(|slot| ScheduledDomainQuality {
+        Ok(core::array::from_fn(|slot| ScheduledDomainQuality {
             id: outputs.schedule.domains()[slot].id,
             quality: received.qualities[slot],
-        });
-        self.run_scheduled_with_outputs_until(
-            outputs.schedule,
-            &domains,
-            motion_domain_id,
-            outputs,
-            targets,
-            guards,
-            limits,
-            cycle_deadline_ns,
-        )
+        }))
     }
 
     fn run_inner<const SCHEDULE_SLOTS: usize>(
@@ -577,7 +652,14 @@ impl<
         motion: Option<MotionInputs<'_, AXES>>,
         cycle_deadline_ns: Option<u64>,
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
-        self.run_inner_with_outputs::<SCHEDULE_SLOTS, 1>(scheduled, motion, cycle_deadline_ns, None)
+        let other = self.other;
+        self.run_inner_with_outputs::<SCHEDULE_SLOTS, 1>(
+            scheduled,
+            motion,
+            cycle_deadline_ns,
+            None,
+            other,
+        )
     }
 
     fn run_inner_with_outputs<const SCHEDULE_SLOTS: usize, const FRAMES: usize>(
@@ -586,6 +668,7 @@ impl<
         motion: Option<MotionInputs<'_, AXES>>,
         cycle_deadline_ns: Option<u64>,
         outputs: Option<&ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>>,
+        other: OtherCycleFacts,
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
         if self.report.cycle == 0
             || self.state.sequence != self.report.cycle
@@ -653,7 +736,7 @@ impl<
         let mut decision_now_ns = cycle_deadline_ns
             .map(|_| self.port.now_ns().max(self.now_ns))
             .unwrap_or(self.now_ns);
-        let mut other = self.other;
+        let mut other = other;
         if cycle_deadline_ns.is_some_and(|deadline| decision_now_ns >= deadline) {
             other.deadline_met = false;
         }

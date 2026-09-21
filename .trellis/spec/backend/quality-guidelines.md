@@ -257,8 +257,19 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   context's actual motion Domain instance and master report, and the DC
   completion result before deriving frozen-order quality snapshots. Reject a
   stale, altered, or foreign report before gate mutation or auxiliary TX.
-  This does not replace the outer owner's control/DC TX or final deadline
-  check after State and event publication.
+  This does not replace the outer owner's control/DC TX or its projection into
+  non-bus safety facts. The supplied deadline is checked again after State and
+  event publication.
+- When `run_dc_and_mailbox_cycle` owns the service stage, pass its complete
+  `ScheduledMailboxCycleReport` to
+  `StopCycleContext::run_mailbox_cycle_with_outputs_until`; do not reconstruct
+  readiness from separate sent bits or a request slot. Reject inconsistent
+  request/progress/TX shapes before gate mutation or process TX. Any service TX
+  failure, mailbox error, or `RetryScheduled` result must clear configuration
+  readiness for that cycle, and a false post-RX deadline must clear (never
+  restore) the caller's budget fact. The lifecycle entry then owns due output,
+  State/event publication, and the final post-publication deadline observation;
+  process-frame submission and task release remain explicit outer stages.
 - Expire in-flight control requests only when `now > deadline`, matching the
   RX index boundary. Retain `Failed(Timeout)` until the matching service FSM
   consumes and releases it, and do not let a late completion erase terminal

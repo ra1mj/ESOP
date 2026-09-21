@@ -278,7 +278,7 @@ ProcBuf ABI v4 在 State 页增加固定容量的 `axis_stops[AXES]`：`request_
 
 `ScheduledDomainBank` 可在激活期绑定不同映像大小的真实 Domain，校验冻结调度的 ID 顺序和数据报索引独占关系，运行时以固定索引表分发已由主站验证的数据报。每个 tick 由同一 RX 所有者调用 `begin_due` 和 `finish_due`；即使收帧失败或到期 Domain 无响应，也必须完成该次接收，使旧输入不能继续冒充有效样本。返回的真实质量数组可按冻结 ID 顺序投影到 MLG/ProcBuf；只读、类型校验的 `domain` 访问口可在 `finish_due` 后交给现有运动生命周期分支。模拟回归已贯通双 Domain 实收、非到期复用、辅助 Domain 到期漏收与停机输出。调用者仍负责发送计划与到期 Domain 的输出、DC/控制数据报接收、整个周期的最终 deadline 和实物 HIL 资格证据。
 
-可选 `ScheduledAuxiliaryOutputs` 将按调度顺序排列的辅助 Domain 安全镜像及分帧计划在激活时与真实 Domain 段绑定，拒绝索引复用、镜像越界、跨 Domain 可写地址重叠。`run_scheduled_with_outputs_until` 在同一生命周期分支中先提交到期辅助帧再决定运动帧；辅助发送失败或跨越周期绝对 deadline 会停止后续辅助帧、撤销运动许可、尝试停机并发布失败位置与接受帧计数。发送成功只证明端口接受，不能代替新输入或停稳证明；安全镜像的内容仍需调用者独立核实，DC/控制接收、State/事件发布后的最终 deadline 和实物 HIL 均尚未闭环。上段描述的是先前仅实现 RX 时的范围。
+可选 `ScheduledAuxiliaryOutputs` 将按调度顺序排列的辅助 Domain 安全镜像及分帧计划在激活时与真实 Domain 段绑定，拒绝索引复用、镜像越界、跨 Domain 可写地址重叠。`run_scheduled_with_outputs_until` 在同一生命周期分支中先提交到期辅助帧再决定运动帧；辅助发送失败或跨越周期绝对 deadline 会停止后续辅助帧、撤销运动许可、尝试停机并发布失败位置与接受帧计数。传入绝对 deadline 时还会在 State/事件发布后再次观测并执行现有更正；发送成功仍只证明端口接受，不能代替新输入或停稳证明。安全镜像内容、过程 Domain 的前置提交、DC/控制服务调用、任务释放和实物 HIL 仍需外层负责。上段描述的是先前仅实现 RX 时的范围。
 
 `ScheduledDomainBank::receive_with_dc` 为已准备并已按冻结计划发送的 DC 提供固定容量的同周期 RX 入口：先验证 DC 索引与 Domain 不冲突、世代匹配，再在一次主站 RX 中分发到期 Domain 和 DC，最后无论缺帧或端口接收错误都结束两者的接收状态。端口错误返回保守的预算失败报告和原始错误，不得用可能已部分提交的输入重新放行运动；DC 缺响应清除 pending、保持旧 `last_sync_cycle`，不能沿用上周期锁定资格。软件模拟覆盖双 Domain 不同速率、仅丢 DC 帧时同周期撤销许可、后续新鲜 DC 恢复仍需重臂，以及端口失败后的保守质量。前置校验失败则尚未开始接收，调用方必须按安全失败处理。调用方仍负责 DC 准备/发送、其他控制接收、安全输出镜像、完整周期终点 deadline 和实物 HIL。
 
@@ -288,7 +288,9 @@ ProcBuf ABI v4 在 State 页增加固定容量的 `axis_stops[AXES]`：`request_
 
 共用 RX 入口现自动调用上述超时扫描：`ScheduledReceiveReport.control_expiry` 只记录本次新超时的句柄，调用方仍需遍历消费，未过期的请求可跨服务周期保持在途。收包成功、链路断开及端口错误都会完成 Domain/DC 收尾；若有新过期控制请求，则以同一时刻回收主站 RX 索引，避免服务处理完请求后旧索引仍占用。完成与失败请求的业务状态推进、发送、所有其他安全事实和最后一次发布后的周期截止时间仍由完整周期所有者负责。前段“调用方负责判定缺失响应”仅指此前未接线的阶段；实物 HIL 证据仍未取得。
 
-新增受检的共享 RX 到输出路径：`run_received_with_outputs_until` 从同一 `ScheduledDomainBank` 刚结束的接收报告生成冻结顺序的 Domain 质量，检查报告周期、当前 Domain 实际质量、运动 Domain 身份和 DC 收尾结果，然后才允许生命周期门槛决策和到期辅助/运动 TX。软件模拟验证运动与 IO Domain、DC、控制请求同周期完成，错误报告在发送前失败；后续周期的到期 IO/DC 缺帧撤销运动许可、进入停止，旧报告无法复用。外部事实、DC/控制 TX、发布完成后的 deadline 和实物 HIL 仍由上层周期所有者负责。
+新增受检的共享 RX 到输出路径：`run_received_with_outputs_until` 从同一 `ScheduledDomainBank` 刚结束的接收报告生成冻结顺序的 Domain 质量，检查报告周期、当前 Domain 实际质量、运动 Domain 身份和 DC 收尾结果，然后才允许生命周期门槛决策和到期辅助/运动 TX。软件模拟验证运动与 IO Domain、DC、控制请求同周期完成，错误报告在发送前失败；后续周期的到期 IO/DC 缺帧撤销运动许可、进入停止，旧报告无法复用。外部事实和 DC/控制 TX 仍由上层周期所有者负责；传入绝对 deadline 时，本入口会在 State/事件发布后再次采样，但仍不能替代完整任务释放与目标硬件 WCET/HIL 资格。
+
+服务阶段与生命周期现可通过 `run_mailbox_cycle_with_outputs_until` 直接绑定。该入口只接受 `run_dc_and_mailbox_cycle` 的完整 `ScheduledMailboxCycleReport`，在任何门槛更新或过程 TX 前核对跨阶段请求句柄、终态邮箱结果、DC/控制发送形状及 TX/RX deadline 单调关系；不允许调用方从零散 `sent` 位重建一个看似健康的周期。任一服务 TX 失败、邮箱错误或 `RetryScheduled` 都会把本周期 CoE/配置事实置为失败，RX 后阶段 deadline 失败只会清除、不会恢复调用方预算事实；之后复用受检共享 RX 路径完成到期辅助/运动输出、State/事件发布和发布后的最终 deadline 观测。模拟回归覆盖聚合报告篡改在新 TX 前拒绝，以及失败、重试、超时和阶段越界的保守投影。过程 Domain 帧仍须在服务入口前由外层提交，任务释放、其他服务、受控 Hold/Ramp 与实物 HIL 仍未闭环，因此这只是完整生产周期所有者的下一层接线。
 
 共享 RX 前的 DC/控制 TX 可由 `ScheduledDomainBank::submit_dc_and_control` 执行：先验证周期、期限、准备态/世代与 Domain/DC/在途控制的索引独占，再发送 DC 和至多一个控制帧。调用者必须检查 `failure` 及 `post_tx_deadline_met` 并在运动输出前映射为保守安全事实；不能仅看 DC/控制 `sent` 位。DC 已准备后的发送错误仍须进入同一共享 RX 收尾，避免旧锁定冒充本周期同步。控制发送失败立即标记 `Failed(TransmitFailed)`，所属服务负责消费和释放；DC 失败或周期期限导致尚未发送的控制请求仍为 `Prepared`，须由所属服务重试、撤销或升级。可复用的帧槽/DMA 描述符不拥有旧响应：失败只能撤销当前帧武装的索引。该入口未集成到完整生产周期所有者，也未替代真实设备或 deadline 资格验证。
 
