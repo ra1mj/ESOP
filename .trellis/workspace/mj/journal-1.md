@@ -39,3 +39,36 @@ Resumed the CiA 402 cyclic PDO task, verified the fixed-layout adapter and SII p
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: R2 qualification evidence gate
+
+**Date**: 2026-09-21
+**Task**: R2 qualification evidence gate
+**Branch**: `main`
+
+### Summary
+
+Added a fail-closed R2 qualification manifest, HIL topology and limitations artifacts, strict evidence/hash/coherence validation, CI reporting, regression tests, and documentation. Local CI, simulator HIL, Zenoh integration, and GitHub Actions run 35578603863 passed; checked-in product baseline remains explicitly unqualified pending real hardware evidence.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9517f9d` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
