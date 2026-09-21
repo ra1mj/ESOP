@@ -582,6 +582,7 @@ impl DcCyclicConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DcCyclicError {
     Busy,
+    MissingResponse,
     InvalidConfiguration,
     ProcessImageOutOfBounds,
     ApplicationTimeRegressed,
@@ -759,6 +760,22 @@ impl DcCyclicSync {
         self.pending = None;
         self.last_error = None;
         Ok(())
+    }
+
+    /// Close an RX generation even if its FRMW response was lost or rejected
+    /// by the master. A missing sample must not keep the next prepare busy or
+    /// allow the previous cycle's lock to count as current evidence.
+    pub fn finish_receive(&mut self, cycle: u64, generation: u16) -> Result<(), DcCyclicError> {
+        if self.pending_generation() == Some(generation) {
+            return self.fail(DcCyclicError::MissingResponse);
+        }
+        if self.pending.is_none() && self.last_sync_cycle == cycle && self.last_error.is_none() {
+            return Ok(());
+        }
+        if let Some(error) = self.last_error {
+            return Err(error);
+        }
+        self.fail(DcCyclicError::GenerationMismatch)
     }
 
     fn fail<T>(&mut self, error: DcCyclicError) -> Result<T, DcCyclicError> {

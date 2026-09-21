@@ -190,9 +190,14 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   routes only verified datagrams and its real quality array feeds the MLG
   projection. Its typed, read-only Domain accessor is valid only after
   `finish_due`, so the motion lifecycle branch can read the same verified
-  Domain without breaking exclusive RX ownership. The caller still owns
-  matching output plans, DC/control RX,
-  lifecycle output submission, and the full-cycle deadline.
+  Domain without breaking exclusive RX ownership. With a prepared DC sync,
+  `receive_with_dc` multiplexes Domain/DC on one master RX call, finalizes
+  both on missing responses and port errors, and returns a conservative
+  budget-missed report plus the original transport error on port failure.
+  Treat a preflight conflict or generation mismatch as a caller safety
+  failure; the rejected call has not started RX. The caller still owns
+  matching output plans, control RX, lifecycle output submission, and the
+  full-cycle deadline.
 - Build slave-to-slave copy plans from an active Domain registry, not ad hoc
   offsets. Bind the source TxPDO, target RxPDO, and target quality RxPDO to
   verified datagram coverage. At the target's scheduled send cycle, accept a

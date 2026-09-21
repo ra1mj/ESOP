@@ -31,6 +31,19 @@ impl RxDatagramConsumer for () {
     }
 }
 
+impl<T: RxDatagramConsumer + ?Sized> RxDatagramConsumer for &mut T {
+    fn accept(
+        &mut self,
+        cycle: u64,
+        received_at_ns: u64,
+        completion: RxMatch,
+        header: DatagramHeader,
+        payload: &[u8],
+    ) -> bool {
+        (**self).accept(cycle, received_at_ns, completion, header, payload)
+    }
+}
+
 /// Route verified datagrams to the first consumer that accepts them.
 ///
 /// Consumers must own disjoint datagram-index sets. This is intentionally a
@@ -123,7 +136,7 @@ pub struct CycleReport {
 }
 
 impl CycleReport {
-    const fn new(cycle: u64) -> Self {
+    pub(crate) const fn new(cycle: u64) -> Self {
         Self {
             cycle,
             received_frames: 0,

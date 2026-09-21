@@ -1,11 +1,13 @@
 //! Fixed-capacity receive ownership for a frozen multi-rate Domain schedule.
 
+use crate::dc::{DcCyclicError, DcCyclicSync};
 use crate::domain::{Domain, DomainError, DomainQuality, DomainSegment};
-use crate::engine::RxDatagramConsumer;
+use crate::engine::{CycleError, CycleReport, EthercatMaster, RxConsumerMux, RxDatagramConsumer};
 use crate::plan::{FramePlan, FramePlanSet};
+use crate::port::{EthercatPort, LinkState};
 use crate::rx_index::RxMatch;
 use crate::schedule::ScheduleTable;
-use crate::wire::DatagramHeader;
+use crate::wire::{DatagramHeader, MAX_ETHERNET_FRAME_LEN};
 use core::any::Any;
 
 mod private {
@@ -73,13 +75,33 @@ pub enum ScheduledDomainError {
     Domain(usize, DomainError),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScheduledReceiveError {
+    DcIndexConflict(u8),
+    DcGenerationMismatch,
+    Domain(ScheduledDomainError),
+}
+
+/// Even an RX port error returns a cycle report tied to the real master
+/// cycle. The conservative budget miss blocks motion while retaining the
+/// precise transport error for diagnostics; Domain and DC pending state have
+/// already been finalized so they cannot leak into the next generation.
+#[derive(Debug)]
+pub struct ScheduledReceiveReport<E, const DOMAINS: usize> {
+    pub report: CycleReport,
+    pub qualities: [DomainQuality; DOMAINS],
+    pub dc_result: Result<(), DcCyclicError>,
+    pub transport_error: Option<CycleError<E>>,
+}
+
 /// Owns the receive borrow for all configured Domains. A single master RX
 /// session dispatches only verified datagrams to Domains due on this tick.
-/// Run `begin_due` before master RX and `finish_due` afterwards, even on an
-/// RX error; otherwise an incomplete Domain could retain its previous sample.
-/// The caller still owns the verified TX plan, non-Domain RX consumers, and
-/// final cycle deadline. Pass the resulting qualities to the lifecycle
-/// schedule projection in the same order.
+/// Use `receive_with_dc` when DC is enabled so a port error cannot skip
+/// Domain or DC receive finalization. For other receive arrangements the
+/// caller must pair `begin_due` and `finish_due`, including on RX errors.
+/// The caller still owns verified TX plans, control RX, and the final cycle
+/// deadline. Pass the resulting qualities to the lifecycle schedule
+/// projection in the same order.
 pub struct ScheduledDomainBank<'a, const DOMAINS: usize, const SLOTS: usize> {
     schedule: &'a ScheduleTable<DOMAINS, SLOTS>,
     domains: [ScheduledDomainEntry<'a>; DOMAINS],
@@ -89,6 +111,53 @@ pub struct ScheduledDomainBank<'a, const DOMAINS: usize, const SLOTS: usize> {
 }
 
 impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAINS, SLOTS> {
+    /// One bounded master RX step for every due Domain and the same-generation
+    /// DC response. Requires `dc.prepare` and arming its frozen FRMW plan
+    /// before this call. No response, link loss, or port error may skip either
+    /// receive finalizer. The caller still owns TX and lifecycle publication.
+    pub fn receive_with_dc<P: EthercatPort, const FRAMES: usize, const MTU: usize>(
+        &mut self,
+        master: &mut EthercatMaster<FRAMES, MTU>,
+        port: &mut P,
+        scratch: &mut [u8; MAX_ETHERNET_FRAME_LEN],
+        generation: u16,
+        dc: &mut DcCyclicSync,
+    ) -> Result<ScheduledReceiveReport<P::Error, DOMAINS>, ScheduledReceiveError> {
+        let dc_index = dc.datagram_plan().index;
+        if self.index_owner[dc_index as usize] != 0 {
+            return Err(ScheduledReceiveError::DcIndexConflict(dc_index));
+        }
+        if dc.pending_generation() != Some(generation) {
+            return Err(ScheduledReceiveError::DcGenerationMismatch);
+        }
+        let cycle = master.cycle_number().wrapping_add(1);
+        self.begin_due(cycle, generation)
+            .map_err(ScheduledReceiveError::Domain)?;
+        let rx = {
+            let mut consumers = RxConsumerMux::new(&mut *self, &mut *dc);
+            master.cycle_receive_with_consumer(port, scratch, generation, &mut consumers)
+        };
+        let (report, transport_error) = match rx {
+            Ok(report) => (report, None),
+            Err(error) => {
+                let mut report = CycleReport::new(master.cycle_number());
+                report.budget_exhausted = true;
+                report.link_down = port.link_state() == LinkState::Down;
+                (report, Some(error))
+            }
+        };
+        let dc_result = dc.finish_receive(report.cycle, generation);
+        let qualities = self
+            .finish_due(report.cycle, generation)
+            .map_err(ScheduledReceiveError::Domain)?;
+        Ok(ScheduledReceiveReport {
+            report,
+            qualities,
+            dc_result,
+            transport_error,
+        })
+    }
+
     pub fn uses_schedule(&self, schedule: &ScheduleTable<DOMAINS, SLOTS>) -> bool {
         core::ptr::eq(self.schedule, schedule)
     }

@@ -321,6 +321,8 @@ R2 多 Domain RX 增量：固定容量 `ScheduledDomainBank` 将冻结 ID 顺序
 
 R2 辅助 TX 增量：可选的 `ScheduledAuxiliaryOutputs` 在激活时将运动与辅助分帧计划绑定到 `ScheduledDomainBank` 的真实段，拒绝索引复用、镜像越界及可写地址重叠。`run_scheduled_with_outputs_until` 只提交到期辅助 Domain 的调用者核实安全镜像；首次 TX 失败或发送跨过当前周期截止时间时，同周期撤销运动许可并尝试发送停机帧，State 保留已接受帧数量、失败位置和预算结果。软件模拟覆盖非到期不发、到期发送、TX 失败与跨期截止时间；安全镜像来源、DC/控制接收、完整生产周期最终 deadline（包括 State/事件发布）、实物 HIL 仍未闭环，R2 出口条件不变。以上前述未接线描述为先前 RX 阶段的进展，不代表本增量的现状。
 
+R2 同周期 DC RX 增量：固定容量 `ScheduledDomainBank::receive_with_dc` 将到期 Domain 和 DC 响应交由同一次主站 RX 分发；DC 索引冲突/世代不匹配在进入接收前拒绝。即使 DC 响应丢失或端口 RX 报错，也结束到期 Domain 和 DC pending；端口错误返回保守预算失败的真实周期报告和原始错误。软件模拟验证 DC 缺帧而运动 Domain WKC 有效时同周期停止、旧 DC lock 不复用、恢复同步后不自动恢复旧许可、端口错误的保守质量。调用方仍需负责 DC 准备/发送、控制接收、TX 计划、安全镜像、完整周期最终 deadline 及实物 HIL；先前段落中的“DC 接收未接线”仅描述当时阶段，R2 出口条件仍未满足。
+
 ### 11.1 发布阻塞条件
 
 任何发布候选必须满足：
