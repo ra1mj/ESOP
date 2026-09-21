@@ -110,9 +110,11 @@ pub use schedule::{ScheduleDomain, ScheduleError, ScheduleSlot, ScheduleTable};
 pub use scheduled_domains::{
     ScheduledDomainBank, ScheduledDomainEntry, ScheduledDomainError, ScheduledDomainRx,
     ScheduledMailboxCycleError, ScheduledMailboxCycleReport, ScheduledMailboxReceiveReport,
-    ScheduledMailboxTxError, ScheduledMailboxTxReport, ScheduledReceiveError,
-    ScheduledReceiveReport, ScheduledServiceFrameError, ScheduledServiceTxError,
-    ScheduledServiceTxFailure, ScheduledServiceTxReport,
+    ScheduledMailboxTxError, ScheduledMailboxTxReport, ScheduledProcessFrameError,
+    ScheduledProcessInputEntry, ScheduledProcessInputPlanError, ScheduledProcessInputs,
+    ScheduledProcessTxError, ScheduledProcessTxFailure, ScheduledProcessTxReport,
+    ScheduledReceiveError, ScheduledReceiveReport, ScheduledServiceFrameError,
+    ScheduledServiceTxError, ScheduledServiceTxFailure, ScheduledServiceTxReport,
 };
 pub use sii::{
     EEPROM_BUSY, EEPROM_ERROR_MASK, EEPROM_READ_COMMAND, SII_CATEGORY_DC, SII_CATEGORY_END,

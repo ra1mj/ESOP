@@ -269,7 +269,19 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   readiness for that cycle, and a false post-RX deadline must clear (never
   restore) the caller's budget fact. The lifecycle entry then owns due output,
   State/event publication, and the final post-publication deadline observation;
-  process-frame submission and task release remain explicit outer stages.
+  task release remains an explicit outer stage.
+- Bind an explicit pre-RX process stage with `ScheduledProcessInputs`, never
+  ad hoc frame construction. Activation must validate schedule order, exact
+  Domain segment coverage, image bounds, index uniqueness, and writable-range
+  separation. Preserve the complete `ScheduledProcessTxReport` and pass it with
+  the mailbox/DC report to
+  `StopCycleContext::run_process_mailbox_cycle_with_outputs_until`; a rejected
+  frame or false stage deadline clears budget qualification, while a forged
+  cycle/mask/count is rejected before any new TX. Use this stage only when no
+  prior lifecycle output already owns the next RX indices (for example initial
+  priming or explicit recovery). In steady state, carry the previous output
+  stage into the next release; never resubmit an armed Domain index merely to
+  satisfy the ordering API.
 - Expire in-flight control requests only when `now > deadline`, matching the
   RX index boundary. Retain `Failed(Timeout)` until the matching service FSM
   consumes and releases it, and do not let a late completion erase terminal

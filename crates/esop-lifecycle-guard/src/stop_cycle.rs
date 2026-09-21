@@ -7,8 +7,8 @@
 use crate::cia402::step_axis_bank;
 use crate::ethercat::{
     OtherCycleFacts, ScheduledDomainQuality, StopFrameError, other_cycle_facts_from_mailbox_cycle,
-    submit_active_frame, submit_inhibited_frame, submit_stopping_frame,
-    verified_ethercat_stop_feedback,
+    other_cycle_facts_from_process_tx, submit_active_frame, submit_inhibited_frame,
+    submit_stopping_frame, verified_ethercat_stop_feedback,
 };
 use crate::procbuf::{
     AxisEvidenceError, LifecycleEventCursor, LifecycleEventError, axis_stops_to_procbuf,
@@ -21,8 +21,8 @@ use crate::{
 };
 use esop_ethercat_core::{
     CycleReport, DcCyclicSync, Domain, EthercatMaster, EthercatPort, FramePlan, FramePlanSet,
-    ScheduleTable, ScheduledDomainBank, ScheduledMailboxCycleReport, ScheduledReceiveReport,
-    ScheduledServiceTxFailure, wire::Command,
+    ScheduleTable, ScheduledDomainBank, ScheduledMailboxCycleReport, ScheduledProcessInputs,
+    ScheduledProcessTxReport, ScheduledReceiveReport, ScheduledServiceTxFailure, wire::Command,
 };
 use esop_procbuf::{HeaderError, ProcBuf, StatePage, StatePublishError};
 use esop_profile_cia402::{
@@ -40,6 +40,7 @@ pub enum StopCycleError {
     InvalidCycleDeadline,
     InvalidAuxiliaryOutputs,
     ReceiveMismatch,
+    ProcessCycleMismatch,
     ServiceCycleMismatch,
     Header(HeaderError),
     NotStopping(LifecycleAction),
@@ -579,6 +580,77 @@ impl<
         limits: &[CyclicLimits; AXES],
         cycle_deadline_ns: u64,
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        let (domains, other) =
+            self.mailbox_cycle_inputs(domain_bank, cycle, motion_domain_id, outputs)?;
+        self.run_inner_with_outputs(
+            Some((outputs.schedule, &domains, motion_domain_id)),
+            Some(MotionInputs {
+                targets,
+                guards,
+                limits,
+            }),
+            Some(cycle_deadline_ns),
+            Some(outputs),
+            other,
+        )
+    }
+
+    /// Consume both bounded pre-RX stages as one causal input. The process
+    /// submission report must match the frozen due traversal and the same
+    /// finalized bank cycle as the mailbox/DC report. A rejected process frame
+    /// or process-stage deadline miss clears budget qualification before any
+    /// auxiliary or motion output is attempted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_process_mailbox_cycle_with_outputs_until<
+        const SCHEDULE_SLOTS: usize,
+        const FRAMES: usize,
+        const PROCESS_FRAMES: usize,
+        const PROCESS_DATAGRAMS: usize,
+    >(
+        &mut self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        process_inputs: &ScheduledProcessInputs<
+            '_,
+            DOMAINS,
+            SCHEDULE_SLOTS,
+            PROCESS_FRAMES,
+            PROCESS_DATAGRAMS,
+        >,
+        process: &ScheduledProcessTxReport<P::Error>,
+        cycle: &ScheduledMailboxCycleReport<P::Error, DOMAINS>,
+        motion_domain_id: u8,
+        outputs: &ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
+        targets: &[Option<Cia402Target>; AXES],
+        guards: &mut [CyclicSetpointGuard; AXES],
+        limits: &[CyclicLimits; AXES],
+        cycle_deadline_ns: u64,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        if !domain_bank.confirms_process_tx(process_inputs, process) {
+            return Err(StopCycleError::ProcessCycleMismatch);
+        }
+        let (domains, other) =
+            self.mailbox_cycle_inputs(domain_bank, cycle, motion_domain_id, outputs)?;
+        let other = other_cycle_facts_from_process_tx(process, other);
+        self.run_inner_with_outputs(
+            Some((outputs.schedule, &domains, motion_domain_id)),
+            Some(MotionInputs {
+                targets,
+                guards,
+                limits,
+            }),
+            Some(cycle_deadline_ns),
+            Some(outputs),
+            other,
+        )
+    }
+
+    fn mailbox_cycle_inputs<const SCHEDULE_SLOTS: usize, const FRAMES: usize>(
+        &self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        cycle: &ScheduledMailboxCycleReport<P::Error, DOMAINS>,
+        motion_domain_id: u8,
+        outputs: &ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
+    ) -> Result<([ScheduledDomainQuality; DOMAINS], OtherCycleFacts), StopCycleError> {
         let service = &cycle.tx.service;
         let service_shape_invalid = cycle.request != cycle.tx.request
             || (cycle.receive.mailbox_progress.is_some() && cycle.request.is_some())
@@ -604,17 +676,7 @@ impl<
             outputs,
         )?;
         let other = other_cycle_facts_from_mailbox_cycle(cycle, self.other);
-        self.run_inner_with_outputs(
-            Some((outputs.schedule, &domains, motion_domain_id)),
-            Some(MotionInputs {
-                targets,
-                guards,
-                limits,
-            }),
-            Some(cycle_deadline_ns),
-            Some(outputs),
-            other,
-        )
+        Ok((domains, other))
     }
 
     fn received_domains<const SCHEDULE_SLOTS: usize, const FRAMES: usize>(

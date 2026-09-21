@@ -3,7 +3,7 @@
 use crate::CyclicQuality;
 use esop_ethercat_core::{
     CycleReport, DcCyclicSync, DomainQuality, MailboxProgress, ScheduleTable,
-    ScheduledMailboxCycleReport,
+    ScheduledMailboxCycleReport, ScheduledProcessTxReport,
 };
 
 #[cfg(feature = "cia402")]
@@ -577,6 +577,18 @@ pub fn other_cycle_facts_from_mailbox_cycle<E, const DOMAINS: usize>(
     other
 }
 
+/// Bind process-Domain submission evidence to the cycle budget gate. Any
+/// rejected due frame means the planned cyclic body was not completed, even
+/// when the port clock has not yet crossed the absolute deadline. A late
+/// post-TX observation can only clear an already-qualified budget fact.
+pub fn other_cycle_facts_from_process_tx<E>(
+    process: &ScheduledProcessTxReport<E>,
+    mut other: OtherCycleFacts,
+) -> OtherCycleFacts {
+    other.deadline_met &= process.failure.is_none() && process.post_tx_deadline_met;
+    other
+}
+
 /// Collect after `Domain::finish_receive` for every required, scheduled
 /// Domain. `due_domains` must contain *all* Domains required in this cycle;
 /// omitted or unscheduled Domains cannot be inferred from a receive report.
@@ -760,7 +772,10 @@ fn quality_from_domain_health(
 mod tests {
     use super::*;
     use esop_ethercat_core::wire::{Command, DatagramHeader};
-    use esop_ethercat_core::{DcCyclicConfig, DcMonitor, RxMatch, ScheduleDomain};
+    use esop_ethercat_core::{
+        DcCyclicConfig, DcMonitor, RxMatch, ScheduleDomain, ScheduledProcessFrameError,
+        ScheduledProcessTxFailure,
+    };
 
     fn report() -> CycleReport {
         CycleReport {
@@ -800,6 +815,34 @@ mod tests {
             external_safety_clear: true,
             deadline_met: true,
         }
+    }
+
+    #[test]
+    fn process_submission_failure_or_late_stage_clears_budget_fact() {
+        let mut process = ScheduledProcessTxReport::<core::convert::Infallible> {
+            cycle: 1,
+            due_mask: 1,
+            expected_frames: 1,
+            sent_frames: 1,
+            failure: None,
+            post_tx_deadline_met: true,
+        };
+        assert_eq!(
+            other_cycle_facts_from_process_tx(&process, other()),
+            other()
+        );
+
+        process.post_tx_deadline_met = false;
+        assert!(!other_cycle_facts_from_process_tx(&process, other()).deadline_met);
+
+        process.post_tx_deadline_met = true;
+        process.sent_frames = 0;
+        process.failure = Some(ScheduledProcessTxFailure {
+            domain_id: 9,
+            frame_index: 0,
+            error: ScheduledProcessFrameError::InvalidDeadline,
+        });
+        assert!(!other_cycle_facts_from_process_tx(&process, other()).deadline_met);
     }
 
     fn locked_dc() -> DcCyclicSync {

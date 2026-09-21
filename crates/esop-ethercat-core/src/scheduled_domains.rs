@@ -12,7 +12,7 @@ use crate::plan::{FramePlan, FramePlanSet};
 use crate::port::{EthercatPort, LinkState};
 use crate::rx_index::RxMatch;
 use crate::schedule::ScheduleTable;
-use crate::wire::{DatagramHeader, MAX_ETHERNET_FRAME_LEN};
+use crate::wire::{Command, DatagramHeader, MAX_ETHERNET_FRAME_LEN};
 use core::any::Any;
 use core::convert::Infallible;
 
@@ -196,6 +196,170 @@ pub enum ScheduledMailboxCycleError<E> {
         tx: ScheduledMailboxTxReport<E>,
         error: ScheduledReceiveError,
     },
+}
+
+/// Frozen process image and frame plans for one scheduled Domain. The image
+/// is read-only on the cyclic path; callers publish a new immutable binding
+/// only while the production cycle is stopped.
+#[derive(Clone, Copy)]
+pub struct ScheduledProcessInputEntry<'a, const FRAMES: usize, const DATAGRAMS: usize> {
+    pub id: u8,
+    pub image: &'a [u8],
+    pub plans: &'a FramePlanSet<FRAMES, DATAGRAMS>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScheduledProcessInputPlanError {
+    InvalidSchedule,
+    DomainMismatch { expected: u8, actual: u8 },
+    InvalidPlan(u8),
+    DuplicateIndex(u8),
+    OverlappingWrite(u8, u8),
+}
+
+/// Activation-time binding between the frozen multi-rate schedule and every
+/// Domain frame submitted before the common RX stage. Runtime traversal is
+/// bounded by the const capacities and performs no plan search or allocation.
+pub struct ScheduledProcessInputs<
+    'a,
+    const DOMAINS: usize,
+    const SCHEDULE_SLOTS: usize,
+    const FRAMES: usize,
+    const DATAGRAMS: usize,
+> {
+    schedule: &'a ScheduleTable<DOMAINS, SCHEDULE_SLOTS>,
+    entries: [ScheduledProcessInputEntry<'a, FRAMES, DATAGRAMS>; DOMAINS],
+}
+
+#[derive(Debug)]
+pub enum ScheduledProcessFrameError<E> {
+    InvalidDeadline,
+    FramePool(FramePoolError),
+    Build(CycleError<Infallible>),
+    Transmit(CycleError<E>),
+}
+
+#[derive(Debug)]
+pub struct ScheduledProcessTxFailure<E> {
+    pub domain_id: u8,
+    pub frame_index: usize,
+    pub error: ScheduledProcessFrameError<E>,
+}
+
+/// Evidence for the process-Domain submission stage preceding DC/control TX.
+/// `expected_frames` is derived from the frozen due mask. A failure identifies
+/// the first frame not accepted by the port; later due frames are not tried.
+#[derive(Debug)]
+pub struct ScheduledProcessTxReport<E> {
+    pub cycle: u64,
+    pub due_mask: u64,
+    pub expected_frames: usize,
+    pub sent_frames: usize,
+    pub failure: Option<ScheduledProcessTxFailure<E>>,
+    pub post_tx_deadline_met: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScheduledProcessTxError {
+    InvalidBinding,
+    CycleOrder,
+}
+
+impl<
+    'a,
+    const DOMAINS: usize,
+    const SCHEDULE_SLOTS: usize,
+    const FRAMES: usize,
+    const DATAGRAMS: usize,
+> ScheduledProcessInputs<'a, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>
+{
+    pub fn new(
+        bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        schedule: &'a ScheduleTable<DOMAINS, SCHEDULE_SLOTS>,
+        entries: [ScheduledProcessInputEntry<'a, FRAMES, DATAGRAMS>; DOMAINS],
+    ) -> Result<Self, ScheduledProcessInputPlanError> {
+        if !bank.uses_schedule(schedule) || schedule.domain_count() != DOMAINS {
+            return Err(ScheduledProcessInputPlanError::InvalidSchedule);
+        }
+
+        let mut indices = [false; 256];
+        for (slot, (configured, entry)) in schedule.domains().iter().zip(&entries).enumerate() {
+            if entry.id != configured.id {
+                return Err(ScheduledProcessInputPlanError::DomainMismatch {
+                    expected: configured.id,
+                    actual: entry.id,
+                });
+            }
+            if entry.plans.is_empty() || !bank.matches_frame_plans(entry.id, entry.plans) {
+                return Err(ScheduledProcessInputPlanError::InvalidPlan(entry.id));
+            }
+            for (plan_index, plan) in entry.plans.plans().iter().enumerate() {
+                for (datagram_index, datagram) in plan.datagrams().iter().enumerate() {
+                    if !matches!(datagram.command, Command::Lrd | Command::Lwr | Command::Lrw)
+                        || datagram.payload_len == 0
+                        || datagram.expected_wkc == 0
+                        || datagram
+                            .payload_offset
+                            .checked_add(datagram.payload_len)
+                            .is_none_or(|end| end > entry.image.len())
+                    {
+                        return Err(ScheduledProcessInputPlanError::InvalidPlan(entry.id));
+                    }
+                    if indices[datagram.index as usize] {
+                        return Err(ScheduledProcessInputPlanError::DuplicateIndex(
+                            datagram.index,
+                        ));
+                    }
+                    indices[datagram.index as usize] = true;
+                    if !matches!(datagram.command, Command::Lwr | Command::Lrw) {
+                        continue;
+                    }
+
+                    for prior in &entries[..slot] {
+                        for earlier in prior.plans.plans().iter().flat_map(|plan| plan.datagrams())
+                        {
+                            if process_writable_overlap(datagram, earlier) {
+                                return Err(ScheduledProcessInputPlanError::OverlappingWrite(
+                                    entry.id, prior.id,
+                                ));
+                            }
+                        }
+                    }
+                    for (earlier_plan_index, earlier_plan) in
+                        entry.plans.plans()[..=plan_index].iter().enumerate()
+                    {
+                        let limit = if earlier_plan_index == plan_index {
+                            datagram_index
+                        } else {
+                            earlier_plan.len()
+                        };
+                        for earlier in &earlier_plan.datagrams()[..limit] {
+                            if process_writable_overlap(datagram, earlier) {
+                                return Err(ScheduledProcessInputPlanError::OverlappingWrite(
+                                    entry.id, entry.id,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Self { schedule, entries })
+    }
+
+    pub const fn schedule(&self) -> &ScheduleTable<DOMAINS, SCHEDULE_SLOTS> {
+        self.schedule
+    }
+}
+
+fn process_writable_overlap(
+    left: &crate::plan::DatagramPlan,
+    right: &crate::plan::DatagramPlan,
+) -> bool {
+    matches!(right.command, Command::Lwr | Command::Lrw)
+        && left.address < right.address.saturating_add(right.payload_len as u32)
+        && right.address < left.address.saturating_add(left.payload_len as u32)
 }
 
 /// Owns the receive borrow for all configured Domains. A single master RX
@@ -677,6 +841,152 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
 
     pub fn uses_schedule(&self, schedule: &ScheduleTable<DOMAINS, SLOTS>) -> bool {
         core::ptr::eq(self.schedule, schedule)
+    }
+
+    /// Submit every process-Domain frame due for the next shared RX cycle.
+    /// A frame failure stops later submissions but remains a reportable stage
+    /// outcome so the service owner can still execute the common RX finalizer
+    /// and invalidate every missing due Domain.
+    pub fn submit_due_process_inputs<
+        P: EthercatPort,
+        const MASTER_FRAMES: usize,
+        const MTU: usize,
+        const PROCESS_FRAMES: usize,
+        const DATAGRAMS: usize,
+    >(
+        &self,
+        inputs: &ScheduledProcessInputs<'_, DOMAINS, SLOTS, PROCESS_FRAMES, DATAGRAMS>,
+        master: &mut EthercatMaster<MASTER_FRAMES, MTU>,
+        port: &mut P,
+        generation: u16,
+        rx_deadline_ns: u64,
+        cycle_deadline_ns: u64,
+    ) -> Result<ScheduledProcessTxReport<P::Error>, ScheduledProcessTxError> {
+        if !core::ptr::eq(self.schedule, inputs.schedule) {
+            return Err(ScheduledProcessTxError::InvalidBinding);
+        }
+        if self.active.is_some() || self.last_cycle != master.cycle_number() {
+            return Err(ScheduledProcessTxError::CycleOrder);
+        }
+
+        let cycle = master.cycle_number().wrapping_add(1);
+        if cycle == 0 {
+            return Err(ScheduledProcessTxError::CycleOrder);
+        }
+        let tick = (cycle - 1) % u64::from(self.schedule.hyperperiod_ticks());
+        let due_mask = self.schedule.due_mask(tick as u32);
+        let expected_frames = inputs
+            .entries
+            .iter()
+            .filter(|entry| due_mask & (1u64 << entry.id) != 0)
+            .map(|entry| entry.plans.frame_count())
+            .sum();
+        let mut report = ScheduledProcessTxReport {
+            cycle,
+            due_mask,
+            expected_frames,
+            sent_frames: 0,
+            failure: None,
+            post_tx_deadline_met: false,
+        };
+
+        'domains: for entry in &inputs.entries {
+            if due_mask & (1u64 << entry.id) == 0 {
+                continue;
+            }
+            for (frame_index, plan) in entry.plans.plans().iter().enumerate() {
+                let now_ns = port.now_ns();
+                let result = if rx_deadline_ns == 0
+                    || cycle_deadline_ns == 0
+                    || now_ns >= rx_deadline_ns
+                    || now_ns >= cycle_deadline_ns
+                {
+                    Err(ScheduledProcessFrameError::InvalidDeadline)
+                } else {
+                    master.reap_expired_rx_before_tx(now_ns);
+                    match master.acquire_frame(generation, rx_deadline_ns) {
+                        Err(error) => Err(ScheduledProcessFrameError::FramePool(error)),
+                        Ok(frame) => {
+                            match master.build_and_arm_frame_from_plan(frame, plan, entry.image) {
+                                Err(error) => {
+                                    let _ = master.release_unarmed_frame(frame);
+                                    Err(ScheduledProcessFrameError::Build(error))
+                                }
+                                Ok(_) => master
+                                    .submit_frame(port, frame)
+                                    .map_err(ScheduledProcessFrameError::Transmit),
+                            }
+                        }
+                    }
+                };
+                if let Err(error) = result {
+                    report.failure = Some(ScheduledProcessTxFailure {
+                        domain_id: entry.id,
+                        frame_index,
+                        error,
+                    });
+                    break 'domains;
+                }
+                report.sent_frames += 1;
+            }
+        }
+        let now_ns = port.now_ns();
+        report.post_tx_deadline_met = rx_deadline_ns != 0
+            && cycle_deadline_ns != 0
+            && now_ns < rx_deadline_ns
+            && now_ns < cycle_deadline_ns;
+        Ok(report)
+    }
+
+    /// Confirm that a process submission report belongs to this bank's most
+    /// recently finalized cycle and exactly matches the frozen due traversal.
+    pub fn confirms_process_tx<E, const PROCESS_FRAMES: usize, const DATAGRAMS: usize>(
+        &self,
+        inputs: &ScheduledProcessInputs<'_, DOMAINS, SLOTS, PROCESS_FRAMES, DATAGRAMS>,
+        report: &ScheduledProcessTxReport<E>,
+    ) -> bool {
+        if self.active.is_some()
+            || self.last_cycle == 0
+            || self.last_cycle != report.cycle
+            || !core::ptr::eq(self.schedule, inputs.schedule)
+        {
+            return false;
+        }
+        let tick = (report.cycle - 1) % u64::from(self.schedule.hyperperiod_ticks());
+        let due_mask = self.schedule.due_mask(tick as u32);
+        let expected_frames: usize = inputs
+            .entries
+            .iter()
+            .filter(|entry| due_mask & (1u64 << entry.id) != 0)
+            .map(|entry| entry.plans.frame_count())
+            .sum();
+        if report.due_mask != due_mask
+            || report.expected_frames != expected_frames
+            || report.sent_frames > expected_frames
+        {
+            return false;
+        }
+
+        let Some(failure) = report.failure.as_ref() else {
+            return report.sent_frames == expected_frames;
+        };
+        if matches!(failure.error, ScheduledProcessFrameError::InvalidDeadline)
+            && report.post_tx_deadline_met
+        {
+            return false;
+        }
+        let mut ordinal = 0usize;
+        for entry in &inputs.entries {
+            if due_mask & (1u64 << entry.id) == 0 {
+                continue;
+            }
+            if entry.id == failure.domain_id {
+                return failure.frame_index < entry.plans.frame_count()
+                    && report.sent_frames == ordinal.saturating_add(failure.frame_index);
+            }
+            ordinal = ordinal.saturating_add(entry.plans.frame_count());
+        }
+        false
     }
 
     /// Confirm that a shared RX report still describes this bank's most
@@ -1167,5 +1477,141 @@ mod tests {
             .unwrap();
         wrong.push(plans.plan(1).unwrap().datagrams()[0]).unwrap();
         assert!(!bank.matches_frame_plans(10, &wrong));
+    }
+
+    #[test]
+    fn process_inputs_bind_schedule_order_images_and_non_overlapping_writes() {
+        let schedule = ScheduleTable::<2, 1>::build(
+            100_000,
+            &[
+                ScheduleDomain {
+                    id: 9,
+                    period_ticks: 1,
+                    phase_ticks: 0,
+                },
+                ScheduleDomain {
+                    id: 10,
+                    period_ticks: 1,
+                    phase_ticks: 0,
+                },
+            ],
+        )
+        .unwrap();
+        let mut motion = Domain::<2, 1>::new(0x1000);
+        motion
+            .add_segment(DomainSegment {
+                datagram_index: 12,
+                input_offset: 0,
+                len: 2,
+                expected_wkc: 1,
+            })
+            .unwrap();
+        let mut auxiliary = Domain::<1, 1>::new(0x2000);
+        auxiliary
+            .add_segment(DomainSegment {
+                datagram_index: 13,
+                input_offset: 0,
+                len: 1,
+                expected_wkc: 1,
+            })
+            .unwrap();
+        let bank = ScheduledDomainBank::new(
+            &schedule,
+            [
+                ScheduledDomainEntry {
+                    id: 9,
+                    domain: &mut motion,
+                },
+                ScheduledDomainEntry {
+                    id: 10,
+                    domain: &mut auxiliary,
+                },
+            ],
+        )
+        .unwrap();
+        let mut motion_plans = FramePlanSet::<1, 1>::new();
+        motion_plans
+            .push(DatagramPlan {
+                command: Command::Lrw,
+                index: 12,
+                address: 0x1000,
+                payload_offset: 0,
+                payload_len: 2,
+                expected_wkc: 1,
+            })
+            .unwrap();
+        let mut auxiliary_plans = FramePlanSet::<1, 1>::new();
+        auxiliary_plans
+            .push(DatagramPlan {
+                command: Command::Lrw,
+                index: 13,
+                address: 0x2000,
+                payload_offset: 0,
+                payload_len: 1,
+                expected_wkc: 1,
+            })
+            .unwrap();
+        let motion_image = [0u8; 2];
+        let auxiliary_image = [0u8; 1];
+        assert!(
+            ScheduledProcessInputs::new(
+                &bank,
+                &schedule,
+                [
+                    ScheduledProcessInputEntry {
+                        id: 9,
+                        image: &motion_image,
+                        plans: &motion_plans,
+                    },
+                    ScheduledProcessInputEntry {
+                        id: 10,
+                        image: &auxiliary_image,
+                        plans: &auxiliary_plans,
+                    },
+                ],
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            ScheduledProcessInputs::new(
+                &bank,
+                &schedule,
+                [
+                    ScheduledProcessInputEntry {
+                        id: 10,
+                        image: &motion_image,
+                        plans: &motion_plans,
+                    },
+                    ScheduledProcessInputEntry {
+                        id: 9,
+                        image: &auxiliary_image,
+                        plans: &auxiliary_plans,
+                    },
+                ],
+            ),
+            Err(ScheduledProcessInputPlanError::DomainMismatch {
+                expected: 9,
+                actual: 10
+            })
+        ));
+        assert!(matches!(
+            ScheduledProcessInputs::new(
+                &bank,
+                &schedule,
+                [
+                    ScheduledProcessInputEntry {
+                        id: 9,
+                        image: &auxiliary_image,
+                        plans: &motion_plans,
+                    },
+                    ScheduledProcessInputEntry {
+                        id: 10,
+                        image: &auxiliary_image,
+                        plans: &auxiliary_plans,
+                    },
+                ],
+            ),
+            Err(ScheduledProcessInputPlanError::InvalidPlan(9))
+        ));
     }
 }

@@ -5,7 +5,7 @@ use esop_ethercat_core::{
     FramePlanSet, LinkState, MailboxConfig, MailboxController, MailboxError, MailboxProgress,
     MailboxProtocol, MasterConfig, PdoDirection, PdoEntry, PortError, RequestHandle, RxPoll,
     ScheduleDomain, ScheduleTable, ScheduledDomainBank, ScheduledDomainEntry,
-    ScheduledServiceTxFailure,
+    ScheduledProcessInputEntry, ScheduledProcessInputs, ScheduledServiceTxFailure,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::cia402::step_axis_bank;
@@ -196,6 +196,81 @@ impl QueuedRxPort {
 }
 
 #[test]
+fn rejected_process_submission_is_bound_to_the_invalidated_receive_cycle() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut plans = FramePlanSet::<1, 1>::new();
+    plans
+        .push(DatagramPlan {
+            command: Command::Lrw,
+            index: 12,
+            address: 0x1000,
+            payload_offset: 0,
+            payload_len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let image = [0u8; 2];
+    let inputs = ScheduledProcessInputs::new(
+        &bank,
+        &schedule,
+        [ScheduledProcessInputEntry {
+            id: 9,
+            image: &image,
+            plans: &plans,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<1, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut port = SimulatedPort::new(1);
+    port.set_now_ns(100_000);
+    port.fail_next_tx();
+    let process = bank
+        .submit_due_process_inputs(&inputs, &mut master, &mut port, 1, 150_000, 150_000)
+        .unwrap();
+    assert_eq!(process.expected_frames, 1);
+    assert_eq!(process.sent_frames, 0);
+    assert!(process.failure.is_some());
+    assert!(process.post_tx_deadline_met);
+
+    bank.begin_due(1, 1).unwrap();
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let received = master
+        .cycle_receive_with_consumer(&mut port, &mut scratch, 1, &mut bank)
+        .unwrap();
+    let qualities = bank.finish_due(received.cycle, 1).unwrap();
+    assert!(!qualities[0].valid);
+    assert!(bank.confirms_process_tx(&inputs, &process));
+}
+
+#[test]
 fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
     let schedule = ScheduleTable::<2, 1>::build(
         100_000,
@@ -271,18 +346,8 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         DcCyclicConfig::new(0x3000, 14, 0),
         DcMonitor::new(50, 10, 1, 2),
     );
-    let mut receive_plan = FramePlan::<3>::new();
-    receive_plan.push(motion_plan.datagrams()[0]).unwrap();
-    receive_plan
-        .push(DatagramPlan {
-            command: Command::Lrw,
-            index: 13,
-            address: 0x2000,
-            payload_offset: IMAGE_BYTES,
-            payload_len: 2,
-            expected_wkc: 1,
-        })
-        .unwrap();
+    let mut motion_input_plans = FramePlanSet::<1, 3>::new();
+    motion_input_plans.push(motion_plan.datagrams()[0]).unwrap();
     let safe_image = input_image(0x0040, 0);
     let auxiliary_image = [0xAA, 0xBB];
     let auxiliary_outputs = ScheduledAuxiliaryOutputs::new(
@@ -323,14 +388,30 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
             &[1],
         )
         .unwrap();
-    let mut receive_image = [0u8; IMAGE_BYTES + 2];
-    receive_image[..IMAGE_BYTES].copy_from_slice(&safe_image);
-    receive_image[IMAGE_BYTES..IMAGE_BYTES + 2].copy_from_slice(&auxiliary_image);
-    let frame = master.acquire_frame(1, 150_000).unwrap();
-    master
-        .build_and_arm_frame_from_plan(frame, &receive_plan, &receive_image)
+    let process_inputs = ScheduledProcessInputs::new(
+        &domain_bank,
+        &schedule,
+        [
+            ScheduledProcessInputEntry {
+                id: 9,
+                image: &safe_image,
+                plans: &motion_input_plans,
+            },
+            ScheduledProcessInputEntry {
+                id: 10,
+                image: &auxiliary_image,
+                plans: &auxiliary_plans,
+            },
+        ],
+    )
+    .unwrap();
+    let mut process = domain_bank
+        .submit_due_process_inputs(&process_inputs, &mut master, &mut port, 1, 150_000, 150_000)
         .unwrap();
-    master.submit_frame(&mut port, frame).unwrap();
+    assert_eq!(process.cycle, 1);
+    assert_eq!(process.expected_frames, 2);
+    assert_eq!(process.sent_frames, 2);
+    assert!(process.failure.is_none() && process.post_tx_deadline_met);
     let mut dc_image = [0u8; 8];
     let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
     let mut service_cycle = domain_bank
@@ -481,8 +562,10 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         service_cycle.receive.received.qualities[1].actual_wkc = 0;
         assert!(!domain_bank.confirms_receive(&service_cycle.receive.received));
         assert!(matches!(
-            context.run_mailbox_cycle_with_outputs_until(
+            context.run_process_mailbox_cycle_with_outputs_until(
                 &domain_bank,
+                &process_inputs,
+                &process,
                 &service_cycle,
                 9,
                 &auxiliary_outputs,
@@ -496,8 +579,10 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         service_cycle.receive.received.qualities[1].actual_wkc = 1;
         service_cycle.receive.received.report.cycle = 0;
         assert!(matches!(
-            context.run_mailbox_cycle_with_outputs_until(
+            context.run_process_mailbox_cycle_with_outputs_until(
                 &domain_bank,
+                &process_inputs,
+                &process,
                 &service_cycle,
                 9,
                 &auxiliary_outputs,
@@ -511,8 +596,10 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         service_cycle.receive.received.report.cycle = 1;
         service_cycle.request = RequestHandle::from_index(0);
         assert!(matches!(
-            context.run_mailbox_cycle_with_outputs_until(
+            context.run_process_mailbox_cycle_with_outputs_until(
                 &domain_bank,
+                &process_inputs,
+                &process,
                 &service_cycle,
                 9,
                 &auxiliary_outputs,
@@ -524,11 +611,30 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
             Err(StopCycleError::ServiceCycleMismatch)
         ));
         service_cycle.request = None;
-        assert_eq!(context.port.tx_frames(), 3);
+        process.cycle = 0;
+        assert!(matches!(
+            context.run_process_mailbox_cycle_with_outputs_until(
+                &domain_bank,
+                &process_inputs,
+                &process,
+                &service_cycle,
+                9,
+                &auxiliary_outputs,
+                &[None],
+                &mut guards,
+                &limits,
+                150_000,
+            ),
+            Err(StopCycleError::ProcessCycleMismatch)
+        ));
+        process.cycle = 1;
+        assert_eq!(context.port.tx_frames(), 4);
         assert_eq!(context.state.quality.sequence, 0);
         let outcome = context
-            .run_mailbox_cycle_with_outputs_until(
+            .run_process_mailbox_cycle_with_outputs_until(
                 &domain_bank,
+                &process_inputs,
+                &process,
                 &service_cycle,
                 9,
                 &auxiliary_outputs,
@@ -545,7 +651,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         assert_eq!(outcome.post_tx_deadline_met, Some(true));
         assert_eq!(outcome.state_publish, Ok(1));
         assert_eq!(buffer.read_state().unwrap().state.sequence, 1);
-        assert_eq!(context.port.tx_frames(), 5);
+        assert_eq!(context.port.tx_frames(), 6);
     }
     port.inner.set_now_ns(200_000);
     dc.prepare(2, 200_000, &mut dc_image).unwrap();
