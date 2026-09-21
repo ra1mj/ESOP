@@ -249,6 +249,20 @@ impl RxIndexTable {
         canceled
     }
 
+    /// A recycled TX frame slot can coexist with older armed responses.
+    /// Cancel only a datagram actually armed by the failed frame generation.
+    pub(crate) fn cancel_owned(&mut self, index: u8, slot_id: u16, generation: u16) -> bool {
+        let entry = &mut self.entries[index as usize];
+        if entry.state != RxSlotState::Armed
+            || entry.slot_id != slot_id
+            || entry.generation != generation
+        {
+            return false;
+        }
+        entry.state = RxSlotState::Empty;
+        true
+    }
+
     pub fn reset_complete(&mut self) {
         for entry in &mut self.entries {
             if matches!(entry.state, RxSlotState::Complete | RxSlotState::Rejected) {

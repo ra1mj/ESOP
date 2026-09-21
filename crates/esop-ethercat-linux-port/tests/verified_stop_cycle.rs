@@ -143,12 +143,14 @@ fn receive<const BYTES: usize>(
     report
 }
 
-struct BufferedRxPort {
+struct QueuedRxPort {
     inner: SimulatedPort,
-    first: Option<(usize, [u8; MAX_ETHERNET_FRAME_LEN])>,
+    pending: [Option<(usize, [u8; MAX_ETHERNET_FRAME_LEN])>; 4],
+    read: usize,
+    written: usize,
 }
 
-impl EthercatPort for BufferedRxPort {
+impl EthercatPort for QueuedRxPort {
     type Error = PortError;
 
     fn link_state(&self) -> LinkState {
@@ -160,30 +162,32 @@ impl EthercatPort for BufferedRxPort {
     }
 
     fn tx_submit(&mut self, frame: &[u8]) -> Result<(), Self::Error> {
-        self.inner.tx_submit(frame)
+        self.inner.tx_submit(frame)?;
+        let mut response = [0; MAX_ETHERNET_FRAME_LEN];
+        if let RxPoll::Frame(length) = self.inner.rx_poll(&mut response)? {
+            assert!(self.written - self.read < self.pending.len());
+            self.pending[self.written % self.pending.len()] = Some((length, response));
+            self.written += 1;
+        }
+        Ok(())
     }
 
     fn rx_poll(
         &mut self,
         destination: &mut [u8; MAX_ETHERNET_FRAME_LEN],
     ) -> Result<RxPoll, Self::Error> {
-        if let Some((length, frame)) = self.first.take() {
-            destination[..length].copy_from_slice(&frame[..length]);
-            return Ok(RxPoll::Frame(length));
+        if self.read != self.written {
+            let (length, response) = self.pending[self.read % self.pending.len()].take().unwrap();
+            destination[..length].copy_from_slice(&response[..length]);
+            self.read += 1;
+            Ok(RxPoll::Frame(length))
+        } else {
+            self.inner.rx_poll(destination)
         }
-        self.inner.rx_poll(destination)
     }
 }
 
-impl BufferedRxPort {
-    fn buffer_first_response(&mut self) {
-        let mut frame = [0; MAX_ETHERNET_FRAME_LEN];
-        let RxPoll::Frame(length) = self.inner.rx_poll(&mut frame).unwrap() else {
-            panic!("control response must be queued");
-        };
-        self.first = Some((length, frame));
-    }
-
+impl QueuedRxPort {
     fn tx_frames(&self) -> usize {
         self.inner.tx_frames()
     }
@@ -262,7 +266,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         })
         .unwrap();
     let mut dc = DcCyclicSync::new(
-        DcCyclicConfig::new(0x3000, 14, IMAGE_BYTES + 2),
+        DcCyclicConfig::new(0x3000, 14, 0),
         DcMonitor::new(50, 10, 1, 2),
     );
     let mut receive_plan = FramePlan::<3>::new();
@@ -277,7 +281,6 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
             expected_wkc: 1,
         })
         .unwrap();
-    receive_plan.push(dc.datagram_plan()).unwrap();
     let safe_image = input_image(0x0040, 0);
     let auxiliary_image = [0xAA, 0xBB];
     let auxiliary_outputs = ScheduledAuxiliaryOutputs::new(
@@ -299,30 +302,42 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         [0xFF; 6],
         [1, 2, 3, 4, 5, 6],
     ));
-    let mut port = BufferedRxPort {
+    let mut port = QueuedRxPort {
         inner: SimulatedPort::new(1),
-        first: None,
+        pending: [None; 4],
+        read: 0,
+        written: 0,
     };
     port.inner.set_now_ns(100_000);
     let mut controls = ControlRequestPool::<1>::new();
     let request = controls
         .acquire(15, 1, 0x5000, RegisterOperation::Read, &[0; 4], 150_000)
         .unwrap();
-    let frame = master.acquire_frame(1, 150_000).unwrap();
-    master
-        .build_control_request(&mut controls, request, frame)
-        .unwrap();
-    master.submit_frame(&mut port, frame).unwrap();
-    port.buffer_first_response();
-    let mut receive_image = [0u8; IMAGE_BYTES + 2 + 8];
+    let mut receive_image = [0u8; IMAGE_BYTES + 2];
     receive_image[..IMAGE_BYTES].copy_from_slice(&safe_image);
     receive_image[IMAGE_BYTES..IMAGE_BYTES + 2].copy_from_slice(&auxiliary_image);
-    dc.prepare(1, 100_000, &mut receive_image).unwrap();
     let frame = master.acquire_frame(1, 150_000).unwrap();
     master
         .build_and_arm_frame_from_plan(frame, &receive_plan, &receive_image)
         .unwrap();
     master.submit_frame(&mut port, frame).unwrap();
+    let mut dc_image = [0u8; 8];
+    let services = domain_bank
+        .submit_dc_and_control(
+            &mut master,
+            &mut port,
+            &mut dc,
+            &mut dc_image,
+            100_000,
+            &mut controls,
+            Some(request),
+            1,
+            150_000,
+            150_000,
+        )
+        .unwrap();
+    assert!(services.dc_sent && services.control_sent);
+    assert!(services.failure.is_none() && services.post_tx_deadline_met);
     let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
     let mut received = domain_bank
         .receive_with_dc_and_control(
@@ -403,6 +418,9 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
     let mut guards = [CyclicSetpointGuard::new()];
     let mut state = StatePage::<1, 0, 2>::new(7);
     state.sequence = received.report.cycle;
+    // The auxiliary output is submitted first for the next cycle. Drop its
+    // response deliberately instead of relying on a one-frame simulator queue.
+    port.inner.drop_next_response();
     {
         let mut context = StopCycleContext {
             guard: &mut guard,
@@ -457,7 +475,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
             Err(StopCycleError::ReceiveMismatch)
         ));
         received.report.cycle = 1;
-        assert_eq!(context.port.tx_frames(), 2);
+        assert_eq!(context.port.tx_frames(), 3);
         assert_eq!(context.state.quality.sequence, 0);
         let outcome = context
             .run_received_with_outputs_until(
@@ -478,12 +496,12 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         assert_eq!(outcome.post_tx_deadline_met, Some(true));
         assert_eq!(outcome.state_publish, Ok(1));
         assert_eq!(buffer.read_state().unwrap().state.sequence, 1);
-        assert_eq!(context.port.tx_frames(), 4);
+        assert_eq!(context.port.tx_frames(), 5);
     }
     controls.release(request).unwrap();
 
     port.inner.set_now_ns(200_000);
-    dc.prepare(2, 200_000, &mut receive_image).unwrap();
+    dc.prepare(2, 200_000, &mut dc_image).unwrap();
     let missing = domain_bank
         .receive_with_dc_and_control(
             &mut master,

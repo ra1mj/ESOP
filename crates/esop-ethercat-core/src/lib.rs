@@ -109,7 +109,8 @@ pub use scan::{ScanAction, ScanController, ScanError, ScanPhase, ScanProgress, S
 pub use schedule::{ScheduleDomain, ScheduleError, ScheduleSlot, ScheduleTable};
 pub use scheduled_domains::{
     ScheduledDomainBank, ScheduledDomainEntry, ScheduledDomainError, ScheduledDomainRx,
-    ScheduledReceiveError, ScheduledReceiveReport,
+    ScheduledReceiveError, ScheduledReceiveReport, ScheduledServiceFrameError,
+    ScheduledServiceTxError, ScheduledServiceTxFailure, ScheduledServiceTxReport,
 };
 pub use sii::{
     EEPROM_BUSY, EEPROM_ERROR_MASK, EEPROM_READ_COMMAND, SII_CATEGORY_DC, SII_CATEGORY_END,

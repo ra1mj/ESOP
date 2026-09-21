@@ -182,6 +182,7 @@ pub enum ControlError {
     LengthMismatch,
     WorkingCounterMismatch,
     Timeout,
+    TransmitFailed,
     RxIndex(RxIndexError),
 }
 
@@ -325,6 +326,21 @@ impl<const REQUESTS: usize> ControlRequestPool<REQUESTS> {
         } else {
             None
         }
+    }
+
+    /// The service TX owner calls this if a prepared request cannot be sent.
+    /// Do not leave a built but unsent request InFlight until an RX timeout.
+    pub fn fail_transmit(&mut self, handle: RequestHandle) -> Result<(), ControlError> {
+        let request = self.get_mut(handle).ok_or(ControlError::InvalidHandle)?;
+        if !matches!(
+            request.state,
+            RequestState::Prepared | RequestState::InFlight
+        ) {
+            return Err(ControlError::InvalidState);
+        }
+        request.state = RequestState::Failed;
+        request.last_error = Some(ControlError::TransmitFailed);
+        Ok(())
     }
 
     pub fn expectation(&self, handle: RequestHandle) -> Result<RxExpectation, ControlError> {

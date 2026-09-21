@@ -212,6 +212,23 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   their RX indices with the same port clock before returning. Skip the extra
   index sweep when no request newly expired. The caller still owns control
   service-state progression and the final cycle deadline.
+- Prepare DC and at most one control TX through the scheduled bank only after
+  validating the current master cycle, absolute deadlines, request generation
+  and Prepared state, and the Domain/DC/in-flight control index partition.
+  A prepared DC generation must be finalized by the shared RX owner even if
+  its send fails. Retire a failed control send as `Failed(TransmitFailed)`;
+  an unsent Prepared request remains the service owner's responsibility.
+  Project both the reported send failure and post-TX deadline into safety
+  facts before allowing motion; neither accepted TX nor a previous DC lock
+  establishes current-cycle qualification.
+- A successfully submitted frame may still await RX after its frame-pool slot
+  or DMA descriptor is recycled. Track the exact indices armed by each frame
+  along with its RX generation, and on rejected TX or partial arm failure
+  cancel only matching armed expectations. Never clear all RX entries by the
+  reused slot/descriptor number, or an unrelated accepted response is lost.
+  For manually constructed frame-pool frames, use `arm_rx_for_frame` so the
+  frame records its own expectations; bare `arm_rx` has no frame owner and
+  must be canceled separately if its sender rejects TX.
 - For the shared-RX-to-output path, prefer
   `StopCycleContext::run_received_with_outputs_until`: confirm the report
   against the bank's just-finalized cycle and current Domain qualities, the

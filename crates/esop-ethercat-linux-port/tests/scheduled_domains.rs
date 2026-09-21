@@ -5,7 +5,8 @@ use esop_ethercat_core::{
     LinkState, MailboxConfig, MailboxController, MailboxPhase, MailboxProgress, MailboxProtocol,
     MailboxRetryPolicy, MasterConfig, PortError, RegisterOperation, RequestHandle, RequestState,
     RxPoll, RxSlotState, ScheduleDomain, ScheduleTable, ScheduledDomainBank, ScheduledDomainEntry,
-    ScheduledReceiveError,
+    ScheduledReceiveError, ScheduledServiceFrameError, ScheduledServiceTxError,
+    ScheduledServiceTxFailure,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::ethercat::{
@@ -1104,4 +1105,211 @@ fn port_error_after_valid_frame_still_blocks_this_cycle() {
     );
     assert!(facts.domain_valid);
     assert!(!facts.wkc_valid && !facts.cycle_within_budget);
+}
+
+struct FailOnNthTxPort {
+    inner: SimulatedPort,
+    attempts: usize,
+    fail_on: usize,
+}
+
+impl EthercatPort for FailOnNthTxPort {
+    type Error = PortError;
+
+    fn link_state(&self) -> LinkState {
+        self.inner.link_state()
+    }
+
+    fn now_ns(&self) -> u64 {
+        self.inner.now_ns()
+    }
+
+    fn tx_submit(&mut self, frame: &[u8]) -> Result<(), Self::Error> {
+        self.attempts += 1;
+        if self.attempts == self.fail_on {
+            Err(PortError::HardwareFault)
+        } else {
+            self.inner.tx_submit(frame)
+        }
+    }
+
+    fn rx_poll(
+        &mut self,
+        destination: &mut [u8; MAX_ETHERNET_FRAME_LEN],
+    ) -> Result<RxPoll, Self::Error> {
+        self.inner.rx_poll(destination)
+    }
+}
+
+#[test]
+fn service_tx_preflights_indices_and_retires_failed_transmissions_in_shared_rx() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<1, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let mut port = FailOnNthTxPort {
+        inner: SimulatedPort::new(1),
+        attempts: 0,
+        fail_on: 2,
+    };
+    port.inner.set_now_ns(100_000);
+    let mut controls = ControlRequestPool::<1>::new();
+    let mut dc_image = [0u8; 8];
+    for (index, expected) in [(12, 12), (13, 13)] {
+        let handle = controls
+            .acquire(index, 1, 0x5000, RegisterOperation::Read, &[0; 4], 150_000)
+            .unwrap();
+        assert!(matches!(
+            bank.submit_dc_and_control(
+                &mut master,
+                &mut port,
+                &mut dc,
+                &mut dc_image,
+                100_000,
+                &mut controls,
+                Some(handle),
+                1,
+                150_000,
+                150_000,
+            ),
+            Err(ScheduledServiceTxError::ControlIndexConflict(index)) if index == expected
+        ));
+        assert_eq!(controls.get(handle).unwrap().state, RequestState::Prepared);
+        assert_eq!(dc.pending_generation(), None);
+        assert_eq!(port.attempts, 0);
+        controls.release(handle).unwrap();
+    }
+
+    let handle = controls
+        .acquire(14, 1, 0x5000, RegisterOperation::Read, &[0; 4], 150_000)
+        .unwrap();
+    assert!(matches!(
+        bank.submit_dc_and_control(
+            &mut master,
+            &mut port,
+            &mut dc,
+            &mut dc_image,
+            100_000,
+            &mut controls,
+            Some(handle),
+            2,
+            150_000,
+            150_000,
+        ),
+        Err(ScheduledServiceTxError::ControlGenerationMismatch)
+    ));
+    assert_eq!(port.attempts, 0);
+
+    let sent = bank
+        .submit_dc_and_control(
+            &mut master,
+            &mut port,
+            &mut dc,
+            &mut dc_image,
+            100_000,
+            &mut controls,
+            Some(handle),
+            1,
+            150_000,
+            150_000,
+        )
+        .unwrap();
+    assert!(sent.dc_sent && !sent.control_sent);
+    assert!(matches!(
+        sent.failure,
+        Some(ScheduledServiceTxFailure::Control(
+            ScheduledServiceFrameError::Transmit(CycleError::Port(PortError::HardwareFault))
+        ))
+    ));
+    assert!(sent.post_tx_deadline_met);
+    let request = controls.get(handle).unwrap();
+    assert_eq!(request.state, RequestState::Failed);
+    assert_eq!(request.last_error(), Some(ControlError::TransmitFailed));
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let received = bank
+        .receive_with_dc_and_control(
+            &mut master,
+            &mut port,
+            &mut scratch,
+            1,
+            &mut dc,
+            &mut controls,
+        )
+        .unwrap();
+    assert_eq!(received.dc_result, Ok(()));
+    assert!(!received.qualities[0].valid);
+    assert!(received.control_expiry.is_empty());
+    controls.release(handle).unwrap();
+
+    port.inner.set_now_ns(200_000);
+    let next = controls
+        .acquire(14, 2, 0x5000, RegisterOperation::Read, &[0; 4], 250_000)
+        .unwrap();
+    port.fail_on = 3;
+    let missing_dc = bank
+        .submit_dc_and_control(
+            &mut master,
+            &mut port,
+            &mut dc,
+            &mut dc_image,
+            200_000,
+            &mut controls,
+            Some(next),
+            2,
+            250_000,
+            250_000,
+        )
+        .unwrap();
+    assert!(!missing_dc.dc_sent && !missing_dc.control_sent);
+    assert!(matches!(
+        missing_dc.failure,
+        Some(ScheduledServiceTxFailure::Dc(
+            ScheduledServiceFrameError::Transmit(CycleError::Port(PortError::HardwareFault))
+        ))
+    ));
+    assert_eq!(controls.get(next).unwrap().state, RequestState::Prepared);
+    assert_eq!(dc.pending_generation(), Some(2));
+    let retired = bank
+        .receive_with_dc_and_control(
+            &mut master,
+            &mut port,
+            &mut scratch,
+            2,
+            &mut dc,
+            &mut controls,
+        )
+        .unwrap();
+    assert_eq!(retired.dc_result, Err(DcCyclicError::MissingResponse));
+    assert_eq!(dc.pending_generation(), None);
+    controls.release(next).unwrap();
 }

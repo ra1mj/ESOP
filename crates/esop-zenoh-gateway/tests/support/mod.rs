@@ -2,7 +2,10 @@ use std::fs::{self, OpenOptions};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+static NEXT_LOG_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Each test owns its router, port and cleanup, including on assertion failure.
 pub struct Router {
@@ -19,8 +22,11 @@ impl Router {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let log_path =
-            std::env::temp_dir().join(format!("esop-zenoh-{}-{nonce}.log", std::process::id()));
+        let log_path = std::env::temp_dir().join(format!(
+            "esop-zenoh-{}-{nonce}-{}.log",
+            std::process::id(),
+            NEXT_LOG_ID.fetch_add(1, Ordering::Relaxed)
+        ));
         OpenOptions::new()
             .write(true)
             .create_new(true)

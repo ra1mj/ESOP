@@ -257,9 +257,9 @@ fn cycle_round_trip_commits_and_releases_rx_slot() {
     let mut master = EthercatMaster::<2, MTU>::new(config);
     let (index, handle) = build_one_datagram(&mut master);
     master
-        .arm_rx(
+        .arm_rx_for_frame(
+            handle,
             index,
-            handle.index() as u16,
             RxExpectation {
                 generation: 42,
                 deadline_ns: 100_000,
@@ -399,6 +399,58 @@ fn dma_port_failure_aborts_descriptor_and_owned_expectations() {
     ));
     assert_eq!(ring.tx_owner(handle), Ok(DmaOwner::Free));
     assert_eq!(master.rx_entry(41).state, RxSlotState::Empty);
+}
+
+#[test]
+fn dma_failure_after_descriptor_reuse_preserves_previous_rx_expectation() {
+    let config = MasterConfig::new([0xFF; 6], [1, 2, 3, 4, 5, 6]);
+    let mut master = EthercatMaster::<2, MTU>::new(config);
+    let mut ring = DmaDescriptorRing::<1, 0, MTU>::new();
+    let mut cache = NoopDmaCache;
+    let mut port = MockDmaTxPort::new();
+    let mut plan = FramePlan::<1>::new();
+    plan.push(DatagramPlan {
+        command: Command::Lrw,
+        index: 42,
+        address: 0x4000,
+        payload_offset: 0,
+        payload_len: 1,
+        expected_wkc: 1,
+    })
+    .unwrap();
+    let (first, length) = master
+        .build_and_arm_dma_frame_from_plan(&mut ring, &plan, &[1], 17, 100_000)
+        .unwrap();
+    master
+        .submit_dma_frame(&mut port, &mut ring, first, length, &mut cache)
+        .unwrap();
+    ring.tx_complete(first, &mut cache).unwrap();
+    ring.tx_reclaim(first).unwrap();
+
+    let mut next_plan = FramePlan::<1>::new();
+    next_plan
+        .push(DatagramPlan {
+            command: Command::Lrw,
+            index: 43,
+            address: 0x4100,
+            payload_offset: 0,
+            payload_len: 1,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let (second, length) = master
+        .build_and_arm_dma_frame_from_plan(&mut ring, &next_plan, &[2], 17, 100_000)
+        .unwrap();
+    assert_eq!(first.index(), second.index());
+    port.fail = true;
+    assert!(matches!(
+        master.submit_dma_frame(&mut port, &mut ring, second, length, &mut cache),
+        Err(esop_ethercat_core::CycleError::Port(
+            PortError::HardwareFault
+        ))
+    ));
+    assert_eq!(master.rx_entry(42).state, RxSlotState::Armed);
+    assert_eq!(master.rx_entry(43).state, RxSlotState::Empty);
 }
 
 #[test]
@@ -601,9 +653,9 @@ fn tx_failure_releases_frame_and_owned_rx_expectations() {
     let mut master = EthercatMaster::<2, MTU>::new(config);
     let (index, handle) = build_one_datagram(&mut master);
     master
-        .arm_rx(
+        .arm_rx_for_frame(
+            handle,
             index,
-            handle.index() as u16,
             RxExpectation {
                 generation: 42,
                 deadline_ns: 100_000,
@@ -636,9 +688,9 @@ fn wkc_failure_is_reported_and_index_can_be_rearmed() {
     let mut master = EthercatMaster::<2, MTU>::new(config);
     let (index, handle) = build_one_datagram(&mut master);
     master
-        .arm_rx(
+        .arm_rx_for_frame(
+            handle,
             index,
-            handle.index() as u16,
             RxExpectation {
                 generation: 42,
                 deadline_ns: 100_000,

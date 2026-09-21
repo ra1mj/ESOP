@@ -118,6 +118,8 @@ struct DmaDescriptor<const MTU: usize> {
     length: usize,
     owner: DmaOwner,
     generation: u16,
+    rx_generation: u16,
+    armed_indices: [u64; 4],
 }
 
 impl<const MTU: usize> DmaDescriptor<MTU> {
@@ -127,6 +129,8 @@ impl<const MTU: usize> DmaDescriptor<MTU> {
             length: 0,
             owner: DmaOwner::Free,
             generation: 0,
+            rx_generation: 0,
+            armed_indices: [0; 4],
         }
     }
 }
@@ -196,6 +200,8 @@ impl<const TX: usize, const RX: usize, const MTU: usize> DmaDescriptorRing<TX, R
         descriptor.generation = next_generation(descriptor.generation);
         descriptor.length = 0;
         descriptor.owner = DmaOwner::CpuOwned;
+        descriptor.rx_generation = 0;
+        descriptor.armed_indices = [0; 4];
         self.tx_cursor = (index + 1) % TX.max(1);
         Ok(DmaTxHandle {
             index: u8::try_from(index).map_err(|_| DmaRingError::InvalidConfiguration)?,
@@ -237,6 +243,33 @@ impl<const TX: usize, const RX: usize, const MTU: usize> DmaDescriptorRing<TX, R
             });
         }
         Ok(descriptor.length)
+    }
+
+    pub(crate) fn record_tx_armed(
+        &mut self,
+        handle: DmaTxHandle,
+        index: u8,
+        rx_generation: u16,
+    ) -> Result<(), DmaRingError> {
+        let descriptor = &mut self.tx[self.validate_tx(handle)?];
+        if descriptor.owner != DmaOwner::CpuOwned {
+            return Err(DmaRingError::InvalidState {
+                actual: descriptor.owner,
+            });
+        }
+        descriptor.rx_generation = rx_generation;
+        descriptor.armed_indices[(index / 64) as usize] |= 1u64 << (index % 64);
+        Ok(())
+    }
+
+    pub(crate) fn tx_armed(&self, handle: DmaTxHandle) -> Result<([u64; 4], u16), DmaRingError> {
+        let descriptor = &self.tx[self.validate_tx(handle)?];
+        if descriptor.owner == DmaOwner::Free {
+            return Err(DmaRingError::InvalidState {
+                actual: descriptor.owner,
+            });
+        }
+        Ok((descriptor.armed_indices, descriptor.rx_generation))
     }
 
     pub fn tx_submit<C: DmaCacheOps>(
@@ -295,6 +328,7 @@ impl<const TX: usize, const RX: usize, const MTU: usize> DmaDescriptorRing<TX, R
         }
         descriptor.length = 0;
         descriptor.owner = DmaOwner::Free;
+        descriptor.armed_indices = [0; 4];
         Ok(())
     }
 
@@ -311,6 +345,7 @@ impl<const TX: usize, const RX: usize, const MTU: usize> DmaDescriptorRing<TX, R
         }
         descriptor.length = 0;
         descriptor.owner = DmaOwner::Free;
+        descriptor.armed_indices = [0; 4];
         Ok(())
     }
 
@@ -328,6 +363,7 @@ impl<const TX: usize, const RX: usize, const MTU: usize> DmaDescriptorRing<TX, R
         }
         descriptor.length = 0;
         descriptor.owner = DmaOwner::Free;
+        descriptor.armed_indices = [0; 4];
         Ok(())
     }
 

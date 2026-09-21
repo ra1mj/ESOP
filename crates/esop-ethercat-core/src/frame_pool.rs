@@ -16,6 +16,8 @@ pub struct FrameSlot<const MTU: usize> {
     pub sequence: u64,
     pub generation: u16,
     pub deadline_ns: u64,
+    pub(crate) armed_indices: [u64; 4],
+    pub(crate) armed_slot_id: u16,
 }
 
 impl<const MTU: usize> FrameSlot<MTU> {
@@ -26,6 +28,8 @@ impl<const MTU: usize> FrameSlot<MTU> {
             sequence: 0,
             generation: 0,
             deadline_ns: 0,
+            armed_indices: [0; 4],
+            armed_slot_id: 0,
         }
     }
 
@@ -34,6 +38,13 @@ impl<const MTU: usize> FrameSlot<MTU> {
         self.sequence = 0;
         self.generation = 0;
         self.deadline_ns = 0;
+        self.armed_indices = [0; 4];
+        self.armed_slot_id = 0;
+    }
+
+    pub(crate) fn mark_armed(&mut self, index: u8, slot_id: u16) {
+        self.armed_slot_id = slot_id;
+        self.armed_indices[(index / 64) as usize] |= 1u64 << (index % 64);
     }
 }
 

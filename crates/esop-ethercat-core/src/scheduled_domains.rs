@@ -6,12 +6,14 @@ use crate::control::{
 use crate::dc::{DcCyclicError, DcCyclicSync};
 use crate::domain::{Domain, DomainError, DomainQuality, DomainSegment};
 use crate::engine::{CycleError, CycleReport, EthercatMaster, RxConsumerMux, RxDatagramConsumer};
+use crate::frame_pool::FramePoolError;
 use crate::plan::{FramePlan, FramePlanSet};
 use crate::port::{EthercatPort, LinkState};
 use crate::rx_index::RxMatch;
 use crate::schedule::ScheduleTable;
 use crate::wire::{DatagramHeader, MAX_ETHERNET_FRAME_LEN};
 use core::any::Any;
+use core::convert::Infallible;
 
 mod private {
     pub trait Sealed {}
@@ -86,6 +88,43 @@ pub enum ScheduledReceiveError {
     Domain(ScheduledDomainError),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScheduledServiceTxError {
+    CycleOrder,
+    InvalidDeadline,
+    DcIndexConflict(u8),
+    ControlIndexConflict(u8),
+    InvalidControlRequest,
+    ControlGenerationMismatch,
+    ControlDeadlineExpired,
+    Dc(DcCyclicError),
+}
+
+#[derive(Debug)]
+pub enum ScheduledServiceFrameError<E> {
+    FramePool(FramePoolError),
+    Build(CycleError<Infallible>),
+    Transmit(CycleError<E>),
+}
+
+#[derive(Debug)]
+pub enum ScheduledServiceTxFailure<E> {
+    Dc(ScheduledServiceFrameError<E>),
+    Control(ScheduledServiceFrameError<E>),
+    Deadline,
+}
+
+/// The DC pending generation remains open after a failed submission so the
+/// shared RX owner retires it as missing. A failed control submission becomes
+/// terminal immediately; its service must consume and release that request.
+#[derive(Debug)]
+pub struct ScheduledServiceTxReport<E> {
+    pub dc_sent: bool,
+    pub control_sent: bool,
+    pub failure: Option<ScheduledServiceTxFailure<E>>,
+    pub post_tx_deadline_met: bool,
+}
+
 /// Even an RX port error returns a cycle report tied to the real master
 /// cycle. The conservative budget miss blocks motion while retaining the
 /// precise transport error for diagnostics; Domain and DC pending state have
@@ -154,23 +193,8 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
         dc: &mut DcCyclicSync,
         controls: &mut ControlRequestPool<REQUESTS>,
     ) -> Result<ScheduledReceiveReport<P::Error, DOMAINS>, ScheduledReceiveError> {
-        let dc_index = dc.datagram_plan().index;
-        let mut claimed = [false; 256];
-        for slot in 0..REQUESTS.min(64) {
-            let Some(handle) = RequestHandle::from_index(slot) else {
-                continue;
-            };
-            let Some(request) = controls.get(handle) else {
-                continue;
-            };
-            if request.state != RequestState::InFlight {
-                continue;
-            }
-            let index = request.datagram_index as usize;
-            if self.index_owner[index] != 0 || index == dc_index as usize || claimed[index] {
-                return Err(ScheduledReceiveError::ControlIndexConflict(index as u8));
-            }
-            claimed[index] = true;
+        if let Some(index) = self.control_index_conflict(dc.datagram_plan().index, controls, None) {
+            return Err(ScheduledReceiveError::ControlIndexConflict(index));
         }
         let mut received = {
             let mut control_consumer = ControlRxConsumer::new(controls);
@@ -189,6 +213,156 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
             master.reap_expired_rx_before_tx(now_ns);
         }
         Ok(received)
+    }
+
+    /// Submit the DC sample and optionally one prepared control request for
+    /// the next shared RX generation. Domain output frames are submitted by
+    /// their lifecycle owner; this method verifies service indices against
+    /// that same bank before any TX or DC preparation. The caller must always
+    /// run the shared RX finalizer after a reported send failure, so a missing
+    /// DC response cannot reuse the previous lock. Feed a failed deadline or
+    /// transmission into the lifecycle budget/safety facts before motion TX.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_dc_and_control<
+        P: EthercatPort,
+        const FRAMES: usize,
+        const MTU: usize,
+        const REQUESTS: usize,
+    >(
+        &self,
+        master: &mut EthercatMaster<FRAMES, MTU>,
+        port: &mut P,
+        dc: &mut DcCyclicSync,
+        dc_image: &mut [u8],
+        application_time_ns: u64,
+        controls: &mut ControlRequestPool<REQUESTS>,
+        request: Option<RequestHandle>,
+        generation: u16,
+        rx_deadline_ns: u64,
+        cycle_deadline_ns: u64,
+    ) -> Result<ScheduledServiceTxReport<P::Error>, ScheduledServiceTxError> {
+        if self.active.is_some() || self.last_cycle != master.cycle_number() {
+            return Err(ScheduledServiceTxError::CycleOrder);
+        }
+        let now_ns = port.now_ns();
+        if rx_deadline_ns == 0
+            || cycle_deadline_ns == 0
+            || now_ns >= rx_deadline_ns
+            || now_ns >= cycle_deadline_ns
+        {
+            return Err(ScheduledServiceTxError::InvalidDeadline);
+        }
+        let dc_index = dc.datagram_plan().index;
+        if self.index_owner[dc_index as usize] != 0 {
+            return Err(ScheduledServiceTxError::DcIndexConflict(dc_index));
+        }
+        if dc.pending_generation().is_some() {
+            return Err(ScheduledServiceTxError::Dc(DcCyclicError::Busy));
+        }
+        let control_deadline_ns = if let Some(handle) = request {
+            let control = controls
+                .get(handle)
+                .ok_or(ScheduledServiceTxError::InvalidControlRequest)?;
+            if control.state != RequestState::Prepared {
+                return Err(ScheduledServiceTxError::InvalidControlRequest);
+            }
+            if control.generation != generation {
+                return Err(ScheduledServiceTxError::ControlGenerationMismatch);
+            }
+            if control.deadline_ns <= now_ns {
+                return Err(ScheduledServiceTxError::ControlDeadlineExpired);
+            }
+            Some(control.deadline_ns)
+        } else {
+            None
+        };
+        if let Some(index) = self.control_index_conflict(dc_index, controls, request) {
+            return Err(ScheduledServiceTxError::ControlIndexConflict(index));
+        }
+        let mut dc_plan = FramePlan::<1>::new();
+        dc_plan
+            .push(dc.datagram_plan())
+            .map_err(|_| ScheduledServiceTxError::Dc(DcCyclicError::InvalidConfiguration))?;
+        dc.prepare(generation, application_time_ns, dc_image)
+            .map_err(ScheduledServiceTxError::Dc)?;
+        master.reap_expired_rx_before_tx(now_ns);
+
+        let mut report = ScheduledServiceTxReport {
+            dc_sent: false,
+            control_sent: false,
+            failure: None,
+            post_tx_deadline_met: false,
+        };
+        match submit_dc_frame(master, port, generation, rx_deadline_ns, &dc_plan, dc_image) {
+            Ok(()) => report.dc_sent = true,
+            Err(error) => report.failure = Some(ScheduledServiceTxFailure::Dc(error)),
+        }
+        if report.failure.is_none() && port.now_ns() >= cycle_deadline_ns {
+            report.failure = Some(ScheduledServiceTxFailure::Deadline);
+        }
+        if report.failure.is_none() {
+            if let Some((handle, control_deadline_ns)) = request.zip(control_deadline_ns) {
+                if port.now_ns() >= control_deadline_ns {
+                    // The request is still Prepared; the service can consume
+                    // the terminal error without waiting for an RX timeout.
+                    let _ = controls.fail_transmit(handle);
+                    report.failure = Some(ScheduledServiceTxFailure::Deadline);
+                } else {
+                    master.reap_expired_rx_before_tx(port.now_ns());
+                    let sent = match master.acquire_frame(generation, control_deadline_ns) {
+                        Ok(frame) => match master.build_control_request(controls, handle, frame) {
+                            Ok(_) => master
+                                .submit_frame(port, frame)
+                                .map_err(ScheduledServiceFrameError::Transmit),
+                            Err(error) => {
+                                let _ = master.release_unarmed_frame(frame);
+                                Err(ScheduledServiceFrameError::Build(error))
+                            }
+                        },
+                        Err(error) => Err(ScheduledServiceFrameError::FramePool(error)),
+                    };
+                    match sent {
+                        Ok(()) => report.control_sent = true,
+                        Err(error) => {
+                            let _ = controls.fail_transmit(handle);
+                            report.failure = Some(ScheduledServiceTxFailure::Control(error));
+                        }
+                    }
+                }
+            }
+        }
+        let final_now_ns = port.now_ns();
+        report.post_tx_deadline_met = final_now_ns < cycle_deadline_ns;
+        if !report.post_tx_deadline_met && report.failure.is_none() {
+            report.failure = Some(ScheduledServiceTxFailure::Deadline);
+        }
+        Ok(report)
+    }
+
+    fn control_index_conflict<const REQUESTS: usize>(
+        &self,
+        dc_index: u8,
+        controls: &ControlRequestPool<REQUESTS>,
+        prepared: Option<RequestHandle>,
+    ) -> Option<u8> {
+        let mut claimed = [false; 256];
+        for slot in 0..REQUESTS.min(64) {
+            let Some(handle) = RequestHandle::from_index(slot) else {
+                continue;
+            };
+            let Some(request) = controls.get(handle) else {
+                continue;
+            };
+            if request.state != RequestState::InFlight && Some(handle) != prepared {
+                continue;
+            }
+            let index = request.datagram_index as usize;
+            if self.index_owner[index] != 0 || index == dc_index as usize || claimed[index] {
+                return Some(index as u8);
+            }
+            claimed[index] = true;
+        }
+        None
     }
 
     fn receive_with_dc_consumer<
@@ -426,6 +600,26 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
             self.domains[slot].domain.quality()
         }))
     }
+}
+
+fn submit_dc_frame<P: EthercatPort, const FRAMES: usize, const MTU: usize>(
+    master: &mut EthercatMaster<FRAMES, MTU>,
+    port: &mut P,
+    generation: u16,
+    rx_deadline_ns: u64,
+    plan: &FramePlan<1>,
+    image: &[u8],
+) -> Result<(), ScheduledServiceFrameError<P::Error>> {
+    let frame = master
+        .acquire_frame(generation, rx_deadline_ns)
+        .map_err(ScheduledServiceFrameError::FramePool)?;
+    if let Err(error) = master.build_and_arm_frame_from_plan(frame, plan, image) {
+        let _ = master.release_unarmed_frame(frame);
+        return Err(ScheduledServiceFrameError::Build(error));
+    }
+    master
+        .submit_frame(port, frame)
+        .map_err(ScheduledServiceFrameError::Transmit)
 }
 
 impl<const DOMAINS: usize, const SLOTS: usize> RxDatagramConsumer

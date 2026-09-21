@@ -401,20 +401,25 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
             .map(|slot| (slot.generation, slot.deadline_ns))
             .ok_or(CycleError::FramePool(FramePoolError::InvalidHandle))?;
         for datagram in plan.datagrams() {
-            self.rx_index
-                .arm(
-                    datagram.index,
-                    handle.index() as u16,
-                    RxExpectation {
-                        generation,
-                        deadline_ns,
-                        expected_address: datagram.address,
-                        expected_size: datagram.payload_len as u16,
-                        expected_type: datagram.command as u8,
-                        expected_wkc: datagram.expected_wkc,
-                    },
-                )
-                .map_err(CycleError::RxIndex)?;
+            if let Err(error) = self.rx_index.arm(
+                datagram.index,
+                handle.index() as u16,
+                RxExpectation {
+                    generation,
+                    deadline_ns,
+                    expected_address: datagram.address,
+                    expected_size: datagram.payload_len as u16,
+                    expected_type: datagram.command as u8,
+                    expected_wkc: datagram.expected_wkc,
+                },
+            ) {
+                self.cancel_frame_expectations(handle);
+                return Err(CycleError::RxIndex(error));
+            }
+            self.frames
+                .slot_mut(handle)
+                .ok_or(CycleError::FramePool(FramePoolError::InvalidHandle))?
+                .mark_armed(datagram.index, handle.index() as u16);
         }
         Ok(length)
     }
@@ -426,7 +431,8 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
     /// never stages the frame in `FramePool`, so the adapter can publish the
     /// returned handle to hardware after calling `DmaDescriptorRing::tx_submit`.
     /// If construction or RX registration fails, the CPU-owned descriptor is
-    /// canceled and all expectations owned by its index are cleared.
+    /// canceled and only expectations armed by that descriptor generation are
+    /// cleared; a previously accepted frame can still await RX after reuse.
     pub fn build_and_arm_dma_frame_from_plan<
         const TX: usize,
         const RX: usize,
@@ -481,9 +487,16 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
                     expected_wkc: datagram.expected_wkc,
                 },
             ) {
-                self.rx_index.cancel_slot(handle.index() as u16);
+                let _ = self.cancel_dma_frame(ring, handle);
                 let _ = ring.tx_cancel(handle);
                 return Err(CycleError::RxIndex(error));
+            }
+            if let Err(error) = ring.record_tx_armed(handle, datagram.index, generation) {
+                self.rx_index
+                    .cancel_owned(datagram.index, handle.index() as u16, generation);
+                let _ = self.cancel_dma_frame(ring, handle);
+                let _ = ring.tx_cancel(handle);
+                return Err(CycleError::Dma(error));
             }
         }
         Ok((handle, length))
@@ -492,8 +505,27 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
     /// Clear RX expectations owned by a DMA frame after the platform rejects
     /// it before hardware ownership is published. The descriptor itself must
     /// be released through `DmaDescriptorRing::tx_cancel`.
-    pub fn cancel_dma_frame(&mut self, handle: DmaTxHandle) -> usize {
-        self.rx_index.cancel_slot(handle.index() as u16)
+    pub fn cancel_dma_frame<const TX: usize, const RX: usize>(
+        &mut self,
+        ring: &DmaDescriptorRing<TX, RX, MTU>,
+        handle: DmaTxHandle,
+    ) -> Result<usize, DmaRingError> {
+        let (indices, generation) = ring.tx_armed(handle)?;
+        let mut cancelled = 0;
+        for (word_index, mut word) in indices.into_iter().enumerate() {
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                word &= word - 1;
+                if self.rx_index.cancel_owned(
+                    (word_index * 64 + bit) as u8,
+                    handle.index() as u16,
+                    generation,
+                ) {
+                    cancelled += 1;
+                }
+            }
+        }
+        Ok(cancelled)
     }
 
     /// Start a bounded receive session backed by a platform-owned DMA RX
@@ -541,7 +573,7 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
         match submit_result {
             Ok(()) => Ok(()),
             Err(error) => {
-                self.cancel_dma_frame(handle);
+                let _ = self.cancel_dma_frame(ring, handle);
                 let _ = ring.tx_abort(handle);
                 Err(CycleError::Port(error))
             }
@@ -588,7 +620,34 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
         self.rx_index
             .arm(datagram_index, request.index() as u16, expectation)
             .map_err(CycleError::RxIndex)?;
+        self.frames
+            .slot_mut(frame)
+            .ok_or(CycleError::FramePool(FramePoolError::InvalidHandle))?
+            .mark_armed(datagram_index, request.index() as u16);
         Ok(length)
+    }
+
+    fn cancel_frame_expectations(&mut self, handle: FrameHandle) -> usize {
+        let Some(frame) = self.frames.slot(handle) else {
+            return 0;
+        };
+        let indices = frame.armed_indices;
+        let generation = frame.generation;
+        let owner = frame.armed_slot_id;
+        let mut cancelled = 0;
+        for (word_index, mut word) in indices.into_iter().enumerate() {
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                word &= word - 1;
+                if self
+                    .rx_index
+                    .cancel_owned((word_index * 64 + bit) as u8, owner, generation)
+                {
+                    cancelled += 1;
+                }
+            }
+        }
+        cancelled
     }
 
     pub fn submit_frame<P: EthercatPort>(
@@ -614,7 +673,7 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
         match tx_result {
             Ok(()) => self.frames.release(handle).map_err(CycleError::FramePool),
             Err(error) => {
-                self.rx_index.cancel_slot(handle.index() as u16);
+                self.cancel_frame_expectations(handle);
                 let _ = self.frames.release(handle);
                 Err(CycleError::Port(error))
             }
@@ -628,6 +687,33 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
         expectation: RxExpectation,
     ) -> Result<(), RxIndexError> {
         self.rx_index.arm(index, slot_id, expectation)
+    }
+
+    /// Bind a hand-built frame's RX expectation to its live frame handle so
+    /// a rejected TX can cancel precisely this frame's datagrams. Bare
+    /// `arm_rx` remains available for expectations without a frame-pool owner.
+    pub fn arm_rx_for_frame(
+        &mut self,
+        frame: FrameHandle,
+        index: u8,
+        expectation: RxExpectation,
+    ) -> Result<(), CycleError<core::convert::Infallible>> {
+        let generation = self
+            .frames
+            .slot_mut(frame)
+            .ok_or(CycleError::FramePool(FramePoolError::InvalidHandle))?
+            .generation;
+        if generation != expectation.generation {
+            return Err(CycleError::RxIndex(RxIndexError::GenerationMismatch));
+        }
+        self.rx_index
+            .arm(index, frame.index() as u16, expectation)
+            .map_err(CycleError::RxIndex)?;
+        self.frames
+            .slot_mut(frame)
+            .ok_or(CycleError::FramePool(FramePoolError::InvalidHandle))?
+            .mark_armed(index, frame.index() as u16);
+        Ok(())
     }
 
     pub fn rx_entry(&self, index: u8) -> crate::rx_index::RxIndexEntry {
