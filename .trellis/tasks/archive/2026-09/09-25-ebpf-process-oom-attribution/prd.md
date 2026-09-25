@@ -48,19 +48,19 @@ incident to the wrong process.
 
 ## Acceptance Criteria
 
-- [ ] A tracked worker-thread exit increments `thread_exits_ignored` without
+- [x] A tracked worker-thread exit increments `thread_exits_ignored` without
       emitting `ProcessExit`; a tracked leader exit retains the existing hard
       fact path.
-- [ ] The OOM BPF program uses `trace_event_raw_mark_victim.pid` rather than
+- [x] The OOM BPF program uses `trace_event_raw_mark_victim.pid` rather than
       the tracepoint executor's PID/TID.
-- [ ] Fixed evidence decoding preserves the OOM victim PID/TID and produces a
+- [x] Fixed evidence decoding preserves the OOM victim PID/TID and produces a
       critical `HOST_OOM` incident with 100-percent confidence and
       `LatchFault` without cycle context.
-- [ ] C and Rust agree on the expanded statistics size, and aggregation tests
+- [x] C and Rust agree on the expanded statistics size, and aggregation tests
       cover saturation of the new counter.
-- [ ] The real CO-RE BPF object compiles in GitHub Actions against runner BTF.
-- [ ] `make ci` passes locally.
-- [ ] Documentation distinguishes leader-exit evidence from arbitrary thread
+- [x] The real CO-RE BPF object compiles in GitHub Actions against runner BTF.
+- [x] `make ci` passes locally.
+- [x] Documentation distinguishes leader-exit evidence from arbitrary thread
       exit and records that exact tracked-PID OOM filtering can miss a kernel
       victim selected as another thread of the same process.
 
