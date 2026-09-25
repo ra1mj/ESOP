@@ -271,3 +271,36 @@ Implemented bounded sched_migrate_task observation with per-TID epoch-aware migr
 ### Next Steps
 
 - None - task complete
+
+
+## Session 9: eBPF gateway stall attribution
+
+**Date**: 2026-09-25
+**Task**: eBPF gateway stall attribution
+**Branch**: `main`
+
+### Summary
+
+Added stable Zenoh publish lifecycle markers, transactional gateway uprobes, bounded eBPF stall evidence, correlated lifecycle classification, tests, and truthful observability documentation; local and GitHub quality gates passed.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0d163fa` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
