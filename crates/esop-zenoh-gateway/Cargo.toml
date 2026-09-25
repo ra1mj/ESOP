@@ -10,6 +10,7 @@ rust-version.workspace = true
 default = []
 zenoh = [
     "dep:esop-command-gateway",
+    "dep:esop-ebpf-agent",
     "dep:esop-lifecycle-guard",
     "dep:esop-procbuf",
     "dep:esop-proto",
@@ -19,6 +20,7 @@ zenoh = [
 
 [dependencies]
 esop-command-gateway = { path = "../esop-command-gateway", optional = true }
+esop-ebpf-agent = { path = "../esop-ebpf-agent", optional = true }
 esop-lifecycle-guard = { path = "../esop-lifecycle-guard", optional = true }
 esop-procbuf = { path = "../esop-procbuf", optional = true }
 esop-proto = { path = "../esop-proto", optional = true }

@@ -719,6 +719,7 @@ name = "esop-zenoh-gateway"
 version = "0.1.0"
 dependencies = [
  "esop-command-gateway",
+ "esop-ebpf-agent",
  "esop-lifecycle-guard",
  "esop-procbuf",
  "esop-profile-cia402",

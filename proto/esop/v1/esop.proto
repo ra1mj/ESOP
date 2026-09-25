@@ -205,6 +205,20 @@ message RuntimeIncident {
   reserved 12, 13;
   reserved "raw_log";
   uint32 schema_version = 14;
+  uint64 boot_id = 15;
+  uint64 agent_epoch = 16;
+  uint32 confidence_percent = 17;
+  uint64 cycle_first = 18;
+  uint64 cycle_last = 19;
+  uint64 evidence_window_ns = 20;
+  uint64 pid = 21;
+  uint64 tid = 22;
+  uint32 cpu = 23;
+  uint32 irq = 24;
+  uint32 netdev_ifindex = 25;
+  uint64 observed_value = 26;
+  uint64 threshold = 27;
+  uint32 event_count = 28;
 }
 
 message RuntimeEvidence {
@@ -217,6 +231,18 @@ message RuntimeEvidence {
   uint32 value = 7;
   uint64 cycle_sequence = 8;
   uint64 boot_id = 9;
+  uint64 evidence_id = 10;
+  uint64 agent_epoch = 11;
+  uint64 transition_sequence = 12;
+  uint32 domain = 13;
+  IncidentSeverity severity = 14;
+  uint32 irq = 15;
+  uint32 netdev_ifindex = 16;
+  uint64 observed_value = 17;
+  uint64 threshold = 18;
+  uint64 duration_ns = 19;
+  uint32 count = 20;
+  uint32 detail = 21;
 }
 
 message QueryRequest {

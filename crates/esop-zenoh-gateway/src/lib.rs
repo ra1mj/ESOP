@@ -4,6 +4,8 @@
 pub mod procbuf_adapter;
 #[cfg(feature = "zenoh")]
 pub mod runtime;
+#[cfg(feature = "zenoh")]
+pub mod runtime_incident;
 
 pub const MAX_FLEET_ID_BYTES: usize = 32;
 pub const MAX_ROBOT_ID_BYTES: usize = 64;

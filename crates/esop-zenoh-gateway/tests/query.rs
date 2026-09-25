@@ -1,10 +1,15 @@
 #![cfg(feature = "zenoh")]
 
-use esop_proto::v1::{QueryReply, QueryRequest, RobotState, RuntimeEvidence, RuntimeIncident};
+use esop_ebpf_agent::{
+    EvidenceDomain, EvidenceKind, IncidentCode, IncidentSeverity, MAX_INCIDENT_EVIDENCE,
+    RecommendedAction, RuntimeEvidence as AgentEvidence, RuntimeIncident as AgentIncident,
+};
+use esop_proto::v1::{QueryReply, QueryRequest, RobotState};
 use esop_proto::{CURRENT_SCHEMA_VERSION, Message};
 use esop_zenoh_gateway::runtime::{
     MAX_QUERY_RECORDS, QueryAdapterError, decode_query_payload, encode_query_reply,
 };
+use esop_zenoh_gateway::runtime_incident::{IncidentContractError, project_runtime_incident};
 use esop_zenoh_gateway::{KeySpace, MAX_PAYLOAD_BYTES, RouteError};
 
 fn space() -> KeySpace {
@@ -21,6 +26,58 @@ fn query_request() -> QueryRequest {
     }
 }
 
+fn agent_incident() -> AgentIncident {
+    let mut evidence = [AgentEvidence::EMPTY; MAX_INCIDENT_EVIDENCE];
+    evidence[0] = AgentEvidence {
+        evidence_id: 1,
+        boot_id: 7,
+        agent_epoch: 2,
+        timestamp_ns: 100,
+        cycle_seq: 11,
+        transition_seq: 5,
+        pid: 10,
+        tid: 11,
+        cpu: 2,
+        irq: 0,
+        netdev_ifindex: 3,
+        observed_value: 4,
+        threshold: 3,
+        duration_ns: 0,
+        count: 4,
+        domain: EvidenceDomain::KernelNetwork,
+        kind: EvidenceKind::NetworkDrop,
+        severity: IncidentSeverity::Error,
+        detail: 0,
+    };
+    AgentIncident {
+        incident_id: 1,
+        boot_id: 7,
+        agent_epoch: 2,
+        code: IncidentCode::HostNicDrop,
+        severity: IncidentSeverity::Error,
+        recommended_action: RecommendedAction::ControlledStop,
+        confidence_percent: 75,
+        first_seen_ns: 90,
+        last_seen_ns: 110,
+        evidence_window_ns: 20,
+        cycle_first: 11,
+        cycle_last: 11,
+        transition_seq: 5,
+        pid: 10,
+        tid: 11,
+        cpu: 2,
+        irq: 0,
+        netdev_ifindex: 3,
+        observed_value: 4,
+        threshold: 3,
+        count: 4,
+        lost_events: 0,
+        evidence_count: 1,
+        reserved: [0; 3],
+        evidence,
+    }
+}
+
 fn reply() -> QueryReply {
     QueryReply {
         robot_id: "robot_01".into(),
@@ -33,10 +90,7 @@ fn reply() -> QueryReply {
             schema_version: CURRENT_SCHEMA_VERSION,
             ..Default::default()
         }],
-        incidents: vec![RuntimeIncident {
-            schema_version: CURRENT_SCHEMA_VERSION,
-            ..Default::default()
-        }],
+        incidents: vec![project_runtime_incident(&agent_incident()).unwrap()],
         truncated: true,
     }
 }
@@ -48,6 +102,20 @@ fn v1_query_round_trip_preserves_cursor_and_result() {
     assert_eq!(decoded, request);
     let encoded = encode_query_reply(&decoded, &reply()).unwrap();
     assert_eq!(QueryReply::decode(encoded.as_slice()).unwrap(), reply());
+}
+
+#[test]
+fn incident_validation_does_not_apply_the_state_sequence_cursor() {
+    let request = QueryRequest {
+        after_sequence: u64::MAX,
+        ..query_request()
+    };
+    let mut response = reply();
+    response.states.clear();
+    let encoded = encode_query_reply(&request, &response).unwrap();
+    let decoded = QueryReply::decode(encoded.as_slice()).unwrap();
+    assert_eq!(decoded.incidents.len(), 1);
+    assert_eq!(decoded.incidents[0].cycle_sequence, 11);
 }
 
 #[test]
@@ -144,13 +212,80 @@ fn rejects_reply_contract_violations_before_publication() {
         Err(QueryAdapterError::Schema(_))
     ));
     response = reply();
-    response.incidents[0].evidence.push(RuntimeEvidence {
-        boot_id: 8,
-        ..Default::default()
-    });
+    response.incidents[0].boot_id = 0;
+    assert!(matches!(
+        encode_query_reply(&request, &response),
+        Err(QueryAdapterError::Incident(
+            IncidentContractError::MissingBootId
+        ))
+    ));
+    response = reply();
+    response.incidents[0].boot_id = 8;
     assert!(matches!(
         encode_query_reply(&request, &response),
         Err(QueryAdapterError::BootMismatch)
+    ));
+    response = reply();
+    response.incidents[0].evidence[0].boot_id = 8;
+    assert!(matches!(
+        encode_query_reply(&request, &response),
+        Err(QueryAdapterError::BootMismatch)
+    ));
+    response = reply();
+    response.incidents[0].incident_id.clear();
+    assert!(matches!(
+        encode_query_reply(&request, &response),
+        Err(QueryAdapterError::Incident(
+            IncidentContractError::MissingIncidentId
+        ))
+    ));
+    response = reply();
+    response.incidents[0].agent_epoch = 0;
+    assert!(matches!(
+        encode_query_reply(&request, &response),
+        Err(QueryAdapterError::Incident(
+            IncidentContractError::MissingAgentEpoch
+        ))
+    ));
+    response = reply();
+    response.incidents[0].window_start_ns = response.incidents[0].window_end_ns + 1;
+    assert!(matches!(
+        encode_query_reply(&request, &response),
+        Err(QueryAdapterError::Incident(
+            IncidentContractError::InvalidTimeWindow
+        ))
+    ));
+    response = reply();
+    response.incidents[0].evidence[0].agent_epoch += 1;
+    assert!(matches!(
+        encode_query_reply(&request, &response),
+        Err(QueryAdapterError::Incident(
+            IncidentContractError::EvidenceEpochMismatch
+        ))
+    ));
+    response = reply();
+    response.incidents[0].evidence[0].evidence_id = 0;
+    assert!(matches!(
+        encode_query_reply(&request, &response),
+        Err(QueryAdapterError::Incident(
+            IncidentContractError::MissingEvidenceId
+        ))
+    ));
+    response = reply();
+    response.incidents[0].evidence[0].timestamp_ns = 0;
+    assert!(matches!(
+        encode_query_reply(&request, &response),
+        Err(QueryAdapterError::Incident(
+            IncidentContractError::EvidenceTimestampOutOfRange
+        ))
+    ));
+    response = reply();
+    response.incidents[0].evidence[0].cycle_sequence = 0;
+    assert!(matches!(
+        encode_query_reply(&request, &response),
+        Err(QueryAdapterError::Incident(
+            IncidentContractError::EvidenceCycleOutOfRange
+        ))
     ));
     response = reply();
     response.states.push(response.states[0].clone());

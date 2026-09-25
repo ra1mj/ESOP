@@ -2,7 +2,7 @@
 
 - 文档版本：1.0
 - 日期：2026-09-25
-- 状态：固定 key namespace、方向策略、可选 Zenoh Session、ProcBuf v4 生命周期、逐轴停止证据与原始周期质量投影、事件投影、v1 命令和类型化查询边界、host QoS、稳定 publish 与 command/query callback 观测 marker、生产安全配置准入及 loopback router 验证已实现；真实设备质量采集、远程 ACL、目标内核 uprobe/开销和生产认证部署待完成
+- 状态：固定 key namespace、方向策略、可选 Zenoh Session、ProcBuf v4 生命周期、逐轴停止证据与原始周期质量投影、事件投影、eBPF RuntimeIncident 无损投影、v1 命令和类型化查询边界、host QoS、稳定 publish 与 command/query callback 观测 marker、生产安全配置准入及 loopback router 验证已实现；真实设备质量采集、远程 ACL、目标内核 uprobe/开销和生产认证部署待完成
 - 上游需求：PRD FR-031、FR-030、FR-045、FR-051
 
 ## 1. Key namespace
@@ -40,10 +40,11 @@ Zenoh session、router、发现、重连、QoS 和 transport security 均属于 
 
 - `publish`：先复用 `KeySpace` 的方向、payload contract 和 4096-byte 上限校验，再执行 Session put；
 - `publish_state` / `publish_event` / `publish_incident`：使用生成的 `esop.v1` 类型编码后发布，状态快照额外校验 `robot_id` 与 namespace 一致；
+- `publish_agent_incident`：在 host 监督域校验 `esop-ebpf-agent::RuntimeIncident` 的非零 identity、time/cycle window、1-8 条 evidence、boot/epoch 和 evidence 所属范围，再生成确定性全局 incident ID 并投影完整 64-bit/provenance 字段。旧 `RuntimeEvidence.value` 只保存饱和的 32-bit 摘要；投影失败与 route/schema/Zenoh transport 错误分离，且不会启动 transport publish marker；
 - `subscribe_commands`：在固定 `cmd` key 上注册后台 subscriber；
 - `admit_authenticated_command`：要求可信监督服务先将认证主体映射为固定 `source_id`，再比较 transport identity 与 payload identity；不匹配时不会进入实时准入；
 - `serve_queries`：在固定 `query` key 上注册底层后台 queryable；
-- `serve_typed_queries`：绑定当前 boot ID，校验 `QueryRequest` 的 payload（最大 4096 bytes）、schema 版本、robot ID 和 `limit`（1-32），将请求交给监督域的快照提供者；应答校验 `QueryReply` 及嵌套记录的版本、robot/boot（含 evidence）、记录总量和编码后的大小，不符合条件时返回稳定的 Zenoh error reply，不发送数据回复。`after_sequence` 对返回的 `RobotState.sequence` 实施严格递增检查；incident 的查询/分页语义由提供者定义，不应误用 `cycle_sequence` 作为状态序号。请求与回复失败计数可通过 `TransportHealth` 读取。
+- `serve_typed_queries`：绑定当前 boot ID，校验 `QueryRequest` 的 payload（最大 4096 bytes）、schema 版本、robot ID 和 `limit`（1-32），将请求交给监督域的快照提供者；应答校验 `QueryReply` 及嵌套记录的版本、robot/boot、incident/证据稳定 ID、共享 agent epoch、窗口/周期范围、证据数量和编码后的大小，不符合条件时返回稳定的 Zenoh error reply，不发送数据回复。`after_sequence` 对返回的 `RobotState.sequence` 实施严格递增检查；incident 的查询/分页语义由提供者定义，不应误用 `cycle_sequence` 作为状态序号。请求与回复失败计数可通过 `TransportHealth` 读取。
 - `TransportHealth`：记录连接状态、发布失败数和 handler 注册数。
 - `PublishQos`：state 使用可丢弃的 data 队列，event/diagnostic 使用可丢弃的高优先级队列；不会因 Zenoh 背压阻塞监督域任务。
 - publish 观测 ABI：用稳定的 `esop_zenoh_gateway_publish_begin_v1(request_id, route_kind)` / `esop_zenoh_gateway_publish_end_v1(request_id, route_kind, outcome)` 标记完整异步 publish 生命周期；request ID 为进程内非零原子序号，outcome 固定为 success、transport failure 或 cancellation。
@@ -93,4 +94,4 @@ callback 运行在 Zenoh host runtime：命令 callback 应只把数据投递到
 
 ProcBuf 固定布局已升级到 ABI v4；v1/v2/v3 reader/writer 不能复用 v4 区域，attach 时必须核对 version、layout hash、容量、robot 和 boot ID。升级需停止旧实时端与监督进程并重新创建区域，再启动相同版本的双方；旧 header 在单元测试中明确被拒绝。Protobuf 仍为 v1 外部契约，新增 `LifecycleSummary.axis_stops` 只携带本周期请求/发出动作和合格的驱动反馈证明位，不表示真实执行的停止动作；旧 Protobuf 读者丢弃新增字段，不能充当透明中继。
 
-补充验证：测试进程为每个场景动态申请 loopback 临时端口并独占 zenohd，覆盖 state/event/incident 的 v1 payload、router 重启后的 health recovery、旧命令 TTL/代际拒绝，以及恢复必须经过新 permit 和显式 rearm。ZenohGateway::refresh_health 使用 session 的 router/peer 连接快照；它属于 host supervisor 观察，不是 motion permit 或应用层投递确认。[Zenoh SessionInfo API](https://docs.rs/zenoh/1.10.1/zenoh/session/struct.SessionInfo.html)
+补充验证：测试进程为每个场景动态申请 loopback 临时端口并独占 zenohd，覆盖 state/event、从固定 agent incident 经生产投影到 router 解码的完整 v1 payload、router 重启后的 health recovery、旧命令 TTL/代际拒绝，以及恢复必须经过新 permit 和显式 rearm。ZenohGateway::refresh_health 使用 session 的 router/peer 连接快照；它属于 host supervisor 观察，不是 motion permit 或应用层投递确认。[Zenoh SessionInfo API](https://docs.rs/zenoh/1.10.1/zenoh/session/struct.SessionInfo.html)

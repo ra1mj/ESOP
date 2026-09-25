@@ -6,13 +6,18 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use esop_command_gateway::{CommandIngress, IngressPolicy};
+use esop_ebpf_agent::{
+    EvidenceDomain, EvidenceKind, IncidentCode, IncidentSeverity, MAX_INCIDENT_EVIDENCE,
+    RecommendedAction, RuntimeEvidence as AgentEvidence, RuntimeIncident as AgentIncident,
+};
 use esop_lifecycle_guard::{
     CyclicQuality, GateId, GuardPolicy, LifecycleAction, LifecycleGuard, LifecycleState,
     StopAction, StopFeedback, procbuf::cyclic_quality_to_procbuf,
 };
 use esop_procbuf::{EventSeverity as ProcSeverity, ProcBuf, ProcBufEvent, StatePage};
 use esop_proto::v1::{
-    DiagnosticEvent, MotionCommand, QueryReply, QueryRequest, RobotState, RuntimeIncident,
+    DiagnosticEvent, MotionCommand, QueryReply, QueryRequest, RobotState,
+    RuntimeIncident as ProtoRuntimeIncident,
 };
 use esop_proto::{CURRENT_SCHEMA_VERSION, Message};
 use esop_zenoh_gateway::procbuf_adapter::ProcBufProjector;
@@ -50,6 +55,58 @@ fn command_payload_with_epoch(sequence: u64, deadline_ns: u64, permit_epoch: u64
         ..MotionCommand::default()
     }
     .encode_to_vec()
+}
+
+fn runtime_incident() -> AgentIncident {
+    let mut evidence = [AgentEvidence::EMPTY; MAX_INCIDENT_EVIDENCE];
+    evidence[0] = AgentEvidence {
+        evidence_id: 17,
+        boot_id: 7,
+        agent_epoch: 3,
+        timestamp_ns: 2_500,
+        cycle_seq: 1,
+        transition_seq: 2,
+        pid: 123,
+        tid: 124,
+        cpu: 5,
+        irq: 0,
+        netdev_ifindex: 0,
+        observed_value: u64::from(u32::MAX) + 5,
+        threshold: 25_000_000,
+        duration_ns: u64::from(u32::MAX) + 5,
+        count: 1,
+        domain: EvidenceDomain::UserZenoh,
+        kind: EvidenceKind::GatewayStall,
+        severity: IncidentSeverity::Error,
+        detail: 2,
+    };
+    AgentIncident {
+        incident_id: 9,
+        boot_id: 7,
+        agent_epoch: 3,
+        code: IncidentCode::GatewayStall,
+        severity: IncidentSeverity::Error,
+        recommended_action: RecommendedAction::ControlledStop,
+        confidence_percent: 75,
+        first_seen_ns: 2_400,
+        last_seen_ns: 2_600,
+        evidence_window_ns: 1_000,
+        cycle_first: 1,
+        cycle_last: 1,
+        transition_seq: 2,
+        pid: 123,
+        tid: 124,
+        cpu: 5,
+        irq: 0,
+        netdev_ifindex: 0,
+        observed_value: u64::from(u32::MAX) + 5,
+        threshold: 25_000_000,
+        count: 1,
+        lost_events: 0,
+        evidence_count: 1,
+        reserved: [0; 3],
+        evidence,
+    }
 }
 
 fn wait_for_command(
@@ -232,12 +289,7 @@ fn router_round_trip_covers_gateway_contracts() {
                 .await
                 .expect("event publishes through router");
             gateway
-                .publish_incident(&RuntimeIncident {
-                    incident_id: "inc-1".to_owned(),
-                    reason_code: 0x2001,
-                    schema_version: CURRENT_SCHEMA_VERSION,
-                    ..RuntimeIncident::default()
-                })
+                .publish_agent_incident(&runtime_incident())
                 .await
                 .expect("incident publishes through router");
             assert_eq!(
@@ -251,17 +303,27 @@ fn router_round_trip_covers_gateway_contracts() {
                 .code,
                 0x1001
             );
+            let incident = ProtoRuntimeIncident::decode(
+                incident_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("incident reaches observer")
+                    .as_slice(),
+            )
+            .expect("incident payload decodes");
             assert_eq!(
-                RuntimeIncident::decode(
-                    incident_rx
-                        .recv_timeout(Duration::from_secs(5))
-                        .expect("incident reaches observer")
-                        .as_slice()
-                )
-                .expect("incident payload decodes")
-                .incident_id,
-                "inc-1"
+                incident.incident_id,
+                "esop-0000000000000007-0000000000000003-0000000000000009"
             );
+            assert_eq!(incident.boot_id, 7);
+            assert_eq!(incident.agent_epoch, 3);
+            assert_eq!(incident.suggested_action, "controlled_stop");
+            assert_eq!(incident.affected_component, "user.zenoh");
+            assert_eq!(incident.observed_value, u64::from(u32::MAX) + 5);
+            assert_eq!(incident.schema_version, CURRENT_SCHEMA_VERSION);
+            assert_eq!(incident.evidence.len(), 1);
+            assert_eq!(incident.evidence[0].evidence_id, 17);
+            assert_eq!(incident.evidence[0].value, u32::MAX);
+            assert_eq!(incident.evidence[0].observed_value, u64::from(u32::MAX) + 5);
 
             let (command_tx, command_rx) = mpsc::channel();
             gateway

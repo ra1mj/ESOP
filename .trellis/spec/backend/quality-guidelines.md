@@ -1250,6 +1250,105 @@ Filter the typed scheduler entity, count migrations in a bounded epoch-aware
 window, emit the first threshold crossing with source/destination identity, and
 require transport-risk correlation before assigning the existing incident code.
 
+## Scenario: Runtime Incident Protobuf and Zenoh Projection
+
+### 1. Scope / Trigger
+
+- Trigger: add or change `esop-ebpf-agent::RuntimeIncident`, its Protobuf v1
+  projection, diagnostic publication, or typed-query incident validation.
+- Scope: host/supervision only. Protobuf and Zenoh must not enter the EtherCAT
+  cycle, MLG decision, ProcBuf writer, or fixed agent ABI.
+
+### 2. Signatures
+
+- Projection:
+  `project_runtime_incident(&esop_ebpf_agent::RuntimeIncident) -> Result<esop_proto::v1::RuntimeIncident, IncidentAdapterError>`.
+- Contract validation:
+  `validate_runtime_incident_message(&esop_proto::v1::RuntimeIncident, Option<u64>) -> Result<(), IncidentContractError>`.
+- Production publication:
+  `ZenohGateway::publish_agent_incident(&esop_ebpf_agent::RuntimeIncident) -> Result<(), RuntimeError>`.
+- Query encoding:
+  `encode_query_reply(QueryReply, &QuerySelector) -> Result<Vec<u8>, QueryAdapterError>`
+  validates every returned incident against the requested boot before encoding.
+
+### 3. Contracts
+
+- Project through the single `runtime_incident` adapter. Validate nonzero
+  incident/boot/epoch identity, confidence, ordered time/cycle windows,
+  `1..=MAX_INCIDENT_EVIDENCE`, evidence identity, shared boot/epoch, and
+  inclusive evidence membership before allocating or publishing.
+- Build the external incident ID from boot ID, agent epoch, and agent-local ID.
+  Preserve full-width values in additive fields; the legacy 32-bit evidence
+  value saturates and never wraps. Existing/reserved Protobuf tags are never
+  renumbered or reused.
+- Keep reason/kind/domain as stable agent discriminants, use explicit severity,
+  action, and affected-component mappings, and do not serialize Rust debug
+  output or infer a stronger root cause.
+- Query validation repeats the Protobuf incident contract against the requested
+  boot. `after_sequence` applies only to `RobotState.sequence`; incident paging
+  remains provider-owned and must not reinterpret `cycle_sequence` as a state
+  cursor.
+- `publish_agent_incident` projects before starting the transport publication,
+  and reports projection failures separately from schema, route, and Zenoh
+  transport failures.
+
+### 4. Validation & Error Matrix
+
+- Zero incident, boot, or epoch identity -> `IncidentAdapterError::InvalidIdentity`;
+  allocate and publish nothing.
+- Confidence above 100, reversed time/cycle windows, or zero evidence window ->
+  the corresponding typed adapter error; allocate and publish nothing.
+- Empty or over-capacity evidence, zero evidence ID, boot/epoch mismatch, or an
+  evidence timestamp/cycle outside the inclusive incident window -> the
+  corresponding typed adapter error; allocate and publish nothing.
+- Query incident boot mismatch -> `QueryAdapterError::BootMismatch`; malformed
+  identity, windows, or evidence -> `QueryAdapterError::Incident` and stable
+  `invalid_incident` reply behavior.
+- Protobuf validation, route, or Zenoh failure after successful projection ->
+  preserve the existing schema/route/transport `RuntimeError`; do not relabel
+  it as an adapter failure.
+
+### 5. Good/Base/Bad Cases
+
+- Good: a scheduler-latency incident with two ordered records from the same
+  boot and agent epoch projects to one deterministic external ID, exact 64-bit
+  values, `host.scheduler`, and the explicit controlled-stop action.
+- Base: a value at or below `u32::MAX` is equal in legacy and additive fields;
+  a larger value saturates only the legacy field while the additive field
+  preserves the original value.
+- Good query: an incident can have a cycle sequence older than the state
+  `after_sequence` cursor and is still returned when its boot and contract are
+  valid.
+- Bad: serialize `Debug` output, truncate a 64-bit value, accept mixed epochs,
+  reinterpret incident cycle as state paging, or publish a partially validated
+  incident.
+
+### 6. Tests Required
+
+- Cover every agent rejection class, all stable enum/string mappings,
+  deterministic ID disambiguation, 64-bit preservation and legacy saturation.
+- The frozen v1 reader must preserve the legacy subset and ignore additive
+  fields; the current reader must see the full message.
+- Query tests cover cross-boot, cross-epoch, invalid windows/evidence and an
+  incident whose cycle is older than the state cursor.
+- The loopback router test must publish through `publish_agent_incident`, decode
+  after transport, and verify ID, action, provenance, evidence and full values.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+Construct Protobuf incidents at each call site, copy only legacy fields, infer
+root cause from free-form details, and let query or transport paths discover
+identity and evidence inconsistencies after allocation or publication starts.
+
+#### Correct
+
+Use one host-only adapter, reject the complete agent contract before publish,
+map every external enum/string explicitly, preserve additive full-width
+provenance, revalidate query-provider output against the requested boot, and
+keep incident paging independent from robot-state sequence cursors.
+
 ## Scenario: eBPF Gateway Operation Stall Evidence
 
 ### 1. Scope / Trigger

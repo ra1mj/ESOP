@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use esop_command_gateway::{CommandIngress, ExternalMotionCommand, IngressError};
+use esop_ebpf_agent::RuntimeIncident as AgentRuntimeIncident;
 use esop_lifecycle_guard::MotionPermit;
 use esop_proto::v1::{
     DiagnosticEvent, MotionCommand, QueryReply, QueryRequest, RobotState, RuntimeIncident,
@@ -17,6 +18,10 @@ use esop_proto::{Message, SchemaCompatibilityError, validate_schema_version};
 use zenoh::Wait;
 use zenoh::qos::{CongestionControl, Priority};
 
+use crate::runtime_incident::{
+    IncidentAdapterError, IncidentContractError, project_runtime_incident,
+    validate_runtime_incident_message,
+};
 use crate::{
     KeySpace, MAX_PAYLOAD_BYTES, MAX_ZENOH_KEY_BYTES, RouteDirection, RouteError, RouteKind,
 };
@@ -369,6 +374,7 @@ pub enum RuntimeError {
     RobotMismatch,
     Schema(SchemaCompatibilityError),
     Security(SecurityConfigError),
+    Incident(IncidentAdapterError),
     Zenoh(zenoh::Error),
 }
 
@@ -402,6 +408,7 @@ pub enum QueryAdapterError {
     LimitOutOfRange,
     TooManyRecords,
     StaleState,
+    Incident(IncidentContractError),
     ProviderUnavailable,
 }
 
@@ -416,6 +423,7 @@ impl QueryAdapterError {
             Self::LimitOutOfRange => "invalid_limit",
             Self::TooManyRecords => "too_many_records",
             Self::StaleState => "stale_state",
+            Self::Incident(_) => "invalid_incident",
             Self::ProviderUnavailable => "provider_unavailable",
         }
     }
@@ -471,12 +479,13 @@ pub fn encode_query_reply(
     }
     for incident in &reply.incidents {
         validate_schema_version(incident.schema_version).map_err(QueryAdapterError::Schema)?;
-        if incident
-            .evidence
-            .iter()
-            .any(|evidence| evidence.boot_id != request.boot_id)
-        {
-            return Err(QueryAdapterError::BootMismatch);
+        match validate_runtime_incident_message(incident, request.boot_id) {
+            Ok(()) => {}
+            Err(IncidentContractError::BootMismatch)
+            | Err(IncidentContractError::EvidenceBootMismatch) => {
+                return Err(QueryAdapterError::BootMismatch);
+            }
+            Err(error) => return Err(QueryAdapterError::Incident(error)),
         }
     }
     if reply.encoded_len() > MAX_PAYLOAD_BYTES {
@@ -685,6 +694,15 @@ impl ZenohGateway {
         validate_schema_version(incident.schema_version).map_err(RuntimeError::Schema)?;
         self.publish(RouteKind::Diagnostic, &incident.encode_to_vec())
             .await
+    }
+
+    /// Validate, project and publish one bounded eBPF agent incident.
+    pub async fn publish_agent_incident(
+        &self,
+        incident: &AgentRuntimeIncident,
+    ) -> Result<(), RuntimeError> {
+        let incident = project_runtime_incident(incident).map_err(RuntimeError::Incident)?;
+        self.publish_incident(&incident).await
     }
 
     /// Register a background command subscriber. The callback should enqueue a

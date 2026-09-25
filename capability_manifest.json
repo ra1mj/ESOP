@@ -88,7 +88,7 @@
     {
       "id": "protobuf_v1_contract",
       "status": "partial",
-      "scope": "Versioned esop.v1 state, command, diagnostic and runtime-incident contract with generated Rust bindings",
+      "scope": "Versioned esop.v1 state, command, diagnostic and additive-compatible full-provenance runtime-incident contract with generated Rust bindings",
       "evidence": [
         "proto/esop/v1/esop.proto",
         "scripts/validate-proto-schema.py",
@@ -96,7 +96,9 @@
         "crates/esop-proto/src/lib.rs",
         "crates/esop-proto/tests/schema_compatibility.rs",
         "crates/esop-proto/tests/reader_writer.rs",
-        "crates/esop-proto/tests/fixtures/v1_784bf73.proto"
+        "crates/esop-proto/tests/fixtures/v1_784bf73.proto",
+        "crates/esop-zenoh-gateway/src/runtime_incident.rs",
+        "crates/esop-zenoh-gateway/tests/runtime_incident.rs"
       ],
       "limitation": "Frozen-v1/current Rust reader-writer pairs are tested; pre-version writers, cross-language compatibility, semantic upgrades and production rolling upgrades remain unqualified"
     },
@@ -114,12 +116,14 @@
     {
       "id": "zenoh_runtime_adapter",
       "status": "partial",
-      "scope": "Optional host-domain Zenoh session adapter with bounded health, typed v1 publish/query, stable v1 publish and command/query callback observation markers, and single-reader ProcBuf state/event projection",
+      "scope": "Optional host-domain Zenoh session adapter with bounded health, typed v1 publish/query, validated eBPF RuntimeIncident projection, stable v1 publish and command/query callback observation markers, and single-reader ProcBuf state/event projection",
       "evidence": [
         "crates/esop-zenoh-gateway/src/runtime.rs",
+        "crates/esop-zenoh-gateway/src/runtime_incident.rs",
         "crates/esop-zenoh-gateway/src/procbuf_adapter.rs",
         "crates/esop-zenoh-gateway/tests/procbuf_adapter.rs",
         "crates/esop-zenoh-gateway/tests/query.rs",
+        "crates/esop-zenoh-gateway/tests/runtime_incident.rs",
         "crates/esop-zenoh-gateway/tests/uprobe_abi.rs",
         "crates/esop-zenoh-gateway/tests/zenoh_live.rs",
         "scripts/test-zenoh.sh",

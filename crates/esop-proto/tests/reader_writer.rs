@@ -96,30 +96,29 @@ macro_rules! samples {
             accepted_at_ns: 1500,
             schema_version: 1,
         };
-        let incident = $schema::RuntimeIncident {
-            incident_id: "inc-1".into(),
-            severity: 4,
-            reason_code: 7,
-            window_start_ns: 100,
-            window_end_ns: 200,
-            cycle_sequence: 21,
-            transition_sequence: 19,
-            lost_event_count: 3,
-            affected_component: "supervisor".into(),
-            suggested_action: "stop".into(),
-            schema_version: 1,
-            evidence: vec![$schema::RuntimeEvidence {
-                kind: 3,
-                timestamp_ns: 150,
-                pid: 123,
-                tid: 124,
-                cpu: 2,
-                attach_point: 1,
-                value: 42,
-                cycle_sequence: 21,
-                boot_id: 9,
-            }],
-        };
+        let mut evidence = $schema::RuntimeEvidence::default();
+        evidence.kind = 3;
+        evidence.timestamp_ns = 150;
+        evidence.pid = 123;
+        evidence.tid = 124;
+        evidence.cpu = 2;
+        evidence.attach_point = 1;
+        evidence.value = 42;
+        evidence.cycle_sequence = 21;
+        evidence.boot_id = 9;
+        let mut incident = $schema::RuntimeIncident::default();
+        incident.incident_id = "inc-1".into();
+        incident.severity = 4;
+        incident.reason_code = 7;
+        incident.window_start_ns = 100;
+        incident.window_end_ns = 200;
+        incident.cycle_sequence = 21;
+        incident.transition_sequence = 19;
+        incident.lost_event_count = 3;
+        incident.affected_component = "supervisor".into();
+        incident.suggested_action = "stop".into();
+        incident.schema_version = 1;
+        incident.evidence = vec![evidence];
         let query = $schema::QueryRequest {
             robot_id: "robot_01".into(),
             boot_id: 9,
@@ -227,4 +226,75 @@ fn additive_axis_stop_evidence_is_visible_to_new_readers_without_changing_legacy
             .axis_stops
             .is_empty()
     );
+}
+
+#[test]
+fn additive_runtime_incident_fields_are_visible_to_current_readers_only() {
+    let message = v1::RuntimeIncident {
+        incident_id: "esop-boot-epoch-1".into(),
+        severity: v1::IncidentSeverity::Error as i32,
+        reason_code: 7,
+        window_start_ns: 100,
+        window_end_ns: 200,
+        cycle_sequence: 12,
+        transition_sequence: 9,
+        lost_event_count: 2,
+        affected_component: "host.network".into(),
+        suggested_action: "controlled_stop".into(),
+        schema_version: 1,
+        boot_id: 11,
+        agent_epoch: 3,
+        confidence_percent: 75,
+        cycle_first: 10,
+        cycle_last: 12,
+        evidence_window_ns: 500,
+        pid: 123,
+        tid: 124,
+        cpu: 5,
+        irq: 3,
+        netdev_ifindex: 7,
+        observed_value: u64::from(u32::MAX) + 9,
+        threshold: 42,
+        event_count: 4,
+        evidence: vec![v1::RuntimeEvidence {
+            kind: 2,
+            timestamp_ns: 150,
+            pid: 123,
+            tid: 124,
+            cpu: 5,
+            attach_point: 0,
+            value: u32::MAX,
+            cycle_sequence: 11,
+            boot_id: 11,
+            evidence_id: 99,
+            agent_epoch: 3,
+            transition_sequence: 9,
+            domain: 2,
+            severity: v1::IncidentSeverity::Error as i32,
+            irq: 3,
+            netdev_ifindex: 7,
+            observed_value: u64::from(u32::MAX) + 9,
+            threshold: 42,
+            duration_ns: 1_000,
+            count: 4,
+            detail: 8,
+        }],
+    };
+
+    let bytes = message.encode_to_vec();
+    let old = baseline::RuntimeIncident::decode(bytes.as_slice()).unwrap();
+    assert_eq!(old.incident_id, message.incident_id);
+    assert_eq!(old.cycle_sequence, message.cycle_sequence);
+    assert_eq!(old.evidence[0].value, u32::MAX);
+    assert_eq!(old.evidence[0].boot_id, 11);
+    assert_eq!(
+        v1::RuntimeIncident::decode(bytes.as_slice()).unwrap(),
+        message
+    );
+
+    let relayed = v1::RuntimeIncident::decode(old.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(relayed.boot_id, 0);
+    assert_eq!(relayed.agent_epoch, 0);
+    assert_eq!(relayed.evidence[0].evidence_id, 0);
+    assert_eq!(relayed.evidence[0].observed_value, 0);
 }
