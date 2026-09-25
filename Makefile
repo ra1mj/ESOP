@@ -4,7 +4,7 @@ CARGO ?= cargo
 RUSTUP ?= rustup
 RUST_TARGET ?= aarch64-unknown-none
 
-.PHONY: test test-hil test-zenoh check fmt-check lint release no-std bpf-syntax bpf capability-manifest proto-schema build-report performance-report r2-qualification zenoh-check setup-rust ci
+.PHONY: test test-hil test-zenoh test-ebpf-raw-port-runtime check fmt-check lint release no-std bpf-syntax bpf capability-manifest proto-schema build-report performance-report ebpf-raw-port-report r2-qualification zenoh-check setup-rust ci
 
 test:
 	$(CARGO) test --workspace --all-features
@@ -14,6 +14,9 @@ test-hil:
 
 test-zenoh:
 	./scripts/test-zenoh.sh
+
+test-ebpf-raw-port-runtime:
+	./scripts/test-ebpf-raw-port-runtime.sh
 
 check:
 	$(CARGO) check --workspace --all-features
@@ -58,6 +61,9 @@ performance-report:
 	python3 scripts/validate-performance-report.py build/performance_report.json
 	python3 -m unittest discover -s scripts/tests -p 'test_performance_report.py'
 
+ebpf-raw-port-report:
+	python3 -m unittest discover -s scripts/tests -p 'test_ebpf_raw_port_qualification.py'
+
 r2-qualification:
 	python3 scripts/validate-r2-qualification.py --expected-commit $$(git rev-parse HEAD) --output build/r2_qualification_report.json
 	python3 -m unittest discover -s scripts/tests -p 'test_r2_qualification.py'
@@ -68,4 +74,4 @@ zenoh-check:
 setup-rust:
 	$(RUSTUP) target add $(RUST_TARGET)
 
-ci: fmt-check check test lint release no-std bpf-syntax capability-manifest proto-schema build-report performance-report r2-qualification zenoh-check
+ci: fmt-check check test lint release no-std bpf-syntax capability-manifest proto-schema build-report performance-report ebpf-raw-port-report r2-qualification zenoh-check

@@ -321,8 +321,15 @@ reason 证据解码和 transport-risk 相关器单元测试。该实现与 CO-RE
 不等于目标内核真实队列压力、丢包注入、verifier 和开销资格。raw-port 子路径
 当前已具备稳定 v1 begin/end marker、TX/RX outcome、独立阈值/epoch、固定 1024 项
 per-thread LRU、原子 uprobe pair、96 字节 `RawPortStall` 解码和风险周期相关器拒绝
-条件；它仍不等于目标内核真实 attach、延迟/错误注入、驱动/NIC/线缆/从站归因、
-完整周期测量或实时开销资格。
+条件。专用 `make test-ebpf-raw-port-runtime` 还会在特权托管 Linux 上关闭无关
+tracepoint，加载真实 CO-RE 对象并通过 verifier，把完整 marker pair 精确附加到夹具
+自身，以 WKC-risk cycle 包围一个 25 ms 延迟释放、阈值为 5 ms 的 Unix-domain
+阻塞 `recv(2)`，再要求 ringbuf 解码、begin/completion/stall 统计和唯一
+`HostPortStall` controlled-stop incident 全部自洽、零 mismatch/loss，最后生成并校验
+`build/ebpf_raw_port_qualification.json`。该资格只覆盖共享 Unix-socket
+marker-to-incident 路径；真实 AF_PACKET 非阻塞 RX/NIC 负载、生产目标内核、
+驱动/NIC/线缆/从站归因、完整周期、开销/WCET 和长时 HIL 仍未资格化，因此
+EBPF-004 整体保持 partial。
 
 EBPF-005 当前已具备有界 CPU/进程页错误窗口、阈值事件、架构错误码 detail
 解码和 cycle-risk 相关器单元测试，并已把进程退出限制为受跟踪 TGID 的主

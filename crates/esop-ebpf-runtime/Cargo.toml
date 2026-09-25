@@ -10,6 +10,10 @@ rust-version.workspace = true
 aya = "0.13.1"
 esop-ebpf-agent = { path = "../esop-ebpf-agent" }
 
+[dev-dependencies]
+esop-ethercat-linux-port = { path = "../esop-ethercat-linux-port" }
+libc = "0.2"
+
 [lib]
 name = "esop_ebpf_runtime"
 path = "src/lib.rs"

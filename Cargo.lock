@@ -659,6 +659,8 @@ version = "0.1.0"
 dependencies = [
  "aya",
  "esop-ebpf-agent",
+ "esop-ethercat-linux-port",
+ "libc",
 ]
 
 [[package]]

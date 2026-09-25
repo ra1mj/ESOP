@@ -17,14 +17,17 @@
     {
       "id": "linux_raw_port",
       "status": "development_hil",
-      "scope": "Linux AF_PACKET port, deterministic simulator and stable v1 raw-socket syscall observation markers",
+      "scope": "Linux AF_PACKET port, deterministic simulator, stable v1 raw-socket syscall observation markers and privileged shared marker-to-incident host qualification",
       "evidence": [
         "crates/esop-ethercat-linux-port/src/lib.rs",
         "crates/esop-ethercat-linux-port/src/sim.rs",
         "crates/esop-ethercat-linux-port/tests/master_sim.rs",
-        "crates/esop-ethercat-linux-port/tests/uprobe_abi.rs"
+        "crates/esop-ethercat-linux-port/tests/uprobe_abi.rs",
+        "crates/esop-ebpf-runtime/examples/raw_port_qualification.rs",
+        "scripts/test-ebpf-raw-port-runtime.sh",
+        "scripts/validate-ebpf-raw-port-qualification.py"
       ],
-      "limitation": "Development and HIL use; markers cover send/recv syscall duration only, with no target uprobe overhead, driver/NIC/wire/slave, complete-cycle or production real-time qualification claim"
+      "limitation": "The privileged Unix-socket fixture qualifies the shared marker/load/attach/ringbuf/correlator path only; real AF_PACKET timing, nonblocking RX under NIC load, production-target uprobe overhead, driver/NIC/wire/slave timing, complete-cycle behavior and production real-time qualification remain open"
     },
     {
       "id": "cia402_profile",
@@ -127,7 +130,7 @@
     {
       "id": "ebpf_observation",
       "status": "partial",
-      "scope": "Linux CO-RE loader, tracepoint attach, optional atomic Zenoh publish/callback and Linux raw-port syscall uprobe pairs, fixed event decode, bounded scheduler runqueue and tracked-TID migration evidence, bounded IRQ/softirq duration evidence, bounded EtherType/ifindex skb drop windows, bounded tracked-process page-fault windows, bounded cpufreq policy-limit episodes, bounded request-correlated gateway and per-thread raw-port syscall duration evidence, leader-thread process-exit filtering, OOM victim-PID attribution and incident correlation",
+      "scope": "Linux CO-RE loader, tracepoint attach, optional atomic Zenoh publish/callback and Linux raw-port syscall uprobe pairs, fixed event decode, privileged raw-port marker-to-incident host qualification, bounded scheduler runqueue and tracked-TID migration evidence, bounded IRQ/softirq duration evidence, bounded EtherType/ifindex skb drop windows, bounded tracked-process page-fault windows, bounded cpufreq policy-limit episodes, bounded request-correlated gateway and per-thread raw-port syscall duration evidence, leader-thread process-exit filtering, OOM victim-PID attribution and incident correlation",
       "evidence": [
         "crates/esop-ebpf-agent/src/lib.rs",
         "crates/esop-ebpf-runtime/src/linux.rs",
@@ -137,9 +140,14 @@
         "crates/esop-zenoh-gateway/tests/uprobe_abi.rs",
         "bpf/esop_runtime.bpf.c",
         "crates/esop-procbuf/tests/cross_layer.rs",
+        "crates/esop-ebpf-runtime/examples/raw_port_qualification.rs",
+        "scripts/test-ebpf-raw-port-runtime.sh",
+        "scripts/validate-ebpf-raw-port-qualification.py",
+        "scripts/tests/test_ebpf_raw_port_qualification.py",
+        ".github/workflows/ci.yml",
         "docs/esop-ebpf-runtime-observability.md"
       ],
-      "limitation": "Zenoh publish/command/query callback and Linux raw-port send/recv syscall markers are implemented for user-space stalls; raw-port cycle/driver/NIC/wire/slave timing, ROS2, recorder and Zenoh IPC/serialization/permit/reconnect hooks remain open. Target-kernel permissions, verifier and real uprobe attachment, scheduler migration and IRQ/softirq pressure injection, real NIC/page-fault/OOM/process-exit/cpufreq-limit/gateway/raw-port stall injection, migration-cause/affinity/cache-impact qualification, major/minor fault attribution, OOM victim TGID resolution, instantaneous-frequency/residency/cause attribution, overhead and production hook qualification remain open"
+      "limitation": "Hosted privileged Linux qualifies the raw-port shared marker pair through CO-RE verifier/load, real uprobe attachment, delayed Unix recv, ringbuf decode and HostPortStall correlation. It does not qualify real AF_PACKET/NIC load, production target kernels, raw-port cycle/driver/NIC/wire/slave timing, overhead/WCET or production hooks. ROS2, recorder, Zenoh IPC/serialization/permit/reconnect, scheduler migration and IRQ/softirq pressure, real NIC/page-fault/OOM/process-exit/cpufreq-limit/gateway injection, migration-cause/affinity/cache-impact, major/minor fault attribution, OOM victim TGID resolution and instantaneous-frequency/residency/cause qualification remain open"
     },
     {
       "id": "stm32_hpmicro_ports",

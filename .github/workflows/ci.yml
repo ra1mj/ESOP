@@ -45,3 +45,23 @@ jobs:
           mkdir -p bpf/build
           cp bpf/vmlinux.h bpf/build/vmlinux.h
           make -C bpf
+
+  ebpf-raw-port-runtime:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install eBPF build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+      - name: Run privileged raw-port runtime qualification
+        run: make test-ebpf-raw-port-runtime
+      - name: Upload raw-port runtime qualification
+        uses: actions/upload-artifact@v4
+        with:
+          name: esop-ebpf-raw-port-runtime-qualification
+          path: build/ebpf_raw_port_qualification.json
+          if-no-files-found: error

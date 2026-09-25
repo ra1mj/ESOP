@@ -833,6 +833,10 @@ over-threshold duration plus transport-risk correlation.
 - Scope: this contract covers only valid TX `send(2)` and every nonblocking
   `recv(2)` syscall in `LinuxRawPort`. It does not qualify caller scheduling,
   driver queues, NAPI/IRQ, NIC DMA, wire, slave response, WKC, or full cycles.
+- The privileged host qualification covers the shared marker/load/attach/
+  ring-buffer/correlator path using a blocking Unix-domain `recv(2)` fixture.
+  It does not convert that fixture into AF_PACKET, hardware, WCET, or production
+  realtime evidence.
 
 ### 2. Signatures
 
@@ -843,6 +847,9 @@ over-threshold duration plus transport-risk correlation.
   `BpfRuntime::update_raw_port_tracking(threshold_ns)`.
 - Attachment: `BpfRuntime::attach_raw_port_probes(target, pid, required)`
   attaches the exact marker-symbol pair transactionally.
+- Qualification entry: `make test-ebpf-raw-port-runtime`; successful execution
+  writes `build/ebpf_raw_port_qualification.json`, which is independently
+  checked by `scripts/validate-ebpf-raw-port-qualification.py`.
 
 ### 3. Contracts
 
@@ -863,6 +870,11 @@ over-threshold duration plus transport-risk correlation.
 - `RawPortStall` classification requires a nonzero threshold, strict
   `duration_ns > threshold`, consistent observed duration, and a correlated
   deadline/WKC/DC-risk cycle before assigning `HOST_PORT_STALL`.
+- The qualification disables unrelated tracepoints, tracks its own PID,
+  requires both raw-port attach bits, publishes the same risk cycle to kernel
+  and agent, and bounds polling by iteration count and elapsed time. It may
+  publish `qualified` only after one expected incident, one begin/completion/
+  stall, and zero mismatch/loss have all been observed.
 
 ### 4. Validation & Error Matrix
 
@@ -874,11 +886,17 @@ over-threshold duration plus transport-risk correlation.
 - Missing end state, duplicate begin, invalid interface/operation/outcome,
   backwards time, or stale epoch -> mismatch statistics and no incident.
 - Map/ring-buffer failure -> bounded loss accounting; never block the port.
+- Missing root/passwordless sudo, verifier/load failure, partial attach, poll
+  timeout, malformed/rejected evidence, or report-schema mismatch -> nonzero
+  qualification exit and no success artifact.
 
 ### 5. Good/Base/Bad Cases
 
 - Good: TX `send(2)` on ifindex 7 takes 1.5 ms against a 1 ms threshold during
   a WKC-risk cycle; emit one attributed controlled-stop recommendation.
+- Good qualification: a 25 ms Unix receive against a 5 ms threshold produces
+  one RX/frame `HostPortStall` for the fixture PID/TID and synthetic ifindex 7,
+  with complete attach masks and zero mismatch/loss.
 - Base: an at-threshold RX Empty call deletes state and emits no evidence.
 - Bad: include frame validation/full cycle in the duration, infer a driver or
   slave root cause, leave stale state after an invalid end, or add a userspace
@@ -895,6 +913,10 @@ over-threshold duration plus transport-risk correlation.
 - Correlator tests reject at-threshold, inconsistent, zero-threshold, and
   healthy-cycle evidence. BPF syntax and real CO-RE compilation cover the map,
   x86_64 marker argument ABI, outcome masks, and state deletion path.
+- The privileged CI job must execute the real object and exact marker pair,
+  validate the JSON artifact, and upload it. Validator regression tests reject
+  missing/unknown/mistyped fields, booleans as integers, partial pairs,
+  inconsistent timing, wrong incident semantics, loss, and mismatch.
 
 ### 7. Wrong vs Correct
 
@@ -908,6 +930,8 @@ and call an over-threshold syscall proof of NIC or slave failure.
 Bracket only raw socket syscalls with stable no-op markers, track each thread
 in an independent bounded epoch-aware map, attach the pair transactionally,
 and require internally consistent duration plus transport-risk correlation.
+Use the Unix-socket fixture only to qualify the shared observation chain, and
+keep AF_PACKET/NIC/driver/wire/slave and realtime-performance claims separate.
 
 ## Code Review Checklist
 
