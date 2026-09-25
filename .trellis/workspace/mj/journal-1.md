@@ -403,3 +403,36 @@ Added a privileged Linux qualification that verifies the real CO-RE object, exac
 ### Next Steps
 
 - None - task complete
+
+
+## Session 13: Privileged eBPF gateway runtime qualification
+
+**Date**: 2026-09-25
+**Task**: Privileged eBPF gateway runtime qualification
+**Branch**: `main`
+
+### Summary
+
+Implemented and documented the privileged Zenoh gateway eBPF marker-to-incident qualification. Added the production-symbol fixture, exact-schema validator and regression tests, minimized-privilege runner, Make/CI integration, and bounded claims. Local quality gates passed; GitHub Actions run 36111379291 passed all jobs and its uploaded report was downloaded and revalidated with two over-threshold gateway records, one merged incident, full attach mask, and zero mismatch/loss.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2fc62b8` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
