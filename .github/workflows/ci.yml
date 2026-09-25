@@ -28,6 +28,7 @@ jobs:
           name: esop-build-evidence
           path: |
             build/*_report.json
+            build/generated/sim-dual-axis/*
             qualification/*.json
             qualification/KNOWN_LIMITATIONS.md
           if-no-files-found: error

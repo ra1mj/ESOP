@@ -79,6 +79,11 @@ pub enum Cia402AxisCommandPolicyError {
     ReversedPositionBounds,
     NonFiniteLimit,
     NegativeLimit,
+    NonPositiveProductLimit,
+    RawPositionRangeOverflow,
+    RawVelocityLimitOverflow,
+    RawTorqueLimitOverflow,
+    RawPositionStepOverflow,
 }
 
 #[cfg(feature = "cia402")]
@@ -111,6 +116,49 @@ impl Cia402AxisCommandPolicy {
         }
         if limits.iter().any(|value| *value < 0.0) {
             return Err(Cia402AxisCommandPolicyError::NegativeLimit);
+        }
+        Ok(())
+    }
+
+    /// Apply the stricter checks required when freezing a generated product.
+    /// Runtime compatibility keeps [`Self::validate`] permissive of zero
+    /// limits, while a generated product must expose usable positive bounds
+    /// whose complete SI envelope is representable by CiA 402 raw fields.
+    pub fn validate_for_product(self) -> Result<(), Cia402AxisCommandPolicyError> {
+        self.validate()?;
+        let limits = [
+            self.max_velocity_radians_per_second,
+            self.max_torque_newton_metres,
+            self.max_position_step_radians,
+        ];
+        if limits.iter().any(|value| *value <= 0.0) {
+            return Err(Cia402AxisCommandPolicyError::NonPositiveProductLimit);
+        }
+
+        for position in [self.min_position_radians, self.max_position_radians] {
+            if rounded_i32(
+                position * self.position_units_per_radian + f64::from(self.position_offset),
+            )
+            .is_none()
+            {
+                return Err(Cia402AxisCommandPolicyError::RawPositionRangeOverflow);
+            }
+        }
+
+        let velocity =
+            self.max_velocity_radians_per_second * self.velocity_units_per_radian_per_second.abs();
+        if rounded_i32(velocity).is_none() || rounded_i32(-velocity).is_none() {
+            return Err(Cia402AxisCommandPolicyError::RawVelocityLimitOverflow);
+        }
+
+        let torque = self.max_torque_newton_metres * self.torque_units_per_newton_metre.abs();
+        if rounded_i16(torque).is_none() || rounded_i16(-torque).is_none() {
+            return Err(Cia402AxisCommandPolicyError::RawTorqueLimitOverflow);
+        }
+
+        let position_step = self.max_position_step_radians * self.position_units_per_radian.abs();
+        if floored_limit(position_step, f64::from(i32::MAX)).is_none() {
+            return Err(Cia402AxisCommandPolicyError::RawPositionStepOverflow);
         }
         Ok(())
     }
@@ -1191,6 +1239,46 @@ mod command_tests {
                 }]
             );
         }
+    }
+
+    #[test]
+    fn product_policy_validation_rejects_zero_limits_and_complete_raw_envelope_overflow() {
+        assert_eq!(POLICY.validate_for_product(), Ok(()));
+
+        let mut zero_limit = POLICY;
+        zero_limit.max_position_step_radians = 0.0;
+        assert_eq!(
+            zero_limit.validate_for_product(),
+            Err(Cia402AxisCommandPolicyError::NonPositiveProductLimit)
+        );
+
+        let mut position_overflow = POLICY;
+        position_overflow.max_position_radians = 1.0e20;
+        assert_eq!(
+            position_overflow.validate_for_product(),
+            Err(Cia402AxisCommandPolicyError::RawPositionRangeOverflow)
+        );
+
+        let mut velocity_overflow = POLICY;
+        velocity_overflow.velocity_units_per_radian_per_second = 1.0e20;
+        assert_eq!(
+            velocity_overflow.validate_for_product(),
+            Err(Cia402AxisCommandPolicyError::RawVelocityLimitOverflow)
+        );
+
+        let mut torque_overflow = POLICY;
+        torque_overflow.torque_units_per_newton_metre = 1.0e20;
+        assert_eq!(
+            torque_overflow.validate_for_product(),
+            Err(Cia402AxisCommandPolicyError::RawTorqueLimitOverflow)
+        );
+
+        let mut step_overflow = POLICY;
+        step_overflow.max_position_step_radians = 1.0e20;
+        assert_eq!(
+            step_overflow.validate_for_product(),
+            Err(Cia402AxisCommandPolicyError::RawPositionStepOverflow)
+        );
     }
 
     #[test]

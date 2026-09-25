@@ -1,0 +1,146 @@
+{
+  "schema_version": "esop.product.v1",
+  "product": {
+    "name": "ESOP dual-axis simulator",
+    "robot_id": "0x000000000000e502",
+    "policy_version": 1
+  },
+  "procbuf": {
+    "axes": 2,
+    "io_channels": 16,
+    "domains": 2,
+    "event_capacity": 64
+  },
+  "cycle": {
+    "base_period_ns": 1000000,
+    "deadline_ns": 800000
+  },
+  "capacities": {
+    "max_process_image_bytes": 128,
+    "max_pdo_entries_per_domain": 64,
+    "max_datagrams_per_domain": 2,
+    "max_frames_per_domain": 2,
+    "max_schedule_slots": 16
+  },
+  "platform": {
+    "board": "host-simulator",
+    "soc": "generic-x86_64",
+    "port": "deterministic-linux-simulator",
+    "rtos_or_kernel": "host Linux; not target qualified",
+    "cache_policy": "host managed; target cache qualification pending",
+    "dma_bytes": null
+  },
+  "domains": [
+    {
+      "id": 0,
+      "name": "motion",
+      "logical_address": "0x00001000",
+      "process_image_offset": 0,
+      "process_image_capacity_bytes": 64,
+      "period_ticks": 1,
+      "phase_ticks": 0,
+      "max_pdo_entries": 32,
+      "max_frames": 2
+    },
+    {
+      "id": 1,
+      "name": "io",
+      "logical_address": "0x00001100",
+      "process_image_offset": 64,
+      "process_image_capacity_bytes": 16,
+      "period_ticks": 4,
+      "phase_ticks": 0,
+      "max_pdo_entries": 8,
+      "max_frames": 2
+    }
+  ],
+  "slaves": [
+    {
+      "name": "drive_left",
+      "kind": "cia402_drive",
+      "position": 0,
+      "station_address": "0x1001",
+      "esi": {
+        "label": "esop-sim-drive-v1",
+        "path": "esi/esop-sim.xml"
+      },
+      "vendor_id": "0x0000e500",
+      "product_code": "0x00004020",
+      "revision": "0x00000001",
+      "serial": "0x00000001",
+      "domain_id": 0,
+      "rx_pdos": ["0x1600"],
+      "tx_pdos": ["0x1a00"]
+    },
+    {
+      "name": "drive_right",
+      "kind": "cia402_drive",
+      "position": 1,
+      "station_address": "0x1002",
+      "esi": {
+        "label": "esop-sim-drive-v1",
+        "path": "esi/esop-sim.xml"
+      },
+      "vendor_id": "0x0000e500",
+      "product_code": "0x00004020",
+      "revision": "0x00000001",
+      "serial": "0x00000002",
+      "domain_id": 0,
+      "rx_pdos": ["0x1600"],
+      "tx_pdos": ["0x1a00"]
+    },
+    {
+      "name": "io_block",
+      "kind": "ethercat_io",
+      "position": 2,
+      "station_address": "0x1003",
+      "esi": {
+        "label": "esop-sim-io-v1",
+        "path": "esi/esop-sim.xml"
+      },
+      "vendor_id": "0x0000e500",
+      "product_code": "0x00007010",
+      "revision": "0x00000001",
+      "serial": null,
+      "domain_id": 1,
+      "rx_pdos": ["0x1601"],
+      "tx_pdos": ["0x1a01"]
+    }
+  ],
+  "axes": [
+    {
+      "index": 0,
+      "name": "left_joint",
+      "slave": "drive_left",
+      "mode": "csp",
+      "policy": {
+        "position_units_per_radian": 100000.0,
+        "velocity_units_per_radian_per_second": 1000.0,
+        "torque_units_per_newton_metre": 100.0,
+        "position_offset": 0,
+        "min_position_radians": -3.141592653589793,
+        "max_position_radians": 3.141592653589793,
+        "max_velocity_radians_per_second": 10.0,
+        "max_torque_newton_metres": 100.0,
+        "max_position_step_radians": 0.02
+      }
+    },
+    {
+      "index": 1,
+      "name": "right_joint",
+      "slave": "drive_right",
+      "mode": "csp",
+      "policy": {
+        "position_units_per_radian": -100000.0,
+        "velocity_units_per_radian_per_second": -1000.0,
+        "torque_units_per_newton_metre": -100.0,
+        "position_offset": 0,
+        "min_position_radians": -3.141592653589793,
+        "max_position_radians": 3.141592653589793,
+        "max_velocity_radians_per_second": 10.0,
+        "max_torque_newton_metres": 100.0,
+        "max_position_step_radians": 0.02
+      }
+    }
+  ]
+}

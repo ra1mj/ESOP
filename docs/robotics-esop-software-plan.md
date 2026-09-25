@@ -125,7 +125,7 @@ Platform layer
 | `esop_zenoh_gateway` | C++/Rust/C，Linux | Protobuf pub/sub/query、远程状态与命令网关 | Zenoh、`esop_ipc` |
 | `esop_ros2_control` | C++，Linux | `hardware_interface::SystemInterface` 插件，`read()`/`write()` 映射 ProcBuf | ROS 2、`esop_ipc` |
 | `esop_ros2_bridge` | C++，Linux | ROS topic/service/action 与 ESOP Proto/诊断的显式映射 | ROS 2、`esop_ipc` |
-| `esop_cfggen` | Rust/Python/C++，宿主机 | ESI/设备配置/URDF 约束输入生成静态 C 配置和 ProcBuf layout | 非固件工具依赖 |
+| `esop-cfggen` | Rust，宿主机 | 严格产品 JSON 与受限 ESI 子集生成静态 C 配置、Domain/PDO/Frame Plan、设备清单、ProcBuf layout 和 build input | `serde`、`quick-xml`、SHA-256；非固件工具依赖 |
 | `esop_sim` | C++/Python，CI | 虚拟从站、PCAP 回放、ProcBuf 与 API 合约测试 | host 工具链 |
 
 `esop_ecat`、`esop_coe`、`esop_dc`、`esop_profile_cia402`、`esop_device` 与 `esop_procbuf` 是 P0 实时闭环。Zenoh、ROS 2 和 protobuf runtime 绝不能进入这些模块的链接依赖图。
@@ -134,18 +134,23 @@ Platform layer
 
 当前 `crates/esop-ethercat-core/src/domain_registry.rs` 已提供固定容量的多 Domain/PDO/datagram 注册层：它在激活前分配稳定 bit offset、校验过程映像和逻辑地址范围、生成多速率调度表，并在激活后锁定配置。`SiiConfigurationCandidate` 可冻结为 `SiiDomainProjection`，将方向局部 PDO 布局与已核验的 FMMU/SyncManager 映射事务式登记到统一 Domain；字节对齐的 segment 可自动绑定 `LWR`/`LRD`，`FramePlanSet` 可按 MTU 拆分并在激活时原子发布。它不替代真实 SII/ESI 自动发现或 FMMU/SM 硬件回读。
 
+当前 `crates/esop-cfggen/` 已把上述注册层用于宿主机产品编译：显式 ESI identity/PDO 选择、稳定 Rx-then-Tx offset、每 Domain 的 LWR/LRD、expected WKC、多速率 schedule、CiA 402 对象/缩放/限幅和 ProcBuf ABI v6 布局会在发布前统一验证。它生成开发证据，不替代启动时 SII/拓扑 read-back、真实从站互操作或 HIL。
+
 ## 5. ProcBuf：机器人实时数据载体
 
 ### 5.1 目标
 
 ProcBuf 是 ESOP 的稳定实时 ABI，用于连接：EtherCAT PDO Domain、设备 profile、实时控制器和 Linux/ROS 2 网关。它是**固定大小、预分配、生成式布局**的共享数据结构，而不是通用消息总线。
 
-每个机器人配置由 `esop_cfggen` 生成：
+每个机器人配置由 `esop-cfggen` 生成：
 
-- `esop_procbuf_layout.h`：C 结构、offset、size、对齐与 schema hash；
-- `robot_esop.proto`：控制面/观测面的 Protobuf 消息；
-- `robot_esop.yaml`：人可读布局与设备能力报告；
-- EtherCAT 静态从站、PDO、DC、Domain 配置。
+- `esop_product_config.h`：固定 slave、Domain、PDO、datagram、axis policy 和 ProcBuf 常量；
+- `product_config.json`：规范化注册、Frame Plan、schedule 和 config SHA-256；
+- `device_inventory.json`：ESI identity、选中 PDO 和语义内容 SHA-256；
+- `procbuf_layout.json`：ABI v6 维度、精确 region bytes 和 layout hash；
+- `robot_build_input.json`：设备、PDO/frame/wire/WKC/copy、周期和资源输入。
+
+Protobuf schema 仍由 `esop-proto` 独立版本化，不由当前 cfggen 动态生成。
 
 ### 5.2 内存布局
 
@@ -311,10 +316,10 @@ ProcBuf State 同时携带 `ecat_time_ns`、`esop_monotonic_time_ns` 和转换�
 
 | 里程碑 | 交付内容 | 验收门槛 |
 | --- | --- | --- |
-| R0：契约与仿真基线 | 目录结构、ProcBuf ABI、`.proto` v1、设备模型、PCAP/虚拟驱动仿真 | 同一 layout 从生成器产生 C header/YAML/proto descriptor；ABI/Schema 兼容检查在 CI 通过。 |
+| R0：契约与仿真基线 | 目录结构、ProcBuf ABI、`.proto` v1、设备模型、PCAP/虚拟驱动仿真 | 同一产品从生成器产生静态 C header、规范化 JSON、设备清单、ProcBuf layout 和 build input；ABI/Schema 兼容检查在 CI 通过。 |
 | R1：机器人 EtherCAT 实时节点 | `esop_ecat`、CoE、DC、ProcBuf、CiA 402 单轴和分布式 IO，STM32/HPM/Linux test ports | 1/8 轴驱动 + IO 达到 OP；500 us/1 ms 目标周期的 WKC、jitter、无分配报告通过。 |
 | R2：多设备与鲁棒性 | 多 Domain、多速率、外设插件框架、事件环、诊断、恢复策略、配置生成 | EtherCAT + CAN-FD/I2C/SPI 的设备可同一 ProcBuf 表达；故障注入不破坏 RT 周期。 |
-| R3：IPC 与 Zenoh/Protobuf 网关 | `esop_ipc`、`esop_proto`、gateway、ACL、query、记录回放、fleet key namespace | IPC/网络丢失与重连、supervisor 新 boot、schema 升级、命令 TTL 和授权拒绝测试通过。当前宿主机 Unix datagram、共享 ProcBuf/Protobuf payload、严格命令 target 到 ProcBuf v6/RT permit，以及冻结策略下的 RT CiA 402 命令执行与实际反馈/错误码/质量回传契约已完成；shared memory/RPMsg、生产 ACL、产品策略生成、WCET/实物 HIL 尚未完成。 |
+| R3：IPC 与 Zenoh/Protobuf 网关 | `esop_ipc`、`esop_proto`、gateway、ACL、query、记录回放、fleet key namespace | IPC/网络丢失与重连、supervisor 新 boot、schema 升级、命令 TTL 和授权拒绝测试通过。当前宿主机 Unix datagram、共享 ProcBuf/Protobuf payload、严格命令 target 到 ProcBuf v6/RT permit、冻结策略下的 RT CiA 402 命令执行/反馈，以及受限 ESI 产品策略生成已完成；shared memory/RPMsg、生产 ACL、生成策略到生产固件的发布接线、WCET/实物 HIL 尚未完成。 |
 | R4：ROS 2 控制接入 | `esop_ros2_control`、ROS bridge、URDF/ros2_control 配置生成、DDS 与 Zenoh RMW 测试矩阵 | `joint_trajectory_controller` 驱动仿真和实机；read/write 不分配、不等待网络。 |
 | R5：产品扩展 | 力控接口、FoE、EoE/SoE/VoE、冗余、FSoE 项目集成 | 每个扩展独立编译开关，提供对周期、RAM、Flash 和故障模型的影响报告。 |
 
@@ -348,7 +353,7 @@ Linux ARM host + STM32/HPM real-time node
 | ROB-008 | P1 | Zenoh gateway 必须执行 key namespace、命令 TTL、source identity、ACL 和限流。 | 未授权、重放、过期、断连重连测试。 |
 | ROB-009 | P1 | `esop_ros2_control` 的 `read()`/`write()` 只访问 ProcBuf/IPC，不直接访问 EtherCAT 或网络。 | 单元测试、依赖检查和 controller HIL。 |
 | ROB-010 | P1 | ROS 2 使用 Zenoh RMW 时，router 存活、发现失败和版本固定必须是部署健康检查项。 | router 不可达/恢复的系统测试。 |
-| ROB-011 | P1 | 每个机器人 build 输出静态内存、ProcBuf 大小、PDO 带宽、预期 WKC、周期预算和设备清单。 | CI 生成并审核 `robot_build_report.json`。 |
+| ROB-011 | P1 | 每个机器人 build 输出静态内存、ProcBuf 大小、PDO 带宽、预期 WKC、周期预算和设备清单。 | CI 通过 `make cfggen-build-report` 生成五个产品产物并审核 `robot_build_report.json`；生成证据保持未资格。 |
 | ROB-012 | P2 | FSoE/安全 PLC 集成须形成独立安全需求、测试和证据包，不复用普通 EtherCAT 验收结论。 | 安全项目独立评审通过。 |
 
 ## 11. 测试、可观测性和发布标准

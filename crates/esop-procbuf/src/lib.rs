@@ -7,6 +7,7 @@
 //! never observes a partially written page and a writer never waits for a
 //! reader. The event ring is a bounded SPSC channel with observable overflow.
 
+use core::alloc::Layout;
 use core::cell::UnsafeCell;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -37,6 +38,26 @@ pub struct ProcBufDimensions {
     pub io_channels: u16,
     pub domains: u16,
     pub event_capacity: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcBufLayoutDescriptor {
+    pub dimensions: ProcBufDimensions,
+    pub header_bytes: u32,
+    pub command_page_bytes: u32,
+    pub state_page_bytes: u32,
+    pub event_record_bytes: u32,
+    pub event_ring_bytes: u32,
+    pub region_bytes: u32,
+    pub layout_hash: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcBufLayoutError {
+    AxisCapacityExceeded,
+    InvalidEventCapacity,
+    LayoutOverflow,
+    RegionSizeOverflow,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1052,6 +1073,138 @@ impl<const AXES: usize, const IO: usize, const DOMAINS: usize, const EVENTS: usi
     }
 }
 
+/// Calculate the exact fixed ABI shape for runtime-selected capacities.
+///
+/// This follows Rust's `repr(C)` field layout rules and is tested against the
+/// const-generic ABI types. It does not allocate and does not change ABI v6.
+pub fn describe_layout(
+    dimensions: ProcBufDimensions,
+) -> Result<ProcBufLayoutDescriptor, ProcBufLayoutError> {
+    if dimensions.axes > 32 {
+        return Err(ProcBufLayoutError::AxisCapacityExceeded);
+    }
+    if dimensions.event_capacity == 0 || !dimensions.event_capacity.is_power_of_two() {
+        return Err(ProcBufLayoutError::InvalidEventCapacity);
+    }
+
+    let axes = usize::from(dimensions.axes);
+    let io_channels = usize::from(dimensions.io_channels);
+    let domains = usize::from(dimensions.domains);
+    let events = usize::from(dimensions.event_capacity);
+
+    let command_page = c_struct_layout(&[
+        array_layout::<u64>(6)?,
+        Layout::new::<u32>(),
+        Layout::new::<ControlMode>(),
+        Layout::new::<u8>(),
+        Layout::new::<u8>(),
+        array_layout::<u8>(3)?,
+        Layout::new::<u32>(),
+        array_layout::<JointCommand>(axes)?,
+        array_layout::<IoCommand>(io_channels)?,
+    ])?;
+    let quality_page = c_struct_layout(&[
+        Layout::new::<u64>(),
+        array_layout::<u8>(4)?,
+        Layout::new::<u32>(),
+        array_layout::<u64>(2)?,
+        Layout::new::<i64>(),
+        Layout::new::<CyclicQualityMask>(),
+        array_layout::<DomainQuality>(domains)?,
+    ])?;
+    let state_page = c_struct_layout(&[
+        array_layout::<u64>(4)?,
+        array_layout::<JointState>(axes)?,
+        array_layout::<IoState>(io_channels)?,
+        quality_page,
+        Layout::new::<LifecycleSummary>(),
+        array_layout::<AxisStopEvidence>(axes)?,
+        Layout::new::<LifecycleHistory>(),
+        Layout::new::<RuntimeObservation>(),
+    ])?;
+    let command_pages = double_page_layout(command_page)?;
+    let state_pages = double_page_layout(state_page)?;
+    let event_ring = c_struct_layout(&[
+        array_layout::<ProcBufEvent>(events)?,
+        array_layout::<AtomicU32>(3)?,
+    ])?;
+    let region = c_struct_layout(&[
+        Layout::new::<ProcBufHeader>(),
+        command_pages,
+        state_pages,
+        event_ring,
+    ])?;
+
+    let header_bytes = size_to_u32(size_of::<ProcBufHeader>())?;
+    let command_page_bytes = size_to_u32(command_page.size())?;
+    let state_page_bytes = size_to_u32(state_page.size())?;
+    let event_record_bytes = size_to_u32(size_of::<ProcBufEvent>())?;
+    let event_ring_bytes = size_to_u32(event_ring.size())?;
+    let region_bytes = size_to_u32(region.size())?;
+
+    let mut layout_hash = 0xCBF2_9CE4_8422_2325u64;
+    for value in [
+        u64::from(ABI_VERSION),
+        u64::from(dimensions.axes),
+        u64::from(dimensions.io_channels),
+        u64::from(dimensions.domains),
+        u64::from(dimensions.event_capacity),
+        u64::from(header_bytes),
+        u64::from(command_page_bytes),
+        u64::from(state_page_bytes),
+        u64::from(event_record_bytes),
+        u64::from(region_bytes),
+    ] {
+        layout_hash = hash_bytes(layout_hash, value);
+    }
+
+    Ok(ProcBufLayoutDescriptor {
+        dimensions,
+        header_bytes,
+        command_page_bytes,
+        state_page_bytes,
+        event_record_bytes,
+        event_ring_bytes,
+        region_bytes,
+        layout_hash,
+    })
+}
+
+fn array_layout<T>(length: usize) -> Result<Layout, ProcBufLayoutError> {
+    Layout::array::<T>(length).map_err(|_| ProcBufLayoutError::LayoutOverflow)
+}
+
+fn repeated_layout(layout: Layout, length: usize) -> Result<Layout, ProcBufLayoutError> {
+    let size = layout
+        .size()
+        .checked_mul(length)
+        .ok_or(ProcBufLayoutError::LayoutOverflow)?;
+    Layout::from_size_align(size, layout.align()).map_err(|_| ProcBufLayoutError::LayoutOverflow)
+}
+
+fn c_struct_layout(fields: &[Layout]) -> Result<Layout, ProcBufLayoutError> {
+    let mut layout = Layout::from_size_align(0, 1).expect("unit layout is valid");
+    for field in fields {
+        layout = layout
+            .extend(*field)
+            .map_err(|_| ProcBufLayoutError::LayoutOverflow)?
+            .0;
+    }
+    Ok(layout.pad_to_align())
+}
+
+fn double_page_layout(page: Layout) -> Result<Layout, ProcBufLayoutError> {
+    c_struct_layout(&[
+        repeated_layout(page, 2)?,
+        array_layout::<AtomicU32>(2)?,
+        Layout::new::<AtomicU32>(),
+    ])
+}
+
+fn size_to_u32(size: usize) -> Result<u32, ProcBufLayoutError> {
+    u32::try_from(size).map_err(|_| ProcBufLayoutError::RegionSizeOverflow)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1104,6 +1257,80 @@ mod tests {
             header.validate::<2, 1, 2, 2>(42, 9),
             Err(HeaderError::LayoutHashMismatch)
         );
+    }
+
+    fn assert_runtime_layout<
+        const AXES: usize,
+        const IO: usize,
+        const DOMAINS: usize,
+        const EVENTS: usize,
+    >() {
+        let descriptor = describe_layout(ProcBufDimensions {
+            axes: AXES as u16,
+            io_channels: IO as u16,
+            domains: DOMAINS as u16,
+            event_capacity: EVENTS as u16,
+        })
+        .unwrap();
+        assert_eq!(descriptor.header_bytes as usize, size_of::<ProcBufHeader>());
+        assert_eq!(
+            descriptor.command_page_bytes as usize,
+            size_of::<CommandPage<AXES, IO>>()
+        );
+        assert_eq!(
+            descriptor.state_page_bytes as usize,
+            size_of::<StatePage<AXES, IO, DOMAINS>>()
+        );
+        assert_eq!(
+            descriptor.event_record_bytes as usize,
+            size_of::<ProcBufEvent>()
+        );
+        assert_eq!(
+            descriptor.event_ring_bytes as usize,
+            size_of::<EventRing<EVENTS>>()
+        );
+        assert_eq!(
+            descriptor.region_bytes as usize,
+            size_of::<ProcBuf<AXES, IO, DOMAINS, EVENTS>>()
+        );
+        assert_eq!(
+            descriptor.layout_hash,
+            layout_hash::<AXES, IO, DOMAINS, EVENTS>()
+        );
+    }
+
+    #[test]
+    fn runtime_layout_matches_const_generic_abi_shapes() {
+        assert_runtime_layout::<0, 0, 0, 1>();
+        assert_runtime_layout::<2, 1, 2, 2>();
+        assert_runtime_layout::<8, 32, 4, 64>();
+        assert_runtime_layout::<32, 128, 16, 256>();
+    }
+
+    #[test]
+    fn runtime_layout_rejects_unrepresentable_capacities() {
+        let dimensions = ProcBufDimensions {
+            axes: 33,
+            io_channels: 0,
+            domains: 0,
+            event_capacity: 1,
+        };
+        assert_eq!(
+            describe_layout(dimensions),
+            Err(ProcBufLayoutError::AxisCapacityExceeded)
+        );
+
+        for event_capacity in [0, 3] {
+            assert_eq!(
+                describe_layout(ProcBufDimensions {
+                    axes: 1,
+                    io_channels: 0,
+                    domains: 0,
+                    event_capacity,
+                }),
+                Err(ProcBufLayoutError::InvalidEventCapacity)
+            );
+        }
     }
 
     #[test]

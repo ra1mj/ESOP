@@ -71,6 +71,10 @@ def validate_report(report: dict) -> None:
         value = require(process_data, key, "process_data")
         if type(value) is not int or value < 0:
             fail(f"process_data.{key} must be a non-negative integer")
+    if "wire_bytes_per_cycle" in process_data:
+        wire_bytes = process_data["wire_bytes_per_cycle"]
+        if type(wire_bytes) is not int or wire_bytes < 0:
+            fail("process_data.wire_bytes_per_cycle must be a non-negative integer")
 
     cycle_budget = require(report, "cycle_budget", "report")
     for key in ("period_ns", "deadline_ns", "qualification"):
@@ -139,6 +143,8 @@ def validate_report(report: dict) -> None:
         )
     ):
         fail("a passed report requires measured nonzero process data")
+    if "wire_bytes_per_cycle" in process_data and process_data["wire_bytes_per_cycle"] <= 0:
+        fail("a passed report with wire bytes requires a positive value")
     for key in ("procbuf_bytes", "dma_bytes", "rt_stack_peak_bytes", "text_rodata_bytes"):
         if resources[key] is None or resources[key] <= 0:
             fail(f"a passed report requires positive resources.{key}")

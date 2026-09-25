@@ -15,6 +15,20 @@
       "limitation": "Real slave interoperability, target MAC ports and long-duration HIL remain open"
     },
     {
+      "id": "product_config_generator",
+      "status": "implemented",
+      "scope": "Deterministic host-only esop.product.v1 and bounded ESI-subset compilation into static C, normalized Domain/PDO/Frame Plan, device inventory, exact ProcBuf v6 layout and fail-closed build input",
+      "evidence": [
+        "crates/esop-cfggen/src/lib.rs",
+        "crates/esop-cfggen/src/generator.rs",
+        "crates/esop-cfggen/tests/generation.rs",
+        "config/examples/sim-dual-axis/product.json",
+        "scripts/tests/test_robot_build_report.py",
+        "docs/esop-product-configuration.md"
+      ],
+      "limitation": "The supported ESI subset is byte-aligned and explicit; modular devices, bit-packed PDOs, vendor scaling/quirks, production firmware consumption, runtime SII read-back, physical slave interoperability, measured wire timing, target resource/WCET and safety qualification remain open"
+    },
+    {
       "id": "linux_raw_port",
       "status": "development_hil",
       "scope": "Linux AF_PACKET port, deterministic simulator, stable v1 raw-socket syscall observation markers and privileged shared marker-to-incident host qualification",
@@ -41,7 +55,7 @@
         "crates/esop-lifecycle-guard/src/ethercat.rs",
         "crates/esop-ethercat-linux-port/tests/verified_stop_cycle.rs"
       ],
-      "limitation": "Runtime conversion accepts explicit frozen per-axis scales and limits; product configuration generation, vendor quirks and two-vendor real-drive HIL remain open"
+      "limitation": "The supported cfggen subset validates and freezes per-axis scales and limits; vendor quirks, production firmware attachment and two-vendor real-drive HIL remain open"
     },
     {
       "id": "procbuf_cia402_execution",
@@ -54,7 +68,7 @@
         "crates/esop-lifecycle-guard/src/stop_cycle.rs",
         "crates/esop-ethercat-linux-port/tests/verified_stop_cycle.rs"
       ],
-      "limitation": "Software simulation proves conversion and accepted frame contents only; no product policy artifact, physical drive response, braking/mechanical suitability, target WCET or safety qualification is claimed"
+      "limitation": "The supported cfggen subset emits validated product policy artifacts, but software simulation proves conversion and accepted frame contents only; production attachment, physical drive response, braking/mechanical suitability, target WCET and safety qualification are not claimed"
     },
     {
       "id": "cia402_procbuf_feedback",
@@ -69,7 +83,7 @@
         "crates/esop-ipc/tests/payloads.rs",
         "crates/esop-proto/tests/reader_writer.rs"
       ],
-      "limitation": "Simulator evidence covers software conversion, quality retention and transport acceptance only; generated product mapping, physical drive semantics, product-scale axis count, target WCET and HIL qualification remain open"
+      "limitation": "Simulator evidence covers software conversion, quality retention and transport acceptance only; generated mappings are build artifacts not runtime read-back proof, and physical drive semantics, product-scale axis count, target WCET and HIL qualification remain open"
     },
     {
       "id": "motion_lifecycle_guard",
@@ -119,7 +133,7 @@
         "crates/esop-ipc/tests/unix_loopback.rs",
         "docs/esop-ipc.md"
       ],
-      "limitation": "Host filesystem Unix datagrams only; downstream RT target execution is tracked separately, while shared memory, RPMsg, cryptographic identity, deployment ACL, product policy generation, production latency/WCET, long-duration stress and physical HIL remain open"
+      "limitation": "Host filesystem Unix datagrams only; downstream RT target execution is tracked separately, while shared memory, RPMsg, cryptographic identity, deployment ACL, production distribution/attachment of generated product policies, production latency/WCET, long-duration stress and physical HIL remain open"
     },
     {
       "id": "command_gateway_policy",
@@ -132,7 +146,7 @@
         "crates/esop-ipc/tests/payloads.rs",
         "docs/esop-command-gateway.md"
       ],
-      "limitation": "Zenoh and IPC reuse the shared strict target mapper and downstream RT execution adapter; cryptographic identity, deployment ACL, generated product policies, physical drive behavior and HIL remain open"
+      "limitation": "Zenoh and IPC reuse the shared strict target mapper and downstream RT execution adapter; cryptographic identity, deployment ACL, production attachment of generated product policies, physical drive behavior and HIL remain open"
     },
     {
       "id": "protobuf_v1_contract",

@@ -3,8 +3,10 @@ SHELL := /bin/sh
 CARGO ?= cargo
 RUSTUP ?= rustup
 RUST_TARGET ?= aarch64-unknown-none
+CFGGEN_EXAMPLE ?= config/examples/sim-dual-axis/product.json
+CFGGEN_OUTPUT ?= build/generated/sim-dual-axis
 
-.PHONY: test test-hil test-ipc test-zenoh test-ebpf-gateway-runtime test-ebpf-raw-port-runtime test-ebpf-process-exit-runtime test-ebpf-oom-runtime test-ebpf-scheduler-migration-runtime test-ebpf-scheduler-runqueue-runtime test-ebpf-softirq-runtime test-ebpf-page-fault-runtime test-ebpf-network-drop-runtime test-ebpf-observability-degradation-runtime check fmt-check lint release no-std bpf-syntax bpf capability-manifest proto-schema build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-oom-report ebpf-scheduler-migration-report ebpf-scheduler-runqueue-report ebpf-softirq-report ebpf-page-fault-report ebpf-network-drop-report ebpf-observability-degradation-report r2-qualification zenoh-check setup-rust ci
+.PHONY: test test-hil test-ipc test-zenoh test-ebpf-gateway-runtime test-ebpf-raw-port-runtime test-ebpf-process-exit-runtime test-ebpf-oom-runtime test-ebpf-scheduler-migration-runtime test-ebpf-scheduler-runqueue-runtime test-ebpf-softirq-runtime test-ebpf-page-fault-runtime test-ebpf-network-drop-runtime test-ebpf-observability-degradation-runtime check fmt-check lint release no-std bpf-syntax bpf capability-manifest proto-schema cfggen-example build-report cfggen-build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-oom-report ebpf-scheduler-migration-report ebpf-scheduler-runqueue-report ebpf-softirq-report ebpf-page-fault-report ebpf-network-drop-report ebpf-observability-degradation-report r2-qualification zenoh-check setup-rust ci
 
 test:
 	$(CARGO) test --workspace --all-features
@@ -82,9 +84,23 @@ capability-manifest:
 proto-schema:
 	python3 scripts/validate-proto-schema.py
 
+cfggen-example:
+	$(CARGO) run -p esop-cfggen -- --input $(CFGGEN_EXAMPLE) --output $(CFGGEN_OUTPUT)
+	gcc -std=c11 -Wall -Wextra -Werror -x c -fsyntax-only $(CFGGEN_OUTPUT)/esop_product_config.h
+
 build-report:
-	python3 scripts/generate-robot-build-report.py --output build/robot_build_report.json
+	@if [ -n "$(PRODUCT_INPUT)" ]; then \
+		python3 scripts/generate-robot-build-report.py --product-input "$(PRODUCT_INPUT)" --output build/robot_build_report.json; \
+	else \
+		python3 scripts/generate-robot-build-report.py --output build/robot_build_report.json; \
+	fi
 	python3 scripts/validate-robot-build-report.py build/robot_build_report.json
+	python3 -m unittest discover -s scripts/tests -p 'test_robot_build_report.py'
+
+cfggen-build-report: cfggen-example
+	python3 scripts/generate-robot-build-report.py --product-input $(CFGGEN_OUTPUT)/robot_build_input.json --output build/robot_build_report.json
+	python3 scripts/validate-robot-build-report.py build/robot_build_report.json
+	python3 -m unittest discover -s scripts/tests -p 'test_robot_build_report.py'
 
 performance-report:
 	python3 scripts/generate-performance-report.py --output build/performance_report.json
@@ -131,4 +147,4 @@ zenoh-check:
 setup-rust:
 	$(RUSTUP) target add $(RUST_TARGET)
 
-ci: fmt-check check test lint release no-std bpf-syntax capability-manifest proto-schema build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-oom-report ebpf-scheduler-migration-report ebpf-scheduler-runqueue-report ebpf-softirq-report ebpf-page-fault-report ebpf-network-drop-report ebpf-observability-degradation-report r2-qualification zenoh-check
+ci: fmt-check check test lint release no-std bpf-syntax capability-manifest proto-schema cfggen-build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-oom-report ebpf-scheduler-migration-report ebpf-scheduler-runqueue-report ebpf-softirq-report ebpf-page-fault-report ebpf-network-drop-report ebpf-observability-degradation-report r2-qualification zenoh-check

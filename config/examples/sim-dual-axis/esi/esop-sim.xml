@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<EtherCATInfo>
+  <Vendor>
+    <Id>#x0000E500</Id>
+    <Name>ESOP Simulator</Name>
+  </Vendor>
+  <Descriptions>
+    <Devices>
+      <Device>
+        <Type ProductCode="#x00004020" RevisionNo="#x00000001">ESOP-SIM-402</Type>
+        <Name>ESOP simulated CiA 402 drive</Name>
+        <RxPdo Sm="2">
+          <Index>#x1600</Index>
+          <Name>CSP outputs</Name>
+          <Entry>
+            <Index>#x6040</Index><SubIndex>0</SubIndex><BitLen>16</BitLen>
+            <Name>Controlword</Name><DataType>UINT</DataType>
+          </Entry>
+          <Entry>
+            <Index>#x6060</Index><SubIndex>0</SubIndex><BitLen>8</BitLen>
+            <Name>Mode of operation</Name><DataType>SINT</DataType>
+          </Entry>
+          <Entry>
+            <Index>#x607A</Index><SubIndex>0</SubIndex><BitLen>32</BitLen>
+            <Name>Target position</Name><DataType>DINT</DataType>
+          </Entry>
+        </RxPdo>
+        <TxPdo Sm="3">
+          <Index>#x1A00</Index>
+          <Name>CSP inputs</Name>
+          <Entry>
+            <Index>#x6041</Index><SubIndex>0</SubIndex><BitLen>16</BitLen>
+            <Name>Statusword</Name><DataType>UINT</DataType>
+          </Entry>
+          <Entry>
+            <Index>#x6061</Index><SubIndex>0</SubIndex><BitLen>8</BitLen>
+            <Name>Mode display</Name><DataType>SINT</DataType>
+          </Entry>
+          <Entry>
+            <Index>#x603F</Index><SubIndex>0</SubIndex><BitLen>16</BitLen>
+            <Name>Error code</Name><DataType>UINT</DataType>
+          </Entry>
+          <Entry>
+            <Index>#x6064</Index><SubIndex>0</SubIndex><BitLen>32</BitLen>
+            <Name>Actual position</Name><DataType>DINT</DataType>
+          </Entry>
+        </TxPdo>
+      </Device>
+      <Device>
+        <Type ProductCode="#x00007010" RevisionNo="#x00000001">ESOP-SIM-IO</Type>
+        <Name>ESOP simulated digital IO</Name>
+        <RxPdo Sm="2">
+          <Index>#x1601</Index>
+          <Name>Digital outputs</Name>
+          <Entry>
+            <Index>#x7000</Index><SubIndex>1</SubIndex><BitLen>16</BitLen>
+            <Name>Outputs</Name><DataType>UINT</DataType>
+          </Entry>
+        </RxPdo>
+        <TxPdo Sm="3">
+          <Index>#x1A01</Index>
+          <Name>Digital inputs</Name>
+          <Entry>
+            <Index>#x6000</Index><SubIndex>1</SubIndex><BitLen>16</BitLen>
+            <Name>Inputs</Name><DataType>UINT</DataType>
+          </Entry>
+        </TxPdo>
+      </Device>
+    </Devices>
+  </Descriptions>
+</EtherCATInfo>

@@ -129,6 +129,8 @@ ESOP 要解决以下产品问题：
 | FR-005 | P1 | 系统应支持显式设备识别与完整 SII PDO/SM 信息校验，用于防止同型号设备错位或换线。 | 交换同型号设备或变更识别对象后，按配置拒绝激活并给出原因。 |
 | FR-006 | P0 | 配置生成工具应把设备/ESI/产品配置转为静态固件配置和可读报告，不将 XML 运行时带入固件。 | 生成 C 配置、ProcBuf 布局、设备清单和构建报告；同一输入生成一致的配置 hash。 |
 
+FR-006 当前增量由宿主机 `esop-cfggen` 实现：严格解析 `esop.product.v1` 和 byte-aligned ESI 子集，通过既有 Domain/Frame Plan/CiA 402/ProcBuf 校验路径，原子输出静态 C 配置、规范化产品、设备清单、ProcBuf ABI v6 布局和 build input。同一语义的 JSON/ESI 排版变化不改变 SHA-256 或输出字节。模块化设备、bit-packed PDO、厂商 scaling/quirk 和完整 ENI/ESI 仍明确拒绝，不能被解释为完整 ESI 兼容。
+
 ### 7.2 EtherCAT 周期数据与 Domain
 
 | ID | 优先级 | 需求 | 验收标准 |
@@ -185,6 +187,8 @@ ESOP 要解决以下产品问题：
 | FR-036 | P0 | 系统应在命令过期、WKC 连续异常、驱动离开 OP/fault、DC 异常、链路断开和 supervisor 重启时执行显式降级策略。 | 每类故障的 hold、ramp-to-zero、quick stop 或 disable 决策均可配置、可观测、可 HIL 验证。 |
 | FR-037 | P1 | 每个构建应生成 `robot_build_report.json`，包含设备清单、静态内存、ProcBuf、PDO、帧、线缆、WKC、copy 与周期预算。 | CI 审核报告，且配置/资源超限时输出明确的失败项。 |
 | FR-038 | P0 | 每次性能资格测试应生成 `performance_report.json`，记录配置、平台、拓扑、周期、jitter、fast path、错误、资源和结论。 | 缺少 cycles、最大值、错误计数或配置 hash 的报告不得判定通过。 |
+
+FR-037 当前增量允许 `robot_build_report.json` 消费 cfggen 的严格 `esop.product-build-input.v1`，复制配置 hash、设备、PDO/frame/wire/WKC/copy、周期与 ProcBuf 资源。生成产物不会把 HIL、目标资源或周期测量升级为通过，伪造 `passed: true`、未知字段和无效预算会在报告发布前被拒绝。
 
 ### 7.7 运动生命周期安全检测
 
