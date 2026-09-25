@@ -1041,13 +1041,27 @@ mod tests {
     #[test]
     fn hard_facts_create_incidents_without_cycle_context() {
         let mut correlator = IncidentCorrelator::<2>::new(11, 3, 1_000);
-        let incident = correlator
+        let exit = correlator
             .ingest(evidence(EvidenceKind::ProcessExit, 2_000))
             .unwrap()
             .unwrap();
-        assert_eq!(incident.code, IncidentCode::UserComponentExit);
-        assert_eq!(incident.confidence_percent, 100);
-        assert_eq!(incident.recommended_action, RecommendedAction::LatchFault);
+        assert_eq!(exit.code, IncidentCode::UserComponentExit);
+        assert_eq!(exit.confidence_percent, 100);
+        assert_eq!(exit.recommended_action, RecommendedAction::LatchFault);
+
+        let mut victim = evidence(EvidenceKind::OomKill, 4_000);
+        victim.domain = EvidenceDomain::KernelMemory;
+        victim.pid = 4242;
+        victim.tid = 4242;
+        victim.severity = IncidentSeverity::Critical;
+        let oom = correlator.ingest(victim).unwrap().unwrap();
+        assert_eq!(oom.code, IncidentCode::HostOom);
+        assert_eq!(oom.severity, IncidentSeverity::Critical);
+        assert_eq!(oom.confidence_percent, 100);
+        assert_eq!(oom.recommended_action, RecommendedAction::LatchFault);
+        assert_eq!(oom.pid, 4242);
+        assert_eq!(oom.tid, 4242);
+        assert_eq!(oom.evidence[0], victim);
     }
 
     #[test]

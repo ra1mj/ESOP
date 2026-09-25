@@ -36,6 +36,7 @@ struct esop_stats {
     __u64 network_unattributed;
     __u64 network_threshold_events;
     __u64 page_fault_threshold_events;
+    __u64 thread_exits_ignored;
 };
 
 struct esop_interrupt_key {
@@ -88,7 +89,7 @@ struct esop_runtime_evidence {
 };
 
 _Static_assert(sizeof(struct esop_context) == 104, "context ABI changed");
-_Static_assert(sizeof(struct esop_stats) == 120, "stats ABI changed");
+_Static_assert(sizeof(struct esop_stats) == 128, "stats ABI changed");
 _Static_assert(sizeof(struct esop_runtime_evidence) == 96, "evidence ABI changed");
 
 struct {
@@ -172,10 +173,10 @@ static __always_inline int esop_tracks(__u32 pid, const struct esop_context *con
     return context && (context->tracked_pid == 0 || context->tracked_pid == pid);
 }
 
-static __always_inline int esop_emit_resource(
+static __always_inline int esop_emit_resource_task(
     __u8 domain, __u8 kind, __u8 severity, __u64 observed_value,
     __u64 threshold, __u64 duration_ns, __u32 count, __u16 irq,
-    __u32 netdev_ifindex, __u8 detail, __u8 include_task)
+    __u32 netdev_ifindex, __u8 detail, __u32 pid, __u32 tid)
 {
     struct esop_context *context = esop_context();
     struct esop_stats *stats = esop_stats();
@@ -194,8 +195,8 @@ static __always_inline int esop_emit_resource(
     event.timestamp_ns = timestamp;
     event.cycle_seq = context->cycle_seq;
     event.transition_seq = context->transition_seq;
-    event.pid = include_task ? esop_tgid() : 0;
-    event.tid = include_task ? esop_tid() : 0;
+    event.pid = pid;
+    event.tid = tid;
     event.cpu = (__u16)bpf_get_smp_processor_id();
     event.irq = irq;
     event.netdev_ifindex = netdev_ifindex;
@@ -217,6 +218,18 @@ static __always_inline int esop_emit_resource(
         stats->emitted_events++;
     }
     return 0;
+}
+
+static __always_inline int esop_emit_resource(
+    __u8 domain, __u8 kind, __u8 severity, __u64 observed_value,
+    __u64 threshold, __u64 duration_ns, __u32 count, __u16 irq,
+    __u32 netdev_ifindex, __u8 detail, __u8 include_task)
+{
+    __u32 pid = include_task ? esop_tgid() : 0;
+    __u32 tid = include_task ? esop_tid() : 0;
+    return esop_emit_resource_task(domain, kind, severity, observed_value,
+                                   threshold, duration_ns, count, irq,
+                                   netdev_ifindex, detail, pid, tid);
 }
 
 static __always_inline void esop_emit(__u8 domain, __u8 kind, __u8 severity,
@@ -306,12 +319,24 @@ int esop_process_exit(void *ctx)
 {
     (void)ctx;
     struct esop_context *context = esop_context();
-    if (esop_tracks(esop_tgid(), context)) {
-        esop_emit(4, 5, 3, 1, 1, 0, 1, 0);
-        struct esop_stats *stats = esop_stats();
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 tgid = (__u32)(pid_tgid >> 32);
+    __u32 tid = (__u32)pid_tgid;
+    if (!esop_tracks(tgid, context)) {
+        return 0;
+    }
+
+    struct esop_stats *stats = esop_stats();
+    if (tid != tgid) {
         if (stats) {
-            stats->process_exits++;
+            stats->thread_exits_ignored++;
         }
+        return 0;
+    }
+
+    esop_emit(4, 5, 3, 1, 1, 0, 1, 0);
+    if (stats) {
+        stats->process_exits++;
     }
     return 0;
 }
@@ -386,16 +411,24 @@ int esop_page_fault_user(struct trace_event_raw_exceptions *event)
 }
 
 SEC("tracepoint/oom/mark_victim")
-int esop_oom_kill(void *ctx)
+int esop_oom_kill(struct trace_event_raw_mark_victim *event)
 {
-    (void)ctx;
     struct esop_context *context = esop_context();
-    if (esop_tracks(esop_tgid(), context)) {
-        esop_emit(3, 4, 3, 1, 1, 0, 1, 0);
-        struct esop_stats *stats = esop_stats();
-        if (stats) {
-            stats->oom_events++;
-        }
+    int raw_pid = BPF_CORE_READ(event, pid);
+    if (raw_pid <= 0) {
+        return 0;
+    }
+
+    __u32 victim_pid = (__u32)raw_pid;
+    if (!esop_tracks(victim_pid, context)) {
+        return 0;
+    }
+
+    esop_emit_resource_task(3, 4, 3, 1, 1, 0, 1, 0, 0, 0,
+                            victim_pid, victim_pid);
+    struct esop_stats *stats = esop_stats();
+    if (stats) {
+        stats->oom_events++;
     }
     return 0;
 }

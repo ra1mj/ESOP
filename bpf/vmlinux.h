@@ -53,6 +53,12 @@ struct trace_event_raw_exceptions {
     char __data[0];
 };
 
+struct trace_event_raw_mark_victim {
+    struct trace_entry ent;
+    int pid;
+    char __data[0];
+};
+
 struct trace_event_raw_irq_handler_entry {
     struct trace_entry ent;
     int irq;

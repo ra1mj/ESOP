@@ -43,7 +43,7 @@ ESOP RT node
 
 两条证据链保持独立：RT 域是运动控制事实来源；eBPF 是 Linux 环境的解释与归因来源。相关器可以合并“同一个周期窗口内的事件”，但不能以缺少 eBPF 事件证明“系统没有问题”。
 
-当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、硬 IRQ/softirq entry/exit attach、EtherCAT EtherType/可选 ifindex 丢包策略更新、页错误计数窗口策略更新和 `RuntimeAgent` 桥接；`bpf/` 提供固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、固定 256 项的 CPU/进程页错误窗口 map、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。CI 负责 CO-RE 对象构建；目标 Linux 环境仍需完成真实权限、verifier、ringbuf、IRQ/softirq、丢包与页错误压力注入以及目标 hook 资格测试。
+当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、硬 IRQ/softirq entry/exit attach、EtherCAT EtherType/可选 ifindex 丢包策略更新、页错误计数窗口策略更新和 `RuntimeAgent` 桥接；`bpf/` 提供固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、固定 256 项的 CPU/进程页错误窗口 map、主线程退出过滤、OOM victim PID 归因、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。CI 负责 CO-RE 对象构建；目标 Linux 环境仍需完成真实权限、verifier、ringbuf、IRQ/softirq、丢包、页错误、OOM 与进程退出压力注入以及目标 hook 资格测试。
 
 ## 4. 观测域与 attach 点
 
@@ -85,6 +85,18 @@ PID/TID、CPU、窗口计数/跨度以及饱和为一字节的架构错误码。
 没有页错误处理完成点或 major/minor 结果，因此当前实现不把窗口跨度解释为
 处理时延，也不从错误码推断 major/minor。页错误证据还必须与 deadline、WKC
 或 DC 风险周期同窗，才可升级为 `HOST_PAGE_FAULT`。
+
+进程生命周期首版把 `sched:sched_process_exit` 视为线程级事件。程序先按当前
+TGID 应用 `tracked_pid` 过滤，仅当退出 TID 等于 TGID 时生成一次
+`ProcessExit` 硬事实；受跟踪进程的普通工作线程退出只增加
+`thread_exits_ignored`，不会触发 `USER_COMPONENT_EXIT`。这条信号表示主线程
+退出，不声称线程组中所有任务已经消失，也不包含 exit code 或 signal。
+
+OOM 首版从 `oom:mark_victim` typed context 读取内核选中的 victim PID，而不
+使用触发 OOM killer 的 current task。固定证据的 PID/TID 都写入该 victim
+PID，因为该 tracepoint 不提供独立 TGID。`tracked_pid == 0` 时保留所有正
+victim PID；非零时只接受精确 PID 匹配，因此内核若选中同一进程的其他线程，
+当前规则可能漏报。解决线程到进程成员关系需要额外有界身份来源或不同 hook。
 
 ### 4.2 用户态观测点
 
@@ -142,8 +154,9 @@ RuntimeIncident
 | `HOST_IRQ_STORM` | 单 IRQ/softirq 在窗口内占用超预算 CPU，伴随 RT 线程 off-CPU。 | 中断或软中断干扰实时线程。 | 按产品策略触发普通 controlled stop。 |
 | `HOST_NIC_DROP` | 指定 EtherType/网卡的 `kfree_skb` 窗口达到计数阈值，且与 WKC/timeout/deadline 风险同窗。 | Linux 网络路径存在可归因的协议栈丢弃。 | 提供 `HOST_OBSERVATION`，不能替代 EtherCAT WKC。 |
 | `HOST_PAGE_FAULT` | 受跟踪进程的 `{CPU, 进程}` 页错误窗口达到计数阈值，且与 deadline/WKC/DC 风险周期同窗。 | 周期可能被内存管理事件打断；当前证据不区分 major/minor。 | 性能资格失败或按策略撤销 host permit。 |
+| `HOST_OOM` | `oom:mark_victim` 为受跟踪 PID 选择 OOM victim。 | 内核已把该任务标记为 OOM victim；证据不推断 TGID 或触发者。 | 作为 hard fact 锁存观测故障；仍不直接写 controlword。 |
 | `HOST_CPU_THROTTLE` | cgroup/CPU pressure/频率窗口异常与 gateway stall 同窗。 | 监督域资源受到限制。 | supervisor lease 降级。 |
-| `USER_COMPONENT_EXIT` | gateway、ROS 2 controller、recorder 或 agent 退出/收到信号。 | 用户态组件生命周期异常。 | MLG 只根据固定 supervisor lease/command age 判定。 |
+| `USER_COMPONENT_EXIT` | 受跟踪 gateway、ROS 2 controller、recorder 或 agent 的主线程退出。 | 用户态组件主生命周期异常；工作线程退出不升级。 | MLG 只根据固定 supervisor lease/command age 判定。 |
 | `OBSERVABILITY_DEGRADED` | BTF/attach/permission/ringbuf/agent health 失败。 | 观测证据不完整。 | 不能自动声称健康；是否禁止运动由产品 policy 决定。 |
 
 ### 6.2 检测规则原则
@@ -223,7 +236,7 @@ BPF 对象、用户态 loader、schema 和规则版本必须绑定：
 | EBPF-002 | 加载 | BPF verifier 拒绝、CO-RE relocation 失败、attach 失败和 agent 卸载均不会破坏 ESOP/ROS/Zenoh 主流程。 |
 | EBPF-003 | 调度 | 人为注入线程延迟、CPU 迁移、IRQ/softirq 压力，能生成 `HOST_SCHEDULER_STALL` 或 `HOST_IRQ_STORM` 证据。 |
 | EBPF-004 | 网络 | 注入网卡队列、协议栈丢包和 raw port 延迟，能关联 `HOST_NIC_DROP` 与 EtherCAT WKC/timeout 窗口。 |
-| EBPF-005 | 内存 | 注入页错误、内存压力和进程 OOM/退出，能生成 `HOST_PAGE_FAULT`/`USER_COMPONENT_EXIT`。 |
+| EBPF-005 | 内存 | 注入页错误、内存压力和进程 OOM/退出，能生成 `HOST_PAGE_FAULT`/`HOST_OOM`/`USER_COMPONENT_EXIT`。 |
 | EBPF-006 | 用户态 | gateway、`ros2_control`、recorder 重启或函数超时能按 PID/TID、cycle_seq 和 request_id 归因。 |
 | EBPF-007 | 完整性 | agent 无法写 MLG、controlword、permit；伪造/过期 host observation 不可清除 fault latch。 |
 | EBPF-008 | 降级 | ringbuf 满、事件丢失、agent 重启、BTF 缺失、权限不足时，丢失计数和 `OBSERVABILITY_DEGRADED` 可见。 |
@@ -237,8 +250,10 @@ reason 证据解码和 transport-risk 相关器单元测试。该实现与 CO-RE
 不等于目标内核真实队列压力、丢包注入、verifier 和开销资格。
 
 EBPF-005 当前已具备有界 CPU/进程页错误窗口、阈值事件、架构错误码 detail
-解码和 cycle-risk 相关器单元测试。该实现与 CO-RE 编译结果不等于目标内核
-真实页错误/内存压力注入、major/minor 归因、verifier 和开销资格。
+解码和 cycle-risk 相关器单元测试，并已把进程退出限制为受跟踪 TGID 的主
+线程、把 OOM 证据绑定到 `mark_victim` 的受害 PID。该实现与 CO-RE 编译
+结果不等于目标内核真实页错误/内存压力/OOM/进程退出注入、victim TGID、
+major/minor 归因、verifier 和开销资格。
 
 ## 11. 运行时输出示例
 

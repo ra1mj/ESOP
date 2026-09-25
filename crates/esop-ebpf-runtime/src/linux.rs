@@ -293,6 +293,7 @@ pub struct KernelStats {
     pub network_unattributed: u64,
     pub network_threshold_events: u64,
     pub page_fault_threshold_events: u64,
+    pub thread_exits_ignored: u64,
 }
 
 // SAFETY: The BPF map value is an all-u64 C-compatible record without padding
@@ -322,6 +323,9 @@ impl KernelStats {
         self.page_fault_threshold_events = self
             .page_fault_threshold_events
             .saturating_add(other.page_fault_threshold_events);
+        self.thread_exits_ignored = self
+            .thread_exits_ignored
+            .saturating_add(other.thread_exits_ignored);
     }
 }
 
@@ -1101,6 +1105,23 @@ mod tests {
         assert_eq!(evidence.domain, EvidenceDomain::KernelMemory);
         assert_eq!(evidence.kind, EvidenceKind::PageFault);
         assert_eq!(evidence.detail, 6);
+
+        put_u32(&mut bytes, 48, 77);
+        put_u32(&mut bytes, 52, 77);
+        put_u64(&mut bytes, 64, 1);
+        put_u64(&mut bytes, 72, 1);
+        put_u64(&mut bytes, 80, 0);
+        put_u32(&mut bytes, 88, 1);
+        bytes[92] = EvidenceDomain::KernelMemory as u8;
+        bytes[93] = EvidenceKind::OomKill as u8;
+        bytes[94] = IncidentSeverity::Critical as u8;
+        bytes[95] = 0;
+        let evidence = decode_evidence(&bytes).unwrap();
+        assert_eq!(evidence.pid, 77);
+        assert_eq!(evidence.tid, 77);
+        assert_eq!(evidence.domain, EvidenceDomain::KernelMemory);
+        assert_eq!(evidence.kind, EvidenceKind::OomKill);
+        assert_eq!(evidence.severity, IncidentSeverity::Critical);
     }
 
     #[test]
@@ -1267,7 +1288,7 @@ mod tests {
     #[test]
     fn kernel_map_abis_and_attach_masks_remain_explicit() {
         assert_eq!(std::mem::size_of::<KernelContext>(), 104);
-        assert_eq!(std::mem::size_of::<KernelStats>(), 120);
+        assert_eq!(std::mem::size_of::<KernelStats>(), 128);
 
         let mut observed = 0;
         for spec in ATTACH_SPECS {
@@ -1301,6 +1322,7 @@ mod tests {
             network_unattributed: 6,
             network_threshold_events: 8,
             page_fault_threshold_events: u64::MAX,
+            thread_exits_ignored: u64::MAX,
             ..KernelStats::default()
         });
         assert_eq!(aggregate.irq_samples, u64::MAX);
@@ -1311,5 +1333,6 @@ mod tests {
         assert_eq!(aggregate.network_unattributed, 6);
         assert_eq!(aggregate.network_threshold_events, 8);
         assert_eq!(aggregate.page_fault_threshold_events, u64::MAX);
+        assert_eq!(aggregate.thread_exits_ignored, u64::MAX);
     }
 }

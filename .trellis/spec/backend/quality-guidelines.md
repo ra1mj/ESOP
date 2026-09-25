@@ -535,6 +535,15 @@ Do not infer major/minor outcome or handler duration from
 point. Preserve the fixed event size and treat target-kernel fault injection,
 verifier behavior, and overhead as separate evidence.
 
+For eBPF lifecycle hard facts, remember that `sched_process_exit` fires for
+threads. Apply the configured process filter to TGID, emit `ProcessExit` only
+for `tid == tgid`, and count ignored worker exits without escalating them. Read
+OOM identity from the typed `oom:mark_victim` victim PID rather than current
+task context; do not invent a TGID when the tracepoint exposes only one PID.
+Keep the fixed event ABI stable and treat target-kernel process/OOM injection,
+PID-namespace behavior, victim thread-group resolution, verifier behavior, and
+overhead as separate qualification evidence.
+
 ## Code Review Checklist
 
 - Is the worst-case loop bounded by a static capacity or explicit budget?
