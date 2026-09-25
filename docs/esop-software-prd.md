@@ -214,6 +214,25 @@ eBPF 观测器只部署在 Linux 监督域或 Linux 实时端口；STM32/HPMicro
 | FR-051 | P1 | 系统应生成结构化 `RuntimeIncident`，包含 incident ID、级别、原因码、时间窗口、证据、关联周期、影响组件、丢失计数和建议动作。 | 运维界面/Zenoh/Protobuf 能按 incident ID 聚合同一问题的多条证据，而不是只显示孤立日志。 |
 | FR-052 | P1 | eBPF 观测只能向 MLG 提供 `HOST_OBSERVATION` 证据或监督心跳，不能直接修改 CiA 402 controlword、绕过 MLG 或成为认证安全通道。 | agent 停止、事件误报、恶意事件和观测延迟测试中，运动许可仍只由 MLG 与产品安全策略裁决。 |
 
+FR-047/FR-050 的 ringbuf-loss 与 restart 子路径现已增加独立特权托管
+x86_64 Linux 资格：`make test-ebpf-observability-degradation-runtime` 保持生产
+4 MiB ringbuf 不变，只加载并要求 `exceptions:page_fault_user`，以当前 TGID、阈值 1
+和 1 ns 窗口对有界 64 MiB 匿名映射反复首次写入，并在内核统计出现正
+`lost_events` 前不消费事件。夹具要求一次有界 poll 把精确的新 loss 投影到
+`RuntimeAgent`，生成 fault `0x45421004` 的 Degraded heartbeat；同一 agent epoch
+重新应用完整能力快照仍不得恢复。旧 runtime 卸载并进入更大 epoch 后，Restarting
+heartbeat 必须清除旧 attach、loss、incident 和 fault，新加载对象的完整能力快照
+才可恢复 Healthy；随后必须接受至少一条新 epoch 页错误记录，且无新增 loss 或
+evidence rejection。严格报告仅在两个 runtime 都拆卸后原子写入
+`build/ebpf_observability_degradation_qualification.json`。
+
+该资格把“一台 hosted 内核上的生产 ringbuf 饱和、精确 loss 投影和
+unload/reload epoch 恢复”从 FR-047/FR-050 开放项中移除。缺少 BTF、ringbuf 或
+required attach 应进入 Degraded，verifier/permission 硬失败应进入 Failed；这些
+缺能力状态只由确定性策略测试覆盖，不代表当前宿主实际注入了对应故障。生产事件
+压力、目标内核、资源开销、WCET、ringbuf 水位遥测和长时稳定性仍未资格化，
+FR-047/FR-050 因此保持部分实现。
+
 FR-048 的 process-crash 子路径现已增加特权托管 Linux 资格：
 `make test-ebpf-process-exit-runtime` 只加载并要求 `sched_process_exit`，在把
 `tracked_pid` 切换到同步子进程后，先证明一个已 join 的 worker 退出只增加

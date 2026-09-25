@@ -18,6 +18,7 @@ pub const CAPABILITY_PERMISSION: u64 = 1 << 3;
 const FAULT_AGENT_CAPABILITY: u32 = 0x4542_1001;
 const FAULT_AGENT_LOAD: u32 = 0x4542_1002;
 const FAULT_AGENT_ATTACH: u32 = 0x4542_1003;
+const FAULT_AGENT_EVENT_LOSS: u32 = 0x4542_1004;
 const FAULT_INCIDENT_DEGRADED: u32 = 0x4542_2001;
 const FAULT_INCIDENT_LATCHED: u32 = 0x4542_2002;
 
@@ -719,6 +720,9 @@ impl AgentHealth {
         if !btf_ok || attach_mask & required_mask != required_mask {
             self.state = AgentState::Degraded;
             self.fault_code = FAULT_AGENT_CAPABILITY;
+        } else if self.lost_event_count != 0 {
+            self.state = AgentState::Degraded;
+            self.fault_code = FAULT_AGENT_EVENT_LOSS;
         } else {
             self.state = AgentState::Healthy;
             self.fault_code = 0;
@@ -740,6 +744,9 @@ impl AgentHealth {
             } else {
                 FAULT_AGENT_ATTACH
             };
+        } else if self.lost_event_count != 0 {
+            self.state = AgentState::Degraded;
+            self.fault_code = FAULT_AGENT_EVENT_LOSS;
         } else {
             self.state = AgentState::Healthy;
             self.fault_code = 0;
@@ -747,9 +754,13 @@ impl AgentHealth {
     }
 
     pub fn record_event_loss(&mut self, count: u32) {
+        if count == 0 {
+            return;
+        }
         self.lost_event_count = self.lost_event_count.saturating_add(count);
-        if self.state == AgentState::Healthy {
+        if self.state != AgentState::Failed {
             self.state = AgentState::Degraded;
+            self.fault_code = FAULT_AGENT_EVENT_LOSS;
         }
     }
 
@@ -782,6 +793,10 @@ impl AgentHealth {
         self.agent_epoch = agent_epoch;
         self.heartbeat_seq = 0;
         self.state = AgentState::Restarting;
+        self.attach_mask = 0;
+        self.lost_event_count = 0;
+        self.incident_count = 0;
+        self.fault_code = 0;
         self.last_event_ns = 0;
     }
 
@@ -1478,11 +1493,93 @@ mod tests {
         let mut health = AgentHealth::new(11, 3);
         health.set_capabilities(0b11, 0b11, true);
         assert_eq!(health.heartbeat(1).heartbeat_seq, 1);
+        health.record_event_loss(2);
+        health.record_incident();
         health.restart(4);
         let observation = health.heartbeat(2);
         assert_eq!(observation.agent_epoch, 4);
         assert_eq!(observation.heartbeat_seq, 1);
         assert_eq!(observation.state, ObservationState::Degraded);
+        assert_eq!(observation.attach_mask, 0);
+        assert_eq!(observation.lost_event_count, 0);
+        assert_eq!(observation.incident_count, 0);
+        assert_eq!(observation.fault_code, 0);
+
+        health.set_capabilities(0b11, 0b11, true);
+        let recovered = health.heartbeat(3);
+        assert_eq!(recovered.agent_epoch, 4);
+        assert_eq!(recovered.heartbeat_seq, 2);
+        assert_eq!(recovered.state, ObservationState::Healthy);
+        assert_eq!(recovered.attach_mask, 0b11);
+    }
+
+    #[test]
+    fn event_loss_is_sticky_within_an_agent_epoch() {
+        let complete = CapabilitySnapshot::new(
+            0xAA,
+            0b11,
+            0b11,
+            CAPABILITY_BTF | CAPABILITY_RINGBUF | CAPABILITY_VERIFIER | CAPABILITY_PERMISSION,
+        );
+        let mut health = AgentHealth::new(11, 3);
+        health.set_capability_snapshot(complete);
+        assert_eq!(health.state(), AgentState::Healthy);
+
+        health.record_event_loss(0);
+        assert_eq!(health.state(), AgentState::Healthy);
+        health.record_event_loss(2);
+        let degraded = health.heartbeat(1);
+        assert_eq!(degraded.state, ObservationState::Degraded);
+        assert_eq!(degraded.lost_event_count, 2);
+        assert_eq!(degraded.fault_code, FAULT_AGENT_EVENT_LOSS);
+
+        health.set_capability_snapshot(complete);
+        let still_degraded = health.heartbeat(2);
+        assert_eq!(still_degraded.state, ObservationState::Degraded);
+        assert_eq!(still_degraded.lost_event_count, 2);
+        assert_eq!(still_degraded.fault_code, FAULT_AGENT_EVENT_LOSS);
+    }
+
+    #[test]
+    fn capability_snapshot_classifies_each_observation_gap() {
+        let required = 0b11;
+        let complete =
+            CAPABILITY_BTF | CAPABILITY_RINGBUF | CAPABILITY_VERIFIER | CAPABILITY_PERMISSION;
+        for capability_mask in [complete & !CAPABILITY_BTF, complete & !CAPABILITY_RINGBUF] {
+            let mut health = AgentHealth::new(11, 3);
+            health.set_capability_snapshot(CapabilitySnapshot::new(
+                0xAA,
+                required,
+                required,
+                capability_mask,
+            ));
+            let observation = health.heartbeat(1);
+            assert_eq!(observation.state, ObservationState::Degraded);
+            assert_eq!(observation.fault_code, FAULT_AGENT_CAPABILITY);
+        }
+
+        let mut missing_attach = AgentHealth::new(11, 3);
+        missing_attach
+            .set_capability_snapshot(CapabilitySnapshot::new(0xAA, 0b01, required, complete));
+        let observation = missing_attach.heartbeat(1);
+        assert_eq!(observation.state, ObservationState::Degraded);
+        assert_eq!(observation.fault_code, FAULT_AGENT_ATTACH);
+
+        for capability_mask in [
+            complete & !CAPABILITY_VERIFIER,
+            complete & !CAPABILITY_PERMISSION,
+        ] {
+            let mut health = AgentHealth::new(11, 3);
+            health.set_capability_snapshot(CapabilitySnapshot::new(
+                0xAA,
+                required,
+                required,
+                capability_mask,
+            ));
+            let observation = health.heartbeat(1);
+            assert_eq!(observation.state, ObservationState::Failed);
+            assert_eq!(observation.fault_code, FAULT_AGENT_LOAD);
+        }
     }
 
     #[test]

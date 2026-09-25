@@ -259,12 +259,17 @@ fn ebpf_health_heartbeat_can_qualify_then_stop_motion() {
         Ok(LifecycleAction::EnableAllowed)
     );
 
-    agent.health_mut().set_capabilities(0, CAPABILITY_BTF, true);
+    agent.health_mut().record_event_loss(2);
+    agent
+        .health_mut()
+        .set_capabilities(CAPABILITY_BTF, CAPABILITY_BTF, true);
     let degraded = agent.heartbeat(101);
     assert_eq!(
         degraded.state,
         esop_lifecycle_guard::ObservationState::Degraded
     );
+    assert_eq!(degraded.lost_event_count, 2);
+    assert_eq!(degraded.fault_code, 0x4542_1004);
     guard.update_host_observation(degraded, 2, 101, 10).unwrap();
     assert_eq!(
         guard.cycle(2, 101),

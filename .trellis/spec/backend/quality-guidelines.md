@@ -1482,6 +1482,103 @@ and require internally consistent duration plus transport-risk correlation.
 Use the Unix-socket fixture only to qualify the shared observation chain, and
 keep AF_PACKET/NIC/driver/wire/slave and realtime-performance claims separate.
 
+## Scenario: eBPF Observability Degradation Runtime Qualification
+
+### 1. Scope / Trigger
+
+- Trigger: change eBPF capability classification, event-loss health projection,
+  agent restart semantics, ring-buffer statistics, or hosted degradation
+  qualification.
+- Scope: qualify one production 4 MiB ring-buffer saturation/loss path and one
+  runtime unload/reload recovery on privileged hosted x86_64 Linux.
+- Missing BTF, ringbuf, required attach, verifier, and permission outcomes are
+  deterministic policy-model cases. Do not describe them as hosted fault
+  injection unless a separate fixture actually mutates the host environment.
+
+### 2. Signatures
+
+- Health inputs: `RuntimeAgent::health_mut().set_capability_snapshot(...)`,
+  `RuntimeAgent::restart(new_epoch)`, and the runtime poll bridge that calls
+  `AgentHealth::record_event_loss(newly_reported_lost_events)`.
+- Runtime setup: `RuntimeConfig` enables and requires only
+  `ATTACH_PAGE_FAULT`, tracks the fixture TGID, and uses page-fault threshold 1
+  with a 1 ns window.
+- Qualification entry: `make test-ebpf-observability-degradation-runtime`.
+  Success writes `build/ebpf_observability_degradation_qualification.json` and
+  validates it with
+  `scripts/validate-ebpf-observability-degradation-qualification.py`.
+
+### 3. Contracts
+
+- Keep the shipped ring buffer at `1 << 22`; do not add a smaller test-only map.
+  Touch and unmap one fixed 64 MiB anonymous chunk per batch, with at most eight
+  batches and no record poll before kernel `lost_events > 0`.
+- Saturation must advance page-fault and successful-emission statistics and
+  produce positive kernel loss. One bounded poll consumes one record and
+  reports the exact new loss clamped to `u32`.
+- Positive loss sets fault `0x45421004` and is sticky for the current epoch.
+  Reapplying a complete capability snapshot must preserve Degraded state and
+  the same loss count.
+- Drop runtime 1 before restart. Epoch 2 starts in Restarting with zero attach,
+  loss, incident, and fault fields. Only runtime 2's complete snapshot may
+  restore Healthy.
+- Runtime 2 must accept at least one new-epoch page-fault record with zero new
+  loss, malformed records, evidence rejection, and incidents. Publish the flat
+  closed-schema report by same-directory rename only after both runtimes detach.
+
+### 4. Validation & Error Matrix
+
+- Missing BTF/ringbuf -> Degraded with capability fault `0x45421001`.
+- Missing required page-fault attach -> Degraded with attach fault
+  `0x45421003`.
+- Missing verifier or BPF permission -> Failed with load fault `0x45421002`.
+- Zero saturation loss, early poll, more than eight batches, count mismatch,
+  nonsticky same-epoch health, stale restart state, recovery loss/rejection, or
+  incomplete cleanup -> nonzero fixture/validator exit and no qualification.
+- Missing root/passwordless sudo, non-x86_64 host, unavailable BTF/attach, or
+  verifier/load failure -> build may complete, but no hosted claim is emitted.
+
+### 5. Good/Base/Bad Cases
+
+- Good: bounded first-write batches fill the production ring buffer; one poll
+  projects the exact delta, epoch 1 stays Degraded, epoch 2 reload recovers and
+  accepts fresh evidence.
+- Base: `record_event_loss(0)` changes nothing, and a complete capability
+  snapshot with no epoch-local loss is Healthy.
+- Bad: shrink the ring buffer, poll while filling it, loop or allocate without
+  a fixed bound, use a synthetic setter as saturation evidence, or preserve old
+  attach/loss/fault state across restart.
+
+### 6. Tests Required
+
+- Agent unit tests assert dedicated loss fault, saturating accumulation,
+  same-epoch stickiness, Failed precedence, restart reset, and capability-state
+  classification.
+- Public ProcBuf/MLG integration proves loss-induced Degraded observation stops
+  motion and cannot be healed by a same-epoch capability refresh.
+- Validator mutation tests reject unknown/missing/mistyped fields, booleans as
+  integers, geometry/mask drift, zero or inconsistent loss, wrong health
+  sequences, stale restart fields, failed recovery, and incomplete cleanup.
+- CI builds the production BPF object and Rust fixture without elevation,
+  elevates only fixture execution, validates the report as the invoking user,
+  uploads the artifact, and the downloaded artifact must pass the same validator.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+Reduce map capacity or call `record_event_loss` directly, then claim a real
+kernel saturation and missing-capability environment; allow a healthy snapshot
+to clear loss or carry old runtime state into the new epoch.
+
+#### Correct
+
+Fill the production nonblocking ring buffer with bounded real page-fault events,
+project the kernel statistic once, keep that fact sticky within the epoch, and
+recover only after detach, larger-epoch reset, new-object load, complete fresh
+capabilities, and accepted new-epoch evidence. Keep policy-matrix tests separate
+from actual hosted fault injection and performance claims.
+
 ## Code Review Checklist
 
 - Is the worst-case loop bounded by a static capacity or explicit budget?

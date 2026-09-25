@@ -2,7 +2,7 @@
 
 - 文档版本：1.2
 - 日期：2026-09-25
-- 状态：设计基线；HostObservation、固定证据 ABI、有界 RuntimeIncident 相关器、同类事件窗口聚合、RuntimeAgent 门面、能力预检结果模型、Rust/Aya CO-RE loader、tracepoint attach、ringbuf 解码桥、有界硬 IRQ/softirq 时长证据、按 EtherType/ifindex 聚合的 `kfree_skb` 丢包证据、有界 cpufreq policy 限频 episode、Zenoh gateway stall 和 Linux raw-port syscall stall 证据已实现；托管 Linux 已覆盖 gateway/raw-port 共享 marker、进程 leader 退出、独立 cgroup v2 单进程 OOM victim、精确 TID 调度迁移、受控 wake-to-switch runqueue、受控 loopback `NET_RX` softirq、受控 virtual-veth unhandled-EtherType 接收丢包和受控 x86_64 匿名页首次写入 page-fault 链的 verifier/load/真实 attach/ringbuf/相关器资格，生产目标内核、真实 transport/物理 NIC/自然负载根因、全局 OOM/受害 TGID 与 cgroup 归因、硬 IRQ 与持续压力/限频注入、物理网卡/driver/NAPI/qdisc/队列压力丢包、页错误内存压力/major-minor 归因、开销和其余 hook 资格仍需单独完成
+- 状态：设计基线；HostObservation、固定证据 ABI、有界 RuntimeIncident 相关器、同类事件窗口聚合、RuntimeAgent 门面、能力预检结果模型、Rust/Aya CO-RE loader、tracepoint attach、ringbuf 解码桥、有界硬 IRQ/softirq 时长证据、按 EtherType/ifindex 聚合的 `kfree_skb` 丢包证据、有界 cpufreq policy 限频 episode、Zenoh gateway stall 和 Linux raw-port syscall stall 证据已实现；托管 Linux 已覆盖 gateway/raw-port 共享 marker、进程 leader 退出、独立 cgroup v2 单进程 OOM victim、精确 TID 调度迁移、受控 wake-to-switch runqueue、受控 loopback `NET_RX` softirq、受控 virtual-veth unhandled-EtherType 接收丢包、受控 x86_64 匿名页首次写入 page-fault 链，以及生产 4 MiB ringbuf 饱和/loss 投影和 epoch unload/reload 恢复的 verifier/load/真实 attach/ringbuf/相关器资格；缺少 BTF/ringbuf/attach、verifier 拒绝和权限不足仍只具备策略模型覆盖，生产目标内核、真实 transport/物理 NIC/自然负载根因、全局 OOM/受害 TGID 与 cgroup 归因、硬 IRQ 与持续压力/限频注入、物理网卡/driver/NAPI/qdisc/队列压力丢包、页错误内存压力/major-minor 归因、开销和其余 hook 资格仍需单独完成
 - 上游需求：[ESOP 软件产品需求文档](esop-software-prd.md) FR-047 至 FR-052、NFR-018
 
 ## 1. 设计结论
@@ -44,6 +44,14 @@ ESOP RT node
 两条证据链保持独立：RT 域是运动控制事实来源；eBPF 是 Linux 环境的解释与归因来源。相关器可以合并“同一个周期窗口内的事件”，但不能以缺少 eBPF 事件证明“系统没有问题”。
 
 当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、调度 TID/迁移计数窗口策略原子更新、硬 IRQ/softirq entry/exit attach、IRQ/softirq CPU/vector 过滤、EtherCAT EtherType/可选 ifindex 丢包策略更新、页错误计数窗口策略更新、cpufreq policy 下限/CPU 策略原子更新、Zenoh gateway 与 Linux raw-port syscall 成对 uprobe attach 和 `RuntimeAgent` 桥接；`bpf/` 提供固定 1024 项的调度 TID 迁移窗口 map、固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、固定 256 项的 CPU/进程页错误窗口 map、固定 256 项的 cpufreq policy episode map、固定 1024 项 gateway request 与 raw-port per-thread 操作 map、主线程退出过滤、OOM victim PID 归因、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。专用托管 Linux CI 已验证 gateway、raw-port、leader 退出、独立 cgroup v2 单进程 OOM victim、两 CPU 精确 TID 调度迁移、受控 FIFO 竞争下精确 TID 唤醒到切换时长、CPU/vector 过滤的 loopback `NET_RX` softirq 时长、唯一 virtual-veth 上四帧 unhandled EtherCAT receive-drop threshold，以及预热独立子进程的 16 页匿名内存首次写入 page-fault 计数阈值链的 CO-RE verifier/load、真实 tracepoint/uprobe attach、ringbuf、统计、相关器和 observer health 共享链；生产目标内核与真实 Zenoh transport、物理 AF_PACKET/NIC、自然负载 runqueue 根因、硬 IRQ、真实 NIC/持续 softirq、物理 NIC/driver/NAPI/qdisc/队列压力丢包、页错误内存压力与 major-minor 归因、全局 OOM/受害 TGID/namespace/cgroup 归因、限频压力、迁移原因/亲和性/cache 影响及开销资格仍需单独完成。
+
+观测生命周期还具备独立特权托管 x86_64 Linux 资格：生产 4 MiB ringbuf
+在 `page_fault_user` 有界 first-write 负载下被真实填满，内核正
+`lost_events` 由一次有界 poll 精确投影为 epoch 内粘滞的 Degraded/event-loss
+heartbeat；旧 runtime 卸载后，较大 agent epoch 清除旧 attach、loss、incident 和
+fault，新对象的完整能力快照才允许恢复 Healthy，并接受新 epoch 证据。该路径不把
+确定性缺能力快照测试表述为实际宿主 BTF、ringbuf、attach、verifier 或 permission
+故障注入，也不覆盖生产事件压力、资源开销、WCET 或长时稳定性。
 
 ## 4. 观测域与 attach 点
 
@@ -341,8 +349,14 @@ host_observation_snapshot
 | 单个 attach 点不可用 | `DEGRADED` | 继续使用其他证据；发布缺失能力。 |
 | ringbuf 满/事件丢失 | `DEGRADED` | 计数、降低采样或只保留 incident；不阻塞。 |
 | agent 用户进程重启 | `RESTARTING` | 旧 epoch 失效；监督 lease 进入宽限期。 |
-| BTF/权限/加载失败 | `FAILED` | 仅按产品 policy 决定是否禁止 host 侧运动；RT 仍不等待。 |
+| BTF、ringbuf 或 required attach 不可用 | `DEGRADED` | 发布缺失能力并保持观测不完整；RT 仍不等待。 |
+| verifier、BPF permission 或硬加载失败 | `FAILED` | 仅按产品 policy 决定是否禁止 host 侧运动；RT 仍不等待。 |
 | 关键 host gate 明确失效 | `FAILED` | 监督域撤销 lease，MLG 执行 configured stop。 |
+
+任意正事件丢失在当前 `agent_epoch` 内是粘滞事实：重新应用健康能力快照不得清除
+Degraded 状态或 event-loss fault。只有卸载旧 runtime、以严格更大的 epoch restart
+并清除 attach/loss/incident/fault 后，新的 runtime 才能凭自己的完整能力快照恢复
+Healthy；Restarting heartbeat 本身仍保守投影为 Degraded `HostObservation`。
 
 ## 8. 性能与资源约束
 
@@ -382,6 +396,21 @@ BPF 对象、用户态 loader、schema 和规则版本必须绑定：
 | EBPF-010 | 开销 | baseline/incident/forensics 三档测得 CPU、内存、ringbuf、事件丢失和 host RT 影响；不改变 MCU 资格结论。 |
 | EBPF-011 | 长测 | 至少 30 分钟 Q1/Q2 Linux 监督域压力测试，无 agent 内存增长、无无限 map 增长、无周期阻塞。 |
 | EBPF-012 | 安全边界 | 产品测试报告明确 eBPF 不是安全通道；STO/FSoE/安全 PLC 仍独立验证。 |
+
+EBPF-008 的 ringbuf-loss/restart 子路径已增加专用特权托管 x86_64 Linux
+资格。`make test-ebpf-observability-degradation-runtime` 保持生产 4 MiB ringbuf，
+只要求 `exceptions:page_fault_user`，以当前 TGID、阈值 1 和 1 ns 窗口执行最多八批
+64 MiB 匿名页首次写入，并在统计出现正 loss 前不 poll。一次有界 poll 必须报告
+与内核 loss 增量完全相同的 `newly_reported_lost_events`，使 epoch 1 heartbeat
+进入 fault `0x45421004` 的 Degraded；同 epoch 完整能力快照不能清除该状态。旧对象
+卸载后，epoch 2 Restarting heartbeat 必须没有旧 attach、loss、incident 或 fault，
+新对象完整快照恢复 Healthy，随后新 epoch 页错误记录必须被接受且无新增 loss 或
+rejection。报告在两个 runtime 均拆卸后原子写入
+`build/ebpf_observability_degradation_qualification.json`，并由封闭 schema 和变异
+测试独立校验。缺少 BTF/ringbuf/required attach 的 Degraded 与
+verifier/permission 的 Failed 仅由策略单元测试证明，不是宿主故障注入；生产压力、
+目标内核、ringbuf 水位、CPU/RAM 开销、WCET 和长测仍未资格化，因此 EBPF-008
+保持 partial。
 
 EBPF-003 的调度迁移子路径已增加专用特权托管 Linux 资格。
 `make test-ebpf-scheduler-migration-runtime` 从实际 allowed affinity 中选择两个 CPU，
