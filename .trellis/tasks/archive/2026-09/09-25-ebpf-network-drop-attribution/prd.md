@@ -60,7 +60,7 @@ correlated with an EtherCAT WKC/timeout window without flooding the ring buffer.
 - [x] Unit tests cover context preservation, map/stat ABI sizes, saturation,
       and network configuration updates.
 - [x] `make ci` passes locally.
-- [ ] GitHub Actions builds the real CO-RE BPF object successfully.
+- [x] GitHub Actions builds the real CO-RE BPF object successfully.
 
 ## Non-Goals
 
