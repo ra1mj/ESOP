@@ -804,3 +804,36 @@ Added the host-only esop-ipc crate with a fixed 80-byte little-endian frame, bou
 ### Next Steps
 
 - None - task complete
+
+
+## Session 25: Connect ProcBuf payloads to hosted IPC
+
+**Date**: 2026-09-26
+**Task**: Connect ProcBuf payloads to hosted IPC
+**Branch**: `main`
+
+### Summary
+
+Added the shared ProcBuf/Protobuf IPC payload adapter, delegated Zenoh projection and command decoding to it, enforced envelope/payload identity before CommandIngress, and covered state/event/command flows over real Unix datagrams.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4ee4b79` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
