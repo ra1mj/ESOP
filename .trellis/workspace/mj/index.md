@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 19
+- **Total Sessions**: 20
 - **Last Active**: 2026-09-25
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~639 | Active |
+| `journal-1.md` | ~674 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 20 | 2026-09-25 | Qualify hosted eBPF network-drop path | `df73269`, `4a45b9f`, `5a5294b` | `main` |
 | 19 | 2026-09-25 | Qualify hosted memcg OOM eBPF path | `560e85d` | `main` |
 | 18 | 2026-09-25 | eBPF page-fault runtime qualification | `ba26760e7750a4cd149b3e9021a0007d5eef470c` | `main` |
 | 17 | 2026-09-25 | Qualify hosted eBPF softirq duration | `73d05e7`, `275a816` | `main` |

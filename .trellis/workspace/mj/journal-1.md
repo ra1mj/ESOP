@@ -637,3 +637,38 @@ Added a fail-closed cgroup-v2 OOM runtime fixture, strict report validator/tests
 ### Next Steps
 
 - None - task complete
+
+
+## Session 20: Qualify hosted eBPF network-drop path
+
+**Date**: 2026-09-25
+**Task**: Qualify hosted eBPF network-drop path
+**Branch**: `main`
+
+### Summary
+
+Added an isolated veth/AF_PACKET network-drop runtime fixture, strict validator/tests, dedicated privileged CI artifact, FR-048/EBPF-004 documentation, and BTF enum-kind compile-time protection. GitHub Actions run 36142735199 passed all 11 jobs; the downloaded report independently validated four filtered drops, one HostNicDrop incident, zero loss, Degraded observation, and complete cleanup.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `df73269` | (see git log) |
+| `4a45b9f` | (see git log) |
+| `5a5294b` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
