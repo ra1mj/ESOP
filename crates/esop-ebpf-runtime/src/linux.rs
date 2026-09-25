@@ -29,9 +29,11 @@ pub const ATTACH_IRQ_HANDLER_ENTRY: u64 = 1 << 6;
 pub const ATTACH_IRQ_HANDLER_EXIT: u64 = 1 << 7;
 pub const ATTACH_SOFTIRQ_ENTRY: u64 = 1 << 8;
 pub const ATTACH_SOFTIRQ_EXIT: u64 = 1 << 9;
+pub const ATTACH_CPU_FREQUENCY_LIMIT: u64 = 1 << 10;
 pub const ATTACH_IRQ_HANDLER: u64 = ATTACH_IRQ_HANDLER_ENTRY | ATTACH_IRQ_HANDLER_EXIT;
 pub const ATTACH_SOFTIRQ: u64 = ATTACH_SOFTIRQ_ENTRY | ATTACH_SOFTIRQ_EXIT;
 pub const NETWORK_PROTOCOL_ETHERCAT: u16 = 0x88A4;
+pub const CPU_FREQUENCY_POLICY_ALL: u32 = u32::MAX;
 pub const ATTACH_ALL: u64 = ATTACH_SCHED_WAKEUP
     | ATTACH_SCHED_SWITCH
     | ATTACH_PROCESS_EXIT
@@ -39,7 +41,8 @@ pub const ATTACH_ALL: u64 = ATTACH_SCHED_WAKEUP
     | ATTACH_OOM_KILL
     | ATTACH_NETWORK_DROP
     | ATTACH_IRQ_HANDLER
-    | ATTACH_SOFTIRQ;
+    | ATTACH_SOFTIRQ
+    | ATTACH_CPU_FREQUENCY_LIMIT;
 
 const TRACEFS_EVENT_ROOTS: [&str; 2] = [
     "/sys/kernel/tracing/events",
@@ -63,6 +66,7 @@ pub enum AttachPoint {
     IrqHandlerExit = 7,
     SoftirqEntry = 8,
     SoftirqExit = 9,
+    CpuFrequencyLimit = 10,
 }
 
 impl AttachPoint {
@@ -78,6 +82,7 @@ impl AttachPoint {
             Self::IrqHandlerExit => ATTACH_IRQ_HANDLER_EXIT,
             Self::SoftirqEntry => ATTACH_SOFTIRQ_ENTRY,
             Self::SoftirqExit => ATTACH_SOFTIRQ_EXIT,
+            Self::CpuFrequencyLimit => ATTACH_CPU_FREQUENCY_LIMIT,
         }
     }
 }
@@ -103,6 +108,12 @@ pub struct RuntimeConfig {
     pub network_drop_window_ns: u64,
     pub irq_duration_threshold_ns: u64,
     pub softirq_duration_threshold_ns: u64,
+    /// Product-qualified minimum cpufreq policy maximum, in kHz. A default of
+    /// 1 keeps the observer inert until deployment supplies its real floor.
+    pub cpu_frequency_floor_khz: u32,
+    /// Exact representative cpufreq policy CPU, or
+    /// [`CPU_FREQUENCY_POLICY_ALL`] to observe every policy.
+    pub cpu_frequency_policy_cpu: u32,
     pub boot_id: u64,
     pub agent_epoch: u64,
 }
@@ -124,6 +135,10 @@ impl RuntimeConfig {
             )
             && self.irq_duration_threshold_ns > 0
             && self.softirq_duration_threshold_ns > 0
+            && valid_cpu_frequency_tracking(
+                self.cpu_frequency_floor_khz,
+                self.cpu_frequency_policy_cpu,
+            )
     }
 }
 
@@ -137,6 +152,10 @@ const fn valid_count_window(threshold: u64, window_ns: u64) -> bool {
 
 const fn valid_network_tracking(protocol: u16, threshold: u64, window_ns: u64) -> bool {
     protocol > 0 && valid_count_window(threshold, window_ns)
+}
+
+const fn valid_cpu_frequency_tracking(floor_khz: u32, policy_cpu: u32) -> bool {
+    floor_khz > 0 && (policy_cpu == CPU_FREQUENCY_POLICY_ALL || policy_cpu <= u16::MAX as u32)
 }
 
 const fn normalize_attach_pairs(mut mask: u64) -> u64 {
@@ -164,6 +183,8 @@ impl Default for RuntimeConfig {
             network_drop_window_ns: 1_000_000,
             irq_duration_threshold_ns: 250_000,
             softirq_duration_threshold_ns: 500_000,
+            cpu_frequency_floor_khz: 1,
+            cpu_frequency_policy_cpu: CPU_FREQUENCY_POLICY_ALL,
             boot_id: 0,
             agent_epoch: 0,
         }
@@ -194,6 +215,10 @@ pub struct KernelContext {
     pub network_protocol: u16,
     pub reserved16: u16,
     pub reserved32: u32,
+    pub cpu_frequency_floor_khz: u32,
+    pub cpu_frequency_policy_cpu: u32,
+    pub cpu_frequency_policy_epoch: u32,
+    pub reserved_cpu_frequency: u32,
 }
 
 // SAFETY: The BPF map value is an all-integer C-compatible record without
@@ -219,6 +244,10 @@ impl KernelContext {
             network_protocol: config.network_protocol,
             reserved16: 0,
             reserved32: 0,
+            cpu_frequency_floor_khz: config.cpu_frequency_floor_khz,
+            cpu_frequency_policy_cpu: config.cpu_frequency_policy_cpu,
+            cpu_frequency_policy_epoch: 1,
+            reserved_cpu_frequency: 0,
         }
     }
 
@@ -240,6 +269,10 @@ impl KernelContext {
             network_protocol: self.network_protocol,
             reserved16: 0,
             reserved32: 0,
+            cpu_frequency_floor_khz: self.cpu_frequency_floor_khz,
+            cpu_frequency_policy_cpu: self.cpu_frequency_policy_cpu,
+            cpu_frequency_policy_epoch: self.cpu_frequency_policy_epoch,
+            reserved_cpu_frequency: 0,
         }
     }
 
@@ -272,6 +305,16 @@ impl KernelContext {
         self.page_fault_window_ns = window_ns;
         true
     }
+
+    fn set_cpu_frequency_tracking(&mut self, floor_khz: u32, policy_cpu: u32) -> bool {
+        if !valid_cpu_frequency_tracking(floor_khz, policy_cpu) {
+            return false;
+        }
+        self.cpu_frequency_policy_epoch = self.cpu_frequency_policy_epoch.wrapping_add(1).max(1);
+        self.cpu_frequency_floor_khz = floor_khz;
+        self.cpu_frequency_policy_cpu = policy_cpu;
+        true
+    }
 }
 
 /// Per-CPU counters maintained by the BPF bundle.
@@ -294,6 +337,10 @@ pub struct KernelStats {
     pub network_threshold_events: u64,
     pub page_fault_threshold_events: u64,
     pub thread_exits_ignored: u64,
+    pub cpu_frequency_updates: u64,
+    pub cpu_frequency_throttle_events: u64,
+    pub cpu_frequency_recoveries: u64,
+    pub cpu_frequency_suppressed: u64,
 }
 
 // SAFETY: The BPF map value is an all-u64 C-compatible record without padding
@@ -326,6 +373,18 @@ impl KernelStats {
         self.thread_exits_ignored = self
             .thread_exits_ignored
             .saturating_add(other.thread_exits_ignored);
+        self.cpu_frequency_updates = self
+            .cpu_frequency_updates
+            .saturating_add(other.cpu_frequency_updates);
+        self.cpu_frequency_throttle_events = self
+            .cpu_frequency_throttle_events
+            .saturating_add(other.cpu_frequency_throttle_events);
+        self.cpu_frequency_recoveries = self
+            .cpu_frequency_recoveries
+            .saturating_add(other.cpu_frequency_recoveries);
+        self.cpu_frequency_suppressed = self
+            .cpu_frequency_suppressed
+            .saturating_add(other.cpu_frequency_suppressed);
     }
 }
 
@@ -456,7 +515,7 @@ const SOFTIRQ_EXIT_SPEC: AttachSpec = AttachSpec {
     event: "softirq_exit",
 };
 
-const ATTACH_SPECS: [AttachSpec; 10] = [
+const ATTACH_SPECS: [AttachSpec; 11] = [
     AttachSpec {
         point: AttachPoint::SchedulerWakeup,
         program: "esop_sched_wakeup",
@@ -497,6 +556,12 @@ const ATTACH_SPECS: [AttachSpec; 10] = [
     IRQ_HANDLER_EXIT_SPEC,
     SOFTIRQ_ENTRY_SPEC,
     SOFTIRQ_EXIT_SPEC,
+    AttachSpec {
+        point: AttachPoint::CpuFrequencyLimit,
+        program: "esop_cpu_frequency_limit",
+        category: "power",
+        event: "cpu_frequency_limits",
+    },
 ];
 
 /// A loaded eBPF bundle. Dropping this value drops BPF maps and tracepoint
@@ -664,6 +729,21 @@ impl BpfRuntime {
     ) -> Result<(), RuntimeError> {
         let mut updated = self.kernel_context;
         if !updated.set_page_fault_tracking(page_fault_threshold, page_fault_window_ns) {
+            return Err(RuntimeError::InvalidConfiguration);
+        }
+        self.context.set(0, updated, 0)?;
+        self.kernel_context = updated;
+        Ok(())
+    }
+
+    /// Atomically replace the cpufreq policy floor and policy-CPU filter.
+    pub fn update_cpu_frequency_tracking(
+        &mut self,
+        cpu_frequency_floor_khz: u32,
+        cpu_frequency_policy_cpu: u32,
+    ) -> Result<(), RuntimeError> {
+        let mut updated = self.kernel_context;
+        if !updated.set_cpu_frequency_tracking(cpu_frequency_floor_khz, cpu_frequency_policy_cpu) {
             return Err(RuntimeError::InvalidConfiguration);
         }
         self.context.set(0, updated, 0)?;
@@ -1122,6 +1202,24 @@ mod tests {
         assert_eq!(evidence.domain, EvidenceDomain::KernelMemory);
         assert_eq!(evidence.kind, EvidenceKind::OomKill);
         assert_eq!(evidence.severity, IncidentSeverity::Critical);
+
+        put_u32(&mut bytes, 48, 0);
+        put_u32(&mut bytes, 52, 0);
+        put_u16(&mut bytes, 56, 7);
+        put_u64(&mut bytes, 64, 1_800_000);
+        put_u64(&mut bytes, 72, 2_000_000);
+        put_u32(&mut bytes, 88, 1);
+        bytes[92] = EvidenceDomain::KernelScheduler as u8;
+        bytes[93] = EvidenceKind::CpuThrottle as u8;
+        bytes[94] = IncidentSeverity::Error as u8;
+        let evidence = decode_evidence(&bytes).unwrap();
+        assert_eq!(evidence.pid, 0);
+        assert_eq!(evidence.tid, 0);
+        assert_eq!(evidence.cpu, 7);
+        assert_eq!(evidence.observed_value, 1_800_000);
+        assert_eq!(evidence.threshold, 2_000_000);
+        assert_eq!(evidence.count, 1);
+        assert_eq!(evidence.kind, EvidenceKind::CpuThrottle);
     }
 
     #[test]
@@ -1209,6 +1307,24 @@ mod tests {
         };
         assert!(!config.valid());
 
+        let config = RuntimeConfig {
+            cpu_frequency_floor_khz: 0,
+            ..RuntimeConfig::default()
+        };
+        assert!(!config.valid());
+
+        let config = RuntimeConfig {
+            cpu_frequency_policy_cpu: u32::from(u16::MAX) + 1,
+            ..RuntimeConfig::default()
+        };
+        assert!(!config.valid());
+
+        let config = RuntimeConfig {
+            cpu_frequency_policy_cpu: CPU_FREQUENCY_POLICY_ALL,
+            ..RuntimeConfig::default()
+        };
+        assert!(config.valid());
+
         let mut config = RuntimeConfig::default();
         config.enabled_attach_mask |= 1 << 63;
         assert!(!config.valid());
@@ -1227,6 +1343,8 @@ mod tests {
             network_drop_window_ns: 1_000,
             irq_duration_threshold_ns: 250,
             softirq_duration_threshold_ns: 500,
+            cpu_frequency_floor_khz: 2_000_000,
+            cpu_frequency_policy_cpu: 7,
             boot_id: 5,
             agent_epoch: 7,
             ..RuntimeConfig::default()
@@ -1249,6 +1367,9 @@ mod tests {
         assert_eq!(context.network_drop_window_ns, 1_000);
         assert_eq!(context.irq_duration_threshold_ns, 250);
         assert_eq!(context.softirq_duration_threshold_ns, 500);
+        assert_eq!(context.cpu_frequency_floor_khz, 2_000_000);
+        assert_eq!(context.cpu_frequency_policy_cpu, 7);
+        assert_eq!(context.cpu_frequency_policy_epoch, 1);
     }
 
     #[test]
@@ -1286,9 +1407,27 @@ mod tests {
     }
 
     #[test]
+    fn cpu_frequency_tracking_updates_are_validated_before_commit() {
+        let mut context = KernelContext::from_config(RuntimeConfig::default());
+        let original_epoch = context.cpu_frequency_policy_epoch;
+        assert!(context.set_cpu_frequency_tracking(2_000_000, 7));
+        assert_eq!(context.cpu_frequency_floor_khz, 2_000_000);
+        assert_eq!(context.cpu_frequency_policy_cpu, 7);
+        assert_eq!(context.cpu_frequency_policy_epoch, original_epoch + 1);
+
+        let unchanged = context;
+        assert!(!context.set_cpu_frequency_tracking(0, 7));
+        assert_eq!(context, unchanged);
+        assert!(!context.set_cpu_frequency_tracking(2_000_000, u32::from(u16::MAX) + 1));
+        assert_eq!(context, unchanged);
+        assert!(context.set_cpu_frequency_tracking(2_000_000, CPU_FREQUENCY_POLICY_ALL));
+        assert_eq!(context.cpu_frequency_policy_epoch, original_epoch + 2);
+    }
+
+    #[test]
     fn kernel_map_abis_and_attach_masks_remain_explicit() {
-        assert_eq!(std::mem::size_of::<KernelContext>(), 104);
-        assert_eq!(std::mem::size_of::<KernelStats>(), 128);
+        assert_eq!(std::mem::size_of::<KernelContext>(), 120);
+        assert_eq!(std::mem::size_of::<KernelStats>(), 160);
 
         let mut observed = 0;
         for spec in ATTACH_SPECS {
@@ -1323,6 +1462,10 @@ mod tests {
             network_threshold_events: 8,
             page_fault_threshold_events: u64::MAX,
             thread_exits_ignored: u64::MAX,
+            cpu_frequency_updates: u64::MAX,
+            cpu_frequency_throttle_events: 3,
+            cpu_frequency_recoveries: 4,
+            cpu_frequency_suppressed: u64::MAX,
             ..KernelStats::default()
         });
         assert_eq!(aggregate.irq_samples, u64::MAX);
@@ -1334,5 +1477,9 @@ mod tests {
         assert_eq!(aggregate.network_threshold_events, 8);
         assert_eq!(aggregate.page_fault_threshold_events, u64::MAX);
         assert_eq!(aggregate.thread_exits_ignored, u64::MAX);
+        assert_eq!(aggregate.cpu_frequency_updates, u64::MAX);
+        assert_eq!(aggregate.cpu_frequency_throttle_events, 3);
+        assert_eq!(aggregate.cpu_frequency_recoveries, 4);
+        assert_eq!(aggregate.cpu_frequency_suppressed, u64::MAX);
     }
 }

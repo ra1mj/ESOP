@@ -79,6 +79,14 @@ struct trace_event_raw_softirq {
     char __data[0];
 };
 
+struct trace_event_raw_cpu_frequency_limits {
+    struct trace_entry ent;
+    __u32 min_freq;
+    __u32 max_freq;
+    __u32 cpu_id;
+    char __data[0];
+};
+
 struct net_device {
     int ifindex;
 };

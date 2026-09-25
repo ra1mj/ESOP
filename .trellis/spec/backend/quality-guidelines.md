@@ -544,6 +544,86 @@ Keep the fixed event ABI stable and treat target-kernel process/OOM injection,
 PID-namespace behavior, victim thread-group resolution, verifier behavior, and
 overhead as separate qualification evidence.
 
+## Scenario: eBPF CPU Frequency Limit Evidence
+
+### 1. Scope / Trigger
+
+- Trigger: add or change Linux cpufreq policy-limit observation in the BPF
+  bundle, Aya runtime, or incident correlator.
+- Scope: `power:cpu_frequency_limits` is a policy-bound signal. It must not be
+  generalized into instantaneous frequency, thermal cause, or throttle
+  residency without a separate qualified source.
+
+### 2. Signatures
+
+- Configuration: `RuntimeConfig::{cpu_frequency_floor_khz,
+  cpu_frequency_policy_cpu}`.
+- Runtime update: `BpfRuntime::update_cpu_frequency_tracking(floor_khz,
+  policy_cpu)` writes one complete `KernelContext` value.
+- Attach point: optional `power:cpu_frequency_limits`; it remains outside the
+  default required mask.
+
+### 3. Contracts
+
+- `floor_khz` is nonzero. `policy_cpu == u32::MAX` means every policy; exact
+  filters must fit the event ABI's `u16` CPU field, including CPU 0.
+- The context owns an internal nonzero policy epoch. Every successful runtime
+  policy update increments it; BPF episode state rearms when its stored epoch
+  differs.
+- Evidence writes policy `cpu_id` to `cpu`, policy `max_freq` to
+  `observed_value`, the configured floor to `threshold`, and zero PID/TID and
+  duration. The fixed event remains 96 bytes.
+- One bounded map entry tracks each policy CPU. Emit on the first positive
+  `max_freq < floor`; suppress repeated below-floor updates; rearm when the
+  policy recovers or the policy epoch changes.
+- `HOST_CPU_THROTTLE` requires both `0 < observed_value < threshold` and a
+  correlated deadline/WKC/DC-risk cycle. Different policy CPUs must not merge
+  into one top-level incident.
+
+### 4. Validation & Error Matrix
+
+- `floor_khz == 0` -> `InvalidConfiguration`; do not update the context map.
+- Exact `policy_cpu > u16::MAX` -> `InvalidConfiguration`; `u32::MAX` remains
+  the only all-policy sentinel.
+- Missing optional tracepoint/program -> reduced attach capability; keep the
+  scheduler/process baseline running.
+- Bounded state insertion failure or ring-buffer output failure -> increment
+  `lost_events`; never block or fabricate evidence.
+- Zero maximum, at/above-floor maximum, or healthy cycle -> no incident.
+
+### 5. Good/Base/Bad Cases
+
+- Good: policy CPU 7 changes from 2.4 GHz to a 1.8 GHz maximum with a 2.0 GHz
+  floor during a deadline-risk cycle; emit one attributed incident.
+- Base: further 1.7/1.6 GHz policy updates in the same episode only increment
+  suppression statistics; a later 2.0 GHz update rearms observation.
+- Bad: treat an ordinary `power:cpu_frequency` transition, hook execution CPU,
+  or a policy maximum as proof of instantaneous throttling cause or duration.
+
+### 6. Tests Required
+
+- Decode asserts policy CPU, actual maximum, configured floor, zero task
+  identity, and unchanged 96-byte event size.
+- Configuration tests reject zero floor and unrepresentable exact CPU filters
+  without mutation, and prove policy epoch advancement on successful updates.
+- Correlator tests reject at-floor, zero-maximum, and healthy-cycle evidence,
+  and prove different policy CPUs retain distinct incidents.
+- C/Rust ABI assertions cover context/stat sizes; statistics aggregation covers
+  saturation; BPF syntax and real CO-RE compilation cover the typed record.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+Treat every dynamic frequency transition as `HOST_CPU_THROTTLE`, record the
+current hook CPU, and emit repeatedly while a policy remains below a floor.
+
+#### Correct
+
+Read typed policy `cpu_id`/`max_freq`, compare against the configured kHz floor,
+emit one event per bounded policy episode, and require cycle-risk correlation
+before assigning the incident code.
+
 ## Code Review Checklist
 
 - Is the worst-case loop bounded by a static capacity or explicit budget?

@@ -471,6 +471,9 @@ impl<const INCIDENTS: usize> IncidentCorrelator<INCIDENTS> {
             {
                 continue;
             }
+            if code == IncidentCode::HostCpuThrottle && existing.cpu != evidence.cpu {
+                continue;
+            }
             if existing.last_seen_ns.abs_diff(evidence.timestamp_ns) <= self.window_ns {
                 return Some(index);
             }
@@ -606,12 +609,19 @@ fn classify(
             RecommendedAction::LatchFault,
             100,
         )),
-        EvidenceKind::CpuThrottle if correlated => Some((
-            IncidentCode::HostCpuThrottle,
-            IncidentSeverity::Error,
-            RecommendedAction::DegradeHostObservation,
-            70,
-        )),
+        EvidenceKind::CpuThrottle
+            if evidence.observed_value > 0
+                && evidence.threshold > 0
+                && evidence.observed_value < evidence.threshold
+                && correlated =>
+        {
+            Some((
+                IncidentCode::HostCpuThrottle,
+                IncidentSeverity::Error,
+                RecommendedAction::DegradeHostObservation,
+                70,
+            ))
+        }
         EvidenceKind::GatewayStall if correlated => Some((
             IncidentCode::GatewayStall,
             IncidentSeverity::Error,
@@ -923,6 +933,69 @@ mod tests {
             interrupt.domain = EvidenceDomain::KernelIrq;
             assert_eq!(correlator.ingest(interrupt).unwrap(), None);
         }
+    }
+
+    #[test]
+    fn cpu_frequency_limit_requires_below_floor_and_cycle_risk() {
+        let mut correlator = IncidentCorrelator::<2>::new(11, 3, 1_000);
+        correlator
+            .observe_cycle(CycleContext {
+                boot_id: 11,
+                cycle_seq: 42,
+                transition_seq: 9,
+                timestamp_ns: 1_000,
+                deadline_miss: 1,
+                ..CycleContext::EMPTY
+            })
+            .unwrap();
+
+        let mut limited = evidence(EvidenceKind::CpuThrottle, 1_100);
+        limited.pid = 0;
+        limited.tid = 0;
+        limited.cpu = 7;
+        limited.observed_value = 1_800_000;
+        limited.threshold = 2_000_000;
+        limited.count = 1;
+        let incident = correlator.ingest(limited).unwrap().unwrap();
+        assert_eq!(incident.code, IncidentCode::HostCpuThrottle);
+        assert_eq!(incident.cpu, 7);
+        assert_eq!(incident.observed_value, 1_800_000);
+        assert_eq!(incident.threshold, 2_000_000);
+        assert_eq!(incident.confidence_percent, 70);
+        assert_eq!(
+            incident.recommended_action,
+            RecommendedAction::DegradeHostObservation
+        );
+
+        let mut other_policy = limited;
+        other_policy.evidence_id = 8;
+        other_policy.timestamp_ns = 1_200;
+        other_policy.cpu = 8;
+        let other_incident = correlator.ingest(other_policy).unwrap().unwrap();
+        assert_ne!(other_incident.incident_id, incident.incident_id);
+        assert_eq!(other_incident.cpu, 8);
+        assert_eq!(correlator.len(), 2);
+
+        let mut at_floor = limited;
+        at_floor.evidence_id = 9;
+        at_floor.observed_value = at_floor.threshold;
+        assert_eq!(correlator.ingest(at_floor).unwrap(), None);
+
+        let mut zero_maximum = limited;
+        zero_maximum.evidence_id = 10;
+        zero_maximum.observed_value = 0;
+        assert_eq!(correlator.ingest(zero_maximum).unwrap(), None);
+
+        let mut healthy = IncidentCorrelator::<2>::new(11, 3, 1_000);
+        healthy
+            .observe_cycle(CycleContext {
+                boot_id: 11,
+                cycle_seq: 42,
+                timestamp_ns: 1_000,
+                ..CycleContext::EMPTY
+            })
+            .unwrap();
+        assert_eq!(healthy.ingest(limited).unwrap(), None);
     }
 
     #[test]

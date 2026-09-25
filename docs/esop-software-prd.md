@@ -208,9 +208,9 @@ eBPF 观测器只部署在 Linux 监督域或 Linux 实时端口；STM32/HPMicro
 | ID | 优先级 | 需求 | 验收标准 |
 | --- | --- | --- | --- |
 | FR-047 | P1 | 系统应提供 eBPF agent 生命周期：内核能力探测、程序加载/验证/挂载、map/ringbuf 初始化、版本报告、健康心跳和安全卸载。 | 在支持、缺少 BTF、权限不足、程序 verifier 拒绝、ringbuf 满和 agent 重启场景下均有明确状态与降级行为。 |
-| FR-048 | P1 | eBPF 应观测调度、IRQ/softirq、网络收发/丢弃、页错误、OOM/进程退出、CPU 迁移/限频和 ESOP/ROS/Zenoh 用户态关键函数。 | 至少能识别 scheduler stall、IRQ storm、NIC drop、page fault、CPU throttle、process crash 和 gateway stall；当前代码已具备有界硬 IRQ/softirq 时长证据、按 EtherType/ifindex 聚合并关联 transport-risk cycle 的 `HOST_NIC_DROP` 证据、按 CPU/进程窗口聚合且关联风险周期的 `HOST_PAGE_FAULT` 证据，以及只把受跟踪进程主线程退出升级为 `USER_COMPONENT_EXIT`、按 `oom:mark_victim` 受害 PID 生成 `HOST_OOM` 的硬事实链路。目标内核压力、丢包、页错误、OOM 和进程退出注入资格仍需单独完成。 |
+| FR-048 | P1 | eBPF 应观测调度、IRQ/softirq、网络收发/丢弃、页错误、OOM/进程退出、CPU 迁移/限频和 ESOP/ROS/Zenoh 用户态关键函数。 | 至少能识别 scheduler stall、IRQ storm、NIC drop、page fault、CPU throttle、process crash 和 gateway stall；当前代码已具备有界硬 IRQ/softirq 时长证据、按 EtherType/ifindex 聚合并关联 transport-risk cycle 的 `HOST_NIC_DROP` 证据、按 CPU/进程窗口聚合且关联风险周期的 `HOST_PAGE_FAULT` 证据、按 cpufreq policy CPU 去重且只在 `max_freq` 低于产品配置下限并关联风险周期时生成的 `HOST_CPU_THROTTLE` 证据，以及只把受跟踪进程主线程退出升级为 `USER_COMPONENT_EXIT`、按 `oom:mark_victim` 受害 PID 生成 `HOST_OOM` 的硬事实链路。CPU 迁移、用户态关键函数/gateway stall 和目标内核压力、丢包、页错误、OOM、进程退出及限频注入资格仍需单独完成。 |
 | FR-049 | P1 | 观测事件应与 ESOP `boot_id`、cycle sequence、组件 PID/TID、CPU、网卡、ProcBuf transition sequence 和 monotonic time 关联。 | 一次周期异常可以从 `performance_report` 追溯到对应的 eBPF 事件窗口和组件。 |
-| FR-050 | P1 | agent 应在内核侧优先聚合计数/直方图，仅在触发阈值或诊断窗口内发送固定大小事件；事件传输不得阻塞被观测进程。 | 高频调度、网络和页错误压力下 ringbuf 丢失计数可见；网络与页错误窗口只在首次达到阈值时发送固定事件，agent 不等待、不向 RT 线程注入锁或同步调用。 |
+| FR-050 | P1 | agent 应在内核侧优先聚合计数/直方图，仅在触发阈值或诊断窗口内发送固定大小事件；事件传输不得阻塞被观测进程。 | 高频调度、网络和页错误压力下 ringbuf 丢失计数可见；网络与页错误窗口只在首次达到阈值时发送固定事件，cpufreq policy 在同一低频 episode 只发送一次并在恢复后重置，agent 不等待、不向 RT 线程注入锁或同步调用。 |
 | FR-051 | P1 | 系统应生成结构化 `RuntimeIncident`，包含 incident ID、级别、原因码、时间窗口、证据、关联周期、影响组件、丢失计数和建议动作。 | 运维界面/Zenoh/Protobuf 能按 incident ID 聚合同一问题的多条证据，而不是只显示孤立日志。 |
 | FR-052 | P1 | eBPF 观测只能向 MLG 提供 `HOST_OBSERVATION` 证据或监督心跳，不能直接修改 CiA 402 controlword、绕过 MLG 或成为认证安全通道。 | agent 停止、事件误报、恶意事件和观测延迟测试中，运动许可仍只由 MLG 与产品安全策略裁决。 |
 

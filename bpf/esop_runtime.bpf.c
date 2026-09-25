@@ -18,6 +18,10 @@ struct esop_context {
     __u16 network_protocol;
     __u16 reserved16;
     __u32 reserved32;
+    __u32 cpu_frequency_floor_khz;
+    __u32 cpu_frequency_policy_cpu;
+    __u32 cpu_frequency_policy_epoch;
+    __u32 reserved_cpu_frequency;
 };
 
 struct esop_stats {
@@ -37,6 +41,10 @@ struct esop_stats {
     __u64 network_threshold_events;
     __u64 page_fault_threshold_events;
     __u64 thread_exits_ignored;
+    __u64 cpu_frequency_updates;
+    __u64 cpu_frequency_throttle_events;
+    __u64 cpu_frequency_recoveries;
+    __u64 cpu_frequency_suppressed;
 };
 
 struct esop_interrupt_key {
@@ -66,6 +74,13 @@ struct esop_page_fault_state {
     __u32 reserved;
 };
 
+struct esop_cpu_frequency_state {
+    __u32 max_frequency_khz;
+    __u32 policy_epoch;
+    __u8 below_floor;
+    __u8 reserved[3];
+};
+
 struct esop_runtime_evidence {
     __u64 evidence_id;
     __u64 boot_id;
@@ -88,8 +103,8 @@ struct esop_runtime_evidence {
     __u8 detail;
 };
 
-_Static_assert(sizeof(struct esop_context) == 104, "context ABI changed");
-_Static_assert(sizeof(struct esop_stats) == 128, "stats ABI changed");
+_Static_assert(sizeof(struct esop_context) == 120, "context ABI changed");
+_Static_assert(sizeof(struct esop_stats) == 160, "stats ABI changed");
 _Static_assert(sizeof(struct esop_runtime_evidence) == 96, "evidence ABI changed");
 
 struct {
@@ -146,6 +161,13 @@ struct {
     __type(value, struct esop_network_drop_state);
 } ESOP_NETWORK_DROPS SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 256);
+    __type(key, __u32);
+    __type(value, struct esop_cpu_frequency_state);
+} ESOP_CPU_FREQUENCY_LIMITS SEC(".maps");
+
 static __always_inline struct esop_context *esop_context(void)
 {
     __u32 key = 0;
@@ -173,10 +195,10 @@ static __always_inline int esop_tracks(__u32 pid, const struct esop_context *con
     return context && (context->tracked_pid == 0 || context->tracked_pid == pid);
 }
 
-static __always_inline int esop_emit_resource_task(
+static __always_inline int esop_emit_resource_cpu_task(
     __u8 domain, __u8 kind, __u8 severity, __u64 observed_value,
     __u64 threshold, __u64 duration_ns, __u32 count, __u16 irq,
-    __u32 netdev_ifindex, __u8 detail, __u32 pid, __u32 tid)
+    __u32 netdev_ifindex, __u8 detail, __u32 pid, __u32 tid, __u16 cpu)
 {
     struct esop_context *context = esop_context();
     struct esop_stats *stats = esop_stats();
@@ -197,7 +219,7 @@ static __always_inline int esop_emit_resource_task(
     event.transition_seq = context->transition_seq;
     event.pid = pid;
     event.tid = tid;
-    event.cpu = (__u16)bpf_get_smp_processor_id();
+    event.cpu = cpu;
     event.irq = irq;
     event.netdev_ifindex = netdev_ifindex;
     event.observed_value = observed_value;
@@ -218,6 +240,18 @@ static __always_inline int esop_emit_resource_task(
         stats->emitted_events++;
     }
     return 0;
+}
+
+static __always_inline int esop_emit_resource_task(
+    __u8 domain, __u8 kind, __u8 severity, __u64 observed_value,
+    __u64 threshold, __u64 duration_ns, __u32 count, __u16 irq,
+    __u32 netdev_ifindex, __u8 detail, __u32 pid, __u32 tid)
+{
+    __u32 cpu = bpf_get_smp_processor_id();
+    __u16 event_cpu = cpu > 0xffff ? 0xffff : (__u16)cpu;
+    return esop_emit_resource_cpu_task(
+        domain, kind, severity, observed_value, threshold, duration_ns, count,
+        irq, netdev_ifindex, detail, pid, tid, event_cpu);
 }
 
 static __always_inline int esop_emit_resource(
@@ -511,6 +545,84 @@ int esop_network_drop(struct trace_event_raw_kfree_skb *event)
             stats) {
             stats->network_threshold_events++;
         }
+    }
+    return 0;
+}
+
+SEC("tracepoint/power/cpu_frequency_limits")
+int esop_cpu_frequency_limit(
+    struct trace_event_raw_cpu_frequency_limits *event)
+{
+    struct esop_context *context = esop_context();
+    if (!context || context->cpu_frequency_floor_khz == 0) {
+        return 0;
+    }
+
+    __u32 policy_cpu = BPF_CORE_READ(event, cpu_id);
+    if (context->cpu_frequency_policy_cpu != 0xffffffff &&
+        context->cpu_frequency_policy_cpu != policy_cpu) {
+        return 0;
+    }
+
+    struct esop_stats *stats = esop_stats();
+    if (stats) {
+        stats->cpu_frequency_updates++;
+    }
+
+    __u32 max_frequency_khz = BPF_CORE_READ(event, max_freq);
+    if (max_frequency_khz == 0) {
+        return 0;
+    }
+
+    __u32 floor_khz = context->cpu_frequency_floor_khz;
+    __u8 below_floor = max_frequency_khz < floor_khz;
+    struct esop_cpu_frequency_state *state =
+        bpf_map_lookup_elem(&ESOP_CPU_FREQUENCY_LIMITS, &policy_cpu);
+    if (!state) {
+        struct esop_cpu_frequency_state initial = {
+            .max_frequency_khz = max_frequency_khz,
+            .policy_epoch = context->cpu_frequency_policy_epoch,
+            .below_floor = below_floor,
+        };
+        if (bpf_map_update_elem(&ESOP_CPU_FREQUENCY_LIMITS, &policy_cpu,
+                                &initial, BPF_ANY) < 0) {
+            if (stats) {
+                stats->lost_events++;
+            }
+            return 0;
+        }
+        if (!below_floor) {
+            return 0;
+        }
+    } else {
+        if (state->policy_epoch != context->cpu_frequency_policy_epoch) {
+            state->policy_epoch = context->cpu_frequency_policy_epoch;
+            state->below_floor = 0;
+        }
+        state->max_frequency_khz = max_frequency_khz;
+        if (below_floor) {
+            if (state->below_floor) {
+                if (stats) {
+                    stats->cpu_frequency_suppressed++;
+                }
+                return 0;
+            }
+            state->below_floor = 1;
+        } else {
+            if (state->below_floor && stats) {
+                stats->cpu_frequency_recoveries++;
+            }
+            state->below_floor = 0;
+            return 0;
+        }
+    }
+
+    __u16 event_cpu = policy_cpu > 0xffff ? 0xffff : (__u16)policy_cpu;
+    if (esop_emit_resource_cpu_task(0, 6, 2, max_frequency_khz, floor_khz,
+                                    0, 1, 0, 0, 0, 0, 0,
+                                    event_cpu) == 0 &&
+        stats) {
+        stats->cpu_frequency_throttle_events++;
     }
     return 0;
 }
