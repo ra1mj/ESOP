@@ -102,4 +102,4 @@ that the real-time owner can read without Protobuf or transport dependencies.
       remain source-compatible and green.
 - [x] Documentation and capability claims describe the delivered boundary and
       remaining production qualification gaps accurately.
-- [ ] Focused tests, strict Clippy, `make ci`, and pushed GitHub Actions pass.
+- [x] Focused tests, strict Clippy, `make ci`, and pushed GitHub Actions pass.
