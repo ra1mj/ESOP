@@ -96,24 +96,24 @@ wire, slave, WCET, or production realtime qualification.
 
 ## Acceptance Criteria
 
-- [ ] AC1: The Linux qualification executable exact-links both raw-port marker
+- [x] AC1: The Linux qualification executable exact-links both raw-port marker
   symbols, requires the complete uprobe pair, and drives a bounded delayed
   blocking `recv(2)` under a transport-risk cycle.
-- [ ] AC2: A successful run observes a strict over-threshold
+- [x] AC2: A successful run observes a strict over-threshold
   `UserEsop/RawPortStall` and produces one `HostPortStall` controlled-stop
   incident with the expected PID/TID/ifindex/cycle/detail/confidence fields.
-- [ ] AC3: Success requires nonzero begin/completion/stall counters, zero
+- [x] AC3: Success requires nonzero begin/completion/stall counters, zero
   mismatch/loss counters, complete attach masks, and a bounded poll loop.
-- [ ] AC4: The JSON validator accepts the fixture report and regression tests
+- [x] AC4: The JSON validator accepts the fixture report and regression tests
   reject malformed types, partial attachment, inconsistent timing, loss,
   mismatches, and wrong incident semantics.
-- [ ] AC5: `make test-ebpf-raw-port-runtime` builds as the normal user, elevates
+- [x] AC5: `make test-ebpf-raw-port-runtime` builds as the normal user, elevates
   only execution, fails explicitly without privilege, and validates the output.
-- [ ] AC6: GitHub Actions executes the privileged qualification and uploads
+- [x] AC6: GitHub Actions executes the privileged qualification and uploads
   `build/ebpf_raw_port_qualification.json` as evidence.
-- [ ] AC7: Focused tests, full `make ci`, BPF syntax/CO-RE build, and the remote
+- [x] AC7: Focused tests, full `make ci`, BPF syntax/CO-RE build, and the remote
   privileged qualification job pass.
-- [ ] AC8: Documentation states the qualified Unix-socket syscall/marker path
+- [x] AC8: Documentation states the qualified Unix-socket syscall/marker path
   and keeps AF_PACKET, driver/NIC/wire/slave, overhead/WCET, long-run HIL, and
   production realtime qualification explicitly open.
 
