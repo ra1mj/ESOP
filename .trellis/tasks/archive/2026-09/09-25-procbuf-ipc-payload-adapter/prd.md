@@ -38,7 +38,7 @@ Connect the fixed-layout ProcBuf ABI to the hosted Unix Datagram IPC transport t
 - [x] State, event, and command round trips pass over real nonblocking Unix datagram endpoints.
 - [x] The Zenoh gateway has no independent ProcBuf projection or MotionCommand field-mapping implementation.
 - [x] Existing Zenoh and ProcBuf behavior tests remain green.
-- [ ] `make ci` and the pushed GitHub Actions workflow pass.
+- [x] `make ci` and the pushed GitHub Actions workflow pass.
 
 ## Notes
 
