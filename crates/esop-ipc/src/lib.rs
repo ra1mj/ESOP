@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 mod frame;
+#[cfg(feature = "payloads")]
+pub mod payloads;
 mod peer;
 #[cfg(unix)]
 mod unix;

@@ -1696,9 +1696,10 @@ from actual hosted fault injection and performance claims.
 - Trigger: add or change the IPC frame ABI, Unix datagram endpoint, peer
   lifecycle monitor, or an adapter that crosses the ProcBuf/Linux supervision
   boundary.
-- Scope: this contract covers hosted filesystem Unix datagrams only. It does
-  not qualify shared memory, RPMsg, payload-specific ProcBuf adapters,
-  cryptographic identity, deployment ACL, production WCET, stress, or HIL.
+- Scope: this contract covers hosted filesystem Unix datagrams and the optional
+  host-only ProcBuf/Protobuf payload adapter. It does not qualify shared memory,
+  RPMsg, command-target conversion into ProcBuf Command pages, cryptographic
+  identity, deployment ACL, production WCET, stress, or HIL.
 - The transport must remain absent from EtherCAT, lifecycle, profile and
   ProcBuf real-time dependency trees.
 
@@ -1710,6 +1711,9 @@ from actual hosted fault injection and performance claims.
 - Lifecycle: `PeerPolicy`, `PeerMonitor::observe` and `PeerMonitor::status`.
 - Transport: `UnixDatagramEndpoint::bind`, `send` and `receive`; focused
   verification is `make test-ipc`.
+- Payloads: `ProcBufProjector::read_state_frame`, `pop_event_frame`,
+  `decode_command_frame` and `admit_command_frame`; Zenoh must delegate its
+  ProcBuf projection and MotionCommand field mapping to the same owner.
 
 ### 3. Contracts
 
@@ -1727,6 +1731,13 @@ from actual hosted fault injection and performance claims.
   endpoint.
 - IPC is transport and liveness evidence only. Command ACL, TTL, authority,
   permits and motion lifecycle decisions stay in their existing policy owners.
+- State/event payloads come only from a header-validated single ProcBuf reader.
+  State envelope identity, sequence and time must match the projected message;
+  quality bits carry known mask in bits 0-15 and good mask in bits 16-31.
+- Command frames must cross-check kind, schema, layout, numeric/text robot,
+  boot, source and sequence before calling `CommandIngress`. Optional transport
+  identity must match the already-cross-checked source. Pre-policy rejection
+  must not mutate ingress replay, rate-limit or audit state.
 
 ### 4. Validation & Error Matrix
 
@@ -1739,18 +1750,24 @@ from actual hosted fault injection and performance claims.
 - Robot/layout/source mismatch, future/stale time, replayed sequence, remote or
   local time regression -> stable typed peer errors; preserve the last accepted
   state.
+- ProcBuf header/replay/lifecycle/stop/quality/non-finite/payload failures and
+  command envelope/payload mismatches -> stable typed payload errors. Do not
+  publish partial messages or invoke ingress on structural failure.
 - Existing local file/socket -> `LocalPathExists`; never remove it. Other I/O
   faults retain the originating `io::Error`.
 
 ### 5. Good/Base/Bad Cases
 
 - Good: command/state/heartbeat datagrams round-trip over two real nonblocking
-  sockets; a same-path peer rebind with a new boot ID is classified Restarted.
+  sockets; projected State/Event decode as v1 Protobuf; a validated command
+  becomes a permit through the existing ingress; a same-path peer rebind with a
+  new boot ID is classified Restarted.
 - Base: an empty receive is `WouldBlock`, timeout boundary is still Online, and
   the next same-boot fresh sequence is Continued.
-- Bad: `transmute` a ProcBuf page, retry until send succeeds, accept unnamed or
-  arbitrary senders, remove a pre-existing path, reuse sequence in one boot, or
-  treat CRC/path matching as authentication.
+- Bad: `transmute` a ProcBuf page, duplicate projection/command mapping in each
+  transport, call ingress before envelope/payload checks, retry until send
+  succeeds, accept unnamed or arbitrary senders, remove a pre-existing path,
+  reuse sequence in one boot, or treat CRC/path matching as authentication.
 
 ### 6. Tests Required
 
@@ -1762,6 +1779,11 @@ from actual hosted fault injection and performance claims.
 - Kernel-backed Unix tests cover both directions, command/state/heartbeat,
   `WouldBlock`, absent peer, unexpected source, oversized datagram, same-path
   restart, bind refusal and owned/replaced-path cleanup.
+- Payload tests cover ProcBuf state/event projection over real sockets, quality
+  mask encoding, all command identity mismatch dimensions, authenticated source,
+  policy admission, stale/non-finite/oversized state, and no ingress mutation on
+  structural rejection. Existing Zenoh tests must continue through the shared
+  implementation.
 - Quality gates include focused Clippy/check, capability validation, full
   workspace CI and dependency-tree proof that real-time crates do not acquire
   `esop-ipc` or POSIX transport dependencies.

@@ -682,6 +682,12 @@ dependencies = [
 [[package]]
 name = "esop-ipc"
 version = "0.1.0"
+dependencies = [
+ "esop-command-gateway",
+ "esop-lifecycle-guard",
+ "esop-procbuf",
+ "esop-proto",
+]
 
 [[package]]
 name = "esop-lifecycle-guard"
@@ -724,6 +730,7 @@ version = "0.1.0"
 dependencies = [
  "esop-command-gateway",
  "esop-ebpf-agent",
+ "esop-ipc",
  "esop-lifecycle-guard",
  "esop-procbuf",
  "esop-profile-cia402",

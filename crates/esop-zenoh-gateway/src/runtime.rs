@@ -10,10 +10,12 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use esop_command_gateway::{CommandIngress, ExternalMotionCommand, IngressError};
 use esop_ebpf_agent::RuntimeIncident as AgentRuntimeIncident;
-use esop_lifecycle_guard::MotionPermit;
-use esop_proto::v1::{
-    DiagnosticEvent, MotionCommand, QueryReply, QueryRequest, RobotState, RuntimeIncident,
+use esop_ipc::payloads::{
+    CommandDecodeError, RobotId, decode_motion_command,
+    validate_authenticated_source as validate_shared_authenticated_source,
 };
+use esop_lifecycle_guard::MotionPermit;
+use esop_proto::v1::{DiagnosticEvent, QueryReply, QueryRequest, RobotState, RuntimeIncident};
 use esop_proto::{Message, SchemaCompatibilityError, validate_schema_version};
 use zenoh::Wait;
 use zenoh::qos::{CongestionControl, Priority};
@@ -397,6 +399,22 @@ impl From<esop_proto::DecodeError> for CommandAdapterError {
     }
 }
 
+impl From<CommandDecodeError> for CommandAdapterError {
+    fn from(error: CommandDecodeError) -> Self {
+        match error {
+            CommandDecodeError::EmptyPayload => Self::Payload(RouteError::EmptyPayload),
+            CommandDecodeError::PayloadTooLarge { .. } => {
+                Self::Payload(RouteError::PayloadTooLarge)
+            }
+            CommandDecodeError::Decode(error) => Self::Decode(error),
+            CommandDecodeError::RobotMismatch => Self::RobotMismatch,
+            CommandDecodeError::Schema(error) => Self::Schema(error),
+            CommandDecodeError::AuthorityOutOfRange => Self::AuthorityOutOfRange,
+            CommandDecodeError::IdentityMismatch => Self::IdentityMismatch,
+        }
+    }
+}
+
 /// Query contract errors are returned as small, stable Zenoh error payloads.
 #[derive(Debug)]
 pub enum QueryAdapterError {
@@ -501,25 +519,10 @@ pub fn decode_command_payload(
     key_space: KeySpace,
     payload: &[u8],
 ) -> Result<ExternalMotionCommand, CommandAdapterError> {
-    KeySpace::validate_payload(payload).map_err(CommandAdapterError::Payload)?;
-    let command = MotionCommand::decode(payload)?;
-    validate_schema_version(command.schema_version).map_err(CommandAdapterError::Schema)?;
-    if command.robot_id.as_bytes() != key_space.robot() {
-        return Err(CommandAdapterError::RobotMismatch);
-    }
-    let authority =
-        u8::try_from(command.authority).map_err(|_| CommandAdapterError::AuthorityOutOfRange)?;
-    Ok(ExternalMotionCommand {
-        boot_id: command.boot_id,
-        source_id: command.source_id,
-        permit_epoch: command.permit_epoch,
-        sequence: command.sequence,
-        deadline_ns: command.deadline_ns,
-        axis_mask: command.axis_mask,
-        authority,
-        reserved: [0; 3],
-        policy_version: command.policy_version,
-    })
+    let robot =
+        str::from_utf8(key_space.robot()).map_err(|_| CommandAdapterError::RobotMismatch)?;
+    let robot = RobotId::new(robot).map_err(|_| CommandAdapterError::RobotMismatch)?;
+    decode_motion_command(robot, payload).map_err(CommandAdapterError::from)
 }
 
 impl From<RouteError> for RuntimeError {
@@ -979,11 +982,8 @@ fn validate_authenticated_source(
     command: ExternalMotionCommand,
     authenticated_source_id: u64,
 ) -> Result<ExternalMotionCommand, CommandAdapterError> {
-    if command.source_id == authenticated_source_id {
-        Ok(command)
-    } else {
-        Err(CommandAdapterError::IdentityMismatch)
-    }
+    validate_shared_authenticated_source(command, authenticated_source_id)
+        .map_err(CommandAdapterError::from)
 }
 
 #[cfg(test)]
@@ -991,6 +991,7 @@ mod tests {
     use super::*;
     use esop_command_gateway::IngressPolicy;
     use esop_proto::CURRENT_SCHEMA_VERSION;
+    use esop_proto::v1::MotionCommand;
 
     #[test]
     fn gateway_observations_allocate_nonzero_unique_request_ids() {

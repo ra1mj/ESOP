@@ -29,7 +29,7 @@
 
 ## 3. CI 校验
 
-`make proto-schema` 检查 proto3/package、顶层消息的 `schema_version`、字段号和名称唯一性、reserved 不复用及 enum 零值。`crates/esop-proto/` 使用 vendored `protoc` 生成 Rust bindings；workspace 测试另外执行第 4 节的 descriptor 门禁和新旧 reader/writer 矩阵。`esop-zenoh-gateway` 的命令入口校验 schema version 和 robot ID 后再转交 `CommandIngress`；host-only incident adapter 在编码前校验 agent identity、窗口、证据数量、boot/epoch 和证据所属范围。类型化查询入口校验请求的 schema、robot、boot 和大小，并对 incident 及其 evidence 重做相同的 Protobuf 合同校验。`make test-zenoh` 验证类型化发布、真实 agent incident 投影、命令路由、查询往返/拒绝及 router 重启后的旧命令拒绝。生产认证和部署仍是后续验收项。
+`make proto-schema` 检查 proto3/package、顶层消息的 `schema_version`、字段号和名称唯一性、reserved 不复用及 enum 零值。`crates/esop-proto/` 使用 vendored `protoc` 生成 Rust bindings；workspace 测试另外执行第 4 节的 descriptor 门禁和新旧 reader/writer 矩阵。`esop-ipc/payloads` 统一拥有 ProcBuf State/Event 投影和 `MotionCommand` 到固定策略字段的解码；IPC 命令入口还会把 frame schema/layout/numeric robot/boot/source/sequence 与 Protobuf payload 交叉核对，所有结构检查通过后才转交 `CommandIngress`。Zenoh 复用同一投影与字段解码。host-only incident adapter 在编码前校验 agent identity、窗口、证据数量、boot/epoch 和证据所属范围。类型化查询入口校验请求的 schema、robot、boot 和大小，并对 incident 及其 evidence 重做相同的 Protobuf 合同校验。`make test-ipc` 验证真实 Unix datagram 的 State/Event/Command payload 边界，`make test-zenoh` 验证类型化发布、真实 agent incident 投影、命令路由、查询往返/拒绝及 router 重启后的旧命令拒绝。生产认证和部署仍是后续验收项。
 
 ## 4. Frozen v1 Compatibility Gate
 

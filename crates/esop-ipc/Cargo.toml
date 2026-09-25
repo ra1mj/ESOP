@@ -9,3 +9,18 @@ rust-version.workspace = true
 [lib]
 name = "esop_ipc"
 path = "src/lib.rs"
+
+[features]
+default = []
+payloads = [
+    "dep:esop-command-gateway",
+    "dep:esop-lifecycle-guard",
+    "dep:esop-procbuf",
+    "dep:esop-proto",
+]
+
+[dependencies]
+esop-command-gateway = { path = "../esop-command-gateway", optional = true }
+esop-lifecycle-guard = { path = "../esop-lifecycle-guard", optional = true }
+esop-procbuf = { path = "../esop-procbuf", optional = true }
+esop-proto = { path = "../esop-proto", optional = true }

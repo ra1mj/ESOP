@@ -13,7 +13,7 @@ test-hil:
 	$(CARGO) test -p esop-ethercat-linux-port --all-features
 
 test-ipc:
-	$(CARGO) test -p esop-ipc
+	$(CARGO) test -p esop-ipc --all-features
 
 test-zenoh:
 	./scripts/test-zenoh.sh

@@ -33,9 +33,40 @@ Heartbeat frames require an empty payload. Schema version, layout hash, robot
 ID, boot ID, source ID and sequence must be nonzero. Decoding requires the
 datagram length to exactly match the declared payload length.
 
-CRC detects accidental corruption; it is not authentication. Payload schema
-ownership remains with the adapter that calls this crate. In particular,
-ProcBuf Rust structs are never serialized from their memory layout.
+CRC detects accidental corruption; it is not authentication. The optional
+`payloads` feature owns the current ProcBuf/Protobuf mapping. ProcBuf Rust
+structs are never serialized from their memory layout.
+
+## ProcBuf and Protobuf Payloads
+
+With the `payloads` feature, `ProcBufProjector` is the sole host-side reader for
+one ProcBuf state page and event ring. It validates the ABI header, layout hash,
+numeric robot ID and boot ID before consuming data, then projects owned
+`RobotState` and `DiagnosticEvent` messages for both IPC and Zenoh. The textual
+robot ID is a separate fixed-capacity deployment identity using the same
+64-byte identifier alphabet as the Zenoh namespace.
+
+State frames bind the Protobuf and IPC identities as follows:
+
+- frame schema, layout, numeric robot, boot, source, sequence and monotonic
+  timestamp are populated explicitly;
+- the low 16 quality bits carry ProcBuf `known_mask`, and bits 16-31 carry
+  `good_mask`; stale quality carries zero, while malformed masks reject the
+  snapshot;
+- the Protobuf payload retains full lifecycle, per-axis stop, quality, joint
+  and IO fields and remains bounded by 4096 bytes.
+
+Event frames use the configured host adapter source in the envelope while the
+event-producing module remains in `DiagnosticEvent.source`.
+
+Command handling has two ordered stages. `decode_command_frame` requires a
+Command frame and cross-checks envelope schema/layout/numeric robot/boot/source/
+sequence against the configured identity and decoded `MotionCommand`.
+`admit_command_frame` calls `CommandIngress` only after those checks and an
+optional authenticated-source comparison succeed. Structural failures therefore
+do not consume replay floors, rate-limit budget or audit slots. ACL, authority,
+TTL, permit epoch, axis policy and motion permits remain owned by
+`esop-command-gateway`.
 
 ## Peer Lifecycle
 
@@ -69,20 +100,22 @@ Binding refuses an existing local path and never unlinks it. On drop, an
 endpoint removes the local socket only when its device/inode still matches the
 socket created by that endpoint, so a replacement path is preserved.
 
-Run focused verification with:
+Run focused transport and payload verification with:
 
 ```sh
 make test-ipc
 ```
 
 The integration tests use real kernel Unix datagram sockets for bidirectional
-command/state/heartbeat traffic, empty nonblocking receive, absent and
-unexpected peers, oversized datagrams, same-path peer rebinding with a new boot
-ID, and owned-path cleanup.
+command/state/heartbeat traffic, projected ProcBuf state/event payloads, valid
+command admission, envelope/payload mismatch rejection, empty nonblocking
+receive, absent and unexpected peers, oversized datagrams, same-path peer
+rebinding with a new boot ID, and owned-path cleanup.
 
 ## Claim Boundary
 
 This implementation does not claim shared memory or RPMsg transport,
-payload-specific ProcBuf adapters, cryptographic peer identity, SELinux or
-filesystem deployment policy, production latency/WCET, long-duration stress,
-or target HIL qualification. Those remain separate acceptance gates.
+MotionCommand target conversion into a ProcBuf Command page, cryptographic peer
+identity, SELinux or filesystem deployment policy, production latency/WCET,
+long-duration stress, or target HIL qualification. Those remain separate
+acceptance gates.

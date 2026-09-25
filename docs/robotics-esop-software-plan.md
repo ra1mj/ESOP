@@ -84,7 +84,7 @@ ESOP 负责把来自控制器的每轴命令在确定周期内写入驱动，并
 | `split-linux-rt` | 高性能 ARM SoC | Linux PREEMPT_RT 用户态 ESOP | 同机或独立 Linux | P1 |
 | `single-host-dev` | PC 开发、仿真、HIL | Linux raw port | 同进程或同机 | P0，仅开发用途 |
 
-实时节点与 Linux 节点之间的 IPC 必须有版本化头、单调序号、时间戳、质量状态和掉线检测。当前 `esop-ipc` 已提供宿主机文件系统 Unix datagram 的固定容量 v1 帧、非阻塞收发、精确 peer path 准入以及重启/离线/重连检测；它不进入实时核心依赖图，也不代表 shared memory、RPMsg、产品延迟/WCET 或 HIL 资格。实时节点不能等待 ROS 2 executor、Zenoh router、DNS、磁盘或远程网络。
+实时节点与 Linux 节点之间的 IPC 必须有版本化头、单调序号、时间戳、质量状态和掉线检测。当前 `esop-ipc` 已提供宿主机文件系统 Unix datagram 的固定容量 v1 帧、非阻塞收发、精确 peer path 准入、重启/离线/重连检测，以及 ProcBuf State/Event 与 Protobuf、MotionCommand 与既有命令准入之间的共享 payload 适配；它不进入实时核心依赖图，也不代表 shared memory、RPMsg、命令 target 写入、产品延迟/WCET 或 HIL 资格。实时节点不能等待 ROS 2 executor、Zenoh router、DNS、磁盘或远程网络。
 
 ## 4. 分层与软件包规划
 
@@ -120,7 +120,7 @@ Platform layer
 | `esop_device` | Rust `no_std`，实时节点 | 驱动/传感器/IO 的统一能力与生命周期 | `esop_procbuf` |
 | `esop_periph_*` | Rust `no_std`，实时节点 | I2C/SPI/UART/CAN-FD/GPIO/USB 外设适配 | `esop_device`、BSP port |
 | `esop_procbuf` | Rust `no_std`，双域 | 固定布局 RT 缓冲、双页快照、事件 ring、质量位 | 独立 ABI 层；不引入平台依赖 |
-| `esop_ipc` | Rust，Linux 宿主域 | 固定容量版本化帧、非阻塞 Unix datagram、peer identity/boot/sequence/time 生命周期检测 | `std::os::unix`；不依赖实时核心，shared memory/RPMsg 与 ProcBuf payload adapter 待实现 |
+| `esop_ipc` | Rust，Linux 宿主域 | 固定容量版本化帧、非阻塞 Unix datagram、peer identity/boot/sequence/time 生命周期检测、可选 ProcBuf/Protobuf payload 与命令帧准入适配 | `std::os::unix`；host feature 单向依赖 ProcBuf/Proto/CommandIngress，不进入实时核心；shared memory/RPMsg 与命令 target 写入待实现 |
 | `esop_proto` | `.proto` + 生成代码，非实时域 | API、配置、状态、事件、记录数据定义 | protobuf runtime |
 | `esop_zenoh_gateway` | C++/Rust/C，Linux | Protobuf pub/sub/query、远程状态与命令网关 | Zenoh、`esop_ipc` |
 | `esop_ros2_control` | C++，Linux | `hardware_interface::SystemInterface` 插件，`read()`/`write()` 映射 ProcBuf | ROS 2、`esop_ipc` |
@@ -314,7 +314,7 @@ ProcBuf State 同时携带 `ecat_time_ns`、`esop_monotonic_time_ns` 和转换�
 | R0：契约与仿真基线 | 目录结构、ProcBuf ABI、`.proto` v1、设备模型、PCAP/虚拟驱动仿真 | 同一 layout 从生成器产生 C header/YAML/proto descriptor；ABI/Schema 兼容检查在 CI 通过。 |
 | R1：机器人 EtherCAT 实时节点 | `esop_ecat`、CoE、DC、ProcBuf、CiA 402 单轴和分布式 IO，STM32/HPM/Linux test ports | 1/8 轴驱动 + IO 达到 OP；500 us/1 ms 目标周期的 WKC、jitter、无分配报告通过。 |
 | R2：多设备与鲁棒性 | 多 Domain、多速率、外设插件框架、事件环、诊断、恢复策略、配置生成 | EtherCAT + CAN-FD/I2C/SPI 的设备可同一 ProcBuf 表达；故障注入不破坏 RT 周期。 |
-| R3：IPC 与 Zenoh/Protobuf 网关 | `esop_ipc`、`esop_proto`、gateway、ACL、query、记录回放、fleet key namespace | IPC/网络丢失与重连、supervisor 新 boot、schema 升级、命令 TTL 和授权拒绝测试通过。当前宿主机 Unix datagram 软件契约已完成；shared memory/RPMsg、payload adapter、生产 ACL/WCET/HIL 尚未完成。 |
+| R3：IPC 与 Zenoh/Protobuf 网关 | `esop_ipc`、`esop_proto`、gateway、ACL、query、记录回放、fleet key namespace | IPC/网络丢失与重连、supervisor 新 boot、schema 升级、命令 TTL 和授权拒绝测试通过。当前宿主机 Unix datagram 与共享 ProcBuf/Protobuf payload 软件契约已完成；shared memory/RPMsg、命令 target 写入、生产 ACL/WCET/HIL 尚未完成。 |
 | R4：ROS 2 控制接入 | `esop_ros2_control`、ROS bridge、URDF/ros2_control 配置生成、DDS 与 Zenoh RMW 测试矩阵 | `joint_trajectory_controller` 驱动仿真和实机；read/write 不分配、不等待网络。 |
 | R5：产品扩展 | 力控接口、FoE、EoE/SoE/VoE、冗余、FSoE 项目集成 | 每个扩展独立编译开关，提供对周期、RAM、Flash 和故障模型的影响报告。 |
 

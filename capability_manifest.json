@@ -72,21 +72,23 @@
         "crates/esop-procbuf/src/lib.rs",
         "crates/esop-procbuf/tests/cross_layer.rs"
       ],
-      "limitation": "Shared-memory, RPMsg and payload-specific transport adapters remain separate scope; hosted Unix datagram transport is tracked by unix_domain_ipc"
+      "limitation": "Shared-memory and RPMsg transports remain separate scope; hosted Unix datagram and the host-only ProcBuf/Protobuf adapter are tracked by unix_domain_ipc"
     },
     {
       "id": "unix_domain_ipc",
       "status": "partial",
-      "scope": "Hosted nonblocking filesystem Unix datagram transport with a bounded versioned frame, exact peer-path admission and peer restart/offline monitoring",
+      "scope": "Hosted nonblocking filesystem Unix datagram transport with bounded versioned frames, exact peer-path admission, peer lifecycle monitoring and a shared ProcBuf/Protobuf state-event-command adapter",
       "evidence": [
         "crates/esop-ipc/src/lib.rs",
         "crates/esop-ipc/src/frame.rs",
+        "crates/esop-ipc/src/payloads.rs",
         "crates/esop-ipc/src/peer.rs",
         "crates/esop-ipc/src/unix.rs",
+        "crates/esop-ipc/tests/payloads.rs",
         "crates/esop-ipc/tests/unix_loopback.rs",
         "docs/esop-ipc.md"
       ],
-      "limitation": "Host filesystem Unix datagrams only; shared memory, RPMsg, payload-specific ProcBuf adapters, cryptographic identity, deployment ACL, production latency/WCET, long-duration stress and HIL remain open"
+      "limitation": "Host filesystem Unix datagrams only; shared memory, RPMsg, command-target conversion into ProcBuf Command pages, cryptographic identity, deployment ACL, production latency/WCET, long-duration stress and HIL remain open"
     },
     {
       "id": "command_gateway_policy",
@@ -97,7 +99,7 @@
         "crates/esop-command-gateway/tests/gateway.rs",
         "docs/esop-command-gateway.md"
       ],
-      "limitation": "Zenoh/Protobuf transport, cryptographic identity and deployment ACL integration remain open"
+      "limitation": "Zenoh and IPC reuse the shared Protobuf decoder; cryptographic identity, deployment ACL and command-target conversion into ProcBuf Command pages remain open"
     },
     {
       "id": "protobuf_v1_contract",
@@ -130,7 +132,7 @@
     {
       "id": "zenoh_runtime_adapter",
       "status": "partial",
-      "scope": "Optional host-domain Zenoh session adapter with bounded health, typed v1 publish/query, validated eBPF RuntimeIncident projection, stable v1 publish and command/query callback observation markers, and single-reader ProcBuf state/event projection",
+      "scope": "Optional host-domain Zenoh session adapter with bounded health, typed v1 publish/query, validated eBPF RuntimeIncident projection, stable v1 publish and command/query callback observation markers, and shared single-reader ProcBuf state/event projection",
       "evidence": [
         "crates/esop-zenoh-gateway/src/runtime.rs",
         "crates/esop-zenoh-gateway/src/runtime_incident.rs",
@@ -143,7 +145,7 @@
         "scripts/test-zenoh.sh",
         "docs/esop-zenoh-gateway.md"
       ],
-      "limitation": "ProcBuf ABI lacks full QualitySummary and lifecycle gate/permit facts; remote ACL, certificate lifecycle and production topology still require environment-level tests"
+      "limitation": "State/event projection and command field decoding are shared with IPC; remote ACL, certificate lifecycle, command-target conversion and production topology still require environment-level tests"
     },
     {
       "id": "ebpf_observation",
