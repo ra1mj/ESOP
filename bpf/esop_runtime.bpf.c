@@ -114,7 +114,7 @@ struct esop_gateway_operation_state {
     __u32 policy_epoch;
     __u32 start_tid;
     __u32 route_kind;
-    __u32 reserved;
+    __u32 operation_class;
 };
 
 struct esop_runtime_evidence {
@@ -358,8 +358,15 @@ static __always_inline __u8 esop_detail_u8(__u64 value)
     return value > 0xff ? 0xff : (__u8)value;
 }
 
-#define ESOP_GATEWAY_ROUTE_MAX 4
+#define ESOP_GATEWAY_OPERATION_PUBLISH 1
+#define ESOP_GATEWAY_OPERATION_CALLBACK 2
+#define ESOP_GATEWAY_PUBLISH_ROUTE_MIN 0
+#define ESOP_GATEWAY_PUBLISH_ROUTE_MAX 2
+#define ESOP_GATEWAY_CALLBACK_ROUTE_MIN 3
+#define ESOP_GATEWAY_CALLBACK_ROUTE_MAX 4
 #define ESOP_GATEWAY_OUTCOME_MAX 2
+#define ESOP_GATEWAY_PUBLISH_OUTCOMES 0x7
+#define ESOP_GATEWAY_CALLBACK_OUTCOMES 0x5
 
 static __always_inline __u8 esop_gateway_detail(__u32 route_kind,
                                                  __u32 outcome)
@@ -389,8 +396,9 @@ static __always_inline __u32 esop_skb_ifindex(struct sk_buff *skb)
     return 0;
 }
 
-SEC("uprobe")
-int esop_gateway_publish_begin(struct pt_regs *registers)
+static __always_inline int esop_gateway_operation_begin(
+    struct pt_regs *registers, __u32 operation_class, __u32 route_min,
+    __u32 route_max)
 {
     struct esop_context *context = esop_context();
     struct esop_stats *stats = esop_stats();
@@ -398,7 +406,7 @@ int esop_gateway_publish_begin(struct pt_regs *registers)
     __u32 route_kind = (__u32)BPF_CORE_READ(registers, si);
     __u32 tgid = esop_tgid();
     if (!context || context->gateway_stall_threshold_ns == 0 ||
-        request_id == 0 || route_kind > ESOP_GATEWAY_ROUTE_MAX ||
+        request_id == 0 || route_kind < route_min || route_kind > route_max ||
         !esop_tracks(tgid, context)) {
         if (stats && context && esop_tracks(tgid, context)) {
             stats->gateway_probe_mismatches++;
@@ -415,6 +423,7 @@ int esop_gateway_publish_begin(struct pt_regs *registers)
         .policy_epoch = context->gateway_probe_epoch,
         .start_tid = esop_tid(),
         .route_kind = route_kind,
+        .operation_class = operation_class,
     };
     if (bpf_map_update_elem(&ESOP_GATEWAY_OPERATIONS, &key, &state,
                             BPF_NOEXIST) < 0) {
@@ -430,8 +439,9 @@ int esop_gateway_publish_begin(struct pt_regs *registers)
     return 0;
 }
 
-SEC("uprobe")
-int esop_gateway_publish_end(struct pt_regs *registers)
+static __always_inline int esop_gateway_operation_end(
+    struct pt_regs *registers, __u32 operation_class, __u32 route_min,
+    __u32 route_max, __u32 allowed_outcomes)
 {
     struct esop_stats *stats = esop_stats();
     __u64 request_id = (__u64)BPF_CORE_READ(registers, di);
@@ -462,6 +472,7 @@ int esop_gateway_publish_end(struct pt_regs *registers)
     __u32 policy_epoch = state->policy_epoch;
     __u32 start_tid = state->start_tid;
     __u32 start_route_kind = state->route_kind;
+    __u32 start_operation_class = state->operation_class;
     if (bpf_map_delete_elem(&ESOP_GATEWAY_OPERATIONS, &key) < 0) {
         if (stats) {
             stats->gateway_probe_mismatches++;
@@ -474,8 +485,11 @@ int esop_gateway_publish_end(struct pt_regs *registers)
 
     struct esop_context *context = esop_context();
     if (!context || context->gateway_stall_threshold_ns == 0 ||
-        route_kind > ESOP_GATEWAY_ROUTE_MAX ||
-        outcome > ESOP_GATEWAY_OUTCOME_MAX || route_kind != start_route_kind ||
+        route_kind < route_min || route_kind > route_max ||
+        outcome > ESOP_GATEWAY_OUTCOME_MAX ||
+        (allowed_outcomes & (1U << outcome)) == 0 ||
+        route_kind != start_route_kind ||
+        operation_class != start_operation_class ||
         policy_epoch != context->gateway_probe_epoch) {
         if (stats) {
             stats->gateway_probe_mismatches++;
@@ -510,6 +524,40 @@ int esop_gateway_publish_end(struct pt_regs *registers)
         }
     }
     return 0;
+}
+
+SEC("uprobe")
+int esop_gateway_publish_begin(struct pt_regs *registers)
+{
+    return esop_gateway_operation_begin(
+        registers, ESOP_GATEWAY_OPERATION_PUBLISH,
+        ESOP_GATEWAY_PUBLISH_ROUTE_MIN, ESOP_GATEWAY_PUBLISH_ROUTE_MAX);
+}
+
+SEC("uprobe")
+int esop_gateway_publish_end(struct pt_regs *registers)
+{
+    return esop_gateway_operation_end(
+        registers, ESOP_GATEWAY_OPERATION_PUBLISH,
+        ESOP_GATEWAY_PUBLISH_ROUTE_MIN, ESOP_GATEWAY_PUBLISH_ROUTE_MAX,
+        ESOP_GATEWAY_PUBLISH_OUTCOMES);
+}
+
+SEC("uprobe")
+int esop_gateway_callback_begin(struct pt_regs *registers)
+{
+    return esop_gateway_operation_begin(
+        registers, ESOP_GATEWAY_OPERATION_CALLBACK,
+        ESOP_GATEWAY_CALLBACK_ROUTE_MIN, ESOP_GATEWAY_CALLBACK_ROUTE_MAX);
+}
+
+SEC("uprobe")
+int esop_gateway_callback_end(struct pt_regs *registers)
+{
+    return esop_gateway_operation_end(
+        registers, ESOP_GATEWAY_OPERATION_CALLBACK,
+        ESOP_GATEWAY_CALLBACK_ROUTE_MIN, ESOP_GATEWAY_CALLBACK_ROUTE_MAX,
+        ESOP_GATEWAY_CALLBACK_OUTCOMES);
 }
 
 SEC("tracepoint/sched/sched_wakeup")

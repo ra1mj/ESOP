@@ -714,36 +714,46 @@ Filter the typed scheduler entity, count migrations in a bounded epoch-aware
 window, emit the first threshold crossing with source/destination identity, and
 require transport-risk correlation before assigning the existing incident code.
 
-## Scenario: eBPF Gateway Publish Stall Evidence
+## Scenario: eBPF Gateway Operation Stall Evidence
 
 ### 1. Scope / Trigger
 
-- Trigger: add or change Zenoh gateway publish markers, gateway uprobes,
-  gateway tracking policy, fixed evidence decode, or gateway-stall
+- Trigger: add or change Zenoh gateway publish/callback markers, gateway
+  uprobes, gateway tracking policy, fixed evidence decode, or gateway-stall
   classification.
 - Scope: this contract covers the complete asynchronous `publish` operation
-  only. It does not qualify query/subscription, ROS2, recorder, target-kernel
+  and synchronous command-subscription and query callback invocation. It does
+  not qualify Zenoh internal queueing, ROS2, recorder, target-kernel
   attachment, fault injection, or production overhead.
 
 ### 2. Signatures
 
 - Stable marker ABI:
   `esop_zenoh_gateway_publish_begin_v1(request_id, route_kind)` and
-  `esop_zenoh_gateway_publish_end_v1(request_id, route_kind, outcome)`.
+  `esop_zenoh_gateway_publish_end_v1(request_id, route_kind, outcome)`, plus
+  `esop_zenoh_gateway_callback_begin_v1(request_id, route_kind)` and
+  `esop_zenoh_gateway_callback_end_v1(request_id, route_kind, outcome)`.
 - Configuration: `RuntimeConfig::gateway_stall_threshold_ns` and
   `BpfRuntime::update_gateway_tracking(threshold_ns)`.
 - Attachment: `BpfRuntime::attach_gateway_publish_probes(target, pid,
-  required)` attaches the exact marker symbols as one pair.
+  required)` and `BpfRuntime::attach_gateway_callback_probes(target, pid,
+  required)` attach each exact marker-symbol pair transactionally.
 
 ### 3. Contracts
 
-- Request IDs are nonzero process-local atomic values. Route and outcome are
-  fixed integers; no user string is parsed in BPF.
-- The guard begins immediately before the awaited Session put and ends exactly
-  once after success, transport failure handling, or future cancellation.
+- Publish and callback request IDs share one nonzero process-local atomic
+  sequence. Route, operation class, and outcome are fixed integers; no user
+  string is parsed in BPF.
+- The publish guard begins immediately before the awaited Session put and ends
+  exactly once after success, transport failure handling, or future
+  cancellation. The callback guard brackets the gateway-owned command/query
+  invocation and ends once after normal completion or Rust unwind; typed query
+  decode/provider/encode/reply work stays inside that invocation.
 - One 1024-entry LRU map tracks `{TGID, request_id}`. State includes monotonic
-  start time, nonzero policy epoch, start TID, and route; every matched end
-  deletes state before validation or emission.
+  start time, nonzero policy epoch, start TID, route, and operation class.
+  Publish accepts only State/Event/Diagnostic; callback accepts only
+  Command/Query and completed/abandoned outcomes. Every matched end deletes
+  state before class, route, outcome, epoch, or emission validation.
 - Context updates are staged and atomically published. Zero threshold is
   rejected without mutation; successful threshold or tracked-PID changes
   advance the gateway epoch.
@@ -772,20 +782,26 @@ require transport-risk correlation before assigning the existing incident code.
 
 - Good: request 77 publishes diagnostics for 1.5 ms against a 1 ms threshold,
   completes on another worker during cycle 42 with a deadline miss, and emits
-  one PID-attributed/TID-zero gateway incident.
-- Base: an at-threshold publish completes and removes state without evidence;
-  cancellation also closes its marker state exactly once.
+  one PID-attributed/TID-zero gateway incident. A command callback that exceeds
+  the threshold during the same risk cycle emits the same fixed evidence with
+  callback class and Command route validation.
+- Base: an at-threshold publish or callback completes and removes state without
+  evidence; publish cancellation and callback unwind each close marker state
+  exactly once.
 - Bad: attach a return probe directly to Rust `async fn publish`, call enum-only
-  evidence a stall, preserve a stale TID after worker migration, or leave the
-  first uprobe attached after the second fails.
+  evidence a stall, cross-complete publish state with a callback end, preserve
+  a stale TID after worker migration, or leave the first uprobe attached after
+  the second fails.
 
 ### 6. Tests Required
 
-- Exact-symbol integration links and calls both versioned C ABI markers.
-- Marker tests cover concurrent nonzero unique IDs, one terminal call, and
-  cancellation.
-- Decode tests assert request ID, route/outcome, PID/TID, duration, threshold,
-  discriminants, and unchanged 96-byte event size.
+- Exact-symbol integration links and calls all four versioned C ABI markers.
+- Marker tests cover shared concurrent nonzero unique IDs, one terminal call,
+  publish cancellation, and callback completion/unwind abandonment.
+- Decode tests assert request ID, callback route/outcome, PID/TID, duration,
+  threshold, discriminants, and unchanged 96-byte event size. BPF source review,
+  syntax checking, and CO-RE object compilation cover operation-class and route
+  separation in the shared map.
 - Configuration tests reject zero without mutation and prove epoch advancement;
   C/Rust context and statistics sizes must match.
 - Correlator tests accept one valid risk-cycle stall and reject at/below
@@ -797,14 +813,16 @@ require transport-risk correlation before assigning the existing incident code.
 
 #### Wrong
 
-Measure only async future construction with uretprobe, attach one marker at a
-time, and classify every `GatewayStall` discriminant as a root cause.
+Measure only async future construction with uretprobe, leave callback work
+unbracketed, attach one marker at a time, and classify every `GatewayStall`
+discriminant as a root cause.
 
 #### Correct
 
-Bracket the awaited operation with stable begin/end markers, attach them
-transactionally, track bounded request state, and require internally
-consistent over-threshold duration plus transport-risk correlation.
+Bracket the awaited publish operation and synchronous callback invocation with
+separate stable begin/end markers, attach each pair transactionally, validate
+operation class in bounded request state, and require internally consistent
+over-threshold duration plus transport-risk correlation.
 
 ## Code Review Checklist
 

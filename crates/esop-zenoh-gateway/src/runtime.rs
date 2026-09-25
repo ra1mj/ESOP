@@ -30,7 +30,7 @@ const STATE_DEGRADED: u8 = 2;
 const STATE_DISCONNECTED: u8 = 3;
 const STATE_CLOSED: u8 = 4;
 
-static NEXT_PUBLISH_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_GATEWAY_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Stable outcomes carried by the v1 gateway publish observation ABI.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,12 +41,26 @@ pub enum GatewayPublishOutcome {
     Cancelled = 2,
 }
 
+/// Stable outcomes carried by the v1 gateway callback observation ABI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum GatewayCallbackOutcome {
+    Completed = 0,
+    Abandoned = 2,
+}
+
 #[cfg(test)]
 static TEST_PUBLISH_MARKER_BEGINS: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static TEST_PUBLISH_MARKER_ENDS: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static TEST_PUBLISH_MARKER_LAST_OUTCOME: AtomicU64 = AtomicU64::new(u64::MAX);
+#[cfg(test)]
+static TEST_CALLBACK_MARKER_BEGINS: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static TEST_CALLBACK_MARKER_ENDS: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static TEST_CALLBACK_MARKER_LAST_OUTCOME: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// Stable v1 uprobe target for the start of an asynchronous publish operation.
 #[unsafe(no_mangle)]
@@ -73,9 +87,34 @@ pub extern "C" fn esop_zenoh_gateway_publish_end_v1(
     }
 }
 
-fn next_publish_request_id() -> u64 {
+/// Stable v1 uprobe target for the start of a synchronous callback operation.
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn esop_zenoh_gateway_callback_begin_v1(request_id: u64, route_kind: u32) {
+    let _ = core::hint::black_box((request_id, route_kind));
+    #[cfg(test)]
+    TEST_CALLBACK_MARKER_BEGINS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Stable v1 uprobe target for the end of a synchronous callback operation.
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn esop_zenoh_gateway_callback_end_v1(
+    request_id: u64,
+    route_kind: u32,
+    outcome: u32,
+) {
+    let _ = core::hint::black_box((request_id, route_kind, outcome));
+    #[cfg(test)]
+    {
+        TEST_CALLBACK_MARKER_ENDS.fetch_add(1, Ordering::Relaxed);
+        TEST_CALLBACK_MARKER_LAST_OUTCOME.store(u64::from(outcome), Ordering::Relaxed);
+    }
+}
+
+fn next_gateway_request_id() -> u64 {
     loop {
-        let request_id = NEXT_PUBLISH_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        let request_id = NEXT_GATEWAY_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
         if request_id != 0 {
             return request_id;
         }
@@ -91,7 +130,7 @@ struct PublishObservation {
 impl PublishObservation {
     fn begin(kind: RouteKind) -> Self {
         let observation = Self {
-            request_id: next_publish_request_id(),
+            request_id: next_gateway_request_id(),
             route_kind: kind as u32,
             finished: false,
         };
@@ -113,6 +152,48 @@ impl Drop for PublishObservation {
     fn drop(&mut self) {
         let _ = self.finish(GatewayPublishOutcome::Cancelled);
     }
+}
+
+struct CallbackObservation {
+    request_id: u64,
+    route_kind: u32,
+    finished: bool,
+}
+
+impl CallbackObservation {
+    fn begin(kind: RouteKind) -> Self {
+        let observation = Self {
+            request_id: next_gateway_request_id(),
+            route_kind: kind as u32,
+            finished: false,
+        };
+        esop_zenoh_gateway_callback_begin_v1(observation.request_id, observation.route_kind);
+        observation
+    }
+
+    fn finish(&mut self, outcome: GatewayCallbackOutcome) -> bool {
+        if self.finished {
+            return false;
+        }
+        self.finished = true;
+        esop_zenoh_gateway_callback_end_v1(self.request_id, self.route_kind, outcome as u32);
+        true
+    }
+}
+
+impl Drop for CallbackObservation {
+    fn drop(&mut self) {
+        let _ = self.finish(GatewayCallbackOutcome::Abandoned);
+    }
+}
+
+fn invoke_observed_callback<T, F>(kind: RouteKind, callback: &F, value: T)
+where
+    F: Fn(T),
+{
+    let mut observation = CallbackObservation::begin(kind);
+    callback(value);
+    let _ = observation.finish(GatewayCallbackOutcome::Completed);
 }
 
 /// Current health of the supervision-domain Zenoh transport.
@@ -626,7 +707,9 @@ impl ZenohGateway {
         if let Err(error) = self
             .session
             .declare_queryable(key)
-            .callback(callback)
+            .callback(move |query| {
+                invoke_observed_callback(RouteKind::Query, &callback, query);
+            })
             .background()
             .await
         {
@@ -700,7 +783,9 @@ impl ZenohGateway {
         if let Err(error) = self
             .session
             .declare_subscriber(key)
-            .callback(callback)
+            .callback(move |sample| {
+                invoke_observed_callback(kind, &callback, sample);
+            })
             .background()
             .await
         {
@@ -890,10 +975,10 @@ mod tests {
     use esop_proto::CURRENT_SCHEMA_VERSION;
 
     #[test]
-    fn publish_observation_allocates_nonzero_unique_request_ids() {
+    fn gateway_observations_allocate_nonzero_unique_request_ids() {
         let mut handles = Vec::new();
         for _ in 0..16 {
-            handles.push(std::thread::spawn(next_publish_request_id));
+            handles.push(std::thread::spawn(next_gateway_request_id));
         }
         let mut request_ids = handles
             .into_iter()
@@ -939,6 +1024,40 @@ mod tests {
         assert_eq!(
             TEST_PUBLISH_MARKER_LAST_OUTCOME.load(Ordering::Relaxed),
             GatewayPublishOutcome::Cancelled as u64
+        );
+    }
+
+    #[test]
+    fn callback_observation_completes_once_and_marks_unwind_abandonment() {
+        TEST_CALLBACK_MARKER_BEGINS.store(0, Ordering::Relaxed);
+        TEST_CALLBACK_MARKER_ENDS.store(0, Ordering::Relaxed);
+        TEST_CALLBACK_MARKER_LAST_OUTCOME.store(u64::MAX, Ordering::Relaxed);
+
+        let calls = AtomicU64::new(0);
+        invoke_observed_callback(
+            RouteKind::Command,
+            &|value| {
+                calls.fetch_add(value, Ordering::Relaxed);
+            },
+            1,
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(TEST_CALLBACK_MARKER_BEGINS.load(Ordering::Relaxed), 1);
+        assert_eq!(TEST_CALLBACK_MARKER_ENDS.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            TEST_CALLBACK_MARKER_LAST_OUTCOME.load(Ordering::Relaxed),
+            GatewayCallbackOutcome::Completed as u64
+        );
+
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            invoke_observed_callback(RouteKind::Query, &|()| panic!("callback unwind"), ());
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(TEST_CALLBACK_MARKER_BEGINS.load(Ordering::Relaxed), 2);
+        assert_eq!(TEST_CALLBACK_MARKER_ENDS.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            TEST_CALLBACK_MARKER_LAST_OUTCOME.load(Ordering::Relaxed),
+            GatewayCallbackOutcome::Abandoned as u64
         );
     }
 

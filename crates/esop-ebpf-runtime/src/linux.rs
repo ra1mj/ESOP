@@ -34,9 +34,13 @@ pub const ATTACH_CPU_FREQUENCY_LIMIT: u64 = 1 << 10;
 pub const ATTACH_SCHED_MIGRATE_TASK: u64 = 1 << 11;
 pub const ATTACH_GATEWAY_PUBLISH_BEGIN: u64 = 1 << 12;
 pub const ATTACH_GATEWAY_PUBLISH_END: u64 = 1 << 13;
+pub const ATTACH_GATEWAY_CALLBACK_BEGIN: u64 = 1 << 14;
+pub const ATTACH_GATEWAY_CALLBACK_END: u64 = 1 << 15;
 pub const ATTACH_IRQ_HANDLER: u64 = ATTACH_IRQ_HANDLER_ENTRY | ATTACH_IRQ_HANDLER_EXIT;
 pub const ATTACH_SOFTIRQ: u64 = ATTACH_SOFTIRQ_ENTRY | ATTACH_SOFTIRQ_EXIT;
 pub const ATTACH_GATEWAY_PUBLISH: u64 = ATTACH_GATEWAY_PUBLISH_BEGIN | ATTACH_GATEWAY_PUBLISH_END;
+pub const ATTACH_GATEWAY_CALLBACK: u64 =
+    ATTACH_GATEWAY_CALLBACK_BEGIN | ATTACH_GATEWAY_CALLBACK_END;
 pub const NETWORK_PROTOCOL_ETHERCAT: u16 = 0x88A4;
 pub const CPU_FREQUENCY_POLICY_ALL: u32 = u32::MAX;
 pub const ATTACH_ALL: u64 = ATTACH_SCHED_WAKEUP
@@ -51,6 +55,8 @@ pub const ATTACH_ALL: u64 = ATTACH_SCHED_WAKEUP
     | ATTACH_SCHED_MIGRATE_TASK;
 pub const GATEWAY_PUBLISH_BEGIN_SYMBOL: &str = "esop_zenoh_gateway_publish_begin_v1";
 pub const GATEWAY_PUBLISH_END_SYMBOL: &str = "esop_zenoh_gateway_publish_end_v1";
+pub const GATEWAY_CALLBACK_BEGIN_SYMBOL: &str = "esop_zenoh_gateway_callback_begin_v1";
+pub const GATEWAY_CALLBACK_END_SYMBOL: &str = "esop_zenoh_gateway_callback_end_v1";
 
 const TRACEFS_EVENT_ROOTS: [&str; 2] = [
     "/sys/kernel/tracing/events",
@@ -627,6 +633,16 @@ const GATEWAY_PUBLISH_END_SPEC: UserProbeSpec = UserProbeSpec {
     program: "esop_gateway_publish_end",
     symbol: GATEWAY_PUBLISH_END_SYMBOL,
 };
+const GATEWAY_CALLBACK_BEGIN_SPEC: UserProbeSpec = UserProbeSpec {
+    mask: ATTACH_GATEWAY_CALLBACK_BEGIN,
+    program: "esop_gateway_callback_begin",
+    symbol: GATEWAY_CALLBACK_BEGIN_SYMBOL,
+};
+const GATEWAY_CALLBACK_END_SPEC: UserProbeSpec = UserProbeSpec {
+    mask: ATTACH_GATEWAY_CALLBACK_END,
+    program: "esop_gateway_callback_end",
+    symbol: GATEWAY_CALLBACK_END_SYMBOL,
+};
 
 const IRQ_HANDLER_ENTRY_SPEC: AttachSpec = AttachSpec {
     point: AttachPoint::IrqHandlerEntry,
@@ -819,27 +835,65 @@ impl BpfRuntime {
         pid: Option<i32>,
         required: bool,
     ) -> Result<bool, RuntimeError> {
-        if pid.is_some_and(|pid| pid <= 0) {
+        self.attach_gateway_probe_pair(
+            target.as_ref(),
+            pid,
+            required,
+            ATTACH_GATEWAY_PUBLISH,
+            GATEWAY_PUBLISH_BEGIN_SPEC,
+            GATEWAY_PUBLISH_END_SPEC,
+        )
+    }
+
+    /// Attach command/query callback begin/end markers as one logical pair.
+    /// Optional unavailability leaves every existing kernel and publish probe
+    /// capability intact; required mode propagates the failure.
+    pub fn attach_gateway_callback_probes(
+        &mut self,
+        target: impl AsRef<Path>,
+        pid: Option<i32>,
+        required: bool,
+    ) -> Result<bool, RuntimeError> {
+        self.attach_gateway_probe_pair(
+            target.as_ref(),
+            pid,
+            required,
+            ATTACH_GATEWAY_CALLBACK,
+            GATEWAY_CALLBACK_BEGIN_SPEC,
+            GATEWAY_CALLBACK_END_SPEC,
+        )
+    }
+
+    fn attach_gateway_probe_pair(
+        &mut self,
+        target: &Path,
+        pid: Option<i32>,
+        required: bool,
+        pair_mask: u64,
+        begin: UserProbeSpec,
+        end: UserProbeSpec,
+    ) -> Result<bool, RuntimeError> {
+        if begin.mask & end.mask != 0
+            || begin.mask | end.mask != pair_mask
+            || pid.is_some_and(|pid| pid <= 0)
+        {
             return Err(RuntimeError::InvalidConfiguration);
         }
-        if self.attach_mask & ATTACH_GATEWAY_PUBLISH == ATTACH_GATEWAY_PUBLISH {
+        if self.attach_mask & pair_mask == pair_mask {
             if required {
-                self.refresh_snapshot(self.snapshot.required_attach_mask | ATTACH_GATEWAY_PUBLISH);
+                self.refresh_snapshot(self.snapshot.required_attach_mask | pair_mask);
             }
             return Ok(true);
         }
 
-        let target = target.as_ref();
-        let Some(begin_link) =
-            self.attach_uprobe(GATEWAY_PUBLISH_BEGIN_SPEC, target, pid, required)?
-        else {
+        let Some(begin_link) = self.attach_uprobe(begin, target, pid, required)? else {
             return Ok(false);
         };
-        match self.attach_uprobe(GATEWAY_PUBLISH_END_SPEC, target, pid, required) {
+        match self.attach_uprobe(end, target, pid, required) {
             Ok(Some(_)) => {
-                self.attach_mask |= GATEWAY_PUBLISH_BEGIN_SPEC.mask | GATEWAY_PUBLISH_END_SPEC.mask;
+                self.attach_mask |= pair_mask;
                 let required_mask = if required {
-                    self.snapshot.required_attach_mask | ATTACH_GATEWAY_PUBLISH
+                    self.snapshot.required_attach_mask | pair_mask
                 } else {
                     self.snapshot.required_attach_mask
                 };
@@ -847,11 +901,11 @@ impl BpfRuntime {
                 Ok(true)
             }
             Ok(None) => {
-                self.detach_uprobe(GATEWAY_PUBLISH_BEGIN_SPEC, begin_link)?;
+                self.detach_uprobe(begin, begin_link)?;
                 Ok(false)
             }
             Err(error) => {
-                self.detach_uprobe(GATEWAY_PUBLISH_BEGIN_SPEC, begin_link)?;
+                self.detach_uprobe(begin, begin_link)?;
                 Err(error)
             }
         }
@@ -1550,7 +1604,7 @@ mod tests {
         bytes[92] = EvidenceDomain::UserZenoh as u8;
         bytes[93] = EvidenceKind::GatewayStall as u8;
         bytes[94] = IncidentSeverity::Error as u8;
-        bytes[95] = 0x12;
+        bytes[95] = 0x24;
         let evidence = decode_evidence(&bytes).unwrap();
         assert_eq!(evidence.evidence_id, 99);
         assert_eq!(evidence.pid, 1_234);
@@ -1562,7 +1616,7 @@ mod tests {
         assert_eq!(evidence.count, 1);
         assert_eq!(evidence.domain, EvidenceDomain::UserZenoh);
         assert_eq!(evidence.kind, EvidenceKind::GatewayStall);
-        assert_eq!(evidence.detail, 0x12);
+        assert_eq!(evidence.detail, 0x24);
     }
 
     #[test]
@@ -1867,9 +1921,15 @@ mod tests {
         }
         assert_eq!(observed, ATTACH_ALL);
         assert_eq!(ATTACH_ALL & ATTACH_GATEWAY_PUBLISH, 0);
+        assert_eq!(ATTACH_ALL & ATTACH_GATEWAY_CALLBACK, 0);
+        assert_eq!(ATTACH_GATEWAY_PUBLISH & ATTACH_GATEWAY_CALLBACK, 0);
         assert_eq!(
             GATEWAY_PUBLISH_BEGIN_SPEC.mask | GATEWAY_PUBLISH_END_SPEC.mask,
             ATTACH_GATEWAY_PUBLISH
+        );
+        assert_eq!(
+            GATEWAY_CALLBACK_BEGIN_SPEC.mask | GATEWAY_CALLBACK_END_SPEC.mask,
+            ATTACH_GATEWAY_CALLBACK
         );
         assert!(complete_pair(
             ATTACH_GATEWAY_PUBLISH,
@@ -1878,6 +1938,14 @@ mod tests {
         assert!(!complete_pair(
             ATTACH_GATEWAY_PUBLISH_BEGIN,
             ATTACH_GATEWAY_PUBLISH
+        ));
+        assert!(complete_pair(
+            ATTACH_GATEWAY_CALLBACK,
+            ATTACH_GATEWAY_CALLBACK
+        ));
+        assert!(!complete_pair(
+            ATTACH_GATEWAY_CALLBACK_END,
+            ATTACH_GATEWAY_CALLBACK
         ));
         assert_eq!(
             normalize_attach_pairs(ATTACH_ALL & !ATTACH_IRQ_HANDLER_EXIT),

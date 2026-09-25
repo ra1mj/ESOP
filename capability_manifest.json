@@ -110,7 +110,7 @@
     {
       "id": "zenoh_runtime_adapter",
       "status": "partial",
-      "scope": "Optional host-domain Zenoh session adapter with bounded health, typed v1 publish/query, stable v1 publish observation markers, and single-reader ProcBuf state/event projection",
+      "scope": "Optional host-domain Zenoh session adapter with bounded health, typed v1 publish/query, stable v1 publish and command/query callback observation markers, and single-reader ProcBuf state/event projection",
       "evidence": [
         "crates/esop-zenoh-gateway/src/runtime.rs",
         "crates/esop-zenoh-gateway/src/procbuf_adapter.rs",
@@ -126,7 +126,7 @@
     {
       "id": "ebpf_observation",
       "status": "partial",
-      "scope": "Linux CO-RE loader, tracepoint attach, optional atomic Zenoh publish uprobe pair, fixed event decode, bounded scheduler runqueue and tracked-TID migration evidence, bounded IRQ/softirq duration evidence, bounded EtherType/ifindex skb drop windows, bounded tracked-process page-fault windows, bounded cpufreq policy-limit episodes, bounded request-correlated gateway publish duration evidence, leader-thread process-exit filtering, OOM victim-PID attribution and incident correlation",
+      "scope": "Linux CO-RE loader, tracepoint attach, optional atomic Zenoh publish and callback uprobe pairs, fixed event decode, bounded scheduler runqueue and tracked-TID migration evidence, bounded IRQ/softirq duration evidence, bounded EtherType/ifindex skb drop windows, bounded tracked-process page-fault windows, bounded cpufreq policy-limit episodes, bounded request-correlated gateway publish and callback duration evidence, leader-thread process-exit filtering, OOM victim-PID attribution and incident correlation",
       "evidence": [
         "crates/esop-ebpf-agent/src/lib.rs",
         "crates/esop-ebpf-runtime/src/linux.rs",
@@ -136,7 +136,7 @@
         "crates/esop-procbuf/tests/cross_layer.rs",
         "docs/esop-ebpf-runtime-observability.md"
       ],
-      "limitation": "Only Zenoh publish markers are implemented for user-space stalls; ROS2, recorder, query/subscription and other user hooks remain open. Target-kernel permissions, verifier and real uprobe attachment, scheduler migration and IRQ/softirq pressure injection, real NIC/page-fault/OOM/process-exit/cpufreq-limit/gateway-stall injection, migration-cause/affinity/cache-impact qualification, major/minor fault attribution, OOM victim TGID resolution, instantaneous-frequency/residency/cause attribution, overhead and production hook qualification remain open"
+      "limitation": "Zenoh publish plus command-subscription and query-callback markers are implemented for user-space stalls; ROS2, recorder, Zenoh IPC/serialization/permit/reconnect and other user hooks remain open. Target-kernel permissions, verifier and real uprobe attachment, scheduler migration and IRQ/softirq pressure injection, real NIC/page-fault/OOM/process-exit/cpufreq-limit/gateway-stall injection, migration-cause/affinity/cache-impact qualification, major/minor fault attribution, OOM victim TGID resolution, instantaneous-frequency/residency/cause attribution, overhead and production hook qualification remain open"
     },
     {
       "id": "stm32_hpmicro_ports",

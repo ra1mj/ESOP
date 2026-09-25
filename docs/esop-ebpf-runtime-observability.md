@@ -125,36 +125,45 @@ CPU，不是 hook 执行 CPU；PID/TID 为零。该事件只证明 policy 最大
 
 用户态观测优先使用稳定的 ESOP 符号或显式 trace hook。Rust `async fn` 的普通
 uprobe/uretprobe 只测得 future 构造，不覆盖 await 的实际运行时间，因此 Zenoh
-gateway publish 路径使用显式版本化 C ABI：
+gateway publish 与同步 callback 路径使用独立的显式版本化 C ABI：
 
 ```text
 esop_zenoh_gateway_publish_begin_v1(request_id: u64, route_kind: u32)
 esop_zenoh_gateway_publish_end_v1(request_id: u64, route_kind: u32, outcome: u32)
+esop_zenoh_gateway_callback_begin_v1(request_id: u64, route_kind: u32)
+esop_zenoh_gateway_callback_end_v1(request_id: u64, route_kind: u32, outcome: u32)
 ```
 
-gateway 在完成 key/payload 准入后分配进程内非零原子 request ID，在 Session put
-前调用 begin；成功、传输失败和 future cancellation 分别以固定 outcome 恰好调用
-一次 end。marker 不解析字符串、不分配、不等待内核响应；未附加探针时仅保留固定
-参数的空调用。其余计划观测点仍包括：
+gateway 为 publish 与 callback 共用一套进程内非零原子 request ID。publish 在完成
+key/payload 准入后、Session put 前调用 begin；成功、传输失败和 future cancellation
+分别以固定 outcome 恰好调用一次 end。command subscription 与 raw/typed query 在
+调用用户 callback 前调用独立 begin，正常返回为 completed，Rust unwind 由 guard
+`Drop` 收口为 abandoned；typed query 的 decode、provider、encode 和同步 reply wait
+都在同一观测窗口内。marker 不解析字符串、不分配、不等待内核响应；未附加探针时
+仅保留固定参数的空调用。进程 abort 不伪造 callback end，遗留状态由固定容量 LRU
+约束。其余计划观测点仍包括：
 
 1. `esop_ros2_control` 的 `read()`、`write()` 和 controller update 边界。
-2. Zenoh gateway 的 IPC、序列化、query/subscribe、permit 和 reconnect。
+2. Zenoh gateway 的 IPC、序列化、permit 和 reconnect。
 3. Linux RT port 的 cycle begin/end、RX drain、commit、prepare、send 和 error return。
 4. recorder、配置工具和维护进程的启动、退出、阻塞和异常返回。
 
 BPF 侧用固定 1024 项 LRU map，以 `{TGID, request_id}` 保存 begin 时间、策略
-epoch、起始 TID 和 route。end 必须匹配进程、request、route 和 epoch，并在所有
-已匹配分支删除状态；只有 `duration_ns > gateway_stall_threshold_ns` 才输出固定
-96 字节 `UserZenoh/GatewayStall` 证据。`evidence_id` 保留 request ID，
+epoch、起始 TID、route 和操作类别。publish 只接受 State/Event/Diagnostic，callback
+只接受 Command/Query；end 必须匹配进程、request、类别、route、允许的 outcome 和
+epoch，并在所有已匹配分支删除状态。只有
+`duration_ns > gateway_stall_threshold_ns` 才输出固定 96 字节
+`UserZenoh/GatewayStall` 证据。`evidence_id` 保留 request ID，
 `observed_value == duration_ns`，`detail` 的低 3 bit 为 route、高位为 outcome；若
 async task 在另一 worker thread 完成，PID 保留、TID 置零。相关器还要求同 cycle
 存在 deadline/WKC/DC 风险，不能只凭 enum 值生成 incident。
 
-Aya runtime 只在调用方给出目标 ELF 后显式附加 begin/end 两个程序。探针对原子
-生效：第二个附加失败会卸载第一个 link。可选模式返回不可用并保留内核 tracepoint
-基线；required 模式返回错误且不声明 readiness。所有用户 hook 都必须携带固定的
-`boot_id`、`cycle_seq` 或 `request_id`，不得解析动态字符串；稳定符号保持 ABI
-版本，缺失时等价于 `USER_PROBE_UNAVAILABLE`，不影响 RT 核心。
+Aya runtime 只在调用方给出目标 ELF 后显式附加 publish 或 callback begin/end
+程序。每组探针对独立原子生效：第二个附加失败会卸载第一个 link。可选模式返回
+不可用并保留内核 tracepoint 基线；required 模式返回错误且不声明 readiness。所有
+用户 hook 都必须携带固定的 `boot_id`、`cycle_seq` 或 `request_id`，不得解析动态
+字符串；稳定符号保持 ABI 版本，缺失时等价于 `USER_PROBE_UNAVAILABLE`，不影响
+RT 核心。
 
 ## 5. 事件与关联模型
 
@@ -302,12 +311,13 @@ EBPF-005 当前已具备有界 CPU/进程页错误窗口、阈值事件、架构
 结果不等于目标内核真实页错误/内存压力/OOM/进程退出注入、victim TGID、
 major/minor 归因、verifier 和开销资格。
 
-EBPF-006 当前已完成 Zenoh gateway publish 子路径：稳定 v1 begin/end marker、
-非零 request ID、future cancellation 收口、可选原子 uprobe 对、固定 1024 项
-epoch-aware LRU 状态、96 字节 request-correlated 证据解码和 transport-risk
-相关器拒绝条件已有源码/单元测试。该结果不等于目标内核真实 symbol attach、
-gateway stall 注入或开销资格；ROS 2、recorder、query/subscribe、IPC 和 reconnect
-hook 仍未完成，因此 EBPF-006 整体保持 partial。
+EBPF-006 当前已完成 Zenoh gateway publish 与 callback 子路径：独立稳定 v1
+begin/end marker、共享非零 request ID、future cancellation 与 callback unwind 收口、
+两组可选原子 uprobe 对、记录操作类别的固定 1024 项 epoch-aware LRU 状态、96 字节
+request-correlated 证据解码和 transport-risk 相关器拒绝条件已有源码/单元测试。
+command subscription 及 raw/typed query 的同步 callback 调用均已覆盖。该结果不等于
+目标内核真实 symbol attach、gateway stall 注入或开销资格；ROS 2、recorder、IPC、
+序列化、permit 和 reconnect hook 仍未完成，因此 EBPF-006 整体保持 partial。
 
 FR-048 的调度迁移路径当前已具备 typed `sched_migrate_task` 读取、独立
 scheduler TID 过滤、固定 1024 项迁移窗口、策略 epoch 重置、来源/目标 CPU
@@ -337,7 +347,7 @@ cycle 184220: deadline_miss
 ## 12. 当前未决项
 
 1. 量产 Linux 内核最低版本、是否强制 CONFIG_DEBUG_INFO_BTF、目标发行版及 libbpf 版本。
-2. Linux raw port、`esop_ros2_control`、recorder 及 Zenoh query/subscribe/IPC/reconnect 的稳定用户态 hook 名称与 ABI；Zenoh publish v1 marker 已固定。
+2. Linux raw port、`esop_ros2_control`、recorder 及 Zenoh IPC/序列化/permit/reconnect 的稳定用户态 hook 名称与 ABI；Zenoh publish 和 command/query callback v1 marker 已固定。
 3. 关键 host gate 是否作为 split-linux-rt 的运动前提，以及其宽限期和停止策略。
 4. 目标网卡的可观测 tracepoint、驱动特定 attach 点、RX/TX queue 映射与丢包口径。
 5. baseline/incident/forensics 的采样率、数据留存时长、隐私字段和远程上传策略。
