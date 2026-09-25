@@ -109,30 +109,30 @@ production target kernels, probe overhead/WCET, or long-duration operation.
 
 ## Acceptance Criteria
 
-- [ ] AC1: The fixture loads the real CO-RE object with only the required
+- [x] AC1: The fixture loads the real CO-RE object with only the required
   process-exit tracepoint and switches tracking to a synchronized child PID
   before allowing any child thread to terminate.
-- [ ] AC2: One controlled worker-thread exit increments
+- [x] AC2: One controlled worker-thread exit increments
   `thread_exits_ignored` without producing a record, incident, or failed lease.
-- [ ] AC3: The child leader exit produces exactly one accepted
+- [x] AC3: The child leader exit produces exactly one accepted
   `KernelProcess/ProcessExit` record and one Critical `UserComponentExit`
   incident with `LatchFault` and confidence 100.
-- [ ] AC4: Evidence and incident fields preserve child PID/TID, boot/epoch,
+- [x] AC4: Evidence and incident fields preserve child PID/TID, boot/epoch,
   hard-fact scalar semantics, zero cycle/transition, and zero loss.
-- [ ] AC5: Kernel statistics prove one emitted event, one leader exit, one
+- [x] AC5: Kernel statistics prove one emitted event, one leader exit, one
   ignored worker exit, zero OOM events, and no ring-buffer loss.
-- [ ] AC6: The observer lease is Healthy before leader exit and Failed after
+- [x] AC6: The observer lease is Healthy before leader exit and Failed after
   the incident, with one incident, the exact attach bit, zero loss, and the
   latched-incident fault code.
-- [ ] AC7: The exact-schema validator accepts the fixture report and regression
+- [x] AC7: The exact-schema validator accepts the fixture report and regression
   tests reject malformed schema/types, partial attachment, false worker
   incidents, semantic/count/identity mismatches, loss, and health mismatch.
-- [ ] AC8: `make test-ebpf-process-exit-runtime` builds unprivileged, elevates
+- [x] AC8: `make test-ebpf-process-exit-runtime` builds unprivileged, elevates
   only execution, fails explicitly without privilege, and validates output.
-- [ ] AC9: GitHub Actions runs the privileged qualification, uploads
+- [x] AC9: GitHub Actions runs the privileged qualification, uploads
   `build/ebpf_process_exit_qualification.json`, and all focused/full quality
   gates pass.
-- [ ] AC10: Documentation preserves the observation-only boundary and all
+- [x] AC10: Documentation preserves the observation-only boundary and all
   unqualified lifecycle cause, target-kernel, overhead, and long-run limits.
 
 ## Out Of Scope
