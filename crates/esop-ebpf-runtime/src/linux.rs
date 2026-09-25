@@ -93,6 +93,8 @@ pub struct RuntimeConfig {
     /// should normally restrict this to the EtherCAT/gateway RT process.
     pub tracked_pid: u32,
     pub scheduler_latency_threshold_ns: u64,
+    pub page_fault_threshold: u64,
+    pub page_fault_window_ns: u64,
     /// Zero observes protocol-matching drops on every interface.
     pub network_ifindex: u32,
     /// Host-order EtherType reported by `skb:kfree_skb`.
@@ -114,6 +116,7 @@ impl RuntimeConfig {
             && complete_pair(self.required_attach_mask, ATTACH_IRQ_HANDLER)
             && complete_pair(self.required_attach_mask, ATTACH_SOFTIRQ)
             && self.scheduler_latency_threshold_ns > 0
+            && valid_count_window(self.page_fault_threshold, self.page_fault_window_ns)
             && valid_network_tracking(
                 self.network_protocol,
                 self.network_drop_threshold,
@@ -128,8 +131,12 @@ const fn complete_pair(mask: u64, pair: u64) -> bool {
     mask & pair == 0 || mask & pair == pair
 }
 
+const fn valid_count_window(threshold: u64, window_ns: u64) -> bool {
+    threshold > 0 && threshold <= u32::MAX as u64 && window_ns > 0
+}
+
 const fn valid_network_tracking(protocol: u16, threshold: u64, window_ns: u64) -> bool {
-    protocol > 0 && threshold > 0 && threshold <= u32::MAX as u64 && window_ns > 0
+    protocol > 0 && valid_count_window(threshold, window_ns)
 }
 
 const fn normalize_attach_pairs(mut mask: u64) -> u64 {
@@ -149,6 +156,8 @@ impl Default for RuntimeConfig {
             required_attach_mask: ATTACH_SCHED_WAKEUP | ATTACH_SCHED_SWITCH | ATTACH_PROCESS_EXIT,
             tracked_pid: 0,
             scheduler_latency_threshold_ns: 1_000_000,
+            page_fault_threshold: 1,
+            page_fault_window_ns: 1_000_000,
             network_ifindex: 0,
             network_protocol: NETWORK_PROTOCOL_ETHERCAT,
             network_drop_threshold: 1,
@@ -176,6 +185,8 @@ pub struct KernelContext {
     pub tracked_pid: u32,
     pub network_ifindex: u32,
     pub scheduler_latency_threshold_ns: u64,
+    pub page_fault_threshold: u64,
+    pub page_fault_window_ns: u64,
     pub network_drop_threshold: u64,
     pub network_drop_window_ns: u64,
     pub irq_duration_threshold_ns: u64,
@@ -199,6 +210,8 @@ impl KernelContext {
             tracked_pid: config.tracked_pid,
             network_ifindex: config.network_ifindex,
             scheduler_latency_threshold_ns: config.scheduler_latency_threshold_ns,
+            page_fault_threshold: config.page_fault_threshold,
+            page_fault_window_ns: config.page_fault_window_ns,
             network_drop_threshold: config.network_drop_threshold,
             network_drop_window_ns: config.network_drop_window_ns,
             irq_duration_threshold_ns: config.irq_duration_threshold_ns,
@@ -218,6 +231,8 @@ impl KernelContext {
             tracked_pid: self.tracked_pid,
             network_ifindex: self.network_ifindex,
             scheduler_latency_threshold_ns: self.scheduler_latency_threshold_ns,
+            page_fault_threshold: self.page_fault_threshold,
+            page_fault_window_ns: self.page_fault_window_ns,
             network_drop_threshold: self.network_drop_threshold,
             network_drop_window_ns: self.network_drop_window_ns,
             irq_duration_threshold_ns: self.irq_duration_threshold_ns,
@@ -248,6 +263,15 @@ impl KernelContext {
         self.network_drop_window_ns = network_drop_window_ns;
         true
     }
+
+    fn set_page_fault_tracking(&mut self, threshold: u64, window_ns: u64) -> bool {
+        if !valid_count_window(threshold, window_ns) {
+            return false;
+        }
+        self.page_fault_threshold = threshold;
+        self.page_fault_window_ns = window_ns;
+        true
+    }
 }
 
 /// Per-CPU counters maintained by the BPF bundle.
@@ -268,6 +292,7 @@ pub struct KernelStats {
     pub network_drops: u64,
     pub network_unattributed: u64,
     pub network_threshold_events: u64,
+    pub page_fault_threshold_events: u64,
 }
 
 // SAFETY: The BPF map value is an all-u64 C-compatible record without padding
@@ -294,6 +319,9 @@ impl KernelStats {
         self.network_threshold_events = self
             .network_threshold_events
             .saturating_add(other.network_threshold_events);
+        self.page_fault_threshold_events = self
+            .page_fault_threshold_events
+            .saturating_add(other.page_fault_threshold_events);
     }
 }
 
@@ -621,6 +649,21 @@ impl BpfRuntime {
         self.kernel_context.irq_duration_threshold_ns = irq_duration_threshold_ns;
         self.kernel_context.softirq_duration_threshold_ns = softirq_duration_threshold_ns;
         self.context.set(0, self.kernel_context, 0)?;
+        Ok(())
+    }
+
+    /// Atomically replace the tracked-process page-fault count window.
+    pub fn update_page_fault_tracking(
+        &mut self,
+        page_fault_threshold: u64,
+        page_fault_window_ns: u64,
+    ) -> Result<(), RuntimeError> {
+        let mut updated = self.kernel_context;
+        if !updated.set_page_fault_tracking(page_fault_threshold, page_fault_window_ns) {
+            return Err(RuntimeError::InvalidConfiguration);
+        }
+        self.context.set(0, updated, 0)?;
+        self.kernel_context = updated;
         Ok(())
     }
 
@@ -1038,6 +1081,26 @@ mod tests {
         let evidence = decode_evidence(&bytes).unwrap();
         assert_eq!(evidence.netdev_ifindex, 17);
         assert_eq!(evidence.detail, 23);
+
+        put_u32(&mut bytes, 48, 42);
+        put_u32(&mut bytes, 52, 43);
+        put_u64(&mut bytes, 64, 4);
+        put_u64(&mut bytes, 72, 4);
+        put_u64(&mut bytes, 80, 900);
+        put_u32(&mut bytes, 88, 4);
+        bytes[92] = EvidenceDomain::KernelMemory as u8;
+        bytes[93] = EvidenceKind::PageFault as u8;
+        bytes[95] = 6;
+        let evidence = decode_evidence(&bytes).unwrap();
+        assert_eq!(evidence.pid, 42);
+        assert_eq!(evidence.tid, 43);
+        assert_eq!(evidence.observed_value, 4);
+        assert_eq!(evidence.threshold, 4);
+        assert_eq!(evidence.duration_ns, 900);
+        assert_eq!(evidence.count, 4);
+        assert_eq!(evidence.domain, EvidenceDomain::KernelMemory);
+        assert_eq!(evidence.kind, EvidenceKind::PageFault);
+        assert_eq!(evidence.detail, 6);
     }
 
     #[test]
@@ -1093,6 +1156,24 @@ mod tests {
         };
         assert!(!config.valid());
 
+        let config = RuntimeConfig {
+            page_fault_threshold: 0,
+            ..RuntimeConfig::default()
+        };
+        assert!(!config.valid());
+
+        let config = RuntimeConfig {
+            page_fault_window_ns: 0,
+            ..RuntimeConfig::default()
+        };
+        assert!(!config.valid());
+
+        let config = RuntimeConfig {
+            page_fault_threshold: u64::from(u32::MAX) + 1,
+            ..RuntimeConfig::default()
+        };
+        assert!(!config.valid());
+
         let mut config = RuntimeConfig::default();
         config.enabled_attach_mask &= !ATTACH_IRQ_HANDLER_EXIT;
         assert!(!config.valid());
@@ -1117,6 +1198,8 @@ mod tests {
         let config = RuntimeConfig {
             tracked_pid: 42,
             scheduler_latency_threshold_ns: 100,
+            page_fault_threshold: 4,
+            page_fault_window_ns: 750,
             network_ifindex: 17,
             network_protocol: NETWORK_PROTOCOL_ETHERCAT,
             network_drop_threshold: 3,
@@ -1138,6 +1221,8 @@ mod tests {
         assert_eq!(context.cycle_seq, 11);
         assert_eq!(context.transition_seq, 13);
         assert_eq!(context.network_ifindex, 17);
+        assert_eq!(context.page_fault_threshold, 4);
+        assert_eq!(context.page_fault_window_ns, 750);
         assert_eq!(context.network_protocol, NETWORK_PROTOCOL_ETHERCAT);
         assert_eq!(context.network_drop_threshold, 3);
         assert_eq!(context.network_drop_window_ns, 1_000);
@@ -1164,9 +1249,25 @@ mod tests {
     }
 
     #[test]
+    fn page_fault_tracking_updates_are_validated_before_commit() {
+        let mut context = KernelContext::from_config(RuntimeConfig::default());
+        assert!(context.set_page_fault_tracking(4, 2_000_000));
+        assert_eq!(context.page_fault_threshold, 4);
+        assert_eq!(context.page_fault_window_ns, 2_000_000);
+
+        let unchanged = context;
+        assert!(!context.set_page_fault_tracking(0, 2_000_000));
+        assert_eq!(context, unchanged);
+        assert!(!context.set_page_fault_tracking(4, 0));
+        assert_eq!(context, unchanged);
+        assert!(!context.set_page_fault_tracking(u64::from(u32::MAX) + 1, 1));
+        assert_eq!(context, unchanged);
+    }
+
+    #[test]
     fn kernel_map_abis_and_attach_masks_remain_explicit() {
-        assert_eq!(std::mem::size_of::<KernelContext>(), 88);
-        assert_eq!(std::mem::size_of::<KernelStats>(), 112);
+        assert_eq!(std::mem::size_of::<KernelContext>(), 104);
+        assert_eq!(std::mem::size_of::<KernelStats>(), 120);
 
         let mut observed = 0;
         for spec in ATTACH_SPECS {
@@ -1199,6 +1300,7 @@ mod tests {
             network_drops: u64::MAX,
             network_unattributed: 6,
             network_threshold_events: 8,
+            page_fault_threshold_events: u64::MAX,
             ..KernelStats::default()
         });
         assert_eq!(aggregate.irq_samples, u64::MAX);
@@ -1208,5 +1310,6 @@ mod tests {
         assert_eq!(aggregate.network_drops, u64::MAX);
         assert_eq!(aggregate.network_unattributed, 6);
         assert_eq!(aggregate.network_threshold_events, 8);
+        assert_eq!(aggregate.page_fault_threshold_events, u64::MAX);
     }
 }

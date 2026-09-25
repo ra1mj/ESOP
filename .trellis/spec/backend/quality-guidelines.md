@@ -526,6 +526,15 @@ a diagnostic counter but must not produce `HOST_NIC_DROP`; that incident also
 requires a correlated transport-risk cycle. Preserve the fixed event size and
 treat target-kernel packet injection/verifier results as separate evidence.
 
+For eBPF page-fault evidence, filter by the tracked process and aggregate by a
+bounded CPU/process key. Emit only the first count-threshold crossing in a
+bounded window, preserve the triggering task and architecture error code, and
+require a correlated cycle-risk window before producing `HOST_PAGE_FAULT`.
+Do not infer major/minor outcome or handler duration from
+`exceptions:page_fault_user`; those require a separate qualified observation
+point. Preserve the fixed event size and treat target-kernel fault injection,
+verifier behavior, and overhead as separate evidence.
+
 ## Code Review Checklist
 
 - Is the worst-case loop bounded by a static capacity or explicit budget?

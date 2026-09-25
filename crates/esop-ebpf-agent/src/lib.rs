@@ -564,7 +564,9 @@ fn classify(
     correlated: bool,
 ) -> Option<(IncidentCode, IncidentSeverity, RecommendedAction, u8)> {
     let over_threshold = evidence.observed_value > evidence.threshold;
-    let enough_count = evidence.count > 0 && u64::from(evidence.count) >= evidence.threshold;
+    let enough_count = evidence.threshold > 0
+        && evidence.count > 0
+        && u64::from(evidence.count) >= evidence.threshold;
     match evidence.kind {
         EvidenceKind::SchedulerRunqueueLatency if over_threshold && correlated => Some((
             IncidentCode::HostSchedulerStall,
@@ -586,7 +588,7 @@ fn classify(
             RecommendedAction::ControlledStop,
             75,
         )),
-        EvidenceKind::PageFault if correlated => Some((
+        EvidenceKind::PageFault if enough_count && correlated => Some((
             IncidentCode::HostPageFault,
             IncidentSeverity::Warning,
             RecommendedAction::DegradeHostObservation,
@@ -965,6 +967,55 @@ mod tests {
             })
             .unwrap();
         assert_eq!(healthy.ingest(drop).unwrap(), None);
+    }
+
+    #[test]
+    fn page_fault_requires_threshold_and_cycle_risk() {
+        let mut correlator = IncidentCorrelator::<2>::new(11, 3, 1_000);
+        correlator
+            .observe_cycle(CycleContext {
+                boot_id: 11,
+                cycle_seq: 42,
+                transition_seq: 9,
+                timestamp_ns: 1_000,
+                deadline_miss: 1,
+                ..CycleContext::EMPTY
+            })
+            .unwrap();
+
+        let mut fault = evidence(EvidenceKind::PageFault, 1_100);
+        fault.domain = EvidenceDomain::KernelMemory;
+        fault.observed_value = 4;
+        fault.threshold = 4;
+        fault.count = 4;
+        fault.detail = 6;
+        let incident = correlator.ingest(fault).unwrap().unwrap();
+        assert_eq!(incident.code, IncidentCode::HostPageFault);
+        assert_eq!(incident.pid, 100);
+        assert_eq!(incident.tid, 101);
+        assert_eq!(incident.evidence[0].detail, 6);
+
+        let mut below_threshold = fault;
+        below_threshold.evidence_id = 8;
+        below_threshold.observed_value = 3;
+        below_threshold.count = 3;
+        assert_eq!(correlator.ingest(below_threshold).unwrap(), None);
+
+        let mut zero_threshold = fault;
+        zero_threshold.evidence_id = 9;
+        zero_threshold.threshold = 0;
+        assert_eq!(correlator.ingest(zero_threshold).unwrap(), None);
+
+        let mut healthy = IncidentCorrelator::<2>::new(11, 3, 1_000);
+        healthy
+            .observe_cycle(CycleContext {
+                boot_id: 11,
+                cycle_seq: 42,
+                timestamp_ns: 1_000,
+                ..CycleContext::EMPTY
+            })
+            .unwrap();
+        assert_eq!(healthy.ingest(fault).unwrap(), None);
     }
 
     #[test]

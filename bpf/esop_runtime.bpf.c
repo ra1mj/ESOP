@@ -9,6 +9,8 @@ struct esop_context {
     __u32 tracked_pid;
     __u32 network_ifindex;
     __u64 scheduler_latency_threshold_ns;
+    __u64 page_fault_threshold;
+    __u64 page_fault_window_ns;
     __u64 network_drop_threshold;
     __u64 network_drop_window_ns;
     __u64 irq_duration_threshold_ns;
@@ -33,6 +35,7 @@ struct esop_stats {
     __u64 network_drops;
     __u64 network_unattributed;
     __u64 network_threshold_events;
+    __u64 page_fault_threshold_events;
 };
 
 struct esop_interrupt_key {
@@ -49,6 +52,17 @@ struct esop_network_drop_state {
     __u64 window_start_ns;
     __u32 count;
     __u32 last_reason;
+};
+
+struct esop_page_fault_key {
+    __u32 cpu;
+    __u32 tgid;
+};
+
+struct esop_page_fault_state {
+    __u64 window_start_ns;
+    __u32 count;
+    __u32 reserved;
 };
 
 struct esop_runtime_evidence {
@@ -73,8 +87,8 @@ struct esop_runtime_evidence {
     __u8 detail;
 };
 
-_Static_assert(sizeof(struct esop_context) == 88, "context ABI changed");
-_Static_assert(sizeof(struct esop_stats) == 112, "stats ABI changed");
+_Static_assert(sizeof(struct esop_context) == 104, "context ABI changed");
+_Static_assert(sizeof(struct esop_stats) == 120, "stats ABI changed");
 _Static_assert(sizeof(struct esop_runtime_evidence) == 96, "evidence ABI changed");
 
 struct {
@@ -102,6 +116,13 @@ struct {
     __type(key, __u32);
     __type(value, __u64);
 } ESOP_WAKEUPS SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 256);
+    __type(key, struct esop_page_fault_key);
+    __type(value, struct esop_page_fault_state);
+} ESOP_PAGE_FAULTS SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -211,7 +232,7 @@ static __always_inline __u16 esop_vector_u16(__u32 vector)
     return vector > 0xffff ? 0xffff : (__u16)vector;
 }
 
-static __always_inline __u8 esop_detail_u8(__u32 value)
+static __always_inline __u8 esop_detail_u8(__u64 value)
 {
     return value > 0xff ? 0xff : (__u8)value;
 }
@@ -296,15 +317,69 @@ int esop_process_exit(void *ctx)
 }
 
 SEC("tracepoint/exceptions/page_fault_user")
-int esop_page_fault_user(void *ctx)
+int esop_page_fault_user(struct trace_event_raw_exceptions *event)
 {
-    (void)ctx;
     struct esop_context *context = esop_context();
-    if (esop_tracks(esop_tgid(), context)) {
-        esop_emit(3, 3, 1, 1, 1, 0, 1, 0);
-        struct esop_stats *stats = esop_stats();
-        if (stats) {
-            stats->page_faults++;
+    __u32 tgid = esop_tgid();
+    if (!esop_tracks(tgid, context)) {
+        return 0;
+    }
+
+    struct esop_stats *stats = esop_stats();
+    if (stats) {
+        stats->page_faults++;
+    }
+    if (!context || context->page_fault_threshold == 0 ||
+        context->page_fault_window_ns == 0) {
+        return 0;
+    }
+
+    __u64 now = bpf_ktime_get_ns();
+    struct esop_page_fault_key key = {
+        .cpu = bpf_get_smp_processor_id(),
+        .tgid = tgid,
+    };
+    struct esop_page_fault_state *state =
+        bpf_map_lookup_elem(&ESOP_PAGE_FAULTS, &key);
+    __u32 count = 1;
+    __u64 elapsed = 0;
+    int threshold_crossed = context->page_fault_threshold == 1;
+    if (!state) {
+        struct esop_page_fault_state initial = {
+            .window_start_ns = now,
+            .count = 1,
+        };
+        if (bpf_map_update_elem(&ESOP_PAGE_FAULTS, &key, &initial,
+                                BPF_ANY) < 0) {
+            if (stats) {
+                stats->lost_events++;
+            }
+            return 0;
+        }
+    } else if (now < state->window_start_ns ||
+               now - state->window_start_ns >=
+                   context->page_fault_window_ns) {
+        state->window_start_ns = now;
+        state->count = 1;
+    } else {
+        elapsed = now - state->window_start_ns;
+        __u32 previous = state->count;
+        if (state->count != 0xffffffff) {
+            state->count++;
+        }
+        count = state->count;
+        threshold_crossed = (__u64)previous < context->page_fault_threshold &&
+                            (__u64)count >= context->page_fault_threshold;
+    }
+
+    if (threshold_crossed) {
+        __u64 error_code = BPF_CORE_READ(event, error_code);
+        if (esop_emit_resource(3, 3, 1, count,
+                               context->page_fault_threshold, elapsed,
+                               count, 0, 0, esop_detail_u8(error_code), 1) ==
+                0 &&
+            stats) {
+            stats->page_fault_threshold_events++;
         }
     }
     return 0;

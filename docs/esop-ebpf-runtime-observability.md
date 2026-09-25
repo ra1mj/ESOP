@@ -43,7 +43,7 @@ ESOP RT node
 
 两条证据链保持独立：RT 域是运动控制事实来源；eBPF 是 Linux 环境的解释与归因来源。相关器可以合并“同一个周期窗口内的事件”，但不能以缺少 eBPF 事件证明“系统没有问题”。
 
-当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、硬 IRQ/softirq entry/exit attach、EtherCAT EtherType/可选 ifindex 丢包策略更新和 `RuntimeAgent` 桥接；`bpf/` 提供固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。CI 负责 CO-RE 对象构建；目标 Linux 环境仍需完成真实权限、verifier、ringbuf、IRQ/softirq 与丢包压力注入以及目标 hook 资格测试。
+当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、硬 IRQ/softirq entry/exit attach、EtherCAT EtherType/可选 ifindex 丢包策略更新、页错误计数窗口策略更新和 `RuntimeAgent` 桥接；`bpf/` 提供固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、固定 256 项的 CPU/进程页错误窗口 map、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。CI 负责 CO-RE 对象构建；目标 Linux 环境仍需完成真实权限、verifier、ringbuf、IRQ/softirq、丢包与页错误压力注入以及目标 hook 资格测试。
 
 ## 4. 观测域与 attach 点
 
@@ -54,7 +54,7 @@ ESOP RT node
 | 调度 | `sched_switch`、`sched_wakeup`、`sched_process_exec/exit` | RT 线程何时被唤醒、实际运行多久、被谁抢占、是否迁移、进程是否退出。 | run-queue latency、off-CPU time、migration、thread exit。 |
 | IRQ/softirq | IRQ 与 softirq entry/exit、CPU 时间统计 | 哪个 IRQ/softirq 占满 CPU，Ethernet IRQ 是否延迟服务。 | handler duration、storm count、CPU overlap。 |
 | 网络 | `net_dev_queue`、`net_dev_xmit`、`netif_receive_skb`、`napi_poll`、`kfree_skb` 等适用点 | EtherCAT raw port 的帧是否进入/离开队列，是否被丢弃或 NAPI/IRQ 延迟。 | interface、queue、drop reason、receive/transmit latency。 |
-| 内存 | user page fault、OOM、进程 mmap/munmap 等低频点 | 周期或 gateway 是否发生页错误、内存压力或 OOM。 | fault count、major/minor、OOM、address-space change。 |
+| 内存 | user page fault、OOM、进程 mmap/munmap 等低频点 | 周期或 gateway 是否发生页错误、内存压力或 OOM。 | fault-window count、架构错误码、OOM、address-space change；major/minor 结果需其他 hook。 |
 | 进程 | exec/exit、signal、cgroup、CPU throttling/pressure 可用点 | gateway、ROS 2、Zenoh、recorder 是否重启、被杀或受资源组限制。 | pid/tid、exit code/signal、cgroup、throttle window。 |
 | 性能计数 | kernel perf event 或平台可用 PMU | CPU cycles、instructions、cache miss 等是否突然恶化。 | 只做采样/窗口统计，不在每周期输出原始样本。 |
 
@@ -77,6 +77,14 @@ host-order EtherType（默认 EtherCAT `0x88A4`），并可选精确匹配 ifind
 阈值时输出一条 96 字节证据，携带 ifindex、窗口计数和饱和为一字节的内核
 drop reason。由于软中断上下文中的 current task 不代表数据包所有者，网络
 证据的 PID/TID 固定为零，也不使用 `tracked_pid` 过滤。
+
+页错误首版使用 `exceptions:page_fault_user` 的 typed tracepoint context，并
+按 `tracked_pid` 过滤。每个 `{CPU, 进程}` 在固定 256 项 LRU map 中维护窗口
+起点和饱和计数；窗口第一次达到配置阈值时输出一条 96 字节证据，携带触发
+PID/TID、CPU、窗口计数/跨度以及饱和为一字节的架构错误码。该 tracepoint
+没有页错误处理完成点或 major/minor 结果，因此当前实现不把窗口跨度解释为
+处理时延，也不从错误码推断 major/minor。页错误证据还必须与 deadline、WKC
+或 DC 风险周期同窗，才可升级为 `HOST_PAGE_FAULT`。
 
 ### 4.2 用户态观测点
 
@@ -133,7 +141,7 @@ RuntimeIncident
 | `HOST_SCHEDULER_STALL` | RT/gateway 线程唤醒到运行的延迟超过阈值，且与 cycle deadline miss 同窗。 | 主机调度导致软件周期风险。 | 可使 supervisor lease 失效；不直接写 controlword。 |
 | `HOST_IRQ_STORM` | 单 IRQ/softirq 在窗口内占用超预算 CPU，伴随 RT 线程 off-CPU。 | 中断或软中断干扰实时线程。 | 按产品策略触发普通 controlled stop。 |
 | `HOST_NIC_DROP` | 指定 EtherType/网卡的 `kfree_skb` 窗口达到计数阈值，且与 WKC/timeout/deadline 风险同窗。 | Linux 网络路径存在可归因的协议栈丢弃。 | 提供 `HOST_OBSERVATION`，不能替代 EtherCAT WKC。 |
-| `HOST_PAGE_FAULT` | ESOP/ROS/Zenoh 关键线程在 cycle 窗口发生页错误。 | 周期可能被内存管理事件打断。 | 性能资格失败或按策略撤销 host permit。 |
+| `HOST_PAGE_FAULT` | 受跟踪进程的 `{CPU, 进程}` 页错误窗口达到计数阈值，且与 deadline/WKC/DC 风险周期同窗。 | 周期可能被内存管理事件打断；当前证据不区分 major/minor。 | 性能资格失败或按策略撤销 host permit。 |
 | `HOST_CPU_THROTTLE` | cgroup/CPU pressure/频率窗口异常与 gateway stall 同窗。 | 监督域资源受到限制。 | supervisor lease 降级。 |
 | `USER_COMPONENT_EXIT` | gateway、ROS 2 controller、recorder 或 agent 退出/收到信号。 | 用户态组件生命周期异常。 | MLG 只根据固定 supervisor lease/command age 判定。 |
 | `OBSERVABILITY_DEGRADED` | BTF/attach/permission/ringbuf/agent health 失败。 | 观测证据不完整。 | 不能自动声称健康；是否禁止运动由产品 policy 决定。 |
@@ -227,6 +235,10 @@ BPF 对象、用户态 loader、schema 和规则版本必须绑定：
 EBPF-004 当前已具备有界 CPU/ifindex 窗口、EtherType/ifindex 过滤、drop
 reason 证据解码和 transport-risk 相关器单元测试。该实现与 CO-RE 编译结果
 不等于目标内核真实队列压力、丢包注入、verifier 和开销资格。
+
+EBPF-005 当前已具备有界 CPU/进程页错误窗口、阈值事件、架构错误码 detail
+解码和 cycle-risk 相关器单元测试。该实现与 CO-RE 编译结果不等于目标内核
+真实页错误/内存压力注入、major/minor 归因、verifier 和开销资格。
 
 ## 11. 运行时输出示例
 
