@@ -837,3 +837,36 @@ Added the shared ProcBuf/Protobuf IPC payload adapter, delegated Zenoh projectio
 ### Next Steps
 
 - None - task complete
+
+
+## Session 26: Complete command target ProcBuf handoff
+
+**Date**: 2026-09-26
+**Task**: Complete command target ProcBuf handoff
+**Branch**: `main`
+
+### Summary
+
+Published validated CSP/CSV/CST command targets into ProcBuf ABI v5 with exact lifecycle permit identity, shared IPC/Zenoh admission adapters, end-to-end Unix datagram coverage, updated capability documentation, and passing local plus GitHub quality gates.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `7d2029168119c499c98dd24c4996ae37df29e0bd` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

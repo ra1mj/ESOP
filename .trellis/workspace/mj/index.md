@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 25
+- **Total Sessions**: 26
 - **Last Active**: 2026-09-26
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~839 | Active |
+| `journal-1.md` | ~872 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 26 | 2026-09-26 | Complete command target ProcBuf handoff | `7d2029168119c499c98dd24c4996ae37df29e0bd` | `main` |
 | 25 | 2026-09-26 | Connect ProcBuf payloads to hosted IPC | `4ee4b79` | `main` |
 | 24 | 2026-09-26 | Implement bounded Unix domain IPC transport | `a8cd6f7` | `main` |
 | 23 | 2026-09-26 | Runtime incident Protobuf and Zenoh projection | `31dfb89` | `main` |
