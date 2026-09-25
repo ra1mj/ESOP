@@ -370,3 +370,36 @@ Added stable Linux raw-port syscall markers, bounded eBPF duration tracking, tra
 ### Next Steps
 
 - None - task complete
+
+
+## Session 12: Qualify eBPF raw-port runtime path
+
+**Date**: 2026-09-25
+**Task**: Qualify eBPF raw-port runtime path
+**Branch**: `main`
+
+### Summary
+
+Added a privileged Linux qualification that verifies the real CO-RE object, exact raw-port uprobe pair, delayed Unix recv evidence, ring-buffer decoding, kernel statistics, HostPortStall correlation, exact-schema report validation, dedicated GitHub Actions evidence, and explicit AF_PACKET/hardware/WCET limits. Local full CI and remote quality run 36108463279 passed.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3963e26` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

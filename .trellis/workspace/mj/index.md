@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 11
+- **Total Sessions**: 12
 - **Last Active**: 2026-09-25
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~372 | Active |
+| `journal-1.md` | ~405 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 12 | 2026-09-25 | Qualify eBPF raw-port runtime path | `3963e26` | `main` |
 | 11 | 2026-09-25 | eBPF Linux raw-port stall attribution | `45e633b` | `main` |
 | 10 | 2026-09-25 | eBPF gateway callback stall attribution | `5ab9ee1` | `main` |
 | 9 | 2026-09-25 | eBPF gateway stall attribution | `0d163fa` | `main` |
