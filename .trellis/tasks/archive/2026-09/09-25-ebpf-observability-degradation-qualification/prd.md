@@ -72,27 +72,27 @@ runtime reports a complete capability snapshot.
 
 ## Acceptance Criteria
 
-- [ ] Unit tests prove event loss has a dedicated fault, is sticky within one
+- [x] Unit tests prove event loss has a dedicated fault, is sticky within one
       epoch, and is cleared only by restart into a new epoch.
-- [ ] Capability tests distinguish missing BTF/ringbuf/required attach points
+- [x] Capability tests distinguish missing BTF/ringbuf/required attach points
       from missing verifier/permission without depending on host mutation.
-- [ ] A privileged hosted Linux run loads only `page_fault_user`, fills the
+- [x] A privileged hosted Linux run loads only `page_fault_user`, fills the
       production 4 MiB ring buffer, and records positive page-fault, emitted,
       and lost-event counters without blocking the producer.
-- [ ] One poll reports the exact new kernel loss to the agent, and both the
+- [x] One poll reports the exact new kernel loss to the agent, and both the
       immediate and same-epoch re-applied heartbeat remain Degraded with the
       event-loss fault and matching count.
-- [ ] Unload/restart/reload advances the agent epoch, clears old attachment and
+- [x] Unload/restart/reload advances the agent epoch, clears old attachment and
       counters, restores Healthy only after a complete new snapshot, and
       accepts a new-epoch page-fault record with zero new loss.
-- [ ] The report is same-directory atomic and its validator fails closed for
+- [x] The report is same-directory atomic and its validator fails closed for
       schema, capability truth table, attach masks, saturation bounds,
       statistics, loss projection, restart reset, recovery, and cleanup.
-- [ ] Focused Rust/Python tests, formatting, Clippy, BPF syntax, capability
+- [x] Focused Rust/Python tests, formatting, Clippy, BPF syntax, capability
       validation, shell/Python syntax, `make ci`, and `git diff --check` pass.
-- [ ] The dedicated GitHub Actions job passes and its downloaded artifact
+- [x] The dedicated GitHub Actions job passes and its downloaded artifact
       independently passes the repository validator.
-- [ ] Documentation removes only hosted ring-buffer-loss/restart qualification
+- [x] Documentation removes only hosted ring-buffer-loss/restart qualification
       from the open list while preserving production pressure, permissions,
       missing-BTF environments, overhead/WCET, and long-duration limits.
 
