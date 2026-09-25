@@ -116,7 +116,7 @@ remaining ROS2, recorder, target-kernel attach/injection, and overhead gaps.
 - [x] AC9: Documentation and `capability_manifest.json` state that this
   increment covers gateway publish markers only and retain the remaining
   observability limitations.
-- [ ] AC10: `make ci`, the live Zenoh test target when available, the BPF object
+- [x] AC10: `make ci`, the live Zenoh test target when available, the BPF object
   build, and the repository GitHub Actions workflow pass before archival.
 
 ## Out of Scope

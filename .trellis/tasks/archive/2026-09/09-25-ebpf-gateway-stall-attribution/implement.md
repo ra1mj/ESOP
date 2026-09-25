@@ -19,7 +19,7 @@
   stall cases.
 - [x] Update README, gateway/runtime-observability docs, FR-048 status,
   capability manifest, and executable Trellis quality contract.
-- [ ] Run focused tests, full local quality gates, live Zenoh tests when the
+- [x] Run focused tests, full local quality gates, live Zenoh tests when the
   router is installed, then push and require the GitHub Actions run to pass.
 
 ## Focused validation
