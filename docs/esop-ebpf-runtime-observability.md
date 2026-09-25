@@ -2,7 +2,7 @@
 
 - 文档版本：1.2
 - 日期：2026-09-25
-- 状态：设计基线；HostObservation、固定证据 ABI、有界 RuntimeIncident 相关器、同类事件窗口聚合、RuntimeAgent 门面、能力预检结果模型、Rust/Aya CO-RE loader、tracepoint attach、ringbuf 解码桥、有界硬 IRQ/softirq 时长证据、按 EtherType/ifindex 聚合的 `kfree_skb` 丢包证据、有界 cpufreq policy 限频 episode、Zenoh gateway stall 和 Linux raw-port syscall stall 证据已实现；托管 Linux 已覆盖 gateway/raw-port 共享 marker、进程 leader 退出、精确 TID 调度迁移、受控 wake-to-switch runqueue、受控 loopback `NET_RX` softirq 和受控 x86_64 匿名页首次写入 page-fault 链的 verifier/load/真实 attach/ringbuf/相关器资格，生产目标内核、真实 transport/NIC/自然负载根因、硬 IRQ 与持续压力/限频注入、页错误内存压力/major-minor 归因、开销和其余 hook 资格仍需单独完成
+- 状态：设计基线；HostObservation、固定证据 ABI、有界 RuntimeIncident 相关器、同类事件窗口聚合、RuntimeAgent 门面、能力预检结果模型、Rust/Aya CO-RE loader、tracepoint attach、ringbuf 解码桥、有界硬 IRQ/softirq 时长证据、按 EtherType/ifindex 聚合的 `kfree_skb` 丢包证据、有界 cpufreq policy 限频 episode、Zenoh gateway stall 和 Linux raw-port syscall stall 证据已实现；托管 Linux 已覆盖 gateway/raw-port 共享 marker、进程 leader 退出、独立 cgroup v2 单进程 OOM victim、精确 TID 调度迁移、受控 wake-to-switch runqueue、受控 loopback `NET_RX` softirq 和受控 x86_64 匿名页首次写入 page-fault 链的 verifier/load/真实 attach/ringbuf/相关器资格，生产目标内核、真实 transport/NIC/自然负载根因、全局 OOM/受害 TGID 与 cgroup 归因、硬 IRQ 与持续压力/限频注入、页错误内存压力/major-minor 归因、开销和其余 hook 资格仍需单独完成
 - 上游需求：[ESOP 软件产品需求文档](esop-software-prd.md) FR-047 至 FR-052、NFR-018
 
 ## 1. 设计结论
@@ -43,7 +43,7 @@ ESOP RT node
 
 两条证据链保持独立：RT 域是运动控制事实来源；eBPF 是 Linux 环境的解释与归因来源。相关器可以合并“同一个周期窗口内的事件”，但不能以缺少 eBPF 事件证明“系统没有问题”。
 
-当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、调度 TID/迁移计数窗口策略原子更新、硬 IRQ/softirq entry/exit attach、IRQ/softirq CPU/vector 过滤、EtherCAT EtherType/可选 ifindex 丢包策略更新、页错误计数窗口策略更新、cpufreq policy 下限/CPU 策略原子更新、Zenoh gateway 与 Linux raw-port syscall 成对 uprobe attach 和 `RuntimeAgent` 桥接；`bpf/` 提供固定 1024 项的调度 TID 迁移窗口 map、固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、固定 256 项的 CPU/进程页错误窗口 map、固定 256 项的 cpufreq policy episode map、固定 1024 项 gateway request 与 raw-port per-thread 操作 map、主线程退出过滤、OOM victim PID 归因、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。专用托管 Linux CI 已验证 gateway、raw-port、leader 退出、两 CPU 精确 TID 调度迁移、受控 FIFO 竞争下精确 TID 唤醒到切换时长、CPU/vector 过滤的 loopback `NET_RX` softirq 时长，以及预热独立子进程的 16 页匿名内存首次写入 page-fault 计数阈值链的 CO-RE verifier/load、真实 tracepoint/uprobe attach、ringbuf、统计、相关器和 observer health 共享链；生产目标内核与真实 Zenoh transport、AF_PACKET/NIC、自然负载 runqueue 根因、硬 IRQ、真实 NIC/持续 softirq、丢包/页错误内存压力与 major-minor 归因、OOM/限频压力、迁移原因/亲和性/cache 影响及开销资格仍需单独完成。
+当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、调度 TID/迁移计数窗口策略原子更新、硬 IRQ/softirq entry/exit attach、IRQ/softirq CPU/vector 过滤、EtherCAT EtherType/可选 ifindex 丢包策略更新、页错误计数窗口策略更新、cpufreq policy 下限/CPU 策略原子更新、Zenoh gateway 与 Linux raw-port syscall 成对 uprobe attach 和 `RuntimeAgent` 桥接；`bpf/` 提供固定 1024 项的调度 TID 迁移窗口 map、固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、固定 256 项的 CPU/进程页错误窗口 map、固定 256 项的 cpufreq policy episode map、固定 1024 项 gateway request 与 raw-port per-thread 操作 map、主线程退出过滤、OOM victim PID 归因、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。专用托管 Linux CI 已验证 gateway、raw-port、leader 退出、独立 cgroup v2 单进程 OOM victim、两 CPU 精确 TID 调度迁移、受控 FIFO 竞争下精确 TID 唤醒到切换时长、CPU/vector 过滤的 loopback `NET_RX` softirq 时长，以及预热独立子进程的 16 页匿名内存首次写入 page-fault 计数阈值链的 CO-RE verifier/load、真实 tracepoint/uprobe attach、ringbuf、统计、相关器和 observer health 共享链；生产目标内核与真实 Zenoh transport、AF_PACKET/NIC、自然负载 runqueue 根因、硬 IRQ、真实 NIC/持续 softirq、丢包/页错误内存压力与 major-minor 归因、全局 OOM/受害 TGID/namespace/cgroup 归因、限频压力、迁移原因/亲和性/cache 影响及开销资格仍需单独完成。
 
 ## 4. 观测域与 attach 点
 
@@ -417,10 +417,16 @@ EBPF-005 当前已具备有界 CPU/进程页错误窗口、阈值事件、架构
 再证明受跟踪 leader 正常退出生成唯一 `ProcessExit`、Critical
 `UserComponentExit`/`LatchFault` 和 Failed heartbeat。两者分别严格校验
 `build/ebpf_page_fault_qualification.json` 与
-`build/ebpf_process_exit_qualification.json`。页错误资格不含 fault address/IP、
+`build/ebpf_process_exit_qualification.json`。`make test-ebpf-oom-runtime` 另在新建
+cgroup v2 叶子内限制一个预热单线程子进程，以 32 MiB `memory.max` 和有界
+128 MiB 匿名页写入触发局部 OOM；夹具要求子进程由 `SIGKILL` 结束，
+`memory.events.local` 至少一次 OOM、恰好一次 OOM kill 且零 group kill，并只生成
+唯一 `KernelMemory/OomKill`、Critical `HostOom`/`LatchFault`、零 loss 和 Failed
+heartbeat，严格报告写入 `build/ebpf_oom_qualification.json`。页错误资格不含 fault address/IP、
 major/minor、handler duration、内存压力、swap/storage 或自然负载根因；退出资格
-不含 exit code/signal，不证明线程组完全消失。OOM、victim TGID、PID namespace/
-cgroup、组件重启、生产目标内核、开销和长时 HIL 仍需单独资格化，因此
+不含 exit code/signal，不证明线程组完全消失；OOM 资格只证明 hosted 单进程
+memcg victim-PID 链，不证明 victim TGID、PID namespace/cgroup identity、触发者、
+全局压力、容器委派或组件重启。生产目标内核、开销和长时 HIL 仍需单独资格化，因此
 EBPF-005 整体保持 partial。
 
 EBPF-006 当前已完成 Zenoh gateway publish 与 callback 子路径：独立稳定 v1
@@ -446,9 +452,10 @@ epoch、来源/目标 CPU 解码和相关器单元测试外，现已具备上述
 wake-to-switch/incident/health 资格；softirq 路径已具备 CPU/vector 过滤的受控
 loopback `NET_RX` duration/incident/health 资格；page-fault 路径已具备预热独立
 子进程、16 页匿名内存首次写入、精确 `ru_minflt`/BPF/evidence 计数和唯一
-incident/health 资格。这些结果仍不等于生产目标内核、自然负载 runqueue 根因、
+incident/health 资格；OOM 路径已具备独立 cgroup v2 单进程、局部事件计数、
+`SIGKILL`、精确 victim PID、incident 和 health 资格。这些结果仍不等于生产目标内核、自然负载 runqueue 根因、
 硬 IRQ 或真实 NIC/持续 softirq 压力、页错误内存压力/major-minor 归因、产品
-优先级/CPU 隔离、迁移原因/亲和性/cache/NUMA 或开销资格。CPU 限频路径已具备
+优先级/CPU 隔离、全局 OOM/受害 TGID/namespace/cgroup 归因、迁移原因/亲和性/cache/NUMA 或开销资格。CPU 限频路径已具备
 typed `cpu_frequency_limits`、policy CPU 过滤、
 低于产品下限 episode 去重、固定事件解码和相关器单元测试，但真实 policy 限制
 注入、共享 policy 拓扑、瞬时频率/驻留时间/原因归因、verifier 和开销资格仍未完成。

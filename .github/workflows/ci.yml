@@ -106,6 +106,26 @@ jobs:
           path: build/ebpf_process_exit_qualification.json
           if-no-files-found: error
 
+  ebpf-oom-runtime:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install eBPF build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+      - name: Run privileged OOM runtime qualification
+        run: make test-ebpf-oom-runtime
+      - name: Upload OOM runtime qualification
+        uses: actions/upload-artifact@v4
+        with:
+          name: esop-ebpf-oom-runtime-qualification
+          path: build/ebpf_oom_qualification.json
+          if-no-files-found: error
+
   ebpf-scheduler-migration-runtime:
     runs-on: ubuntu-24.04
     steps:

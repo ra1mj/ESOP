@@ -596,9 +596,11 @@ threads. Apply the configured process filter to TGID, emit `ProcessExit` only
 for `tid == tgid`, and count ignored worker exits without escalating them. Read
 OOM identity from the typed `oom:mark_victim` victim PID rather than current
 task context; do not invent a TGID when the tracepoint exposes only one PID.
-Keep the fixed event ABI stable and treat target-kernel process/OOM injection,
-PID-namespace behavior, victim thread-group resolution, verifier behavior, and
-overhead as separate qualification evidence.
+Keep the fixed event ABI stable. A hosted single-process cgroup-v2 fixture may
+qualify the raw victim-PID chain when it independently proves one local OOM
+kill, but PID namespace/cgroup identity, victim thread-group resolution,
+global OOM behavior, production-kernel behavior, and overhead remain separate
+qualification evidence.
 
 ## Scenario: eBPF Process-Exit Runtime Qualification
 
@@ -676,6 +678,64 @@ any process-exit record, and label it complete component death.
 Track only a waiting child, release and verify the joined worker first, then
 release the leader, require exact counters/evidence/health, and preserve the
 narrow leader-exit claim in the report and documentation.
+
+## Scenario: eBPF Memcg OOM Runtime Qualification
+
+### 1. Scope / Trigger
+
+- Trigger: add or change `oom:mark_victim` filtering, fixed OOM evidence
+  decode, hard-fact correlation, observer health projection, or its host
+  qualification.
+- Scope: one prepared single-threaded child in a unique hosted cgroup-v2 leaf
+  with a fixed `memory.max`. This does not qualify global OOM, victim TGID,
+  namespace/cgroup identity, trigger/root cause, container delegation, restart
+  supervision, production kernels, timing, WCET, or long-running pressure.
+
+### 2. Signatures
+
+- Entry: `make test-ebpf-oom-runtime`.
+- Fixture: `oom_qualification <esop_runtime.bpf.o> <report.json>`;
+  `--oom-child` is a private same-binary fixed-pipe mode.
+- Artifact: `build/ebpf_oom_qualification.json`.
+- Validator: `scripts/validate-ebpf-oom-qualification.py <report>`.
+
+### 3. Contracts
+
+- Create a fresh leaf directly below the cgroup-v2 root, require the memory
+  controller, set a fixed 32 MiB hard limit, disable swap when available, and
+  keep group OOM disabled. Never limit the parent or runner cgroup.
+- Start and warm the child first, move only its exact PID into the leaf, and
+  verify sole membership before loading/releasing. The child remains
+  single-threaded so the raw victim PID has one expected identity.
+- Load the production CO-RE object with enabled and required masks both equal
+  to `ATTACH_OOM_KILL`. Baseline BPF and local cgroup OOM counters are zero.
+- Release a bounded 128 MiB anonymous-page injection. Require child `SIGKILL`,
+  local `oom >= 1`, exact `oom_kill == 1`, and `oom_group_kill == 0`.
+- The sole BPF event is `KernelMemory/OomKill/Critical` for the child PID/TID.
+  It produces one Critical/confidence-100 `HostOom` with `LatchFault` and a
+  Failed observation with fault `0x45422002`, without cycle correlation.
+- Reap the child, verify the leaf is empty, remove it, then atomically publish
+  and validate the report. Cleanup failure invalidates qualification.
+
+### 4. Validation & Error Matrix
+
+- Missing cgroup v2/memory controller, partial attach, verifier/permission
+  failure, early/normal/wrong-signal child exit, timeout, or residue -> fail.
+- No local OOM, zero/multiple victim kills, group kill, wrong PID/TID, extra
+  event, malformed/rejected record, loss, wrong incident/action/health, or
+  report-schema mismatch -> fail and publish no qualified artifact.
+- `memory.events.local.oom` and `max` are lower-bound diagnostics, not exact
+  portable counts; `oom_kill` is the exact single-victim contract.
+- No root/passwordless sudo -> fail explicitly after unprivileged compilation.
+
+### 5. Tests Required
+
+- Rust all-target checks and Clippy compile the cgroup/child fixture.
+- Validator tests cover closed schema, geometry, membership, signal/cleanup,
+  local counter deltas, masks/stats/loss, victim identity, incident semantics,
+  cycle absence, and the Healthy-to-Failed transition.
+- `make ci` includes the validator suite. A dedicated privileged Actions job
+  runs the host fixture and uploads the validated report.
 
 ## Scenario: eBPF CPU Frequency Limit Evidence
 
