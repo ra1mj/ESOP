@@ -170,7 +170,7 @@ ESOP 要解决以下产品问题：
 | FR-026 | P0 | ProcBuf 应提供固定布局的 Command、State、Quality 和 Event 数据区，包含 ABI 版本、布局 hash、robot ID、boot ID、序号和时间戳。 | 生成布局与实际 PDO/设备映射一致；ABI/hash/boot ID 不匹配时拒绝数据交互。 |
 | FR-027 | P0 | ProcBuf 的命令与状态应保证单写者/单读者一致性；读者不得看到部分状态，过期命令不得进入 PDO。 | 并发、重启、cache、序号、时效和掉线注入测试通过。 |
 | FR-028 | P0 | 每个关节应暴露请求模式、目标位置/速度/转矩、实际值、使能、状态字、故障、时间戳和质量。 | 生成 layout、实物 PDO offset 与 SI 单位/缩放定义交叉验证。 |
-| FR-029 | P1 | IPC 应支持共享内存、RPMsg 或 Unix domain socket 的受控实现，并传递版本、序号、时间戳、质量与掉线状态。当前已实现宿主机文件系统 Unix datagram：固定容量版本化帧、显式小端布局、CRC、精确 peer path 准入、非阻塞收发、按 robot/layout/source/boot/sequence/time 检测离线/重连/重启，以及 ProcBuf State/Event 到 Protobuf 帧和 MotionCommand 帧到既有命令准入的共享适配。 | 每种声明支持的 IPC 完成 supervisor 重启、boot ID 变化、延迟和断线测试；当前 Unix datagram 已有真实内核套接字的双向、WouldBlock、peer 缺失/来源错误/超长报文、同路径新 boot 重启、路径所有权、State/Event payload 和命令准入测试，并证明 envelope/payload 不一致不会修改 ingress 状态。共享内存、RPMsg、命令 target 到 ProcBuf Command page、部署 ACL、生产延迟/WCET、长时压力和 HIL 仍需单独验收。 |
+| FR-029 | P1 | IPC 应支持共享内存、RPMsg 或 Unix domain socket 的受控实现，并传递版本、序号、时间戳、质量与掉线状态。当前已实现宿主机文件系统 Unix datagram：固定容量版本化帧、显式小端布局、CRC、精确 peer path 准入、非阻塞收发、按 robot/layout/source/boot/sequence/time 检测离线/重连/重启，以及 ProcBuf State/Event 到 Protobuf 帧和 MotionCommand target 经结构验证、策略准入、ProcBuf v5 Command page 发布到 RT permit 重建的共享适配。 | 每种声明支持的 IPC 完成 supervisor 重启、boot ID 变化、延迟和断线测试；当前 Unix datagram 已有真实内核套接字的双向、WouldBlock、peer 缺失/来源错误/超长报文、同路径新 boot 重启、路径所有权、State/Event payload、完整命令 target 到生命周期接受测试，并证明 envelope/payload/target 不一致不会修改 ingress 状态。共享内存、RPMsg、部署 ACL、产品限位/PDO 缩放、生产延迟/WCET、长时压力和 HIL 仍需单独验收。 |
 | FR-030 | P1 | 外部 API 应以 `proto/esop/v1/` 下的版本化 Protobuf 定义配置、状态、事件、维护与诊断数据。 | 新旧 reader/writer 兼容性组合进入 CI；删除字段均 reserved，字段号不复用。 |
 | FR-031 | P1 | Zenoh 网关应在 Linux 监督域发布状态/事件/诊断，接收受控命令和查询。 | key namespace、来源身份、ACL、TTL、序号、重放、限流、断连与恢复测试通过。 |
 | FR-032 | P1 | `ros2_control` 硬件接口的 `read()`/`write()` 仅访问 ProcBuf/IPC，不直接访问 EtherCAT 端口或网络。 | 依赖检查、单元测试、双轴 `joint_trajectory_controller` 仿真和 HIL 演示通过。 |
@@ -370,7 +370,7 @@ qdisc、队列压力、拥塞、真实 EtherCAT 设备、生产内核、开销/W
 ProcBuf 是实时数据 ABI，而不是通用消息总线。它必须是固定大小、预分配和生成式布局，至少包含：
 
 1. Header：magic、ABI version、layout hash、robot ID、boot ID。
-2. Command：序号、命令时效、请求模式、运动使能、关节命令与 IO 命令。
+2. Command：序号、命令时效、完整 permit identity/policy version、请求模式、运动使能、关节命令与 IO 命令。
 3. State：序号、EtherCAT 时间、实时单调时间、关节状态、IO 状态和总体健康度。
 4. Quality：每 Domain WKC、freshness、link、AL、DC、故障位图。
 5. Event：固定记录的事件环。
@@ -418,8 +418,8 @@ ProcBuf 是实时数据 ABI，而不是通用消息总线。它必须是固定�
 | --- | --- | --- |
 | R0：契约与仿真基线 | ProcBuf ABI、MLG 状态/permit 契约、Protobuf v1、设备模型、配置生成、wire/unit、PCAP/虚拟从站。 | 同一配置可生成 C layout、YAML、descriptor 和静态配置；MLG 状态模型/属性测试及 ABI/schema 兼容检查通过。 |
 | R1：最小 EtherCAT 实时节点 | 端口、扫描、AL、静态 PDO、单 Domain、WKC、基本诊断。 | 1/8/32 从站达到 SAFEOP/OP；1 小时无内存增长。 |
-| R2：伺服与实时资格 | CoE、DC、ProcBuf、MLG、CiA 402 单轴/双轴和 IO、故障策略。 | 两种驱动 + IO 完成 HIL；Q1/Q2、无动态分配、MLG 状态机和故障矩阵证据通过。当前已具备跨层质量门投影、LifecycleSnapshot、双轴独立许可、配置停止动作、新 permit epoch 恢复、ProcBuf v4 生命周期摘要、逐轴请求/成功提交控制字/反馈证明位及原始周期质量位图、固定转换历史发布、有序 lifecycle 转换/逐轴超时事件生成、环满重试及历史覆盖显式确认接口、基于已提交 Domain 的新鲜停机反馈适配器、冻结计划的停机帧提交与跨轴别名拒绝、单 Domain 活动/停机/禁止输出周期分支协调器（真实周期核对、模式/目标限幅及输出 PDO 别名验证、新激活的目标守卫重置并在使能边沿由新鲜实际反馈播种、使能边沿目标与实际反馈一致、成功 TX 后推进目标、活动帧失败同周期撤销许可并尝试停机、失败 TX 仍发布证据、后续新鲜反馈确认、锁存超时后发送 Disable、State 后发布有序事件）、TX/构帧失败后停机证明拒绝与重试及 RX 超时索引复用边界测试、证据绑定能力清单和构建/性能报告校验测试；显式预 RX 过程 Domain 计划已具备激活期绑定、定长提交、阶段证据和生命周期预算投影，稳定周期已具备上一轮输出到下一轮 RX 的固定容量阶段交接、generation/deadline 核对、重复 priming 拒绝及发布后任务结算，统一生产服务调度器已按启动、映射、DC 配置、邮箱固定优先级管理单请求所有权、跨周期等待、未发送请求重建、终态回交、故障阻塞和 MLG 门控投影；可选受控停车规划器已覆盖 CSP Hold、CSV/CST RampToZero、事务性 TX 提交、ProcBuf 实际动作证据，以及 stop-only/共享 RX/控制服务/统一生产服务周期接线与转换序列级回退锁存，仍缺具体产品限幅/HIL 资格、目标硬件 WCET 和实物 HIL 证据。 |
-| R3：产品化集成 | 多设备、外设模型、事件、配置报告、宿主机 Unix datagram IPC、Zenoh/Protobuf 网关、ACL、Linux eBPF 运行时观测。 | IPC/网络断连不阻塞周期；IPC identity/boot/sequence/time 检测、ProcBuf/Protobuf payload、命令鉴权/TTL/审计、eBPF 观测健康和 schema 升级测试通过。当前 Unix datagram 与共享 payload 软件契约已完成；共享内存/RPMsg、命令 target 写入、生产拓扑与 HIL 仍开放。 |
+| R2：伺服与实时资格 | CoE、DC、ProcBuf、MLG、CiA 402 单轴/双轴和 IO、故障策略。 | 两种驱动 + IO 完成 HIL；Q1/Q2、无动态分配、MLG 状态机和故障矩阵证据通过。当前已具备跨层质量门投影、LifecycleSnapshot、双轴独立许可、配置停止动作、新 permit epoch 恢复、ProcBuf v5 生命周期摘要与完整命令 permit policy identity、逐轴请求/成功提交控制字/反馈证明位及原始周期质量位图、固定转换历史发布、有序 lifecycle 转换/逐轴超时事件生成、环满重试及历史覆盖显式确认接口、基于已提交 Domain 的新鲜停机反馈适配器、冻结计划的停机帧提交与跨轴别名拒绝、单 Domain 活动/停机/禁止输出周期分支协调器（真实周期核对、模式/目标限幅及输出 PDO 别名验证、新激活的目标守卫重置并在使能边沿由新鲜实际反馈播种、使能边沿目标与实际反馈一致、成功 TX 后推进目标、活动帧失败同周期撤销许可并尝试停机、失败 TX 仍发布证据、后续新鲜反馈确认、锁存超时后发送 Disable、State 后发布有序事件）、TX/构帧失败后停机证明拒绝与重试及 RX 超时索引复用边界测试、证据绑定能力清单和构建/性能报告校验测试；显式预 RX 过程 Domain 计划已具备激活期绑定、定长提交、阶段证据和生命周期预算投影，稳定周期已具备上一轮输出到下一轮 RX 的固定容量阶段交接、generation/deadline 核对、重复 priming 拒绝及发布后任务结算，统一生产服务调度器已按启动、映射、DC 配置、邮箱固定优先级管理单请求所有权、跨周期等待、未发送请求重建、终态回交、故障阻塞和 MLG 门控投影；可选受控停车规划器已覆盖 CSP Hold、CSV/CST RampToZero、事务性 TX 提交、ProcBuf 实际动作证据，以及 stop-only/共享 RX/控制服务/统一生产服务周期接线与转换序列级回退锁存，仍缺具体产品限幅/HIL 资格、目标硬件 WCET 和实物 HIL 证据。 |
+| R3：产品化集成 | 多设备、外设模型、事件、配置报告、宿主机 Unix datagram IPC、Zenoh/Protobuf 网关、ACL、Linux eBPF 运行时观测。 | IPC/网络断连不阻塞周期；IPC identity/boot/sequence/time 检测、ProcBuf/Protobuf payload、命令鉴权/TTL/审计、eBPF 观测健康和 schema 升级测试通过。当前 Unix datagram、共享 payload、严格命令 target 到 ProcBuf v5/RT permit 软件契约已完成；共享内存/RPMsg、生产 ACL/拓扑、产品目标语义、WCET 与 HIL 仍开放。 |
 | R4：机器人软件集成 | `ros2_control`、ROS bridge、URDF/配置生成、双轴轨迹演示。 | `read/update/write` 不绕过 ProcBuf；仿真与实机 HIL 演示及兼容矩阵完成。 |
 | R5：扩展与专项 | FoE、其他协议、冗余、FSoE 项目对接、官方流程。 | 每个扩展有独立开关、资源/周期影响报告与专项证据。 |
 

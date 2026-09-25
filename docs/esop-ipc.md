@@ -59,14 +59,24 @@ State frames bind the Protobuf and IPC identities as follows:
 Event frames use the configured host adapter source in the envelope while the
 event-producing module remains in `DiagnosticEvent.source`.
 
-Command handling has two ordered stages. `decode_command_frame` requires a
-Command frame and cross-checks envelope schema/layout/numeric robot/boot/source/
-sequence against the configured identity and decoded `MotionCommand`.
-`admit_command_frame` calls `CommandIngress` only after those checks and an
-optional authenticated-source comparison succeed. Structural failures therefore
-do not consume replay floors, rate-limit budget or audit slots. ACL, authority,
-TTL, permit epoch, axis policy and motion permits remain owned by
-`esop-command-gateway`.
+Command handling has three ordered boundaries. The compatibility path keeps
+`decode_command_frame` and `admit_command_frame` for policy-only callers. The
+strict path uses `prepare_procbuf_command_frame` or
+`prepare_motion_command_for_procbuf` to cross-check envelope/schema/layout/
+numeric robot/boot/source/sequence, optional authenticated identity, CSP/CSV/
+CST mode, 32-bit capacity mask, zero-based one-to-one joint coverage, finite
+targets and non-negative limits before `CommandIngress` is called.
+
+After admission, `AdmittedProcBufCommand` builds the ABI-v5 `CommandPage` from
+the returned permit rather than untrusted policy fields. It binds robot, boot,
+layout and fixed capacities, retains empty unselected axes/IO slots, and offers
+a borrowing `publish` method so a delivery failure can be retried without
+replaying ingress. RT readers use
+`esop_lifecycle_guard::procbuf::motion_permit_from_command` after
+`ProcBuf::read_command` to recover the complete permit, including policy
+version. Structural failures do not consume replay floors, rate-limit budget or
+audit slots. ACL, authority, TTL, permit epoch, axis policy and motion permits
+remain owned by `esop-command-gateway`.
 
 ## Peer Lifecycle
 
@@ -107,15 +117,16 @@ make test-ipc
 ```
 
 The integration tests use real kernel Unix datagram sockets for bidirectional
-command/state/heartbeat traffic, projected ProcBuf state/event payloads, valid
-command admission, envelope/payload mismatch rejection, empty nonblocking
-receive, absent and unexpected peers, oversized datagrams, same-path peer
-rebinding with a new boot ID, and owned-path cleanup.
+command/state/heartbeat traffic, projected ProcBuf state/event payloads, strict
+command target admission through ProcBuf publication and lifecycle permit
+acceptance, envelope/payload mismatch rejection, empty nonblocking receive,
+absent and unexpected peers, oversized datagrams, same-path peer rebinding with
+a new boot ID, and owned-path cleanup.
 
 ## Claim Boundary
 
 This implementation does not claim shared memory or RPMsg transport,
-MotionCommand target conversion into a ProcBuf Command page, cryptographic peer
-identity, SELinux or filesystem deployment policy, production latency/WCET,
-long-duration stress, or target HIL qualification. Those remain separate
-acceptance gates.
+cryptographic peer identity, SELinux or filesystem deployment policy,
+product-specific mechanical limits, PDO scaling, setpoint-step acceptance,
+actual drive execution, production latency/WCET, long-duration stress, or
+target HIL qualification. Those remain separate acceptance gates.

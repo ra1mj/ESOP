@@ -1,7 +1,7 @@
 //! Fixed-size projection for the optional ProcBuf ABI boundary.
 
-use crate::{CyclicQuality, LifecycleSnapshot};
-use esop_procbuf::{CyclicQualityMask, LifecycleSummary, QualityFact, StatePage};
+use crate::{CyclicQuality, LifecycleSnapshot, MotionPermit};
+use esop_procbuf::{CommandPage, CyclicQualityMask, LifecycleSummary, QualityFact, StatePage};
 
 use crate::{LifecycleGuard, LifecycleState, MAX_MOTION_AXES, STOP_TIMEOUT_FAULT_CODE, StopAction};
 use esop_procbuf::{EventPushError, EventSeverity, HeaderError, ProcBuf, ProcBufEvent};
@@ -27,6 +27,28 @@ use crate::ethercat::{
 use esop_ethercat_core::{
     CycleReport, DcCyclicSync, DomainQuality as EthercatDomainQuality, ScheduleTable,
 };
+
+/// Reconstruct the exact admitted permit carried by a validated ProcBuf
+/// command. Call this only after `ProcBuf::read_command`; disabled pages do not
+/// grant a permit.
+pub const fn motion_permit_from_command<const AXES: usize, const IO: usize>(
+    command: &CommandPage<AXES, IO>,
+) -> Option<MotionPermit> {
+    if command.motion_enable_request == 0 {
+        return None;
+    }
+    Some(MotionPermit {
+        boot_id: command.boot_id,
+        source_id: command.source_id,
+        permit_epoch: command.permit_epoch,
+        sequence: command.sequence,
+        expires_at_ns: command.permit_expires_at_ns,
+        axis_mask: command.axis_mask,
+        authority: command.authority,
+        reserved: [0; 3],
+        policy_version: command.policy_version,
+    })
+}
 #[cfg(feature = "ethercat")]
 use esop_procbuf::DomainQuality as ProcBufDomainQuality;
 

@@ -11,10 +11,12 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use esop_command_gateway::{CommandIngress, ExternalMotionCommand, IngressError};
 use esop_ebpf_agent::RuntimeIncident as AgentRuntimeIncident;
 use esop_ipc::payloads::{
-    CommandDecodeError, RobotId, decode_motion_command,
+    AdmittedProcBufCommand, CommandDecodeError, CommandPrepareError, PreparedProcBufCommand,
+    RobotId, decode_motion_command, prepare_motion_command_for_procbuf,
     validate_authenticated_source as validate_shared_authenticated_source,
 };
 use esop_lifecycle_guard::MotionPermit;
+use esop_procbuf::ProcBuf;
 use esop_proto::v1::{DiagnosticEvent, QueryReply, QueryRequest, RobotState, RuntimeIncident};
 use esop_proto::{Message, SchemaCompatibilityError, validate_schema_version};
 use zenoh::Wait;
@@ -393,6 +395,12 @@ pub enum CommandAdapterError {
     Policy(IngressError),
 }
 
+#[derive(Debug)]
+pub enum ProcBufCommandAdapterError {
+    Prepare(CommandPrepareError),
+    Policy(IngressError),
+}
+
 impl From<esop_proto::DecodeError> for CommandAdapterError {
     fn from(error: esop_proto::DecodeError) -> Self {
         Self::Decode(error)
@@ -525,6 +533,24 @@ pub fn decode_command_payload(
     decode_motion_command(robot, payload).map_err(CommandAdapterError::from)
 }
 
+pub fn prepare_procbuf_command_payload<
+    const AXES: usize,
+    const IO: usize,
+    const DOMAINS: usize,
+    const EVENTS: usize,
+>(
+    key_space: KeySpace,
+    buffer: &ProcBuf<AXES, IO, DOMAINS, EVENTS>,
+    payload: &[u8],
+    authenticated_source_id: Option<u64>,
+) -> Result<PreparedProcBufCommand<AXES, IO>, CommandPrepareError> {
+    let robot = str::from_utf8(key_space.robot())
+        .map_err(|_| CommandPrepareError::Decode(CommandDecodeError::RobotMismatch))?;
+    let robot = RobotId::new(robot)
+        .map_err(|_| CommandPrepareError::Decode(CommandDecodeError::RobotMismatch))?;
+    prepare_motion_command_for_procbuf(robot, buffer, payload, authenticated_source_id)
+}
+
 impl From<RouteError> for RuntimeError {
     fn from(error: RouteError) -> Self {
         Self::Route(error)
@@ -640,6 +666,77 @@ impl ZenohGateway {
         ingress
             .admit(command, now_ns)
             .map_err(CommandAdapterError::Policy)
+    }
+
+    /// Validate a complete target command against the destination ProcBuf
+    /// before policy admission. This reuses the IPC target mapper.
+    pub fn prepare_procbuf_command<
+        const AXES: usize,
+        const IO: usize,
+        const DOMAINS: usize,
+        const EVENTS: usize,
+    >(
+        &self,
+        buffer: &ProcBuf<AXES, IO, DOMAINS, EVENTS>,
+        payload: &[u8],
+    ) -> Result<PreparedProcBufCommand<AXES, IO>, CommandPrepareError> {
+        prepare_procbuf_command_payload(self.key_space, buffer, payload, None)
+    }
+
+    pub fn prepare_authenticated_procbuf_command<
+        const AXES: usize,
+        const IO: usize,
+        const DOMAINS: usize,
+        const EVENTS: usize,
+    >(
+        &self,
+        buffer: &ProcBuf<AXES, IO, DOMAINS, EVENTS>,
+        payload: &[u8],
+        authenticated_source_id: u64,
+    ) -> Result<PreparedProcBufCommand<AXES, IO>, CommandPrepareError> {
+        prepare_procbuf_command_payload(
+            self.key_space,
+            buffer,
+            payload,
+            Some(authenticated_source_id),
+        )
+    }
+
+    pub fn admit_procbuf_command<
+        const AXES: usize,
+        const IO: usize,
+        const DOMAINS: usize,
+        const EVENTS: usize,
+    >(
+        &self,
+        ingress: &mut CommandIngress,
+        buffer: &ProcBuf<AXES, IO, DOMAINS, EVENTS>,
+        payload: &[u8],
+        now_ns: u64,
+    ) -> Result<AdmittedProcBufCommand<AXES, IO>, ProcBufCommandAdapterError> {
+        self.prepare_procbuf_command(buffer, payload)
+            .map_err(ProcBufCommandAdapterError::Prepare)?
+            .admit(ingress, now_ns)
+            .map_err(ProcBufCommandAdapterError::Policy)
+    }
+
+    pub fn admit_authenticated_procbuf_command<
+        const AXES: usize,
+        const IO: usize,
+        const DOMAINS: usize,
+        const EVENTS: usize,
+    >(
+        &self,
+        ingress: &mut CommandIngress,
+        buffer: &ProcBuf<AXES, IO, DOMAINS, EVENTS>,
+        payload: &[u8],
+        authenticated_source_id: u64,
+        now_ns: u64,
+    ) -> Result<AdmittedProcBufCommand<AXES, IO>, ProcBufCommandAdapterError> {
+        self.prepare_authenticated_procbuf_command(buffer, payload, authenticated_source_id)
+            .map_err(ProcBufCommandAdapterError::Prepare)?
+            .admit(ingress, now_ns)
+            .map_err(ProcBufCommandAdapterError::Policy)
     }
 
     /// Publish a contract-checked payload on a state, event, diagnostic, or
@@ -990,8 +1087,10 @@ fn validate_authenticated_source(
 mod tests {
     use super::*;
     use esop_command_gateway::IngressPolicy;
+    use esop_ipc::payloads::{CommandPrepareError, CommandTargetError};
+    use esop_procbuf::{ControlMode, ProcBuf};
     use esop_proto::CURRENT_SCHEMA_VERSION;
-    use esop_proto::v1::MotionCommand;
+    use esop_proto::v1::{JointTarget, MotionCommand};
 
     #[test]
     fn gateway_observations_allocate_nonzero_unique_request_ids() {
@@ -1222,6 +1321,39 @@ mod tests {
         .encode_to_vec()
     }
 
+    fn encoded_target_command() -> Vec<u8> {
+        MotionCommand {
+            robot_id: "robot_01".to_owned(),
+            boot_id: 7,
+            schema_version: CURRENT_SCHEMA_VERSION,
+            source_id: 42,
+            permit_epoch: 1,
+            sequence: 1,
+            deadline_ns: 100,
+            axis_mask: 0x03,
+            authority: 2,
+            policy_version: 9,
+            requested_mode: 9,
+            joints: vec![
+                JointTarget {
+                    axis: 0,
+                    position: 1.0,
+                    max_velocity: 2.0,
+                    max_torque: 3.0,
+                    ..JointTarget::default()
+                },
+                JointTarget {
+                    axis: 1,
+                    position: 4.0,
+                    max_velocity: 5.0,
+                    max_torque: 6.0,
+                    ..JointTarget::default()
+                },
+            ],
+        }
+        .encode_to_vec()
+    }
+
     #[test]
     fn command_payload_enters_fixed_ingress_and_becomes_audited_permit() {
         let key_space = KeySpace::new(b"fleet_a", b"robot_01").unwrap();
@@ -1249,6 +1381,47 @@ mod tests {
             .unwrap();
         assert_eq!(permit.source_id, 42);
         assert_eq!(permit.sequence, 1);
+        assert_eq!(ingress.audit_count(), 1);
+    }
+
+    #[test]
+    fn procbuf_command_payload_reuses_shared_target_mapper() {
+        let key_space = KeySpace::new(b"fleet_a", b"robot_01").unwrap();
+        let buffer = ProcBuf::<2, 1, 1, 4>::new(41, 7);
+        let mut ingress = CommandIngress::new(
+            7,
+            IngressPolicy {
+                authorized_sources: [42, 0, 0, 0],
+                authorized_source_count: 1,
+                minimum_authority: 2,
+                reserved: [0; 2],
+                permit_policy_version: 9,
+                allowed_axis_mask: 0x03,
+                max_ttl_ns: 100,
+                rate_window_ns: 1_000,
+                max_commands_per_window: 2,
+                reserved_tail: [0; 6],
+            },
+        );
+        let payload = encoded_target_command();
+        let admitted = prepare_procbuf_command_payload(key_space, &buffer, &payload, Some(42))
+            .unwrap()
+            .admit(&mut ingress, 1)
+            .unwrap();
+        assert_eq!(admitted.page().requested_mode, ControlMode::Csv);
+        assert_eq!(admitted.page().axes[1].position, 4.0);
+        assert_eq!(admitted.publish(&buffer), Ok(1));
+        assert_eq!(ingress.audit_count(), 1);
+
+        let mut invalid = MotionCommand::decode(payload.as_slice()).unwrap();
+        invalid.sequence = 2;
+        invalid.joints[1].axis = 0;
+        assert!(matches!(
+            prepare_procbuf_command_payload(key_space, &buffer, &invalid.encode_to_vec(), Some(42)),
+            Err(CommandPrepareError::Target(
+                CommandTargetError::DuplicateAxis(0)
+            ))
+        ));
         assert_eq!(ingress.audit_count(), 1);
     }
 

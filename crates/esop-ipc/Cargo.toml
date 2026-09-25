@@ -24,3 +24,6 @@ esop-command-gateway = { path = "../esop-command-gateway", optional = true }
 esop-lifecycle-guard = { path = "../esop-lifecycle-guard", optional = true }
 esop-procbuf = { path = "../esop-procbuf", optional = true }
 esop-proto = { path = "../esop-proto", optional = true }
+
+[dev-dependencies]
+esop-lifecycle-guard = { path = "../esop-lifecycle-guard", features = ["procbuf"] }

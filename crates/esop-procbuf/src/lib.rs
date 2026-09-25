@@ -12,7 +12,7 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 pub const ABI_MAGIC: u32 = 0x4553_4F50;
-pub const ABI_VERSION: u16 = 4;
+pub const ABI_VERSION: u16 = 5;
 
 const PAGE_FREE: u32 = 0;
 const PAGE_WRITING: u32 = 1;
@@ -228,7 +228,8 @@ pub struct CommandPage<const AXES: usize, const IO: usize> {
     pub requested_mode: ControlMode,
     pub motion_enable_request: u8,
     pub authority: u8,
-    pub reserved: u8,
+    pub reserved: [u8; 3],
+    pub policy_version: u32,
     pub axes: [JointCommand; AXES],
     pub io: [IoCommand; IO],
 }
@@ -246,18 +247,38 @@ impl<const AXES: usize, const IO: usize> CommandPage<AXES, IO> {
             requested_mode: ControlMode::Unknown,
             motion_enable_request: 0,
             authority: 0,
-            reserved: 0,
+            reserved: [0; 3],
+            policy_version: 0,
             axes: [JointCommand::EMPTY; AXES],
             io: [IoCommand::EMPTY; IO],
         }
     }
 
     fn well_formed(self) -> bool {
+        let axis_mask_fits =
+            AXES <= 32 && (AXES == 32 || self.axis_mask & !((1u32 << AXES) - 1) == 0);
+        let targets_valid = self.axes.iter().enumerate().all(|(index, &axis)| {
+            let selected = index < 32 && self.axis_mask & (1u32 << index) != 0;
+            axis.finite()
+                && axis.max_velocity >= 0.0
+                && axis.max_torque >= 0.0
+                && (selected || axis == JointCommand::EMPTY)
+        });
+        let permit_valid = self.motion_enable_request == 0
+            || (self.source_id != 0
+                && self.permit_epoch != 0
+                && self.permit_expires_at_ns != 0
+                && self.deadline_ns == self.permit_expires_at_ns
+                && self.authority != 0
+                && self.policy_version != 0
+                && self.axis_mask != 0);
         self.sequence != 0
             && self.requested_mode != ControlMode::Unknown
             && self.motion_enable_request <= 1
-            && self.axes.iter().copied().all(JointCommand::finite)
-            && (self.motion_enable_request == 0 || self.axis_mask != 0)
+            && self.reserved == [0; 3]
+            && axis_mask_fits
+            && targets_valid
+            && permit_valid
     }
 }
 
@@ -1028,7 +1049,8 @@ mod tests {
             requested_mode: ControlMode::Csp,
             motion_enable_request: 1,
             authority: 1,
-            reserved: 0,
+            reserved: [0; 3],
+            policy_version: 1,
             axes: [JointCommand::EMPTY; 2],
             io: [IoCommand::EMPTY; 1],
         }
@@ -1039,7 +1061,7 @@ mod tests {
         let buffer = TestBuf::new(42, 9);
         assert_eq!(buffer.validate_header(42, 9), Ok(()));
         assert_eq!(buffer.header().abi_version, ABI_VERSION);
-        for version in [1, 2, 3] {
+        for version in [1, 2, 3, 4] {
             let mut previous_abi = buffer.header();
             previous_abi.abi_version = version;
             assert_eq!(
@@ -1095,6 +1117,61 @@ mod tests {
         assert_eq!(
             buffer.read_command(50, &mut floor),
             Err(CommandReadError::Expired)
+        );
+    }
+
+    #[test]
+    fn command_channel_rejects_invalid_permit_and_target_fields() {
+        let buffer = TestBuf::new(42, 9);
+
+        let mut invalid = command(9, 1, 100);
+        invalid.policy_version = 0;
+        assert_eq!(
+            buffer.publish_command(invalid),
+            Err(CommandPublishError::InvalidCommand)
+        );
+
+        invalid = command(9, 1, 100);
+        invalid.axis_mask = 0x04;
+        assert_eq!(
+            buffer.publish_command(invalid),
+            Err(CommandPublishError::InvalidCommand)
+        );
+
+        invalid = command(9, 1, 100);
+        invalid.axes[0].max_velocity = -1.0;
+        assert_eq!(
+            buffer.publish_command(invalid),
+            Err(CommandPublishError::InvalidCommand)
+        );
+
+        invalid = command(9, 1, 100);
+        invalid.axes[0].torque = f64::INFINITY;
+        assert_eq!(
+            buffer.publish_command(invalid),
+            Err(CommandPublishError::InvalidCommand)
+        );
+
+        invalid = command(9, 1, 100);
+        invalid.deadline_ns = 101;
+        assert_eq!(
+            buffer.publish_command(invalid),
+            Err(CommandPublishError::InvalidCommand)
+        );
+
+        invalid = command(9, 1, 100);
+        invalid.axis_mask = 0x01;
+        invalid.axes[1].position = 1.0;
+        assert_eq!(
+            buffer.publish_command(invalid),
+            Err(CommandPublishError::InvalidCommand)
+        );
+
+        invalid = command(9, 1, 100);
+        invalid.reserved[0] = 1;
+        assert_eq!(
+            buffer.publish_command(invalid),
+            Err(CommandPublishError::InvalidCommand)
         );
     }
 

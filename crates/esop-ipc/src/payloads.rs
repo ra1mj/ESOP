@@ -5,7 +5,8 @@ use core::str;
 use esop_command_gateway::{CommandIngress, ExternalMotionCommand, IngressError};
 use esop_lifecycle_guard::MotionPermit;
 use esop_procbuf::{
-    CyclicQualityMask, EventSeverity as ProcSeverity, HeaderError, ProcBuf, ProcBufEvent,
+    CommandPage, CommandPublishError as ProcBufPublishError, ControlMode, CyclicQualityMask,
+    EventSeverity as ProcSeverity, HeaderError, IoCommand, JointCommand, ProcBuf, ProcBufEvent,
     ProcBufHeader, QualityFact, StateSnapshot,
 };
 use esop_proto::v1::{
@@ -480,6 +481,11 @@ pub fn decode_motion_command(
     robot_id: RobotId,
     payload: &[u8],
 ) -> Result<ExternalMotionCommand, CommandDecodeError> {
+    let command = decode_motion_command_message(payload)?;
+    map_motion_command(robot_id, &command)
+}
+
+fn decode_motion_command_message(payload: &[u8]) -> Result<MotionCommand, CommandDecodeError> {
     if payload.is_empty() {
         return Err(CommandDecodeError::EmptyPayload);
     }
@@ -489,8 +495,7 @@ pub fn decode_motion_command(
             actual: payload.len(),
         });
     }
-    let command = MotionCommand::decode(payload)?;
-    map_motion_command(robot_id, &command)
+    MotionCommand::decode(payload).map_err(CommandDecodeError::Decode)
 }
 
 pub fn validate_authenticated_source(
@@ -525,6 +530,279 @@ fn map_motion_command(
         reserved: [0; 3],
         policy_version: command.policy_version,
     })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JointTargetField {
+    Position,
+    Velocity,
+    Torque,
+    MaxVelocity,
+    MaxTorque,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommandTargetError {
+    AxisCapacityTooLarge { maximum: usize, actual: usize },
+    UnsupportedMode(u32),
+    AxisMaskOutsideCapacity { axis_mask: u32, capacity: usize },
+    TooManyTargets { maximum: usize, actual: usize },
+    AxisOutOfRange { axis: u32, capacity: usize },
+    DuplicateAxis(u32),
+    AxisNotSelected(u32),
+    MissingAxis(u32),
+    NonFinite { axis: u32, field: JointTargetField },
+    NegativeLimit { axis: u32, field: JointTargetField },
+}
+
+#[derive(Debug)]
+pub enum CommandPrepareError {
+    Identity(CommandIdentityError),
+    Decode(CommandDecodeError),
+    BootMismatch { expected: u64, actual: u64 },
+    Target(CommandTargetError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommandPublicationError {
+    RobotMismatch { expected: u64, actual: u64 },
+    BootMismatch { expected: u64, actual: u64 },
+    LayoutMismatch { expected: u64, actual: u64 },
+    Header(HeaderError),
+    Publish(ProcBufPublishError),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreparedProcBufCommand<const AXES: usize, const IO: usize> {
+    identity: CommandFrameIdentity,
+    command: ExternalMotionCommand,
+    requested_mode: ControlMode,
+    axes: [JointCommand; AXES],
+    io: [IoCommand; IO],
+}
+
+impl<const AXES: usize, const IO: usize> PreparedProcBufCommand<AXES, IO> {
+    pub const fn policy_command(&self) -> ExternalMotionCommand {
+        self.command
+    }
+
+    pub fn admit(
+        self,
+        ingress: &mut CommandIngress,
+        now_ns: u64,
+    ) -> Result<AdmittedProcBufCommand<AXES, IO>, IngressError> {
+        let permit = ingress.admit(self.command, now_ns)?;
+        let page = CommandPage {
+            boot_id: permit.boot_id,
+            sequence: permit.sequence,
+            deadline_ns: permit.expires_at_ns,
+            source_id: permit.source_id,
+            permit_epoch: permit.permit_epoch,
+            permit_expires_at_ns: permit.expires_at_ns,
+            axis_mask: permit.axis_mask,
+            requested_mode: self.requested_mode,
+            motion_enable_request: 1,
+            authority: permit.authority,
+            reserved: [0; 3],
+            policy_version: permit.policy_version,
+            axes: self.axes,
+            io: self.io,
+        };
+        Ok(AdmittedProcBufCommand {
+            identity: self.identity,
+            permit,
+            page,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AdmittedProcBufCommand<const AXES: usize, const IO: usize> {
+    identity: CommandFrameIdentity,
+    permit: MotionPermit,
+    page: CommandPage<AXES, IO>,
+}
+
+impl<const AXES: usize, const IO: usize> AdmittedProcBufCommand<AXES, IO> {
+    pub const fn permit(&self) -> MotionPermit {
+        self.permit
+    }
+
+    pub const fn page(&self) -> &CommandPage<AXES, IO> {
+        &self.page
+    }
+
+    pub fn publish<const DOMAINS: usize, const EVENTS: usize>(
+        &self,
+        buffer: &ProcBuf<AXES, IO, DOMAINS, EVENTS>,
+    ) -> Result<u64, CommandPublicationError> {
+        let header = buffer.header();
+        if header.robot_id != self.identity.numeric_robot_id {
+            return Err(CommandPublicationError::RobotMismatch {
+                expected: self.identity.numeric_robot_id,
+                actual: header.robot_id,
+            });
+        }
+        if header.boot_id != self.identity.boot_id {
+            return Err(CommandPublicationError::BootMismatch {
+                expected: self.identity.boot_id,
+                actual: header.boot_id,
+            });
+        }
+        if header.layout_hash != self.identity.layout_hash {
+            return Err(CommandPublicationError::LayoutMismatch {
+                expected: self.identity.layout_hash,
+                actual: header.layout_hash,
+            });
+        }
+        buffer
+            .validate_header(self.identity.numeric_robot_id, self.identity.boot_id)
+            .map_err(CommandPublicationError::Header)?;
+        buffer
+            .publish_command(self.page)
+            .map_err(CommandPublicationError::Publish)
+    }
+}
+
+pub fn prepare_motion_command_for_procbuf<
+    const AXES: usize,
+    const IO: usize,
+    const DOMAINS: usize,
+    const EVENTS: usize,
+>(
+    robot_id: RobotId,
+    buffer: &ProcBuf<AXES, IO, DOMAINS, EVENTS>,
+    payload: &[u8],
+    authenticated_source_id: Option<u64>,
+) -> Result<PreparedProcBufCommand<AXES, IO>, CommandPrepareError> {
+    let identity = CommandFrameIdentity::for_procbuf(robot_id, buffer)
+        .map_err(CommandPrepareError::Identity)?;
+    let message = decode_motion_command_message(payload).map_err(CommandPrepareError::Decode)?;
+    let command = map_motion_command(robot_id, &message).map_err(CommandPrepareError::Decode)?;
+    if command.boot_id != identity.boot_id {
+        return Err(CommandPrepareError::BootMismatch {
+            expected: identity.boot_id,
+            actual: command.boot_id,
+        });
+    }
+    let command = match authenticated_source_id {
+        Some(source_id) => validate_authenticated_source(command, source_id)
+            .map_err(CommandPrepareError::Decode)?,
+        None => command,
+    };
+    prepare_decoded_command(identity, command, &message).map_err(CommandPrepareError::Target)
+}
+
+fn prepare_decoded_command<const AXES: usize, const IO: usize>(
+    identity: CommandFrameIdentity,
+    command: ExternalMotionCommand,
+    message: &MotionCommand,
+) -> Result<PreparedProcBufCommand<AXES, IO>, CommandTargetError> {
+    if AXES > 32 {
+        return Err(CommandTargetError::AxisCapacityTooLarge {
+            maximum: 32,
+            actual: AXES,
+        });
+    }
+    let requested_mode = match message.requested_mode {
+        8 => ControlMode::Csp,
+        9 => ControlMode::Csv,
+        10 => ControlMode::Cst,
+        mode => return Err(CommandTargetError::UnsupportedMode(mode)),
+    };
+    let capacity_mask = if AXES == 32 {
+        u32::MAX
+    } else {
+        (1u32 << AXES) - 1
+    };
+    if command.axis_mask & !capacity_mask != 0 {
+        return Err(CommandTargetError::AxisMaskOutsideCapacity {
+            axis_mask: command.axis_mask,
+            capacity: AXES,
+        });
+    }
+    if message.joints.len() > AXES {
+        return Err(CommandTargetError::TooManyTargets {
+            maximum: AXES,
+            actual: message.joints.len(),
+        });
+    }
+
+    let mut axes = [JointCommand::EMPTY; AXES];
+    let mut seen_mask = 0u32;
+    for target in &message.joints {
+        let index =
+            usize::try_from(target.axis).map_err(|_| CommandTargetError::AxisOutOfRange {
+                axis: target.axis,
+                capacity: AXES,
+            })?;
+        if index >= AXES {
+            return Err(CommandTargetError::AxisOutOfRange {
+                axis: target.axis,
+                capacity: AXES,
+            });
+        }
+        let bit = 1u32 << index;
+        if seen_mask & bit != 0 {
+            return Err(CommandTargetError::DuplicateAxis(target.axis));
+        }
+        if command.axis_mask & bit == 0 {
+            return Err(CommandTargetError::AxisNotSelected(target.axis));
+        }
+        validate_joint_target(target.axis, target)?;
+        seen_mask |= bit;
+        axes[index] = JointCommand {
+            position: target.position,
+            velocity: target.velocity,
+            torque: target.torque,
+            max_velocity: target.max_velocity,
+            max_torque: target.max_torque,
+        };
+    }
+    let missing_mask = command.axis_mask & !seen_mask;
+    if missing_mask != 0 {
+        return Err(CommandTargetError::MissingAxis(
+            missing_mask.trailing_zeros(),
+        ));
+    }
+
+    Ok(PreparedProcBufCommand {
+        identity,
+        command,
+        requested_mode,
+        axes,
+        io: [IoCommand::EMPTY; IO],
+    })
+}
+
+fn validate_joint_target(
+    axis: u32,
+    target: &esop_proto::v1::JointTarget,
+) -> Result<(), CommandTargetError> {
+    for (field, value) in [
+        (JointTargetField::Position, target.position),
+        (JointTargetField::Velocity, target.velocity),
+        (JointTargetField::Torque, target.torque),
+        (JointTargetField::MaxVelocity, target.max_velocity),
+        (JointTargetField::MaxTorque, target.max_torque),
+    ] {
+        if !value.is_finite() {
+            return Err(CommandTargetError::NonFinite { axis, field });
+        }
+    }
+    if target.max_velocity < 0.0 {
+        return Err(CommandTargetError::NegativeLimit {
+            axis,
+            field: JointTargetField::MaxVelocity,
+        });
+    }
+    if target.max_torque < 0.0 {
+        return Err(CommandTargetError::NegativeLimit {
+            axis,
+            field: JointTargetField::MaxTorque,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -599,6 +877,13 @@ pub enum CommandFrameError {
     Policy(IngressError),
 }
 
+#[derive(Debug)]
+pub enum ProcBufCommandFrameError {
+    Frame(CommandFrameError),
+    Target(CommandTargetError),
+    Policy(IngressError),
+}
+
 pub fn encode_command_frame(
     identity: CommandFrameIdentity,
     command: &MotionCommand,
@@ -641,6 +926,15 @@ pub fn decode_command_frame(
     frame: &IpcFrame,
     authenticated_source_id: Option<u64>,
 ) -> Result<ExternalMotionCommand, CommandFrameError> {
+    decode_command_frame_message(identity, frame, authenticated_source_id)
+        .map(|(_, command)| command)
+}
+
+fn decode_command_frame_message(
+    identity: CommandFrameIdentity,
+    frame: &IpcFrame,
+    authenticated_source_id: Option<u64>,
+) -> Result<(MotionCommand, ExternalMotionCommand), CommandFrameError> {
     let header = frame.header();
     if header.kind != MessageKind::Command {
         return Err(CommandFrameError::WrongKind(header.kind));
@@ -665,8 +959,10 @@ pub fn decode_command_frame(
             actual: header.boot_id,
         });
     }
-    let command = decode_motion_command(identity.robot_id, frame.payload())
-        .map_err(CommandFrameError::Decode)?;
+    let message =
+        decode_motion_command_message(frame.payload()).map_err(CommandFrameError::Decode)?;
+    let command =
+        map_motion_command(identity.robot_id, &message).map_err(CommandFrameError::Decode)?;
     if command.boot_id != header.boot_id {
         return Err(CommandFrameError::BootMismatch {
             expected: header.boot_id,
@@ -686,11 +982,33 @@ pub fn decode_command_frame(
         });
     }
     match authenticated_source_id {
-        Some(source_id) => {
-            validate_authenticated_source(command, source_id).map_err(CommandFrameError::Decode)
-        }
-        None => Ok(command),
+        Some(source_id) => validate_authenticated_source(command, source_id)
+            .map(|command| (message, command))
+            .map_err(CommandFrameError::Decode),
+        None => Ok((message, command)),
     }
+}
+
+pub fn prepare_procbuf_command_frame<const AXES: usize, const IO: usize>(
+    identity: CommandFrameIdentity,
+    frame: &IpcFrame,
+    authenticated_source_id: Option<u64>,
+) -> Result<PreparedProcBufCommand<AXES, IO>, ProcBufCommandFrameError> {
+    let (message, command) = decode_command_frame_message(identity, frame, authenticated_source_id)
+        .map_err(ProcBufCommandFrameError::Frame)?;
+    prepare_decoded_command(identity, command, &message).map_err(ProcBufCommandFrameError::Target)
+}
+
+pub fn admit_procbuf_command_frame<const AXES: usize, const IO: usize>(
+    identity: CommandFrameIdentity,
+    ingress: &mut CommandIngress,
+    frame: &IpcFrame,
+    authenticated_source_id: Option<u64>,
+    now_ns: u64,
+) -> Result<AdmittedProcBufCommand<AXES, IO>, ProcBufCommandFrameError> {
+    prepare_procbuf_command_frame(identity, frame, authenticated_source_id)?
+        .admit(ingress, now_ns)
+        .map_err(ProcBufCommandFrameError::Policy)
 }
 
 pub fn admit_command_frame(

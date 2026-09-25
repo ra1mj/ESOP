@@ -156,7 +156,7 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   must reset the planners and latch every later cycle in that sequence to the
   default Disable/QuickStop path; a new transition sequence clears that latch.
   An active-frame failure that creates the stop sequence must enter the same
-  latched fallback path. ProcBuf v4 carries per-axis requested and issued
+  latched fallback path. ProcBuf v5 carries per-axis requested and issued
   actions plus fresh, quality-checked feedback proof bits. Use the controlled
   evidence projector only for an accepted controlled frame so an enabled
   Hold/Ramp target is recorded as the policy action and its terminal Disable
@@ -1698,8 +1698,8 @@ from actual hosted fault injection and performance claims.
   boundary.
 - Scope: this contract covers hosted filesystem Unix datagrams and the optional
   host-only ProcBuf/Protobuf payload adapter. It does not qualify shared memory,
-  RPMsg, command-target conversion into ProcBuf Command pages, cryptographic
-  identity, deployment ACL, production WCET, stress, or HIL.
+  RPMsg, cryptographic identity, deployment ACL, product mechanical limits,
+  PDO scaling, actual drive execution, production WCET, stress, or HIL.
 - The transport must remain absent from EtherCAT, lifecycle, profile and
   ProcBuf real-time dependency trees.
 
@@ -1712,8 +1712,10 @@ from actual hosted fault injection and performance claims.
 - Transport: `UnixDatagramEndpoint::bind`, `send` and `receive`; focused
   verification is `make test-ipc`.
 - Payloads: `ProcBufProjector::read_state_frame`, `pop_event_frame`,
-  `decode_command_frame` and `admit_command_frame`; Zenoh must delegate its
-  ProcBuf projection and MotionCommand field mapping to the same owner.
+  `decode_command_frame`, `admit_command_frame`,
+  `prepare_procbuf_command_frame`, `prepare_motion_command_for_procbuf` and
+  `AdmittedProcBufCommand::publish`; Zenoh must delegate its ProcBuf projection
+  and MotionCommand target mapping to the same owner.
 
 ### 3. Contracts
 
@@ -1738,6 +1740,14 @@ from actual hosted fault injection and performance claims.
   boot, source and sequence before calling `CommandIngress`. Optional transport
   identity must match the already-cross-checked source. Pre-policy rejection
   must not mutate ingress replay, rate-limit or audit state.
+- The strict target path accepts only CSP/CSV/CST raw modes, at most 32 axes,
+  an in-capacity mask, exactly one zero-based finite target per selected axis,
+  and non-negative velocity/torque limits. It builds authority fields only from
+  the returned permit, binds robot/boot/layout/capacity, leaves unselected and
+  IO slots empty, and keeps publication separately retryable.
+- ProcBuf ABI v5 carries permit `policy_version`; v1-v4 attachments are rejected.
+  RT consumers reconstruct permits only from a command returned by
+  `ProcBuf::read_command` and still submit it to `LifecycleGuard`.
 
 ### 4. Validation & Error Matrix
 
@@ -1751,17 +1761,18 @@ from actual hosted fault injection and performance claims.
   local time regression -> stable typed peer errors; preserve the last accepted
   state.
 - ProcBuf header/replay/lifecycle/stop/quality/non-finite/payload failures and
-  command envelope/payload mismatches -> stable typed payload errors. Do not
-  publish partial messages or invoke ingress on structural failure.
+  command envelope/payload/target mismatches -> stable typed payload errors. Do
+  not publish partial messages or invoke ingress on structural failure.
 - Existing local file/socket -> `LocalPathExists`; never remove it. Other I/O
   faults retain the originating `io::Error`.
 
 ### 5. Good/Base/Bad Cases
 
 - Good: command/state/heartbeat datagrams round-trip over two real nonblocking
-  sockets; projected State/Event decode as v1 Protobuf; a validated command
-  becomes a permit through the existing ingress; a same-path peer rebind with a
-  new boot ID is classified Restarted.
+  sockets; projected State/Event decode as v1 Protobuf; a validated target
+  becomes an admitted ProcBuf command, RT readback reconstructs the same permit,
+  and lifecycle accepts it; a same-path peer rebind with a new boot ID is
+  classified Restarted.
 - Base: an empty receive is `WouldBlock`, timeout boundary is still Online, and
   the next same-boot fresh sequence is Continued.
 - Bad: `transmute` a ProcBuf page, duplicate projection/command mapping in each
@@ -1781,9 +1792,10 @@ from actual hosted fault injection and performance claims.
   restart, bind refusal and owned/replaced-path cleanup.
 - Payload tests cover ProcBuf state/event projection over real sockets, quality
   mask encoding, all command identity mismatch dimensions, authenticated source,
-  policy admission, stale/non-finite/oversized state, and no ingress mutation on
-  structural rejection. Existing Zenoh tests must continue through the shared
-  implementation.
+  policy admission, every target-structure error, destination binding,
+  publication retry, RT permit reconstruction, stale/non-finite/oversized state,
+  and no ingress mutation on structural rejection. Existing Zenoh tests must
+  continue through the shared implementation.
 - Quality gates include focused Clippy/check, capability validation, full
   workspace CI and dependency-tree proof that real-time crates do not acquire
   `esop-ipc` or POSIX transport dependencies.

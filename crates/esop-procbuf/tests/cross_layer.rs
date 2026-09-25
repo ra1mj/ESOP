@@ -22,7 +22,8 @@ fn command(boot_id: u64, sequence: u64, deadline_ns: u64) -> CommandPage<2, 0> {
         requested_mode: ControlMode::Csp,
         motion_enable_request: 1,
         authority: 1,
-        reserved: 0,
+        reserved: [0; 3],
+        policy_version: 1,
         axes: [JointCommand::EMPTY; 2],
         io: [],
     }

@@ -67,7 +67,7 @@
     {
       "id": "procbuf_abi",
       "status": "implemented",
-      "scope": "Fixed-layout command/state pages, quality, lifecycle history and event ring",
+      "scope": "ProcBuf ABI v5 fixed-layout command/state pages with complete command permit identity, quality, lifecycle history and event ring",
       "evidence": [
         "crates/esop-procbuf/src/lib.rs",
         "crates/esop-procbuf/tests/cross_layer.rs"
@@ -77,7 +77,7 @@
     {
       "id": "unix_domain_ipc",
       "status": "partial",
-      "scope": "Hosted nonblocking filesystem Unix datagram transport with bounded versioned frames, exact peer-path admission, peer lifecycle monitoring and a shared ProcBuf/Protobuf state-event-command adapter",
+      "scope": "Hosted nonblocking filesystem Unix datagram transport with bounded versioned frames, exact peer-path admission, peer lifecycle monitoring and a shared ProcBuf/Protobuf state-event-command adapter including strict target admission and retryable ProcBuf publication",
       "evidence": [
         "crates/esop-ipc/src/lib.rs",
         "crates/esop-ipc/src/frame.rs",
@@ -88,18 +88,20 @@
         "crates/esop-ipc/tests/unix_loopback.rs",
         "docs/esop-ipc.md"
       ],
-      "limitation": "Host filesystem Unix datagrams only; shared memory, RPMsg, command-target conversion into ProcBuf Command pages, cryptographic identity, deployment ACL, production latency/WCET, long-duration stress and HIL remain open"
+      "limitation": "Host filesystem Unix datagrams only; shared memory, RPMsg, cryptographic identity, deployment ACL, product mechanical limits/PDO scaling, actual drive execution, production latency/WCET, long-duration stress and HIL remain open"
     },
     {
       "id": "command_gateway_policy",
       "status": "partial",
-      "scope": "Fixed-capacity external command ACL, TTL, replay, rate-limit and permit conversion",
+      "scope": "Fixed-capacity external command ACL, TTL, replay, rate-limit and permit conversion with shared pre-ingress target validation and ProcBuf handoff",
       "evidence": [
         "crates/esop-command-gateway/src/lib.rs",
         "crates/esop-command-gateway/tests/gateway.rs",
+        "crates/esop-ipc/src/payloads.rs",
+        "crates/esop-ipc/tests/payloads.rs",
         "docs/esop-command-gateway.md"
       ],
-      "limitation": "Zenoh and IPC reuse the shared Protobuf decoder; cryptographic identity, deployment ACL and command-target conversion into ProcBuf Command pages remain open"
+      "limitation": "Zenoh and IPC reuse the shared strict target mapper; cryptographic identity, deployment ACL, product target semantics, actual drive execution and HIL remain open"
     },
     {
       "id": "protobuf_v1_contract",
@@ -132,7 +134,7 @@
     {
       "id": "zenoh_runtime_adapter",
       "status": "partial",
-      "scope": "Optional host-domain Zenoh session adapter with bounded health, typed v1 publish/query, validated eBPF RuntimeIncident projection, stable v1 publish and command/query callback observation markers, and shared single-reader ProcBuf state/event projection",
+      "scope": "Optional host-domain Zenoh session adapter with bounded health, typed v1 publish/query, validated eBPF RuntimeIncident projection, stable v1 publish and command/query callback observation markers, shared single-reader ProcBuf state/event projection, and shared strict command-target ProcBuf handoff",
       "evidence": [
         "crates/esop-zenoh-gateway/src/runtime.rs",
         "crates/esop-zenoh-gateway/src/runtime_incident.rs",
@@ -145,7 +147,7 @@
         "scripts/test-zenoh.sh",
         "docs/esop-zenoh-gateway.md"
       ],
-      "limitation": "State/event projection and command field decoding are shared with IPC; remote ACL, certificate lifecycle, command-target conversion and production topology still require environment-level tests"
+      "limitation": "State/event projection and strict command-target mapping are shared with IPC; remote ACL, certificate lifecycle, product target semantics, actual drive behavior and production topology still require environment-level tests"
     },
     {
       "id": "ebpf_observation",

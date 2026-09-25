@@ -2,12 +2,20 @@
 
 use esop_command_gateway::{CommandIngress, IngressPolicy};
 use esop_ipc::payloads::{
-    CommandDecodeError, CommandFrameError, CommandFrameIdentity, ProcBufProjector, RobotId,
-    RobotIdError, admit_command_frame, decode_motion_command, encode_command_frame,
+    CommandDecodeError, CommandFrameError, CommandFrameIdentity, CommandPublicationError,
+    CommandTargetError, JointTargetField, ProcBufCommandFrameError, ProcBufProjector, RobotId,
+    RobotIdError, admit_command_frame, admit_procbuf_command_frame, decode_motion_command,
+    encode_command_frame,
 };
 use esop_ipc::{IpcFrame, IpcHeader, MAX_PAYLOAD_BYTES, MessageKind, UnixDatagramEndpoint};
-use esop_procbuf::{EventSeverity as ProcSeverity, ProcBuf, ProcBufEvent, QualityFact, StatePage};
-use esop_proto::v1::{DiagnosticEvent, MotionCommand, RobotState};
+use esop_lifecycle_guard::{
+    GuardPolicy, LifecycleGuard, StopAction, procbuf::motion_permit_from_command,
+};
+use esop_procbuf::{
+    ControlMode, EventSeverity as ProcSeverity, IoCommand, JointCommand, ProcBuf, ProcBufEvent,
+    QualityFact, StatePage,
+};
+use esop_proto::v1::{DiagnosticEvent, JointTarget, MotionCommand, RobotState};
 use esop_proto::{CURRENT_SCHEMA_VERSION, Message};
 use std::fs;
 use std::path::PathBuf;
@@ -83,6 +91,44 @@ fn command(sequence: u64) -> MotionCommand {
         schema_version: CURRENT_SCHEMA_VERSION,
         ..MotionCommand::default()
     }
+}
+
+fn targeted_command(sequence: u64, requested_mode: u32) -> MotionCommand {
+    MotionCommand {
+        requested_mode,
+        joints: vec![
+            JointTarget {
+                axis: 0,
+                position: 1.0,
+                velocity: 2.0,
+                torque: 3.0,
+                max_velocity: 4.0,
+                max_torque: 5.0,
+            },
+            JointTarget {
+                axis: 1,
+                position: 11.0,
+                velocity: 12.0,
+                torque: 13.0,
+                max_velocity: 14.0,
+                max_torque: 15.0,
+            },
+        ],
+        ..command(sequence)
+    }
+}
+
+fn strict_target_error(
+    ingress: &mut CommandIngress,
+    command: &MotionCommand,
+) -> ProcBufCommandFrameError {
+    let buffer = TestBuf::new(41, 7);
+    let identity = CommandFrameIdentity::for_procbuf(robot_id(), &buffer).unwrap();
+    let frame = encode_command_frame(identity, command, 100).unwrap();
+    let error =
+        admit_procbuf_command_frame::<2, 1>(identity, ingress, &frame, Some(42), 100).unwrap_err();
+    assert_eq!(ingress.audit_count(), 0);
+    error
 }
 
 fn raw_command_frame(
@@ -243,6 +289,255 @@ fn command_frame_crosses_socket_and_enters_the_existing_ingress_policy() {
         (7, 42, 3, 1, 0x03)
     );
     assert_eq!(ingress.audit_count(), 1);
+}
+
+#[test]
+fn strict_target_mapping_preserves_modes_permit_and_empty_slots() {
+    for (raw_mode, expected_mode) in [
+        (8, ControlMode::Csp),
+        (9, ControlMode::Csv),
+        (10, ControlMode::Cst),
+    ] {
+        let buffer = TestBuf::new(41, 7);
+        let identity = CommandFrameIdentity::for_procbuf(robot_id(), &buffer).unwrap();
+        let frame = encode_command_frame(identity, &targeted_command(1, raw_mode), 100).unwrap();
+        let mut ingress = ingress();
+        let admitted =
+            admit_procbuf_command_frame::<2, 1>(identity, &mut ingress, &frame, Some(42), 100)
+                .unwrap();
+        let permit = admitted.permit();
+        let page = admitted.page();
+        assert_eq!(page.requested_mode, expected_mode);
+        assert_eq!(page.motion_enable_request, 1);
+        assert_eq!(page.boot_id, permit.boot_id);
+        assert_eq!(page.source_id, permit.source_id);
+        assert_eq!(page.permit_epoch, permit.permit_epoch);
+        assert_eq!(page.sequence, permit.sequence);
+        assert_eq!(page.deadline_ns, permit.expires_at_ns);
+        assert_eq!(page.permit_expires_at_ns, permit.expires_at_ns);
+        assert_eq!(page.axis_mask, permit.axis_mask);
+        assert_eq!(page.authority, permit.authority);
+        assert_eq!(page.policy_version, permit.policy_version);
+        assert_eq!(
+            page.axes[0],
+            JointCommand {
+                position: 1.0,
+                velocity: 2.0,
+                torque: 3.0,
+                max_velocity: 4.0,
+                max_torque: 5.0,
+            }
+        );
+        assert_eq!(page.io, [IoCommand::EMPTY; 1]);
+        assert_eq!(ingress.audit_count(), 1);
+    }
+
+    let buffer = TestBuf::new(41, 7);
+    let identity = CommandFrameIdentity::for_procbuf(robot_id(), &buffer).unwrap();
+    let mut partial = targeted_command(1, 8);
+    partial.axis_mask = 0x01;
+    partial.joints.pop();
+    let frame = encode_command_frame(identity, &partial, 100).unwrap();
+    let mut ingress = ingress();
+    let admitted =
+        admit_procbuf_command_frame::<2, 1>(identity, &mut ingress, &frame, Some(42), 100).unwrap();
+    assert_eq!(admitted.page().axes[1], JointCommand::EMPTY);
+    assert_eq!(admitted.page().io, [IoCommand::EMPTY; 1]);
+}
+
+#[test]
+fn every_structural_target_failure_precedes_ingress_mutation() {
+    let mut ingress = ingress();
+    let mut invalid = targeted_command(1, 7);
+    assert!(matches!(
+        strict_target_error(&mut ingress, &invalid),
+        ProcBufCommandFrameError::Target(CommandTargetError::UnsupportedMode(7))
+    ));
+
+    invalid = targeted_command(1, 8);
+    invalid.axis_mask = 0x07;
+    assert!(matches!(
+        strict_target_error(&mut ingress, &invalid),
+        ProcBufCommandFrameError::Target(CommandTargetError::AxisMaskOutsideCapacity {
+            axis_mask: 0x07,
+            capacity: 2
+        })
+    ));
+
+    invalid = targeted_command(1, 8);
+    invalid.joints.push(JointTarget {
+        axis: 2,
+        ..JointTarget::default()
+    });
+    assert!(matches!(
+        strict_target_error(&mut ingress, &invalid),
+        ProcBufCommandFrameError::Target(CommandTargetError::TooManyTargets {
+            maximum: 2,
+            actual: 3
+        })
+    ));
+
+    invalid = targeted_command(1, 8);
+    invalid.joints[1].axis = 2;
+    assert!(matches!(
+        strict_target_error(&mut ingress, &invalid),
+        ProcBufCommandFrameError::Target(CommandTargetError::AxisOutOfRange {
+            axis: 2,
+            capacity: 2
+        })
+    ));
+
+    invalid = targeted_command(1, 8);
+    invalid.joints[1].axis = 0;
+    assert!(matches!(
+        strict_target_error(&mut ingress, &invalid),
+        ProcBufCommandFrameError::Target(CommandTargetError::DuplicateAxis(0))
+    ));
+
+    invalid = targeted_command(1, 8);
+    invalid.axis_mask = 0x01;
+    assert!(matches!(
+        strict_target_error(&mut ingress, &invalid),
+        ProcBufCommandFrameError::Target(CommandTargetError::AxisNotSelected(1))
+    ));
+
+    invalid = targeted_command(1, 8);
+    invalid.joints.pop();
+    assert!(matches!(
+        strict_target_error(&mut ingress, &invalid),
+        ProcBufCommandFrameError::Target(CommandTargetError::MissingAxis(1))
+    ));
+
+    invalid = targeted_command(1, 8);
+    invalid.joints[0].position = f64::NAN;
+    assert!(matches!(
+        strict_target_error(&mut ingress, &invalid),
+        ProcBufCommandFrameError::Target(CommandTargetError::NonFinite {
+            axis: 0,
+            field: JointTargetField::Position
+        })
+    ));
+
+    invalid = targeted_command(1, 8);
+    invalid.joints[0].max_velocity = -1.0;
+    assert!(matches!(
+        strict_target_error(&mut ingress, &invalid),
+        ProcBufCommandFrameError::Target(CommandTargetError::NegativeLimit {
+            axis: 0,
+            field: JointTargetField::MaxVelocity
+        })
+    ));
+
+    invalid = targeted_command(1, 8);
+    invalid.joints[0].max_torque = -1.0;
+    assert!(matches!(
+        strict_target_error(&mut ingress, &invalid),
+        ProcBufCommandFrameError::Target(CommandTargetError::NegativeLimit {
+            axis: 0,
+            field: JointTargetField::MaxTorque
+        })
+    ));
+
+    let buffer = ProcBuf::<33, 1, 1, 8>::new(41, 7);
+    let identity = CommandFrameIdentity::for_procbuf(robot_id(), &buffer).unwrap();
+    let frame = encode_command_frame(identity, &targeted_command(1, 8), 100).unwrap();
+    assert!(matches!(
+        admit_procbuf_command_frame::<33, 1>(identity, &mut ingress, &frame, Some(42), 100),
+        Err(ProcBufCommandFrameError::Target(
+            CommandTargetError::AxisCapacityTooLarge {
+                maximum: 32,
+                actual: 33
+            }
+        ))
+    ));
+    assert_eq!(ingress.audit_count(), 0);
+
+    let buffer = TestBuf::new(41, 7);
+    let identity = CommandFrameIdentity::for_procbuf(robot_id(), &buffer).unwrap();
+    let frame = encode_command_frame(identity, &targeted_command(1, 8), 100).unwrap();
+    assert!(
+        admit_procbuf_command_frame::<2, 1>(identity, &mut ingress, &frame, Some(42), 100).is_ok()
+    );
+    assert_eq!(ingress.audit_count(), 1);
+}
+
+#[test]
+fn admitted_command_stays_retryable_and_bound_to_its_procbuf() {
+    let buffer = TestBuf::new(41, 7);
+    let identity = CommandFrameIdentity::for_procbuf(robot_id(), &buffer).unwrap();
+    let frame = encode_command_frame(identity, &targeted_command(1, 8), 100).unwrap();
+    let mut ingress = ingress();
+    let admitted =
+        admit_procbuf_command_frame::<2, 1>(identity, &mut ingress, &frame, Some(42), 100).unwrap();
+    assert_eq!(ingress.audit_count(), 1);
+
+    let wrong_robot = TestBuf::new(42, 7);
+    assert_eq!(
+        admitted.publish(&wrong_robot),
+        Err(CommandPublicationError::RobotMismatch {
+            expected: 41,
+            actual: 42
+        })
+    );
+    let wrong_boot = TestBuf::new(41, 8);
+    assert_eq!(
+        admitted.publish(&wrong_boot),
+        Err(CommandPublicationError::BootMismatch {
+            expected: 7,
+            actual: 8
+        })
+    );
+    let wrong_layout = ProcBuf::<2, 1, 2, 8>::new(41, 7);
+    assert!(matches!(
+        admitted.publish(&wrong_layout),
+        Err(CommandPublicationError::LayoutMismatch { .. })
+    ));
+
+    assert_eq!(admitted.publish(&buffer), Ok(1));
+    assert_eq!(ingress.audit_count(), 1);
+}
+
+#[test]
+fn real_unix_command_reaches_procbuf_and_lifecycle_acceptance() {
+    let directory = TestDirectory::new();
+    let (producer, supervisor) = endpoints(&directory);
+    let buffer = TestBuf::new(41, 7);
+    let identity = CommandFrameIdentity::for_procbuf(robot_id(), &buffer).unwrap();
+    let frame = encode_command_frame(identity, &targeted_command(1, 10), 100).unwrap();
+    producer.send(&frame).unwrap();
+    let received = supervisor.receive().unwrap();
+
+    let mut ingress = ingress();
+    let admitted =
+        admit_procbuf_command_frame::<2, 1>(identity, &mut ingress, &received, Some(42), 100)
+            .unwrap();
+    admitted.publish(&buffer).unwrap();
+
+    let mut floor = 0;
+    let snapshot = buffer.read_command(101, &mut floor).unwrap();
+    assert_eq!(snapshot.command.requested_mode, ControlMode::Cst);
+    assert_eq!(snapshot.command.axes, admitted.page().axes);
+    assert_eq!(snapshot.command.io, [IoCommand::EMPTY; 1]);
+    let permit = motion_permit_from_command(&snapshot.command).unwrap();
+    assert_eq!(permit, admitted.permit());
+
+    let mut guard = LifecycleGuard::new(
+        0,
+        7,
+        GuardPolicy {
+            enter_good_cycles: 1,
+            exit_bad_cycles: 1,
+            max_age_cycles: 1,
+            stop_timeout_cycles: 10,
+            stop_action: StopAction::QuickStop,
+            authorized_source_id: 42,
+            minimum_authority: 2,
+            permit_policy_version: 9,
+            allowed_axis_mask: 0x03,
+        },
+    );
+    guard.accept_permit(permit, 101).unwrap();
+    assert_eq!(guard.permit(), Some(permit));
 }
 
 #[test]

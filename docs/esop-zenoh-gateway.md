@@ -1,8 +1,8 @@
 # ESOP Zenoh 路由边界
 
 - 文档版本：1.0
-- 日期：2026-09-25
-- 状态：固定 key namespace、方向策略、可选 Zenoh Session、与 IPC 共享的 ProcBuf v4 状态/事件投影和 MotionCommand 字段解码、逐轴停止证据与原始周期质量投影、eBPF RuntimeIncident 无损投影、类型化查询边界、host QoS、稳定 publish 与 command/query callback 观测 marker、生产安全配置准入及 loopback router 验证已实现；真实设备质量采集、远程 ACL、命令 target 写入、目标内核 uprobe/开销和生产认证部署待完成
+- 日期：2026-09-26
+- 状态：固定 key namespace、方向策略、可选 Zenoh Session、与 IPC 共享的 ProcBuf v5 状态/事件投影及严格 MotionCommand target 到 Command page 路径、逐轴停止证据与原始周期质量投影、eBPF RuntimeIncident 无损投影、类型化查询边界、host QoS、稳定 publish 与 command/query callback 观测 marker、生产安全配置准入及 loopback router 验证已实现；真实设备质量采集、远程 ACL、目标内核 uprobe/开销和生产认证部署待完成
 - 上游需求：PRD FR-031、FR-030、FR-045、FR-051
 
 ## 1. Key namespace
@@ -25,7 +25,7 @@ esop/<fleet>/<robot_id>/{state,event,diagnostic,cmd,query}
 | `cmd` | 监督域接收 | `MotionCommand` |
 | `query` | 双向 | `QueryRequest` / `QueryReply` |
 
-路由层只校验 key、方向和 payload 类型；它不执行 Protobuf 编解码，也不承担认证。实际 payload 必须先经过生成的 v1 binding，再由命令准入层执行 source/authority/TTL/sequence/axis policy，最后才转换为 `MotionPermit`。
+路由层只校验 key、方向和 payload 类型；它不执行 Protobuf 编解码，也不承担认证。实际 payload 必须先经过生成的 v1 binding 和共享 target 结构验证，再由命令准入层执行 source/authority/TTL/sequence/axis policy，最后从已准入 `MotionPermit` 构造 ProcBuf Command page。
 
 ## 3. 断连与实时隔离
 
@@ -51,6 +51,7 @@ Zenoh session、router、发现、重连、QoS 和 transport security 均属于 
 - callback 观测 ABI：用独立稳定的 `esop_zenoh_gateway_callback_begin_v1(request_id, route_kind)` / `esop_zenoh_gateway_callback_end_v1(request_id, route_kind, outcome)` 包围 command subscription 与 raw/typed query callback 调用；publish 和 callback 共用同一非零 request ID 序列，正常返回固定为 completed，Rust unwind 通过 guard `Drop` 固定为 abandoned。类型化 query 的 decode、provider、encode 和同步 reply wait 均位于同一 query callback 观测窗口内。
 - `TransportSecurityPolicy` / `open_secure`：在建立 Session 前检查传输协议、TLS 根证书、名称校验、mTLS 客户端证书/私钥和公钥或用户名密码认证材料；生产调用方应使用 `TransportSecurityPolicy::production()`，开发/HIL 可显式使用 `open` 或 `development()`。
 - `decode_command` / `admit_command`：复用 `esop-ipc/payloads` 的 `MotionCommand` 字段解码，校验 schema 和 robot ID，并转交 `CommandIngress` 执行来源、权限、TTL、epoch、序号、轴掩码、限流和审计。Zenoh 仍负责 namespace 与认证主体映射；共享解码器不授予 permit。
+- `prepare_procbuf_command` / `admit_procbuf_command` 及 authenticated 变体：复用 IPC 的严格 target mapper，在 ingress 前验证 CSP/CSV/CST、轴容量/掩码/覆盖、有限值和非负限值；准入后返回绑定目标 ProcBuf identity/layout 的 `AdmittedProcBufCommand`，调用方可借用该值重试发布而不重复准入。该路径不证明驱动已执行目标。
 - `ProcBufProjector`：Zenoh 兼容 wrapper 委托给 `esop-ipc/payloads` 的监督域单读者。共享实现校验 ABI/layout、数值 robot ID 和 boot ID 后读取完整状态页与事件环，转换为外部 `RobotState` / `DiagnosticEvent`；原样投影 required/valid/qualified/ready 门槛位图、permit epoch/expiry、转换周期、恢复计数和 permit 审计序号，并在原始质量事实完整且与 State 序号相同时生成 `QualitySummary`；拒绝状态序号回退、无效生命周期值、非法质量位图、非有限关节值和超 4096-byte 状态。数值 robot ID 与外部文本 ID 的配对须由部署配置提供，不从字符串猜测哈希。
 
 marker 是无阻塞、无字符串解析的可选观测边界；没有附加 uprobe 时只执行固定参数的空 marker，不改变 publish 或 callback 结果。Rust `async fn` 的普通 entry/return 只覆盖 future 构造，不能表示 await 生命周期，因此 publish guard 在 Session put 前 begin，并在健康刷新、传输失败处理或 future drop 后恰好 end 一次。callback guard 则紧贴 gateway 所有的调用边界，在调用用户 callback 前 begin，并在正常返回或 Rust unwind 时恰好 end 一次；进程 abort 不伪造 terminal marker，遗留状态由固定容量 LRU 约束。eBPF runtime 分别对 publish 和 callback 的 begin/end 符号实行原子成对附加，缺失可选符号时保留内核 tracepoint 基线；是否把任一探针对设为 required 由监督域显式决定。该 ABI 不提供运动许可、投递确认或功能安全保证。
@@ -92,6 +93,6 @@ callback 运行在 Zenoh host runtime：命令 callback 应只把数据投递到
 
 `motion_permit_current` 仅表示 permit 本身未过期，不表示当前可以驱动：命令门槛失效时，状态可能已进入 `Stopping`，而 permit 仍在有效期。执行侧始终以 MLG 状态和门槛决策约束 CiA 402，不以该布尔字段单独判定运动授权。
 
-ProcBuf 固定布局已升级到 ABI v4；v1/v2/v3 reader/writer 不能复用 v4 区域，attach 时必须核对 version、layout hash、容量、robot 和 boot ID。升级需停止旧实时端与监督进程并重新创建区域，再启动相同版本的双方；旧 header 在单元测试中明确被拒绝。Protobuf 仍为 v1 外部契约，新增 `LifecycleSummary.axis_stops` 只携带本周期请求/发出动作和合格的驱动反馈证明位，不表示真实执行的停止动作；旧 Protobuf 读者丢弃新增字段，不能充当透明中继。
+ProcBuf 固定布局已升级到 ABI v5：Command page 增加 permit `policy_version`，使 RT 端可以无分配地重建完整 `MotionPermit`。v1-v4 reader/writer 不能复用 v5 区域，attach 时必须核对 version、layout hash、容量、robot 和 boot ID。升级需停止旧实时端与监督进程并重新创建区域，再启动相同版本的双方；旧 header 在单元测试中明确被拒绝。Protobuf 仍为 v1 外部契约，`LifecycleSummary.axis_stops` 只携带本周期请求/发出动作和合格的驱动反馈证明位，不表示真实执行的停止动作；旧 Protobuf 读者丢弃新增字段，不能充当透明中继。
 
 补充验证：测试进程为每个场景动态申请 loopback 临时端口并独占 zenohd，覆盖 state/event、从固定 agent incident 经生产投影到 router 解码的完整 v1 payload、router 重启后的 health recovery、旧命令 TTL/代际拒绝，以及恢复必须经过新 permit 和显式 rearm。ZenohGateway::refresh_health 使用 session 的 router/peer 连接快照；它属于 host supervisor 观察，不是 motion permit 或应用层投递确认。[Zenoh SessionInfo API](https://docs.rs/zenoh/1.10.1/zenoh/session/struct.SessionInfo.html)
