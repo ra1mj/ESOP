@@ -705,3 +705,36 @@ Added sticky epoch-local eBPF event-loss health, restart reset semantics, a prod
 ### Next Steps
 
 - None - task complete
+
+
+## Session 22: Stabilize eBPF softirq qualification gating
+
+**Date**: 2026-09-26
+**Task**: Stabilize eBPF softirq qualification gating
+**Branch**: `main`
+
+### Summary
+
+Bounded hosted softirq observation to the exact GSO injection interval, preserved strict one-event evidence, passed all local quality gates and GitHub Actions run 36160745503, independently validated artifact 10876025194, and archived the completed task.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `d2b7eeb9641fec87444f2aabc2ae6ba7855ae414` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 21
+- **Total Sessions**: 22
 - **Last Active**: 2026-09-26
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~707 | Active |
+| `journal-1.md` | ~740 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 22 | 2026-09-26 | Stabilize eBPF softirq qualification gating | `d2b7eeb9641fec87444f2aabc2ae6ba7855ae414` | `main` |
 | 21 | 2026-09-26 | Qualify eBPF observability degradation recovery | `9db984178f79157d177d2688e665b902d434d204` | `main` |
 | 20 | 2026-09-25 | Qualify hosted eBPF network-drop path | `df73269`, `4a45b9f`, `5a5294b` | `main` |
 | 19 | 2026-09-25 | Qualify hosted memcg OOM eBPF path | `560e85d` | `main` |
