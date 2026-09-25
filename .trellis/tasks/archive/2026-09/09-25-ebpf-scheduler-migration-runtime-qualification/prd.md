@@ -68,21 +68,21 @@ report/validator/privileged-CI pattern this task must follow.
 
 ## Acceptance Criteria
 
-- [ ] A two-CPU hosted Linux run verifies production CO-RE load, required
+- [x] A two-CPU hosted Linux run verifies production CO-RE load, required
       `sched_migrate_task` attachment, exact worker-TID tracking, and bounded
       A-to-B-to-A affinity-driven migration.
-- [ ] The run produces exactly one fixed migration record and one correlated
+- [x] The run produces exactly one fixed migration record and one correlated
       lower-confidence scheduler incident with the required source/destination,
       cycle, count, severity, action, confidence, and priority fields.
-- [ ] Poll, statistics, correlator, and observer-health fields are exact and
+- [x] Poll, statistics, correlator, and observer-health fields are exact and
       show zero malformed, rejected, dropped, or lost evidence.
-- [ ] The qualification report is same-directory atomic and the validator is
+- [x] The qualification report is same-directory atomic and the validator is
       fail-closed for schema, integer ranges, attach masks, identity,
       migration path, counts, timestamps, incident semantics, and health.
-- [ ] `make ci`, focused Rust/Python tests, BPF syntax, and diff checks pass.
-- [ ] The dedicated privileged GitHub Actions job passes and its downloaded
+- [x] `make ci`, focused Rust/Python tests, BPF syntax, and diff checks pass.
+- [x] The dedicated privileged GitHub Actions job passes and its downloaded
       report independently passes the repository validator.
-- [ ] Documentation removes hosted scheduler migration from the open list
+- [x] Documentation removes hosted scheduler migration from the open list
       while preserving production-kernel, migration-cause, affinity-policy,
       cache/NUMA impact, latency, overhead/WCET, pressure, and long-duration
       qualification limits.
@@ -107,3 +107,19 @@ report/validator/privileged-CI pattern this task must follow.
 - The report records scheduler priority as observed by the tracepoint but does
   not equate it with userspace `sched_priority` or use it as a pass/fail policy
   beyond the fixed unsigned-byte ABI.
+
+## Acceptance Evidence
+
+- Implementation commit: `f1aeddc0d260a3cb6e3de5b6cf0ace84a304e898`.
+- Local quality gate: `make ci`, focused Rust build/Clippy, nine validator
+  regression tests, BPF syntax, capability-manifest validation, formatting,
+  Python compilation, shell syntax, and diff checks passed.
+- GitHub Actions run `36117944042` passed all six jobs, including the dedicated
+  `ebpf-scheduler-migration-runtime` privileged job and the Rust/Zenoh gate.
+- Artifact `esop-ebpf-scheduler-migration-runtime-qualification` was downloaded
+  and independently accepted by
+  `scripts/validate-ebpf-scheduler-migration-qualification.py`.
+- The report recorded worker TID 8054, CPU path `0 -> 1 -> 0`, attach mask 2048,
+  first-move count 1 with zero records, final migration count 2, one threshold
+  event, one record, one incident, zero loss/malformed/rejected/dropped fields,
+  confidence 60, evidence duration 51654 ns, and Degraded fault `0x45422001`.
