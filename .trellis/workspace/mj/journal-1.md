@@ -238,3 +238,36 @@ Added bounded cpu_frequency_limits tracing, runtime floor and policy filtering, 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 8: eBPF CPU migration attribution
+
+**Date**: 2026-09-25
+**Task**: eBPF CPU migration attribution
+**Branch**: `main`
+
+### Summary
+
+Implemented bounded sched_migrate_task observation with per-TID epoch-aware migration windows, fixed evidence decoding, correlated lower-confidence scheduler incidents, ABI and stats updates, documentation, local quality gates, and passing GitHub Rust/CO-RE CI.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5065098` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
