@@ -55,4 +55,3 @@ make test-ebpf-softirq-runtime
   remove stale temp/final reports and close sockets through RAII.
 - Do not describe the calibration-derived threshold as a product budget or the
   loopback GSO burst as NIC, EtherCAT, production pressure, or WCET evidence.
-
