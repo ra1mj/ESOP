@@ -30,6 +30,91 @@ const STATE_DEGRADED: u8 = 2;
 const STATE_DISCONNECTED: u8 = 3;
 const STATE_CLOSED: u8 = 4;
 
+static NEXT_PUBLISH_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Stable outcomes carried by the v1 gateway publish observation ABI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum GatewayPublishOutcome {
+    Success = 0,
+    TransportFailure = 1,
+    Cancelled = 2,
+}
+
+#[cfg(test)]
+static TEST_PUBLISH_MARKER_BEGINS: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static TEST_PUBLISH_MARKER_ENDS: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static TEST_PUBLISH_MARKER_LAST_OUTCOME: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Stable v1 uprobe target for the start of an asynchronous publish operation.
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn esop_zenoh_gateway_publish_begin_v1(request_id: u64, route_kind: u32) {
+    let _ = core::hint::black_box((request_id, route_kind));
+    #[cfg(test)]
+    TEST_PUBLISH_MARKER_BEGINS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Stable v1 uprobe target for the end of an asynchronous publish operation.
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn esop_zenoh_gateway_publish_end_v1(
+    request_id: u64,
+    route_kind: u32,
+    outcome: u32,
+) {
+    let _ = core::hint::black_box((request_id, route_kind, outcome));
+    #[cfg(test)]
+    {
+        TEST_PUBLISH_MARKER_ENDS.fetch_add(1, Ordering::Relaxed);
+        TEST_PUBLISH_MARKER_LAST_OUTCOME.store(u64::from(outcome), Ordering::Relaxed);
+    }
+}
+
+fn next_publish_request_id() -> u64 {
+    loop {
+        let request_id = NEXT_PUBLISH_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        if request_id != 0 {
+            return request_id;
+        }
+    }
+}
+
+struct PublishObservation {
+    request_id: u64,
+    route_kind: u32,
+    finished: bool,
+}
+
+impl PublishObservation {
+    fn begin(kind: RouteKind) -> Self {
+        let observation = Self {
+            request_id: next_publish_request_id(),
+            route_kind: kind as u32,
+            finished: false,
+        };
+        esop_zenoh_gateway_publish_begin_v1(observation.request_id, observation.route_kind);
+        observation
+    }
+
+    fn finish(&mut self, outcome: GatewayPublishOutcome) -> bool {
+        if self.finished {
+            return false;
+        }
+        self.finished = true;
+        esop_zenoh_gateway_publish_end_v1(self.request_id, self.route_kind, outcome as u32);
+        true
+    }
+}
+
+impl Drop for PublishObservation {
+    fn drop(&mut self) {
+        let _ = self.finish(GatewayPublishOutcome::Cancelled);
+    }
+}
+
 /// Current health of the supervision-domain Zenoh transport.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -475,6 +560,7 @@ impl ZenohGateway {
         let key = str::from_utf8(&key[..length]).map_err(|_| RuntimeError::InvalidKeyEncoding)?;
 
         let qos = PublishQos::for_route(kind);
+        let mut observation = PublishObservation::begin(kind);
         match self
             .session
             .put(key, payload)
@@ -485,11 +571,14 @@ impl ZenohGateway {
         {
             Ok(()) => {
                 self.refresh_health().await;
+                let _ = observation.finish(GatewayPublishOutcome::Success);
                 Ok(())
             }
             Err(error) => {
                 self.health.publish_failures.fetch_add(1, Ordering::Relaxed);
-                Err(self.record_transport_error(error).await)
+                let error = self.record_transport_error(error).await;
+                let _ = observation.finish(GatewayPublishOutcome::TransportFailure);
+                Err(error)
             }
         }
     }
@@ -799,6 +888,59 @@ mod tests {
     use super::*;
     use esop_command_gateway::IngressPolicy;
     use esop_proto::CURRENT_SCHEMA_VERSION;
+
+    #[test]
+    fn publish_observation_allocates_nonzero_unique_request_ids() {
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            handles.push(std::thread::spawn(next_publish_request_id));
+        }
+        let mut request_ids = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert!(request_ids.iter().all(|request_id| *request_id != 0));
+        request_ids.sort_unstable();
+        request_ids.dedup();
+        assert_eq!(request_ids.len(), 16);
+    }
+
+    #[test]
+    fn publish_observation_ends_once_and_marks_cancellation() {
+        TEST_PUBLISH_MARKER_BEGINS.store(0, Ordering::Relaxed);
+        TEST_PUBLISH_MARKER_ENDS.store(0, Ordering::Relaxed);
+        TEST_PUBLISH_MARKER_LAST_OUTCOME.store(u64::MAX, Ordering::Relaxed);
+
+        let mut completed = PublishObservation::begin(RouteKind::State);
+        assert!(completed.finish(GatewayPublishOutcome::Success));
+        assert!(!completed.finish(GatewayPublishOutcome::TransportFailure));
+        drop(completed);
+        assert_eq!(TEST_PUBLISH_MARKER_BEGINS.load(Ordering::Relaxed), 1);
+        assert_eq!(TEST_PUBLISH_MARKER_ENDS.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            TEST_PUBLISH_MARKER_LAST_OUTCOME.load(Ordering::Relaxed),
+            GatewayPublishOutcome::Success as u64
+        );
+
+        let mut failed = PublishObservation::begin(RouteKind::Diagnostic);
+        assert!(failed.finish(GatewayPublishOutcome::TransportFailure));
+        drop(failed);
+        assert_eq!(TEST_PUBLISH_MARKER_BEGINS.load(Ordering::Relaxed), 2);
+        assert_eq!(TEST_PUBLISH_MARKER_ENDS.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            TEST_PUBLISH_MARKER_LAST_OUTCOME.load(Ordering::Relaxed),
+            GatewayPublishOutcome::TransportFailure as u64
+        );
+
+        let cancelled = PublishObservation::begin(RouteKind::Event);
+        drop(cancelled);
+        assert_eq!(TEST_PUBLISH_MARKER_BEGINS.load(Ordering::Relaxed), 3);
+        assert_eq!(TEST_PUBLISH_MARKER_ENDS.load(Ordering::Relaxed), 3);
+        assert_eq!(
+            TEST_PUBLISH_MARKER_LAST_OUTCOME.load(Ordering::Relaxed),
+            GatewayPublishOutcome::Cancelled as u64
+        );
+    }
 
     #[test]
     fn health_is_bounded_and_transitions_are_explicit() {

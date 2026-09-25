@@ -26,6 +26,9 @@ struct esop_context {
     __u32 scheduler_migration_epoch;
     __u64 scheduler_migration_threshold;
     __u64 scheduler_migration_window_ns;
+    __u64 gateway_stall_threshold_ns;
+    __u32 gateway_probe_epoch;
+    __u32 reserved_gateway;
 };
 
 struct esop_stats {
@@ -51,6 +54,10 @@ struct esop_stats {
     __u64 cpu_frequency_suppressed;
     __u64 scheduler_migrations;
     __u64 scheduler_migration_threshold_events;
+    __u64 gateway_probe_begins;
+    __u64 gateway_probe_completions;
+    __u64 gateway_stalls;
+    __u64 gateway_probe_mismatches;
 };
 
 struct esop_interrupt_key {
@@ -96,6 +103,20 @@ struct esop_scheduler_migration_state {
     __u32 reserved;
 };
 
+struct esop_gateway_operation_key {
+    __u64 request_id;
+    __u32 tgid;
+    __u32 reserved;
+};
+
+struct esop_gateway_operation_state {
+    __u64 start_ns;
+    __u32 policy_epoch;
+    __u32 start_tid;
+    __u32 route_kind;
+    __u32 reserved;
+};
+
 struct esop_runtime_evidence {
     __u64 evidence_id;
     __u64 boot_id;
@@ -118,8 +139,8 @@ struct esop_runtime_evidence {
     __u8 detail;
 };
 
-_Static_assert(sizeof(struct esop_context) == 144, "context ABI changed");
-_Static_assert(sizeof(struct esop_stats) == 176, "stats ABI changed");
+_Static_assert(sizeof(struct esop_context) == 160, "context ABI changed");
+_Static_assert(sizeof(struct esop_stats) == 208, "stats ABI changed");
 _Static_assert(sizeof(struct esop_runtime_evidence) == 96, "evidence ABI changed");
 
 struct {
@@ -190,6 +211,13 @@ struct {
     __type(value, struct esop_scheduler_migration_state);
 } ESOP_SCHEDULER_MIGRATIONS SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 1024);
+    __type(key, struct esop_gateway_operation_key);
+    __type(value, struct esop_gateway_operation_state);
+} ESOP_GATEWAY_OPERATIONS SEC(".maps");
+
 static __always_inline struct esop_context *esop_context(void)
 {
     __u32 key = 0;
@@ -230,10 +258,11 @@ static __always_inline int esop_tracks_scheduler(
     return target == 0 || target == tid;
 }
 
-static __always_inline int esop_emit_resource_cpu_task(
-    __u8 domain, __u8 kind, __u8 severity, __u64 observed_value,
-    __u64 threshold, __u64 duration_ns, __u32 count, __u16 irq,
-    __u32 netdev_ifindex, __u8 detail, __u32 pid, __u32 tid, __u16 cpu)
+static __always_inline int esop_emit_resource_cpu_task_id(
+    __u64 evidence_id, __u8 domain, __u8 kind, __u8 severity,
+    __u64 observed_value, __u64 threshold, __u64 duration_ns, __u32 count,
+    __u16 irq, __u32 netdev_ifindex, __u8 detail, __u32 pid, __u32 tid,
+    __u16 cpu)
 {
     struct esop_context *context = esop_context();
     struct esop_stats *stats = esop_stats();
@@ -245,8 +274,8 @@ static __always_inline int esop_emit_resource_cpu_task(
     __u64 timestamp = now;
     struct esop_runtime_evidence event = {};
 
-    /* The timestamp is monotonic and unique enough for the bounded evidence ID. */
-    event.evidence_id = timestamp;
+    /* A zero producer ID falls back to the monotonic timestamp. */
+    event.evidence_id = evidence_id == 0 ? timestamp : evidence_id;
     event.boot_id = context->boot_id;
     event.agent_epoch = context->agent_epoch;
     event.timestamp_ns = timestamp;
@@ -275,6 +304,16 @@ static __always_inline int esop_emit_resource_cpu_task(
         stats->emitted_events++;
     }
     return 0;
+}
+
+static __always_inline int esop_emit_resource_cpu_task(
+    __u8 domain, __u8 kind, __u8 severity, __u64 observed_value,
+    __u64 threshold, __u64 duration_ns, __u32 count, __u16 irq,
+    __u32 netdev_ifindex, __u8 detail, __u32 pid, __u32 tid, __u16 cpu)
+{
+    return esop_emit_resource_cpu_task_id(
+        0, domain, kind, severity, observed_value, threshold, duration_ns,
+        count, irq, netdev_ifindex, detail, pid, tid, cpu);
 }
 
 static __always_inline int esop_emit_resource_task(
@@ -319,6 +358,15 @@ static __always_inline __u8 esop_detail_u8(__u64 value)
     return value > 0xff ? 0xff : (__u8)value;
 }
 
+#define ESOP_GATEWAY_ROUTE_MAX 4
+#define ESOP_GATEWAY_OUTCOME_MAX 2
+
+static __always_inline __u8 esop_gateway_detail(__u32 route_kind,
+                                                 __u32 outcome)
+{
+    return (__u8)((outcome << 4) | route_kind);
+}
+
 static __always_inline __u32 esop_skb_ifindex(struct sk_buff *skb)
 {
     if (!skb) {
@@ -337,6 +385,129 @@ static __always_inline __u32 esop_skb_ifindex(struct sk_buff *skb)
     if (bpf_core_read(&skb_iif, sizeof(skb_iif), &skb->skb_iif) == 0 &&
         skb_iif > 0) {
         return (__u32)skb_iif;
+    }
+    return 0;
+}
+
+SEC("uprobe")
+int esop_gateway_publish_begin(struct pt_regs *registers)
+{
+    struct esop_context *context = esop_context();
+    struct esop_stats *stats = esop_stats();
+    __u64 request_id = (__u64)BPF_CORE_READ(registers, di);
+    __u32 route_kind = (__u32)BPF_CORE_READ(registers, si);
+    __u32 tgid = esop_tgid();
+    if (!context || context->gateway_stall_threshold_ns == 0 ||
+        request_id == 0 || route_kind > ESOP_GATEWAY_ROUTE_MAX ||
+        !esop_tracks(tgid, context)) {
+        if (stats && context && esop_tracks(tgid, context)) {
+            stats->gateway_probe_mismatches++;
+        }
+        return 0;
+    }
+
+    struct esop_gateway_operation_key key = {
+        .request_id = request_id,
+        .tgid = tgid,
+    };
+    struct esop_gateway_operation_state state = {
+        .start_ns = bpf_ktime_get_ns(),
+        .policy_epoch = context->gateway_probe_epoch,
+        .start_tid = esop_tid(),
+        .route_kind = route_kind,
+    };
+    if (bpf_map_update_elem(&ESOP_GATEWAY_OPERATIONS, &key, &state,
+                            BPF_NOEXIST) < 0) {
+        if (stats) {
+            stats->gateway_probe_mismatches++;
+            stats->lost_events++;
+        }
+        return 0;
+    }
+    if (stats) {
+        stats->gateway_probe_begins++;
+    }
+    return 0;
+}
+
+SEC("uprobe")
+int esop_gateway_publish_end(struct pt_regs *registers)
+{
+    struct esop_stats *stats = esop_stats();
+    __u64 request_id = (__u64)BPF_CORE_READ(registers, di);
+    __u32 route_kind = (__u32)BPF_CORE_READ(registers, si);
+    __u32 outcome = (__u32)BPF_CORE_READ(registers, dx);
+    __u32 tgid = esop_tgid();
+    if (request_id == 0) {
+        if (stats) {
+            stats->gateway_probe_mismatches++;
+        }
+        return 0;
+    }
+
+    struct esop_gateway_operation_key key = {
+        .request_id = request_id,
+        .tgid = tgid,
+    };
+    struct esop_gateway_operation_state *state =
+        bpf_map_lookup_elem(&ESOP_GATEWAY_OPERATIONS, &key);
+    if (!state) {
+        if (stats) {
+            stats->gateway_probe_mismatches++;
+        }
+        return 0;
+    }
+
+    __u64 start_ns = state->start_ns;
+    __u32 policy_epoch = state->policy_epoch;
+    __u32 start_tid = state->start_tid;
+    __u32 start_route_kind = state->route_kind;
+    if (bpf_map_delete_elem(&ESOP_GATEWAY_OPERATIONS, &key) < 0) {
+        if (stats) {
+            stats->gateway_probe_mismatches++;
+        }
+        return 0;
+    }
+    if (stats) {
+        stats->gateway_probe_completions++;
+    }
+
+    struct esop_context *context = esop_context();
+    if (!context || context->gateway_stall_threshold_ns == 0 ||
+        route_kind > ESOP_GATEWAY_ROUTE_MAX ||
+        outcome > ESOP_GATEWAY_OUTCOME_MAX || route_kind != start_route_kind ||
+        policy_epoch != context->gateway_probe_epoch) {
+        if (stats) {
+            stats->gateway_probe_mismatches++;
+        }
+        return 0;
+    }
+
+    __u64 now = bpf_ktime_get_ns();
+    if (now < start_ns) {
+        if (stats) {
+            stats->gateway_probe_mismatches++;
+        }
+        return 0;
+    }
+    __u64 duration_ns = now - start_ns;
+    if (duration_ns <= context->gateway_stall_threshold_ns) {
+        return 0;
+    }
+
+    __u32 end_tid = esop_tid();
+    __u32 evidence_tid = start_tid == end_tid ? end_tid : 0;
+    __u32 cpu = bpf_get_smp_processor_id();
+    __u16 event_cpu = cpu > 0xffff ? 0xffff : (__u16)cpu;
+    if (esop_emit_resource_cpu_task_id(
+            request_id, 7, 7, 2, duration_ns,
+            context->gateway_stall_threshold_ns, duration_ns, 1, 0, 0,
+            esop_gateway_detail(route_kind, outcome), tgid, evidence_tid,
+            event_cpu) == 0) {
+        stats = esop_stats();
+        if (stats) {
+            stats->gateway_stalls++;
+        }
     }
     return 0;
 }

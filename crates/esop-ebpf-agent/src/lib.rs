@@ -168,8 +168,10 @@ pub struct RuntimeEvidence {
     pub severity: IncidentSeverity,
     /// Kind-specific bounded detail. Network drops carry the saturated kernel
     /// skb drop reason, while CPU migrations carry saturated scheduler
-    /// priority; producers without a detail value write zero. For
-    /// `CpuMigration`, `irq` is the origin CPU and `cpu` is the destination.
+    /// priority. Gateway stalls carry the route kind in bits 0-2 and publish
+    /// outcome in bits 4-5. Producers without a detail value write zero. For
+    /// `CpuMigration`, `irq` is the origin CPU and `cpu` is the destination;
+    /// for a gateway operation that changes worker threads, `tid` is zero.
     pub detail: u8,
 }
 
@@ -570,6 +572,9 @@ fn classify(
     correlated: bool,
 ) -> Option<(IncidentCode, IncidentSeverity, RecommendedAction, u8)> {
     let over_threshold = evidence.observed_value > evidence.threshold;
+    let duration_over_threshold = evidence.threshold > 0
+        && evidence.duration_ns > evidence.threshold
+        && evidence.observed_value == evidence.duration_ns;
     let enough_count = evidence.threshold > 0
         && evidence.count > 0
         && u64::from(evidence.count) >= evidence.threshold;
@@ -637,7 +642,7 @@ fn classify(
                 70,
             ))
         }
-        EvidenceKind::GatewayStall if correlated => Some((
+        EvidenceKind::GatewayStall if duration_over_threshold && correlated => Some((
             IncidentCode::GatewayStall,
             IncidentSeverity::Error,
             RecommendedAction::ControlledStop,
@@ -1080,6 +1085,71 @@ mod tests {
             })
             .unwrap();
         assert_eq!(healthy.ingest(limited).unwrap(), None);
+    }
+
+    #[test]
+    fn gateway_stall_requires_consistent_duration_threshold_and_cycle_risk() {
+        let mut correlator = IncidentCorrelator::<4>::new(11, 3, 1_000);
+        correlator
+            .observe_cycle(CycleContext {
+                boot_id: 11,
+                cycle_seq: 42,
+                transition_seq: 9,
+                timestamp_ns: 1_000,
+                deadline_miss: 1,
+                ..CycleContext::EMPTY
+            })
+            .unwrap();
+
+        let mut stall = evidence(EvidenceKind::GatewayStall, 1_100);
+        stall.domain = EvidenceDomain::UserZenoh;
+        stall.evidence_id = 77;
+        stall.pid = 1_234;
+        stall.tid = 0;
+        stall.observed_value = 1_500_000;
+        stall.threshold = 1_000_000;
+        stall.duration_ns = 1_500_000;
+        stall.count = 1;
+        stall.detail = 0x12;
+
+        let incident = correlator.ingest(stall).unwrap().unwrap();
+        assert_eq!(incident.code, IncidentCode::GatewayStall);
+        assert_eq!(incident.severity, IncidentSeverity::Error);
+        assert_eq!(incident.pid, 1_234);
+        assert_eq!(incident.tid, 0);
+        assert_eq!(incident.evidence[0].detail, 0x12);
+        assert_eq!(incident.confidence_percent, 75);
+        assert_eq!(
+            incident.recommended_action,
+            RecommendedAction::ControlledStop
+        );
+
+        let mut at_threshold = stall;
+        at_threshold.evidence_id = 78;
+        at_threshold.observed_value = at_threshold.threshold;
+        at_threshold.duration_ns = at_threshold.threshold;
+        assert_eq!(correlator.ingest(at_threshold).unwrap(), None);
+
+        let mut inconsistent = stall;
+        inconsistent.evidence_id = 79;
+        inconsistent.observed_value += 1;
+        assert_eq!(correlator.ingest(inconsistent).unwrap(), None);
+
+        let mut zero_threshold = stall;
+        zero_threshold.evidence_id = 80;
+        zero_threshold.threshold = 0;
+        assert_eq!(correlator.ingest(zero_threshold).unwrap(), None);
+
+        let mut healthy = IncidentCorrelator::<2>::new(11, 3, 1_000);
+        healthy
+            .observe_cycle(CycleContext {
+                boot_id: 11,
+                cycle_seq: 42,
+                timestamp_ns: 1_000,
+                ..CycleContext::EMPTY
+            })
+            .unwrap();
+        assert_eq!(healthy.ingest(stall).unwrap(), None);
     }
 
     #[test]

@@ -17,6 +17,24 @@ typedef unsigned long long __u64;
 typedef signed int __s32;
 typedef int pid_t;
 
+struct pt_regs {
+    unsigned long r15;
+    unsigned long r14;
+    unsigned long r13;
+    unsigned long r12;
+    unsigned long bp;
+    unsigned long bx;
+    unsigned long r11;
+    unsigned long r10;
+    unsigned long r9;
+    unsigned long r8;
+    unsigned long ax;
+    unsigned long cx;
+    unsigned long dx;
+    unsigned long si;
+    unsigned long di;
+};
+
 struct trace_entry {
     unsigned short type;
     unsigned char flags;

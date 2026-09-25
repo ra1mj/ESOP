@@ -714,6 +714,98 @@ Filter the typed scheduler entity, count migrations in a bounded epoch-aware
 window, emit the first threshold crossing with source/destination identity, and
 require transport-risk correlation before assigning the existing incident code.
 
+## Scenario: eBPF Gateway Publish Stall Evidence
+
+### 1. Scope / Trigger
+
+- Trigger: add or change Zenoh gateway publish markers, gateway uprobes,
+  gateway tracking policy, fixed evidence decode, or gateway-stall
+  classification.
+- Scope: this contract covers the complete asynchronous `publish` operation
+  only. It does not qualify query/subscription, ROS2, recorder, target-kernel
+  attachment, fault injection, or production overhead.
+
+### 2. Signatures
+
+- Stable marker ABI:
+  `esop_zenoh_gateway_publish_begin_v1(request_id, route_kind)` and
+  `esop_zenoh_gateway_publish_end_v1(request_id, route_kind, outcome)`.
+- Configuration: `RuntimeConfig::gateway_stall_threshold_ns` and
+  `BpfRuntime::update_gateway_tracking(threshold_ns)`.
+- Attachment: `BpfRuntime::attach_gateway_publish_probes(target, pid,
+  required)` attaches the exact marker symbols as one pair.
+
+### 3. Contracts
+
+- Request IDs are nonzero process-local atomic values. Route and outcome are
+  fixed integers; no user string is parsed in BPF.
+- The guard begins immediately before the awaited Session put and ends exactly
+  once after success, transport failure handling, or future cancellation.
+- One 1024-entry LRU map tracks `{TGID, request_id}`. State includes monotonic
+  start time, nonzero policy epoch, start TID, and route; every matched end
+  deletes state before validation or emission.
+- Context updates are staged and atomically published. Zero threshold is
+  rejected without mutation; successful threshold or tracked-PID changes
+  advance the gateway epoch.
+- The fixed event remains 96 bytes. It writes request ID to `evidence_id`,
+  TGID to PID, matching worker TID or zero after migration, elapsed time to
+  both `observed_value` and `duration_ns`, configured threshold to `threshold`,
+  and route/outcome to bounded detail.
+- `GatewayStall` classification requires nonzero threshold, strict
+  `duration_ns > threshold`, consistent observed duration, and a correlated
+  deadline/WKC/DC-risk cycle.
+
+### 4. Validation & Error Matrix
+
+- Zero threshold or nonpositive explicit attach PID ->
+  `InvalidConfiguration`; do not mutate the context or capability snapshot.
+- Missing optional program/symbol/target -> `Ok(false)` with the kernel
+  baseline intact; required mode returns the typed failure.
+- Second-probe failure -> detach the first link and publish neither attach bit.
+- Duplicate/missing request, invalid route/outcome, backwards time, or stale
+  epoch -> delete matched state where possible, increment mismatch statistics,
+  and emit no incident.
+- Map insertion or ring-buffer failure -> bounded diagnostics/loss accounting;
+  never block the gateway or control path.
+
+### 5. Good/Base/Bad Cases
+
+- Good: request 77 publishes diagnostics for 1.5 ms against a 1 ms threshold,
+  completes on another worker during cycle 42 with a deadline miss, and emits
+  one PID-attributed/TID-zero gateway incident.
+- Base: an at-threshold publish completes and removes state without evidence;
+  cancellation also closes its marker state exactly once.
+- Bad: attach a return probe directly to Rust `async fn publish`, call enum-only
+  evidence a stall, preserve a stale TID after worker migration, or leave the
+  first uprobe attached after the second fails.
+
+### 6. Tests Required
+
+- Exact-symbol integration links and calls both versioned C ABI markers.
+- Marker tests cover concurrent nonzero unique IDs, one terminal call, and
+  cancellation.
+- Decode tests assert request ID, route/outcome, PID/TID, duration, threshold,
+  discriminants, and unchanged 96-byte event size.
+- Configuration tests reject zero without mutation and prove epoch advancement;
+  C/Rust context and statistics sizes must match.
+- Correlator tests accept one valid risk-cycle stall and reject at/below
+  threshold, inconsistent duration, zero threshold, and healthy-cycle cases.
+- Statistics aggregation saturates; BPF syntax and CO-RE object compilation
+  cover the bounded map and x86_64 marker argument ABI.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+Measure only async future construction with uretprobe, attach one marker at a
+time, and classify every `GatewayStall` discriminant as a root cause.
+
+#### Correct
+
+Bracket the awaited operation with stable begin/end markers, attach them
+transactionally, track bounded request state, and require internally
+consistent over-threshold duration plus transport-risk correlation.
+
 ## Code Review Checklist
 
 - Is the worst-case loop bounded by a static capacity or explicit budget?

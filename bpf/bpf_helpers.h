@@ -30,6 +30,7 @@ typedef signed long long __s64;
 #endif
 
 #define BPF_ANY 0
+#define BPF_NOEXIST 1
 #define BPF_MAP_TYPE_HASH 1
 #define BPF_MAP_TYPE_ARRAY 2
 #define BPF_MAP_TYPE_PERCPU_ARRAY 6

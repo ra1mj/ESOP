@@ -7,7 +7,8 @@ use std::path::Path;
 
 use aya::maps::{Array, MapData, MapError, PerCpuArray, RingBuf};
 use aya::programs::trace_point::TracePointLinkId;
-use aya::programs::{ProgramError, TracePoint};
+use aya::programs::uprobe::UProbeLinkId;
+use aya::programs::{ProgramError, TracePoint, UProbe};
 use aya::{Ebpf, EbpfError, Pod};
 use esop_ebpf_agent::{
     CAPABILITY_BTF, CAPABILITY_PERMISSION, CAPABILITY_RINGBUF, CAPABILITY_VERIFIER,
@@ -31,8 +32,11 @@ pub const ATTACH_SOFTIRQ_ENTRY: u64 = 1 << 8;
 pub const ATTACH_SOFTIRQ_EXIT: u64 = 1 << 9;
 pub const ATTACH_CPU_FREQUENCY_LIMIT: u64 = 1 << 10;
 pub const ATTACH_SCHED_MIGRATE_TASK: u64 = 1 << 11;
+pub const ATTACH_GATEWAY_PUBLISH_BEGIN: u64 = 1 << 12;
+pub const ATTACH_GATEWAY_PUBLISH_END: u64 = 1 << 13;
 pub const ATTACH_IRQ_HANDLER: u64 = ATTACH_IRQ_HANDLER_ENTRY | ATTACH_IRQ_HANDLER_EXIT;
 pub const ATTACH_SOFTIRQ: u64 = ATTACH_SOFTIRQ_ENTRY | ATTACH_SOFTIRQ_EXIT;
+pub const ATTACH_GATEWAY_PUBLISH: u64 = ATTACH_GATEWAY_PUBLISH_BEGIN | ATTACH_GATEWAY_PUBLISH_END;
 pub const NETWORK_PROTOCOL_ETHERCAT: u16 = 0x88A4;
 pub const CPU_FREQUENCY_POLICY_ALL: u32 = u32::MAX;
 pub const ATTACH_ALL: u64 = ATTACH_SCHED_WAKEUP
@@ -45,6 +49,8 @@ pub const ATTACH_ALL: u64 = ATTACH_SCHED_WAKEUP
     | ATTACH_SOFTIRQ
     | ATTACH_CPU_FREQUENCY_LIMIT
     | ATTACH_SCHED_MIGRATE_TASK;
+pub const GATEWAY_PUBLISH_BEGIN_SYMBOL: &str = "esop_zenoh_gateway_publish_begin_v1";
+pub const GATEWAY_PUBLISH_END_SYMBOL: &str = "esop_zenoh_gateway_publish_end_v1";
 
 const TRACEFS_EVENT_ROOTS: [&str; 2] = [
     "/sys/kernel/tracing/events",
@@ -123,6 +129,7 @@ pub struct RuntimeConfig {
     /// Exact representative cpufreq policy CPU, or
     /// [`CPU_FREQUENCY_POLICY_ALL`] to observe every policy.
     pub cpu_frequency_policy_cpu: u32,
+    pub gateway_stall_threshold_ns: u64,
     pub boot_id: u64,
     pub agent_epoch: u64,
 }
@@ -153,6 +160,7 @@ impl RuntimeConfig {
                 self.cpu_frequency_floor_khz,
                 self.cpu_frequency_policy_cpu,
             )
+            && self.gateway_stall_threshold_ns > 0
     }
 }
 
@@ -213,6 +221,7 @@ impl Default for RuntimeConfig {
             softirq_duration_threshold_ns: 500_000,
             cpu_frequency_floor_khz: 1,
             cpu_frequency_policy_cpu: CPU_FREQUENCY_POLICY_ALL,
+            gateway_stall_threshold_ns: 1_000_000,
             boot_id: 0,
             agent_epoch: 0,
         }
@@ -251,6 +260,9 @@ pub struct KernelContext {
     pub scheduler_migration_epoch: u32,
     pub scheduler_migration_threshold: u64,
     pub scheduler_migration_window_ns: u64,
+    pub gateway_stall_threshold_ns: u64,
+    pub gateway_probe_epoch: u32,
+    pub reserved_gateway: u32,
 }
 
 // SAFETY: The BPF map value is an all-integer C-compatible record without
@@ -284,6 +296,9 @@ impl KernelContext {
             scheduler_migration_epoch: 1,
             scheduler_migration_threshold: config.scheduler_migration_threshold,
             scheduler_migration_window_ns: config.scheduler_migration_window_ns,
+            gateway_stall_threshold_ns: config.gateway_stall_threshold_ns,
+            gateway_probe_epoch: 1,
+            reserved_gateway: 0,
         }
     }
 
@@ -313,7 +328,21 @@ impl KernelContext {
             scheduler_migration_epoch: self.scheduler_migration_epoch,
             scheduler_migration_threshold: self.scheduler_migration_threshold,
             scheduler_migration_window_ns: self.scheduler_migration_window_ns,
+            gateway_stall_threshold_ns: self.gateway_stall_threshold_ns,
+            gateway_probe_epoch: self.gateway_probe_epoch,
+            reserved_gateway: 0,
         }
+    }
+
+    fn set_tracked_pid(&mut self, tracked_pid: u32) {
+        if self.tracked_pid == tracked_pid {
+            return;
+        }
+        if self.scheduler_tid == 0 {
+            self.scheduler_migration_epoch = self.scheduler_migration_epoch.wrapping_add(1).max(1);
+        }
+        self.gateway_probe_epoch = self.gateway_probe_epoch.wrapping_add(1).max(1);
+        self.tracked_pid = tracked_pid;
     }
 
     fn set_network_tracking(
@@ -378,6 +407,15 @@ impl KernelContext {
         self.scheduler_migration_window_ns = scheduler_migration_window_ns;
         true
     }
+
+    fn set_gateway_tracking(&mut self, gateway_stall_threshold_ns: u64) -> bool {
+        if gateway_stall_threshold_ns == 0 {
+            return false;
+        }
+        self.gateway_probe_epoch = self.gateway_probe_epoch.wrapping_add(1).max(1);
+        self.gateway_stall_threshold_ns = gateway_stall_threshold_ns;
+        true
+    }
 }
 
 /// Per-CPU counters maintained by the BPF bundle.
@@ -406,6 +444,10 @@ pub struct KernelStats {
     pub cpu_frequency_suppressed: u64,
     pub scheduler_migrations: u64,
     pub scheduler_migration_threshold_events: u64,
+    pub gateway_probe_begins: u64,
+    pub gateway_probe_completions: u64,
+    pub gateway_stalls: u64,
+    pub gateway_probe_mismatches: u64,
 }
 
 // SAFETY: The BPF map value is an all-u64 C-compatible record without padding
@@ -456,6 +498,16 @@ impl KernelStats {
         self.scheduler_migration_threshold_events = self
             .scheduler_migration_threshold_events
             .saturating_add(other.scheduler_migration_threshold_events);
+        self.gateway_probe_begins = self
+            .gateway_probe_begins
+            .saturating_add(other.gateway_probe_begins);
+        self.gateway_probe_completions = self
+            .gateway_probe_completions
+            .saturating_add(other.gateway_probe_completions);
+        self.gateway_stalls = self.gateway_stalls.saturating_add(other.gateway_stalls);
+        self.gateway_probe_mismatches = self
+            .gateway_probe_mismatches
+            .saturating_add(other.gateway_probe_mismatches);
     }
 }
 
@@ -505,10 +557,7 @@ impl fmt::Display for RuntimeError {
             Self::Program(error) => write!(formatter, "BPF program operation failed: {error}"),
             Self::MissingMap(name) => write!(formatter, "required BPF map `{name}` is missing"),
             Self::MissingProgram(name) => {
-                write!(
-                    formatter,
-                    "required BPF tracepoint program `{name}` is missing"
-                )
+                write!(formatter, "required BPF program `{name}` is missing")
             }
             Self::Evidence(error) => write!(formatter, "malformed BPF evidence: {error:?}"),
             Self::Correlator(error) => {
@@ -560,6 +609,24 @@ struct AttachSpec {
     category: &'static str,
     event: &'static str,
 }
+
+#[derive(Clone, Copy)]
+struct UserProbeSpec {
+    mask: u64,
+    program: &'static str,
+    symbol: &'static str,
+}
+
+const GATEWAY_PUBLISH_BEGIN_SPEC: UserProbeSpec = UserProbeSpec {
+    mask: ATTACH_GATEWAY_PUBLISH_BEGIN,
+    program: "esop_gateway_publish_begin",
+    symbol: GATEWAY_PUBLISH_BEGIN_SYMBOL,
+};
+const GATEWAY_PUBLISH_END_SPEC: UserProbeSpec = UserProbeSpec {
+    mask: ATTACH_GATEWAY_PUBLISH_END,
+    program: "esop_gateway_publish_end",
+    symbol: GATEWAY_PUBLISH_END_SYMBOL,
+};
 
 const IRQ_HANDLER_ENTRY_SPEC: AttachSpec = AttachSpec {
     point: AttachPoint::IrqHandlerEntry,
@@ -743,6 +810,53 @@ impl BpfRuntime {
         self.kernel_context
     }
 
+    /// Attach the stable gateway publish begin/end markers as one logical
+    /// pair. Optional unavailability leaves the kernel tracepoint baseline
+    /// intact and returns `Ok(false)`; required mode propagates the failure.
+    pub fn attach_gateway_publish_probes(
+        &mut self,
+        target: impl AsRef<Path>,
+        pid: Option<i32>,
+        required: bool,
+    ) -> Result<bool, RuntimeError> {
+        if pid.is_some_and(|pid| pid <= 0) {
+            return Err(RuntimeError::InvalidConfiguration);
+        }
+        if self.attach_mask & ATTACH_GATEWAY_PUBLISH == ATTACH_GATEWAY_PUBLISH {
+            if required {
+                self.refresh_snapshot(self.snapshot.required_attach_mask | ATTACH_GATEWAY_PUBLISH);
+            }
+            return Ok(true);
+        }
+
+        let target = target.as_ref();
+        let Some(begin_link) =
+            self.attach_uprobe(GATEWAY_PUBLISH_BEGIN_SPEC, target, pid, required)?
+        else {
+            return Ok(false);
+        };
+        match self.attach_uprobe(GATEWAY_PUBLISH_END_SPEC, target, pid, required) {
+            Ok(Some(_)) => {
+                self.attach_mask |= GATEWAY_PUBLISH_BEGIN_SPEC.mask | GATEWAY_PUBLISH_END_SPEC.mask;
+                let required_mask = if required {
+                    self.snapshot.required_attach_mask | ATTACH_GATEWAY_PUBLISH
+                } else {
+                    self.snapshot.required_attach_mask
+                };
+                self.refresh_snapshot(required_mask);
+                Ok(true)
+            }
+            Ok(None) => {
+                self.detach_uprobe(GATEWAY_PUBLISH_BEGIN_SPEC, begin_link)?;
+                Ok(false)
+            }
+            Err(error) => {
+                self.detach_uprobe(GATEWAY_PUBLISH_BEGIN_SPEC, begin_link)?;
+                Err(error)
+            }
+        }
+    }
+
     /// Project loader health into the observation agent. This only changes the
     /// host-observation lease state; it cannot grant a motion permit.
     pub fn apply_capability_snapshot<const INCIDENTS: usize>(
@@ -776,11 +890,7 @@ impl BpfRuntime {
             return Err(RuntimeError::InvalidConfiguration);
         }
         let mut updated = self.kernel_context;
-        if updated.scheduler_tid == 0 && updated.tracked_pid != tracked_pid {
-            updated.scheduler_migration_epoch =
-                updated.scheduler_migration_epoch.wrapping_add(1).max(1);
-        }
-        updated.tracked_pid = tracked_pid;
+        updated.set_tracked_pid(tracked_pid);
         updated.scheduler_latency_threshold_ns = scheduler_latency_threshold_ns;
         updated.network_drop_threshold = network_drop_threshold;
         self.context.set(0, updated, 0)?;
@@ -817,6 +927,21 @@ impl BpfRuntime {
             scheduler_migration_threshold,
             scheduler_migration_window_ns,
         ) {
+            return Err(RuntimeError::InvalidConfiguration);
+        }
+        self.context.set(0, updated, 0)?;
+        self.kernel_context = updated;
+        Ok(())
+    }
+
+    /// Atomically replace the gateway publish stall threshold and invalidate
+    /// any operation that began under the previous policy epoch.
+    pub fn update_gateway_tracking(
+        &mut self,
+        gateway_stall_threshold_ns: u64,
+    ) -> Result<(), RuntimeError> {
+        let mut updated = self.kernel_context;
+        if !updated.set_gateway_tracking(gateway_stall_threshold_ns) {
             return Err(RuntimeError::InvalidConfiguration);
         }
         self.context.set(0, updated, 0)?;
@@ -1028,6 +1153,69 @@ impl BpfRuntime {
         let tracepoint: &mut TracePoint = program.try_into()?;
         tracepoint.detach(link)?;
         Ok(())
+    }
+
+    fn attach_uprobe(
+        &mut self,
+        spec: UserProbeSpec,
+        target: &Path,
+        pid: Option<i32>,
+        required: bool,
+    ) -> Result<Option<UProbeLinkId>, RuntimeError> {
+        let Some(program) = self.bpf.program_mut(spec.program) else {
+            return if required {
+                Err(RuntimeError::MissingProgram(spec.program))
+            } else {
+                Ok(None)
+            };
+        };
+        let uprobe: &mut UProbe = match program.try_into() {
+            Ok(uprobe) => uprobe,
+            Err(error) if required => return Err(RuntimeError::Program(error)),
+            Err(_) => return Ok(None),
+        };
+        match uprobe.fd() {
+            Ok(_) => {}
+            Err(ProgramError::NotLoaded) => {
+                if let Err(error) = uprobe.load() {
+                    return if required {
+                        Err(RuntimeError::Program(error))
+                    } else {
+                        Ok(None)
+                    };
+                }
+            }
+            Err(error) if required => return Err(RuntimeError::Program(error)),
+            Err(_) => return Ok(None),
+        }
+        match uprobe.attach(Some(spec.symbol), 0, target, pid) {
+            Ok(link) => Ok(Some(link)),
+            Err(error) if required => Err(RuntimeError::Program(error)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn detach_uprobe(
+        &mut self,
+        spec: UserProbeSpec,
+        link: UProbeLinkId,
+    ) -> Result<(), RuntimeError> {
+        let program = self
+            .bpf
+            .program_mut(spec.program)
+            .ok_or(RuntimeError::MissingProgram(spec.program))?;
+        let uprobe: &mut UProbe = program.try_into()?;
+        uprobe.detach(link)?;
+        Ok(())
+    }
+
+    fn refresh_snapshot(&mut self, required_attach_mask: u64) {
+        self.snapshot = CapabilitySnapshot::new(
+            self.snapshot.kernel_release_hash,
+            self.attach_mask,
+            required_attach_mask,
+            self.snapshot.capability_mask,
+        );
     }
 }
 
@@ -1348,6 +1536,33 @@ mod tests {
         assert_eq!(evidence.count, 4);
         assert_eq!(evidence.detail, 20);
         assert_eq!(evidence.kind, EvidenceKind::CpuMigration);
+
+        put_u64(&mut bytes, 0, 99);
+        put_u32(&mut bytes, 48, 1_234);
+        put_u32(&mut bytes, 52, 0);
+        put_u16(&mut bytes, 56, 3);
+        put_u16(&mut bytes, 58, 0);
+        put_u32(&mut bytes, 60, 0);
+        put_u64(&mut bytes, 64, 1_500_000);
+        put_u64(&mut bytes, 72, 1_000_000);
+        put_u64(&mut bytes, 80, 1_500_000);
+        put_u32(&mut bytes, 88, 1);
+        bytes[92] = EvidenceDomain::UserZenoh as u8;
+        bytes[93] = EvidenceKind::GatewayStall as u8;
+        bytes[94] = IncidentSeverity::Error as u8;
+        bytes[95] = 0x12;
+        let evidence = decode_evidence(&bytes).unwrap();
+        assert_eq!(evidence.evidence_id, 99);
+        assert_eq!(evidence.pid, 1_234);
+        assert_eq!(evidence.tid, 0);
+        assert_eq!(evidence.cpu, 3);
+        assert_eq!(evidence.observed_value, 1_500_000);
+        assert_eq!(evidence.threshold, 1_000_000);
+        assert_eq!(evidence.duration_ns, 1_500_000);
+        assert_eq!(evidence.count, 1);
+        assert_eq!(evidence.domain, EvidenceDomain::UserZenoh);
+        assert_eq!(evidence.kind, EvidenceKind::GatewayStall);
+        assert_eq!(evidence.detail, 0x12);
     }
 
     #[test]
@@ -1477,6 +1692,12 @@ mod tests {
         };
         assert!(config.valid());
 
+        let config = RuntimeConfig {
+            gateway_stall_threshold_ns: 0,
+            ..RuntimeConfig::default()
+        };
+        assert!(!config.valid());
+
         let mut config = RuntimeConfig::default();
         config.enabled_attach_mask |= 1 << 63;
         assert!(!config.valid());
@@ -1500,6 +1721,7 @@ mod tests {
             softirq_duration_threshold_ns: 500,
             cpu_frequency_floor_khz: 2_000_000,
             cpu_frequency_policy_cpu: 7,
+            gateway_stall_threshold_ns: 900_000,
             boot_id: 5,
             agent_epoch: 7,
             ..RuntimeConfig::default()
@@ -1529,6 +1751,8 @@ mod tests {
         assert_eq!(context.scheduler_migration_threshold, 4);
         assert_eq!(context.scheduler_migration_window_ns, 500);
         assert_eq!(context.scheduler_migration_epoch, 1);
+        assert_eq!(context.gateway_stall_threshold_ns, 900_000);
+        assert_eq!(context.gateway_probe_epoch, 1);
     }
 
     #[test]
@@ -1608,9 +1832,33 @@ mod tests {
     }
 
     #[test]
+    fn gateway_tracking_updates_are_validated_before_commit() {
+        let mut context = KernelContext::from_config(RuntimeConfig::default());
+        let original_epoch = context.gateway_probe_epoch;
+        assert!(context.set_gateway_tracking(2_000_000));
+        assert_eq!(context.gateway_stall_threshold_ns, 2_000_000);
+        assert_eq!(context.gateway_probe_epoch, original_epoch + 1);
+
+        let unchanged = context;
+        assert!(!context.set_gateway_tracking(0));
+        assert_eq!(context, unchanged);
+
+        let scheduler_epoch = context.scheduler_migration_epoch;
+        let gateway_epoch = context.gateway_probe_epoch;
+        context.set_tracked_pid(42);
+        assert_eq!(context.tracked_pid, 42);
+        assert_eq!(context.scheduler_migration_epoch, scheduler_epoch + 1);
+        assert_eq!(context.gateway_probe_epoch, gateway_epoch + 1);
+
+        let unchanged = context;
+        context.set_tracked_pid(42);
+        assert_eq!(context, unchanged);
+    }
+
+    #[test]
     fn kernel_map_abis_and_attach_masks_remain_explicit() {
-        assert_eq!(std::mem::size_of::<KernelContext>(), 144);
-        assert_eq!(std::mem::size_of::<KernelStats>(), 176);
+        assert_eq!(std::mem::size_of::<KernelContext>(), 160);
+        assert_eq!(std::mem::size_of::<KernelStats>(), 208);
 
         let mut observed = 0;
         for spec in ATTACH_SPECS {
@@ -1618,6 +1866,19 @@ mod tests {
             observed |= spec.point.mask();
         }
         assert_eq!(observed, ATTACH_ALL);
+        assert_eq!(ATTACH_ALL & ATTACH_GATEWAY_PUBLISH, 0);
+        assert_eq!(
+            GATEWAY_PUBLISH_BEGIN_SPEC.mask | GATEWAY_PUBLISH_END_SPEC.mask,
+            ATTACH_GATEWAY_PUBLISH
+        );
+        assert!(complete_pair(
+            ATTACH_GATEWAY_PUBLISH,
+            ATTACH_GATEWAY_PUBLISH
+        ));
+        assert!(!complete_pair(
+            ATTACH_GATEWAY_PUBLISH_BEGIN,
+            ATTACH_GATEWAY_PUBLISH
+        ));
         assert_eq!(
             normalize_attach_pairs(ATTACH_ALL & !ATTACH_IRQ_HANDLER_EXIT),
             ATTACH_ALL & !ATTACH_IRQ_HANDLER
@@ -1651,6 +1912,10 @@ mod tests {
             cpu_frequency_suppressed: u64::MAX,
             scheduler_migrations: u64::MAX,
             scheduler_migration_threshold_events: 9,
+            gateway_probe_begins: u64::MAX,
+            gateway_probe_completions: 11,
+            gateway_stalls: 12,
+            gateway_probe_mismatches: u64::MAX,
             ..KernelStats::default()
         });
         assert_eq!(aggregate.irq_samples, u64::MAX);
@@ -1668,5 +1933,9 @@ mod tests {
         assert_eq!(aggregate.cpu_frequency_suppressed, u64::MAX);
         assert_eq!(aggregate.scheduler_migrations, u64::MAX);
         assert_eq!(aggregate.scheduler_migration_threshold_events, 9);
+        assert_eq!(aggregate.gateway_probe_begins, u64::MAX);
+        assert_eq!(aggregate.gateway_probe_completions, 11);
+        assert_eq!(aggregate.gateway_stalls, 12);
+        assert_eq!(aggregate.gateway_probe_mismatches, u64::MAX);
     }
 }
