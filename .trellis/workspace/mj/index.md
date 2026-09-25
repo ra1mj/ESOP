@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 9
+- **Total Sessions**: 10
 - **Last Active**: 2026-09-25
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~306 | Active |
+| `journal-1.md` | ~339 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 10 | 2026-09-25 | eBPF gateway callback stall attribution | `5ab9ee1` | `main` |
 | 9 | 2026-09-25 | eBPF gateway stall attribution | `0d163fa` | `main` |
 | 8 | 2026-09-25 | eBPF CPU migration attribution | `5065098` | `main` |
 | 7 | 2026-09-25 | eBPF CPU frequency limit attribution | `e935969` | `main` |

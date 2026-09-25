@@ -304,3 +304,36 @@ Added stable Zenoh publish lifecycle markers, transactional gateway uprobes, bou
 ### Next Steps
 
 - None - task complete
+
+
+## Session 10: eBPF gateway callback stall attribution
+
+**Date**: 2026-09-25
+**Task**: eBPF gateway callback stall attribution
+**Branch**: `main`
+
+### Summary
+
+Added stable Zenoh command/query callback markers, shared gateway request IDs, BPF operation-class validation, atomic Aya callback probe attachment, fixed-ABI coverage, live Zenoh validation, and truthful observability documentation.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5ab9ee1` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
