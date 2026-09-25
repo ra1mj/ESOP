@@ -72,7 +72,21 @@
         "crates/esop-procbuf/src/lib.rs",
         "crates/esop-procbuf/tests/cross_layer.rs"
       ],
-      "limitation": "Shared-memory, RPMsg and UDS transport integrations are separate scope"
+      "limitation": "Shared-memory, RPMsg and payload-specific transport adapters remain separate scope; hosted Unix datagram transport is tracked by unix_domain_ipc"
+    },
+    {
+      "id": "unix_domain_ipc",
+      "status": "partial",
+      "scope": "Hosted nonblocking filesystem Unix datagram transport with a bounded versioned frame, exact peer-path admission and peer restart/offline monitoring",
+      "evidence": [
+        "crates/esop-ipc/src/lib.rs",
+        "crates/esop-ipc/src/frame.rs",
+        "crates/esop-ipc/src/peer.rs",
+        "crates/esop-ipc/src/unix.rs",
+        "crates/esop-ipc/tests/unix_loopback.rs",
+        "docs/esop-ipc.md"
+      ],
+      "limitation": "Host filesystem Unix datagrams only; shared memory, RPMsg, payload-specific ProcBuf adapters, cryptographic identity, deployment ACL, production latency/WCET, long-duration stress and HIL remain open"
     },
     {
       "id": "command_gateway_policy",

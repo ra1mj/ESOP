@@ -680,6 +680,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "esop-ipc"
+version = "0.1.0"
+
+[[package]]
 name = "esop-lifecycle-guard"
 version = "0.1.0"
 dependencies = [

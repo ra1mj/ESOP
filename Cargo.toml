@@ -12,6 +12,7 @@ members = [
     "crates/esop-command-gateway",
     "crates/esop-proto",
     "crates/esop-zenoh-gateway",
+    "crates/esop-ipc",
 ]
 
 [workspace.package]

@@ -1689,6 +1689,98 @@ recover only after detach, larger-epoch reset, new-object load, complete fresh
 capabilities, and accepted new-epoch evidence. Keep policy-matrix tests separate
 from actual hosted fault injection and performance claims.
 
+## Scenario: Hosted Unix Datagram IPC Boundary
+
+### 1. Scope / Trigger
+
+- Trigger: add or change the IPC frame ABI, Unix datagram endpoint, peer
+  lifecycle monitor, or an adapter that crosses the ProcBuf/Linux supervision
+  boundary.
+- Scope: this contract covers hosted filesystem Unix datagrams only. It does
+  not qualify shared memory, RPMsg, payload-specific ProcBuf adapters,
+  cryptographic identity, deployment ACL, production WCET, stress, or HIL.
+- The transport must remain absent from EtherCAT, lifecycle, profile and
+  ProcBuf real-time dependency trees.
+
+### 2. Signatures
+
+- Frame: `IpcHeader`, `IpcFrame::new`, `IpcFrame::encode_into` and
+  `IpcFrame::decode`; v1 is an explicit 80-byte little-endian header with a
+  4096-byte maximum payload and IEEE payload CRC-32.
+- Lifecycle: `PeerPolicy`, `PeerMonitor::observe` and `PeerMonitor::status`.
+- Transport: `UnixDatagramEndpoint::bind`, `send` and `receive`; focused
+  verification is `make test-ipc`.
+
+### 3. Contracts
+
+- Never serialize raw Rust, ProcBuf, protobuf or C struct memory. Every offset,
+  width, byte order and reserved field is part of the versioned wire contract.
+- Reject zero schema/layout/robot/boot/source/sequence fields, unknown kinds,
+  nonzero reserved bits, over-capacity payloads, length mismatch, CRC mismatch,
+  nonempty heartbeat payloads and empty non-heartbeat payloads.
+- Same-boot traffic requires strictly increasing sequence and nondecreasing
+  remote time. A new boot resets those floors. Future, stale, wrong-identity and
+  backwards-local-time observations do not mutate peer state.
+- Endpoint calls attempt one bounded operation with no retry, sleep or worker.
+  Admit only the exact configured peer path. Refuse existing bind paths and
+  unlink on drop only when the path still identifies the socket created by the
+  endpoint.
+- IPC is transport and liveness evidence only. Command ACL, TTL, authority,
+  permits and motion lifecycle decisions stay in their existing policy owners.
+
+### 4. Validation & Error Matrix
+
+- Empty nonblocking receive or local queue pressure -> `WouldBlock`; peer path
+  absent/refused/reset -> `PeerUnavailable`; wrong sender ->
+  `UnexpectedSource`; one-byte-over-limit receive -> `OversizedDatagram`.
+- Short header, oversized payload, wrong magic/version/header size/kind,
+  reserved bits, semantic zero, exact-length mismatch and CRC failure -> stable
+  typed codec errors; never publish a partial frame.
+- Robot/layout/source mismatch, future/stale time, replayed sequence, remote or
+  local time regression -> stable typed peer errors; preserve the last accepted
+  state.
+- Existing local file/socket -> `LocalPathExists`; never remove it. Other I/O
+  faults retain the originating `io::Error`.
+
+### 5. Good/Base/Bad Cases
+
+- Good: command/state/heartbeat datagrams round-trip over two real nonblocking
+  sockets; a same-path peer rebind with a new boot ID is classified Restarted.
+- Base: an empty receive is `WouldBlock`, timeout boundary is still Online, and
+  the next same-boot fresh sequence is Continued.
+- Bad: `transmute` a ProcBuf page, retry until send succeeds, accept unnamed or
+  arbitrary senders, remove a pre-existing path, reuse sequence in one boot, or
+  treat CRC/path matching as authentication.
+
+### 6. Tests Required
+
+- Codec tests cover golden offsets/bytes, maximum payload, output capacity,
+  truncation, overlength, unknown/reserved values, semantic zeros and CRC.
+- Peer tests cover first contact, continued traffic, timeout boundaries,
+  offline/reconnect, new boot, replay, remote/local time regression, stale and
+  future frames, identity mismatch and no-mutation-on-error.
+- Kernel-backed Unix tests cover both directions, command/state/heartbeat,
+  `WouldBlock`, absent peer, unexpected source, oversized datagram, same-path
+  restart, bind refusal and owned/replaced-path cleanup.
+- Quality gates include focused Clippy/check, capability validation, full
+  workspace CI and dependency-tree proof that real-time crates do not acquire
+  `esop-ipc` or POSIX transport dependencies.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+Cast a process image into a datagram, block or retry under pressure, let the
+transport authorize motion, infer restart from a path alone, or unlink whatever
+currently occupies the endpoint path.
+
+#### Correct
+
+Encode one bounded versioned frame explicitly, return pressure to the caller,
+validate exact source plus identity/boot/sequence/time before committing peer
+state, keep safety policy outside transport, and remove only the socket inode
+owned by the endpoint.
+
 ## Code Review Checklist
 
 - Is the worst-case loop bounded by a static capacity or explicit budget?

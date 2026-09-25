@@ -1,0 +1,11 @@
+[package]
+name = "esop-ipc"
+version = "0.1.0"
+description = "Bounded nonblocking Unix domain IPC transport for ESOP supervision"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "esop_ipc"
+path = "src/lib.rs"
