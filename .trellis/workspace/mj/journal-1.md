@@ -502,3 +502,38 @@ Added an exact-TID two-CPU scheduler migration qualification fixture, strict rep
 ### Next Steps
 
 - None - task complete
+
+
+## Session 16: Qualify eBPF scheduler runqueue latency
+
+**Date**: 2026-09-25
+**Task**: Qualify eBPF scheduler runqueue latency
+**Branch**: `main`
+
+### Summary
+
+Added privileged hosted-Linux exact-TID scheduler runqueue latency qualification, strict report validation and CI artifact coverage; corrected fallback evidence-ID semantics and stabilized scheduler-migration setup with an inert pre-worker TID. Local make ci and GitHub Actions run 36123158759 passed, and downloaded runqueue/migration artifacts passed independent validation.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `7b89813` | (see git log) |
+| `bc9891a` | (see git log) |
+| `adc6131` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
