@@ -72,3 +72,37 @@ Added a fail-closed R2 qualification manifest, HIL topology and limitations arti
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: eBPF IRQ and softirq attribution
+
+**Date**: 2026-09-25
+**Task**: eBPF IRQ and softirq attribution
+**Branch**: `main`
+
+### Summary
+
+Added bounded hard IRQ and softirq duration probes, transactional attach-pair handling, runtime thresholds and statistics, HOST_IRQ_STORM correlation, tests, documentation, and successful local plus GitHub CO-RE validation.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `dc11d28` | (see git log) |
+| `59b271c` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
