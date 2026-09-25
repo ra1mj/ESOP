@@ -1,6 +1,14 @@
 #include "vmlinux.h"
 #include "bpf_helpers.h"
 
+_Static_assert(__builtin_types_compatible_p(
+                   typeof(((struct trace_event_raw_kfree_skb *)0)->reason),
+                   enum skb_drop_reason),
+               "kfree_skb reason must preserve its enum BTF kind");
+_Static_assert(sizeof(((struct trace_event_raw_kfree_skb *)0)->reason) ==
+                   sizeof(__u32),
+               "kfree_skb reason must remain 32-bit");
+
 struct esop_context {
     __u64 boot_id;
     __u64 agent_epoch;

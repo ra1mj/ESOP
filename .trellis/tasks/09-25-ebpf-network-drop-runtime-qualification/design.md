@@ -57,9 +57,9 @@ privilege/tool preflight
 ## Runtime and correlation contract
 
 - The runtime enables and requires only `ATTACH_NETWORK_DROP`. The hosted load
-  gate also verifies that the vendored `kfree_skb.reason` type is unsigned and
-  the BPF read does not require a `FIELD_SIGNED` relocation unsupported by the
-  current Aya loader. Decoder, statistics, correlator, and health policy remain
+  gate also verifies that the vendored `kfree_skb.reason` type preserves the
+  target `enum skb_drop_reason` BTF kind so Aya can apply its `FIELD_SIGNED`
+  relocation. Decoder, statistics, correlator, and health policy remain
   unchanged.
 - The BPF aggregation key is `{cpu, ifindex}`. CPU affinity plus synchronous
   veth receive processing makes one deterministic key; the emitted CPU must
@@ -115,5 +115,5 @@ privilege/tool preflight
   chain. It does not qualify physical NICs, drivers, NAPI, XDP, qdisc, queue
   pressure, real EtherCAT devices, production kernels, overhead, or WCET.
 - Rollback removes the example, runner, validator/tests, Make/CI targets, docs,
-  capability-evidence entry, and the paired unsigned tracepoint field/read
+  capability-evidence entry, and the paired enum-kind tracepoint field/read
   alignment if the network-drop program is removed.

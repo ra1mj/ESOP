@@ -126,13 +126,17 @@ struct sk_buff {
     int skb_iif;
 };
 
+enum skb_drop_reason {
+    SKB_NOT_DROPPED_YET = 0,
+};
+
 struct trace_event_raw_kfree_skb {
     struct trace_entry ent;
     void *skbaddr;
     void *location;
     const void *rx_sk;
     unsigned short protocol;
-    unsigned int reason;
+    enum skb_drop_reason reason;
     char __data[0];
 };
 

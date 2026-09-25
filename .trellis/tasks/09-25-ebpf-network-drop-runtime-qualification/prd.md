@@ -40,9 +40,10 @@ and object compilation cannot detect.
   `ATTACH_NETWORK_DROP`, EtherType exactly `0x88a4`, exact receive ifindex,
   threshold four, a bounded nonzero aggregation window, and no unrelated hook.
   Require a complete capability snapshot and Healthy initial heartbeat.
-- Keep `kfree_skb.reason` unsigned in the vendored tracepoint type and BPF read
-  so the object does not depend on a `FIELD_SIGNED` relocation that the current
-  runtime loader cannot apply. Do not hard-code the enum value.
+- Preserve `kfree_skb.reason` as the named `enum skb_drop_reason` BTF kind in
+  the vendored tracepoint type and keep the observed value unsigned so Aya can
+  apply the `FIELD_SIGNED` relocation against the target enum. Do not hard-code
+  the runtime drop-reason value.
 - Run negative controls before the formal injection: frames with a different
   EtherType on the forward link and EtherCAT frames in the reverse direction
   must produce no matching BPF network statistics, event, or incident.
