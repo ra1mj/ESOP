@@ -77,28 +77,28 @@ Local unprivileged probes showed one target-CPU `NET_RX` execution for 8-54
 
 ## Acceptance Criteria
 
-- [ ] A privileged hosted Linux run verifies production CO-RE load, required
+- [x] A privileged hosted Linux run verifies production CO-RE load, required
       softirq entry/exit attachment, exact CPU/vector filtering, and one
       complete 54-segment loopback GSO injection.
-- [ ] Calibration emits exactly one matching duration record with zero loss;
+- [x] Calibration emits exactly one matching duration record with zero loss;
       the formal threshold is derived from that measured duration and the fresh
       formal run remains strictly over threshold.
-- [ ] The formal run produces exactly one fixed softirq record and one
+- [x] The formal run produces exactly one fixed softirq record and one
       correlated Error `HostIrqStorm` with `ControlledStop`, confidence 70,
       matching CPU/vector/cycle/timing fields, and one retained evidence item.
-- [ ] Formal poll, statistics, correlator, and observer-health fields are exact
+- [x] Formal poll, statistics, correlator, and observer-health fields are exact
       and show one sample/overrun/emission with zero hard-IRQ activity,
       malformed/rejected/dropped evidence, or loss.
-- [ ] Different hard-IRQ/softirq or CPU/vector identities do not merge into one
+- [x] Different hard-IRQ/softirq or CPU/vector identities do not merge into one
       incident, while same-identity evidence retains existing bounded merging.
-- [ ] The qualification report is same-directory atomic and its validator is
+- [x] The qualification report is same-directory atomic and its validator is
       fail-closed for schema, integer ranges, filters, attach pair, calibration,
       GSO injection, counts, incident semantics, cycle identity, and health.
-- [ ] Focused Rust/Python tests, formatting, Clippy, BPF syntax, capability
+- [x] Focused Rust/Python tests, formatting, Clippy, BPF syntax, capability
       validation, shell/Python syntax, `make ci`, and `git diff --check` pass.
-- [ ] The dedicated privileged GitHub Actions job passes and its downloaded
+- [x] The dedicated privileged GitHub Actions job passes and its downloaded
       artifact independently passes the repository validator.
-- [ ] Documentation removes controlled hosted loopback softirq injection from
+- [x] Documentation removes controlled hosted loopback softirq injection from
       the open list while preserving hard-IRQ, production-NIC, production
       kernel, natural-load/root-cause, overhead/WCET, sustained-pressure, and
       long-duration limits.
