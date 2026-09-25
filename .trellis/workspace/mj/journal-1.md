@@ -870,3 +870,36 @@ Published validated CSP/CSV/CST command targets into ProcBuf ABI v5 with exact l
 ### Next Steps
 
 - None - task complete
+
+
+## Session 27: ProcBuf CiA 402 target execution
+
+**Date**: 2026-09-26
+**Task**: ProcBuf CiA 402 target execution
+**Branch**: `main`
+
+### Summary
+
+Implemented fail-closed ProcBuf command validation and deterministic CiA 402 PDO target execution, exposed direct and scheduled stop-cycle APIs, added Linux E2E coverage, updated qualification evidence and PRD documentation, and verified the complete local and GitHub Actions quality gates.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `01c6626` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
