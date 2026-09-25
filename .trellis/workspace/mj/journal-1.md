@@ -205,3 +205,36 @@ Prevented tracked worker-thread exits from becoming critical component-exit inci
 ### Next Steps
 
 - None - task complete
+
+
+## Session 7: eBPF CPU frequency limit attribution
+
+**Date**: 2026-09-25
+**Task**: eBPF CPU frequency limit attribution
+**Branch**: `main`
+
+### Summary
+
+Added bounded cpu_frequency_limits tracing, runtime floor and policy filtering, episode suppression and recovery, saturating statistics, correlated HOST_CPU_THROTTLE classification, ABI tests, documentation, capability evidence, and real CO-RE CI validation.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e935969` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

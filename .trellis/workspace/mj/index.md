@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 6
+- **Total Sessions**: 7
 - **Last Active**: 2026-09-25
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~207 | Active |
+| `journal-1.md` | ~240 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 7 | 2026-09-25 | eBPF CPU frequency limit attribution | `e935969` | `main` |
 | 6 | 2026-09-25 | eBPF process and OOM attribution | `703be95` | `main` |
 | 5 | 2026-09-25 | eBPF page fault window attribution | `1394f6f` | `main` |
 | 4 | 2026-09-25 | eBPF EtherCAT drop attribution | `8690b77` | `main` |
