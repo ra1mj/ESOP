@@ -17,5 +17,5 @@
 - [x] Run focused default/feature builds, Rust tests/Clippy, proto/capability
       validators, loopback Zenoh tests, formatting, `git diff --check` and
       complete `make ci`.
-- [ ] Review compatibility and trust-boundary behavior, commit, push, and track
+- [x] Review compatibility and trust-boundary behavior, commit, push, and track
       the final GitHub Actions run before archive/journal completion.

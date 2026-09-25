@@ -87,7 +87,7 @@ reserved numbers/names must remain unchanged.
 - [x] Default/no-feature and `zenoh` feature builds, workspace tests, Clippy,
       Protobuf validation, loopback Zenoh tests, capability validation,
       formatting and complete `make ci` pass.
-- [ ] Changes are committed and pushed to `ra1mj/ESOP`; the final GitHub
+- [x] Changes are committed and pushed to `ra1mj/ESOP`; the final GitHub
       Actions run succeeds before the task is archived.
 
 ## Out Of Scope
