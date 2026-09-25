@@ -2,7 +2,7 @@
 
 - 文档版本：1.0
 - 日期：2026-09-26
-- 状态：固定 key namespace、方向策略、可选 Zenoh Session、与 IPC 共享的 ProcBuf v5 状态/事件投影及严格 MotionCommand target 到 Command page 路径、逐轴停止证据与原始周期质量投影、eBPF RuntimeIncident 无损投影、类型化查询边界、host QoS、稳定 publish 与 command/query callback 观测 marker、生产安全配置准入及 loopback router 验证已实现；真实设备质量采集、远程 ACL、目标内核 uprobe/开销和生产认证部署待完成
+- 状态：固定 key namespace、方向策略、可选 Zenoh Session、与 IPC 共享的 ProcBuf v6 状态/事件投影及严格 MotionCommand target 到 Command page 路径、CiA 402 实际反馈/错误码/逐字段质量、逐轴停止证据与原始周期质量投影、eBPF RuntimeIncident 无损投影、类型化查询边界、host QoS、稳定 publish 与 command/query callback 观测 marker、生产安全配置准入及 loopback router 验证已实现；真实设备质量采集、远程 ACL、目标内核 uprobe/开销和生产认证部署待完成
 - 上游需求：PRD FR-031、FR-030、FR-045、FR-051
 
 ## 1. Key namespace
@@ -93,6 +93,6 @@ callback 运行在 Zenoh host runtime：命令 callback 应只把数据投递到
 
 `motion_permit_current` 仅表示 permit 本身未过期，不表示当前可以驱动：命令门槛失效时，状态可能已进入 `Stopping`，而 permit 仍在有效期。执行侧始终以 MLG 状态和门槛决策约束 CiA 402，不以该布尔字段单独判定运动授权。
 
-ProcBuf 固定布局已升级到 ABI v5：Command page 增加 permit `policy_version`，使 RT 端可以无分配地重建完整 `MotionPermit`。v1-v4 reader/writer 不能复用 v5 区域，attach 时必须核对 version、layout hash、容量、robot 和 boot ID。升级需停止旧实时端与监督进程并重新创建区域，再启动相同版本的双方；旧 header 在单元测试中明确被拒绝。Protobuf 仍为 v1 外部契约，`LifecycleSummary.axis_stops` 只携带本周期请求/发出动作和合格的驱动反馈证明位，不表示真实执行的停止动作；旧 Protobuf 读者丢弃新增字段，不能充当透明中继。
+ProcBuf 固定布局已升级到 ABI v6：Command page 保留 permit `policy_version`，State `JointState` 增加 CiA 402 drive error code，并用逐字段质量位区分当前验证输入和保留旧值。RT 端按同一冻结轴策略反向换算实际 PDO，只在端口接受输出帧后更新 State Controlword；同周期有效 DC 证据才推进 EtherCAT 时间。v1-v5 reader/writer 不能复用 v6 区域，attach 时必须核对 version、layout hash、容量、robot 和 boot ID。升级需停止旧实时端与监督进程并重新创建区域，再启动相同版本的双方；旧 header 在单元测试中明确被拒绝。Protobuf 仍为 v1 外部契约，新增 `JointState.drive_error_code = 11` 对旧读者是 additive 字段；`LifecycleSummary.axis_stops` 只携带本周期请求/发出动作和合格的驱动反馈证明位，不表示真实执行的停止动作。旧 Protobuf 读者会丢弃新增字段，不能充当透明中继。
 
 补充验证：测试进程为每个场景动态申请 loopback 临时端口并独占 zenohd，覆盖 state/event、从固定 agent incident 经生产投影到 router 解码的完整 v1 payload、router 重启后的 health recovery、旧命令 TTL/代际拒绝，以及恢复必须经过新 permit 和显式 rearm。ZenohGateway::refresh_health 使用 session 的 router/peer 连接快照；它属于 host supervisor 观察，不是 motion permit 或应用层投递确认。[Zenoh SessionInfo API](https://docs.rs/zenoh/1.10.1/zenoh/session/struct.SessionInfo.html)

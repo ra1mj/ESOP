@@ -9,11 +9,11 @@ use esop_procbuf::{EventPushError, EventSeverity, HeaderError, ProcBuf, ProcBufE
 #[cfg(feature = "cia402")]
 use crate::{AxisCycleDecision, AxisDirective, StopFeedback};
 #[cfg(feature = "cia402")]
-use esop_procbuf::{AxisStopEvidence, ControlMode};
+use esop_procbuf::{AxisStopEvidence, ControlMode, JointStateQuality};
 #[cfg(feature = "cia402")]
 use esop_profile_cia402::{
-    CONTROLWORD_DISABLE_VOLTAGE, CONTROLWORD_QUICK_STOP, Cia402Output, Cia402Target, CyclicLimits,
-    OperatingMode,
+    CONTROLWORD_DISABLE_VOLTAGE, CONTROLWORD_QUICK_STOP, Cia402Output, Cia402PdoError,
+    Cia402PdoField, Cia402PdoMap, Cia402Target, CyclicLimits, DriveState, OperatingMode,
 };
 
 #[cfg(all(feature = "cia402", feature = "ethercat"))]
@@ -348,6 +348,116 @@ fn floored_limit(value: f64, maximum: f64) -> Option<f64> {
     let floored = (value as u64) as f64;
     (floored <= maximum).then_some(floored)
 }
+
+#[cfg(feature = "cia402")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Cia402FeedbackError {
+    AxisCapacityExceeded,
+    InvalidPolicy(usize, Cia402AxisCommandPolicyError),
+    Pdo(usize, Cia402PdoError),
+    NonFiniteValue(usize, Cia402PdoField),
+}
+
+/// Transactionally project verified CiA 402 inputs and accepted outputs into
+/// the State page. Unverified input retains old values but clears freshness;
+/// accepted controlwords remain independently observable as TX evidence.
+#[cfg(feature = "cia402")]
+pub fn cia402_feedback_to_procbuf<const AXES: usize, const IO: usize, const DOMAINS: usize>(
+    state: &mut StatePage<AXES, IO, DOMAINS>,
+    image: &[u8],
+    maps: &[Cia402PdoMap; AXES],
+    modes: &[OperatingMode; AXES],
+    policies: &[Cia402AxisCommandPolicy; AXES],
+    input_current: bool,
+    accepted_outputs: Option<&[Cia402Output; AXES]>,
+) -> Result<(), Cia402FeedbackError> {
+    if AXES > MAX_MOTION_AXES {
+        return Err(Cia402FeedbackError::AxisCapacityExceeded);
+    }
+
+    let mut axes = state.axes;
+    for (axis, joint) in axes.iter_mut().enumerate() {
+        joint.quality = 0;
+        if input_current {
+            let policy = policies[axis];
+            policy
+                .validate()
+                .map_err(|error| Cia402FeedbackError::InvalidPolicy(axis, error))?;
+            let inputs = maps[axis]
+                .read_inputs_for(image, modes[axis])
+                .map_err(|error| Cia402FeedbackError::Pdo(axis, error))?;
+            let drive_state = DriveState::from_statusword(inputs.statusword);
+
+            joint.statusword = inputs.statusword;
+            joint.error_code = inputs.error_code;
+            joint.drive_state = drive_state as u8;
+            joint.actual_mode = inputs.actual_mode as u8;
+            joint.quality = JointStateQuality::CURRENT_INPUT;
+            if inputs.actual_mode == modes[axis] {
+                joint.quality |= JointStateQuality::MODE_CONFIRMED;
+            }
+            if drive_state.is_operation_enabled() {
+                joint.quality |= JointStateQuality::OPERATION_ENABLED;
+            }
+            if !drive_state.is_fault() && inputs.error_code == 0 {
+                joint.quality |= JointStateQuality::FAULT_FREE;
+            }
+
+            if let Some(raw) = inputs.actual_position {
+                joint.position = finite_feedback_value(
+                    (f64::from(raw) - f64::from(policy.position_offset))
+                        / policy.position_units_per_radian,
+                    axis,
+                    Cia402PdoField::ActualPosition,
+                )?;
+                joint.quality |= JointStateQuality::POSITION_VALID;
+            }
+            if let Some(raw) = inputs.actual_velocity {
+                joint.velocity = finite_feedback_value(
+                    f64::from(raw) / policy.velocity_units_per_radian_per_second,
+                    axis,
+                    Cia402PdoField::ActualVelocity,
+                )?;
+                joint.quality |= JointStateQuality::VELOCITY_VALID;
+            }
+            if let Some(raw) = inputs.actual_torque {
+                joint.torque = finite_feedback_value(
+                    f64::from(raw) / policy.torque_units_per_newton_metre,
+                    axis,
+                    Cia402PdoField::ActualTorque,
+                )?;
+                joint.quality |= JointStateQuality::TORQUE_VALID;
+            }
+            if let Some(raw) = inputs.following_error {
+                joint.following_error = finite_feedback_value(
+                    f64::from(raw) / policy.position_units_per_radian,
+                    axis,
+                    Cia402PdoField::FollowingError,
+                )?;
+                joint.quality |= JointStateQuality::FOLLOWING_ERROR_VALID;
+            }
+        }
+
+        if let Some(outputs) = accepted_outputs {
+            joint.controlword = outputs[axis].controlword;
+        }
+    }
+    state.axes = axes;
+    Ok(())
+}
+
+#[cfg(feature = "cia402")]
+fn finite_feedback_value(
+    value: f64,
+    axis: usize,
+    field: Cia402PdoField,
+) -> Result<f64, Cia402FeedbackError> {
+    value
+        .is_finite()
+        .then_some(value)
+        .ok_or(Cia402FeedbackError::NonFiniteValue(axis, field))
+}
+
 #[cfg(feature = "ethercat")]
 use esop_procbuf::DomainQuality as ProcBufDomainQuality;
 
@@ -450,6 +560,9 @@ fn project_ethercat_diagnostics<const AXES: usize, const IO: usize, const DOMAIN
     dc: &DcCyclicSync,
     quality: CyclicQuality,
 ) {
+    if quality.distributed_clock_locked && dc.last_sync_cycle() == report.cycle {
+        state.ecat_time_ns = dc.last_reference_time_ns();
+    }
     state.quality.link_up = (!report.link_down) as u8;
     state.quality.dc_locked = quality.distributed_clock_locked as u8;
     // Offset is the last observed sample; dc_locked signals whether it is
@@ -1268,6 +1381,301 @@ mod command_tests {
     }
 }
 
+#[cfg(all(test, feature = "cia402", feature = "ethercat"))]
+mod feedback_tests {
+    use super::*;
+    use esop_ethercat_core::PdoEntry;
+    use esop_procbuf::{JointState, JointStateQuality};
+
+    const POLICY: Cia402AxisCommandPolicy = Cia402AxisCommandPolicy {
+        position_units_per_radian: -100.0,
+        velocity_units_per_radian_per_second: -20.0,
+        torque_units_per_newton_metre: 10.0,
+        position_offset: 10,
+        min_position_radians: -10.0,
+        max_position_radians: 10.0,
+        max_velocity_radians_per_second: 20.0,
+        max_torque_newton_metres: 20.0,
+        max_position_step_radians: 1.0,
+    };
+
+    fn field_entry(
+        field: Cia402PdoField,
+        bit_offset: usize,
+        bit_length: u8,
+        signed: bool,
+    ) -> PdoEntry {
+        PdoEntry {
+            index: field.object_index(),
+            subindex: 0,
+            bit_offset,
+            bit_length,
+            signed,
+            direction: field.direction(),
+        }
+    }
+
+    fn map_at(base: usize) -> Cia402PdoMap {
+        let mut map = Cia402PdoMap::new();
+        for (field, offset, length, signed) in [
+            (Cia402PdoField::Statusword, 0, 16, false),
+            (Cia402PdoField::ModeDisplay, 16, 8, true),
+            (Cia402PdoField::ErrorCode, 24, 16, false),
+            (Cia402PdoField::ActualPosition, 40, 32, true),
+            (Cia402PdoField::ActualVelocity, 72, 32, true),
+            (Cia402PdoField::ActualTorque, 104, 16, true),
+            (Cia402PdoField::FollowingError, 120, 32, true),
+            (Cia402PdoField::Controlword, 152, 16, false),
+            (Cia402PdoField::ModeOfOperation, 168, 8, true),
+            (Cia402PdoField::TargetPosition, 176, 32, true),
+            (Cia402PdoField::TargetVelocity, 208, 32, true),
+            (Cia402PdoField::TargetTorque, 240, 16, true),
+        ] {
+            map.set_entry(field, field_entry(field, base + offset, length, signed));
+        }
+        map
+    }
+
+    #[derive(Clone, Copy)]
+    struct TestFeedback {
+        statusword: u16,
+        error_code: u16,
+        position: i32,
+        velocity: i32,
+        torque: i16,
+        following_error: i32,
+    }
+
+    fn write_feedback(map: &Cia402PdoMap, image: &mut [u8], feedback: TestFeedback) {
+        map.entry(Cia402PdoField::Statusword)
+            .unwrap()
+            .write_unsigned(image, u64::from(feedback.statusword))
+            .unwrap();
+        map.entry(Cia402PdoField::ModeDisplay)
+            .unwrap()
+            .write_signed(image, i64::from(OperatingMode::Csp.raw()))
+            .unwrap();
+        map.entry(Cia402PdoField::ErrorCode)
+            .unwrap()
+            .write_unsigned(image, u64::from(feedback.error_code))
+            .unwrap();
+        for (field, value) in [
+            (Cia402PdoField::ActualPosition, i64::from(feedback.position)),
+            (Cia402PdoField::ActualVelocity, i64::from(feedback.velocity)),
+            (Cia402PdoField::ActualTorque, i64::from(feedback.torque)),
+            (
+                Cia402PdoField::FollowingError,
+                i64::from(feedback.following_error),
+            ),
+        ] {
+            map.entry(field)
+                .unwrap()
+                .write_signed(image, value)
+                .unwrap();
+        }
+    }
+
+    fn output(controlword: u16) -> Cia402Output {
+        Cia402Output {
+            state: DriveState::OperationEnabled,
+            statusword: 0x0027,
+            controlword,
+            operation_enabled: true,
+            motion_allowed: true,
+            fault_reset_pulse: false,
+        }
+    }
+
+    #[test]
+    fn projects_signed_si_feedback_quality_faults_and_accepted_controlword() {
+        let map = map_at(0);
+        let mut image = [0_u8; 32];
+        let mut feedback = TestFeedback {
+            statusword: 0x0027,
+            error_code: 0,
+            position: -113,
+            velocity: -25,
+            torque: -13,
+            following_error: -7,
+        };
+        write_feedback(&map, &mut image, feedback);
+        let mut state = StatePage::<1, 0, 1>::new(9);
+
+        cia402_feedback_to_procbuf(
+            &mut state,
+            &image,
+            &[map],
+            &[OperatingMode::Csp],
+            &[POLICY],
+            true,
+            Some(&[output(0x000F)]),
+        )
+        .unwrap();
+
+        let joint = state.axes[0];
+        assert!((joint.position - 1.23).abs() < f64::EPSILON);
+        assert!((joint.velocity - 1.25).abs() < f64::EPSILON);
+        assert!((joint.torque + 1.3).abs() < f64::EPSILON);
+        assert!((joint.following_error - 0.07).abs() < f64::EPSILON);
+        assert_eq!(joint.statusword, 0x0027);
+        assert_eq!(joint.controlword, 0x000F);
+        assert_eq!(joint.error_code, 0);
+        assert_eq!(joint.drive_state, DriveState::OperationEnabled as u8);
+        assert_eq!(joint.actual_mode, OperatingMode::Csp as u8);
+        assert_eq!(joint.quality, u8::MAX);
+
+        feedback.statusword = 0x0008;
+        feedback.error_code = 0x2310;
+        write_feedback(&map, &mut image, feedback);
+        cia402_feedback_to_procbuf(
+            &mut state,
+            &image,
+            &[map],
+            &[OperatingMode::Csp],
+            &[POLICY],
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(state.axes[0].drive_state, DriveState::Fault as u8);
+        assert_eq!(state.axes[0].error_code, 0x2310);
+        assert_eq!(state.axes[0].quality & JointStateQuality::FAULT_FREE, 0);
+        assert_eq!(
+            state.axes[0].quality & JointStateQuality::OPERATION_ENABLED,
+            0
+        );
+    }
+
+    #[test]
+    fn stale_and_unmapped_feedback_retain_values_but_clear_validity() {
+        let full_map = map_at(0);
+        let mut sparse_map = full_map;
+        sparse_map.clear_entry(Cia402PdoField::ActualVelocity);
+        sparse_map.clear_entry(Cia402PdoField::ActualTorque);
+        sparse_map.clear_entry(Cia402PdoField::FollowingError);
+        let mut image = [0_u8; 32];
+        write_feedback(
+            &full_map,
+            &mut image,
+            TestFeedback {
+                statusword: 0x0027,
+                error_code: 0,
+                position: -113,
+                velocity: -25,
+                torque: -13,
+                following_error: -7,
+            },
+        );
+        let mut state = StatePage::<1, 0, 1>::new(9);
+        state.axes[0] = JointState {
+            position: 9.0,
+            velocity: 8.0,
+            torque: 7.0,
+            following_error: 6.0,
+            statusword: 5,
+            controlword: 4,
+            error_code: 3,
+            drive_state: 2,
+            actual_mode: 1,
+            quality: u8::MAX,
+            reserved: 0,
+        };
+
+        cia402_feedback_to_procbuf(
+            &mut state,
+            &image,
+            &[sparse_map],
+            &[OperatingMode::Csp],
+            &[POLICY],
+            true,
+            None,
+        )
+        .unwrap();
+        assert!((state.axes[0].position - 1.23).abs() < f64::EPSILON);
+        assert_eq!(state.axes[0].velocity, 8.0);
+        assert_eq!(state.axes[0].torque, 7.0);
+        assert_eq!(state.axes[0].following_error, 6.0);
+        assert_ne!(state.axes[0].quality & JointStateQuality::POSITION_VALID, 0);
+        assert_eq!(
+            state.axes[0].quality
+                & (JointStateQuality::VELOCITY_VALID
+                    | JointStateQuality::TORQUE_VALID
+                    | JointStateQuality::FOLLOWING_ERROR_VALID),
+            0
+        );
+
+        let retained = state.axes[0];
+        cia402_feedback_to_procbuf(
+            &mut state,
+            &[],
+            &[Cia402PdoMap::new()],
+            &[OperatingMode::Unknown],
+            &[POLICY],
+            false,
+            Some(&[output(0x0002)]),
+        )
+        .unwrap();
+        assert_eq!(state.axes[0].quality, 0);
+        assert_eq!(state.axes[0].controlword, 0x0002);
+        assert_eq!(state.axes[0].position, retained.position);
+        assert_eq!(state.axes[0].statusword, retained.statusword);
+        assert_eq!(state.axes[0].error_code, retained.error_code);
+    }
+
+    #[test]
+    fn multi_axis_failure_does_not_publish_a_partial_snapshot() {
+        let maps = [map_at(0), map_at(256)];
+        let mut image = [0_u8; 64];
+        write_feedback(
+            &maps[0],
+            &mut image,
+            TestFeedback {
+                statusword: 0x0027,
+                error_code: 0,
+                position: -113,
+                velocity: -25,
+                torque: -13,
+                following_error: -7,
+            },
+        );
+        write_feedback(
+            &maps[1],
+            &mut image,
+            TestFeedback {
+                statusword: 0x0027,
+                error_code: 0,
+                position: -213,
+                velocity: -45,
+                torque: -23,
+                following_error: -9,
+            },
+        );
+        let mut state = StatePage::<2, 0, 1>::new(9);
+        state.axes[0].position = 10.0;
+        state.axes[1].position = 20.0;
+        let before = state.axes;
+        let mut invalid = POLICY;
+        invalid.position_units_per_radian = 0.0;
+
+        assert_eq!(
+            cia402_feedback_to_procbuf(
+                &mut state,
+                &image,
+                &maps,
+                &[OperatingMode::Csp; 2],
+                &[POLICY, invalid],
+                true,
+                None,
+            ),
+            Err(Cia402FeedbackError::InvalidPolicy(
+                1,
+                Cia402AxisCommandPolicyError::ZeroScale,
+            ))
+        );
+        assert_eq!(state.axes, before);
+    }
+}
+
 #[cfg(all(test, feature = "ethercat"))]
 mod tests {
     use super::*;
@@ -1358,6 +1766,7 @@ mod tests {
         assert_eq!(state.quality.link_up, 1);
         assert_eq!(state.quality.dc_locked, 1);
         assert_eq!(state.quality.dc_offset_ns, 20);
+        assert_eq!(state.ecat_time_ns, 100);
         assert_eq!(state.quality.domains[0].expected_wkc, 2);
         assert_eq!(state.quality.domains[0].input_age_cycles, 0);
         assert_eq!(state.quality.domains[1].last_valid_cycle, 3);
@@ -1399,5 +1808,6 @@ mod tests {
         assert!(!stale_dc.distributed_clock_locked);
         assert_eq!(state.quality.dc_locked, 0);
         assert_eq!(state.quality.dc_offset_ns, 20);
+        assert_eq!(state.ecat_time_ns, 100);
     }
 }

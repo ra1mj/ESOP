@@ -46,7 +46,7 @@
     {
       "id": "procbuf_cia402_execution",
       "status": "implemented",
-      "scope": "Allocation-free ProcBuf v5 CSP/CSV/CST command validation, exact lifecycle-permit binding, deterministic SI-to-raw conversion, enable-edge actual hold and transactional CiA 402 PDO submission",
+      "scope": "Allocation-free ProcBuf v6 CSP/CSV/CST command validation, exact lifecycle-permit binding, deterministic SI-to-raw conversion, enable-edge actual hold and transactional CiA 402 PDO submission",
       "evidence": [
         "crates/esop-procbuf/src/lib.rs",
         "crates/esop-lifecycle-guard/src/procbuf.rs",
@@ -55,6 +55,21 @@
         "crates/esop-ethercat-linux-port/tests/verified_stop_cycle.rs"
       ],
       "limitation": "Software simulation proves conversion and accepted frame contents only; no product policy artifact, physical drive response, braking/mechanical suitability, target WCET or safety qualification is claimed"
+    },
+    {
+      "id": "cia402_procbuf_feedback",
+      "status": "implemented",
+      "scope": "Allocation-free verified CiA 402 PDO feedback projection into ProcBuf v6 State with bidirectional frozen axis scaling, drive error code, field-level freshness, accepted-Controlword truth and additive Protobuf exposure",
+      "evidence": [
+        "crates/esop-profile-cia402/src/pdo.rs",
+        "crates/esop-lifecycle-guard/src/procbuf.rs",
+        "crates/esop-lifecycle-guard/src/stop_cycle.rs",
+        "crates/esop-ethercat-linux-port/tests/verified_stop_cycle.rs",
+        "crates/esop-ipc/src/payloads.rs",
+        "crates/esop-ipc/tests/payloads.rs",
+        "crates/esop-proto/tests/reader_writer.rs"
+      ],
+      "limitation": "Simulator evidence covers software conversion, quality retention and transport acceptance only; generated product mapping, physical drive semantics, product-scale axis count, target WCET and HIL qualification remain open"
     },
     {
       "id": "motion_lifecycle_guard",
@@ -83,7 +98,7 @@
     {
       "id": "procbuf_abi",
       "status": "implemented",
-      "scope": "ProcBuf ABI v5 fixed-layout command/state pages with complete command permit identity, quality, lifecycle history and event ring",
+      "scope": "ProcBuf ABI v6 fixed-layout command/state pages with complete command permit identity, per-axis CiA 402 feedback/error/quality, lifecycle history and event ring",
       "evidence": [
         "crates/esop-procbuf/src/lib.rs",
         "crates/esop-procbuf/tests/cross_layer.rs"

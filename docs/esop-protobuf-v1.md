@@ -1,7 +1,7 @@
 # ESOP Protobuf v1 契约
 
 - 文档版本：1.0
-- 日期：2026-09-25
+- 日期：2026-09-26
 - 状态：schema 源、结构校验、Rust 生成绑定、v1 版本准入、冻结基线 descriptor 门禁、新旧 reader/writer 双向测试、RuntimeIncident additive 无损字段和 loopback transport round-trip 已实现；跨语言与生产滚动升级仍待验证
 - 上游需求：PRD FR-030、FR-031、FR-045、FR-049、FR-051
 
@@ -11,7 +11,7 @@
 
 当前契约覆盖：
 
-- `RobotState`、`JointState`、`IoState` 和 `QualitySummary`
+- `RobotState`、`JointState`、`IoState` 和 `QualitySummary`；`JointState.drive_error_code = 11` 以 additive 字段暴露 CiA 402 `0x603F`
 - `LifecycleSummary`（包括可选逐轴 `AxisStopEvidence`）、`DiagnosticEvent` 和审计关联字段
 - `MotionCommand`、`CommandReply` 和外部命令来源/TTL/序号/策略版本
 - `RuntimeIncident`、`RuntimeEvidence`、查询请求与查询响应；incident 追加字段保留 boot/agent epoch、配置证据窗口、完整 cycle 范围、组件标识、置信度和 64-bit 观测值，evidence 追加字段保留稳定 ID、epoch、domain、transition、IRQ/ifindex、duration/count/detail 和完整 64-bit 值
@@ -48,6 +48,7 @@ independently; baseline bindings are included only by integration tests.
 | Current v1 / Frozen v1 | The same non-default values survive decoding with the frozen generated bindings |
 | Additive test writer / Both v1 readers | Unknown fields are ignored; decode/re-encode drops them |
 | Current v1 axis stop evidence / Frozen v1 reader | Old reader preserves legacy summary but ignores new per-axis evidence; re-encoding loses the evidence |
+| Current v1 drive error code / Frozen v1 reader | Old reader preserves legacy joint fields but ignores field 11; current reader sees the error code and old re-encoding drops it |
 | Current v1 runtime incident / Frozen v1 reader | Old reader preserves legacy incident/evidence fields and saturated 32-bit value, ignores additive provenance/full-width fields, and drops them on re-encode |
 | Unknown enum writer / Both v1 readers | Numeric value remains unknown and typed conversion fails |
 

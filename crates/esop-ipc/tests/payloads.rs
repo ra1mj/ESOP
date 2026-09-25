@@ -200,6 +200,7 @@ fn state_and_event_frames_cross_real_unix_datagrams_with_bound_identity() {
     state.monotonic_time_ns = 123_000;
     state.ecat_time_ns = 122_000;
     state.axes[0].position = 1.5;
+    state.axes[0].error_code = 0x2310;
     state.quality.sequence = 9;
     state.quality.cyclic.known_mask = QualityFact::ALL_MASK;
     state.quality.cyclic.good_mask = QualityFact::Platform.bit() | QualityFact::Wkc.bit();
@@ -230,6 +231,7 @@ fn state_and_event_frames_cross_real_unix_datagrams_with_bound_identity() {
         ("robot_01", 7, 9)
     );
     assert_eq!(decoded.joints[0].position, 1.5);
+    assert_eq!(decoded.joints[0].drive_error_code, 0x2310);
     let quality = decoded.quality.unwrap();
     assert!(quality.platform_ready && quality.wkc_valid);
     assert!(!quality.drive_ready && !quality.command_current);

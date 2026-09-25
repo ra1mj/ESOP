@@ -229,6 +229,30 @@ fn additive_axis_stop_evidence_is_visible_to_new_readers_without_changing_legacy
 }
 
 #[test]
+fn additive_drive_error_code_is_visible_to_current_readers_only() {
+    let message = v1::JointState {
+        axis: 2,
+        statusword: 0x0008,
+        drive_state: 7,
+        drive_error_code: 0x2310,
+        ..Default::default()
+    };
+    let bytes = message.encode_to_vec();
+    let old = baseline::JointState::decode(bytes.as_slice()).unwrap();
+    assert_eq!(old.axis, message.axis);
+    assert_eq!(old.statusword, message.statusword);
+
+    let projected = v1::JointState::decode(bytes.as_slice()).unwrap();
+    assert_eq!(projected.drive_error_code, 0x2310);
+    assert_eq!(
+        v1::JointState::decode(old.encode_to_vec().as_slice())
+            .unwrap()
+            .drive_error_code,
+        0
+    );
+}
+
+#[test]
 fn additive_runtime_incident_fields_are_visible_to_current_readers_only() {
     let message = v1::RuntimeIncident {
         incident_id: "esop-boot-epoch-1".into(),

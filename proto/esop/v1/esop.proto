@@ -124,6 +124,7 @@ message JointState {
   uint32 drive_state = 8;
   uint32 actual_mode = 9;
   uint32 quality = 10;
+  uint32 drive_error_code = 11;
 }
 
 message IoState {

@@ -360,6 +360,7 @@ impl ProcBufProjector {
                 drive_state: u32::from(joint.drive_state),
                 actual_mode: u32::from(joint.actual_mode),
                 quality: u32::from(joint.quality),
+                drive_error_code: u32::from(joint.error_code),
             });
         }
         let io = state

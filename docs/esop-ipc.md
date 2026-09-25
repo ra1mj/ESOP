@@ -67,7 +67,7 @@ numeric robot/boot/source/sequence, optional authenticated identity, CSP/CSV/
 CST mode, 32-bit capacity mask, zero-based one-to-one joint coverage, finite
 targets and non-negative limits before `CommandIngress` is called.
 
-After admission, `AdmittedProcBufCommand` builds the ABI-v5 `CommandPage` from
+After admission, `AdmittedProcBufCommand` builds the ABI-v6 `CommandPage` from
 the returned permit rather than untrusted policy fields. It binds robot, boot,
 layout and fixed capacities, retains empty unselected axes/IO slots, and offers
 a borrowing `publish` method so a delivery failure can be retried without
@@ -85,6 +85,9 @@ guard, applies caller-frozen per-axis SI scaling and mechanical limits, holds
 verified actual feedback on the enable edge, and only then delegates desired
 raw targets to the existing transactional CiA 402 EtherCAT frame path. This
 does not move conversion or EtherCAT dependencies into the hosted IPC crate.
+The State projection also carries the ABI-v6 per-axis drive error code and
+quality bitset into additive Protobuf `JointState.drive_error_code` field 11.
+ABI-v5 and older shared regions must be recreated before either side attaches.
 
 ## Peer Lifecycle
 

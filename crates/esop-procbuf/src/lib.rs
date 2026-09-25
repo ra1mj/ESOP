@@ -12,7 +12,7 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 pub const ABI_MAGIC: u32 = 0x4553_4F50;
-pub const ABI_VERSION: u16 = 5;
+pub const ABI_VERSION: u16 = 6;
 
 const PAGE_FREE: u32 = 0;
 const PAGE_WRITING: u32 = 1;
@@ -317,10 +317,27 @@ pub struct JointState {
     pub following_error: f64,
     pub statusword: u16,
     pub controlword: u16,
+    pub error_code: u16,
     pub drive_state: u8,
     pub actual_mode: u8,
     pub quality: u8,
     pub reserved: u8,
+}
+
+/// Per-axis freshness and field-validity flags for [`JointState::quality`].
+/// A writer must clear every bit when the current EtherCAT input is not
+/// verified; retained values then remain diagnostic-only stale data.
+pub struct JointStateQuality;
+
+impl JointStateQuality {
+    pub const CURRENT_INPUT: u8 = 1 << 0;
+    pub const POSITION_VALID: u8 = 1 << 1;
+    pub const VELOCITY_VALID: u8 = 1 << 2;
+    pub const TORQUE_VALID: u8 = 1 << 3;
+    pub const FOLLOWING_ERROR_VALID: u8 = 1 << 4;
+    pub const MODE_CONFIRMED: u8 = 1 << 5;
+    pub const OPERATION_ENABLED: u8 = 1 << 6;
+    pub const FAULT_FREE: u8 = 1 << 7;
 }
 
 impl JointState {
@@ -331,6 +348,7 @@ impl JointState {
         following_error: 0.0,
         statusword: 0,
         controlword: 0,
+        error_code: 0,
         drive_state: 255,
         actual_mode: 255,
         quality: 0,
@@ -1064,7 +1082,7 @@ mod tests {
         let buffer = TestBuf::new(42, 9);
         assert_eq!(buffer.validate_header(42, 9), Ok(()));
         assert_eq!(buffer.header().abi_version, ABI_VERSION);
-        for version in [1, 2, 3, 4] {
+        for version in [1, 2, 3, 4, 5] {
             let mut previous_abi = buffer.header();
             previous_abi.abi_version = version;
             assert_eq!(

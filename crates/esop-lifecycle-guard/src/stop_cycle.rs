@@ -15,10 +15,11 @@ use crate::ethercat::{
     submit_prepared_active_frame, submit_stopping_frame, verified_ethercat_stop_feedback,
 };
 use crate::procbuf::{
-    AxisEvidenceError, Cia402AxisCommandPolicy, LifecycleEventCursor, LifecycleEventError,
-    ProcBufCia402CommandError, axis_stops_to_procbuf, controlled_axis_stops_to_procbuf,
-    cyclic_quality_to_procbuf, ethercat_cycle_to_procbuf, lifecycle_events_to_procbuf,
-    lifecycle_to_procbuf, prepare_cia402_command, scheduled_ethercat_cycle_to_procbuf,
+    AxisEvidenceError, Cia402AxisCommandPolicy, Cia402FeedbackError, LifecycleEventCursor,
+    LifecycleEventError, ProcBufCia402CommandError, axis_stops_to_procbuf,
+    cia402_feedback_to_procbuf, controlled_axis_stops_to_procbuf, cyclic_quality_to_procbuf,
+    ethercat_cycle_to_procbuf, lifecycle_events_to_procbuf, lifecycle_to_procbuf,
+    prepare_cia402_command, scheduled_ethercat_cycle_to_procbuf,
 };
 use crate::{
     CyclicQuality, GateId, LifecycleAction, LifecycleError, LifecycleGuard, MAX_MOTION_AXES,
@@ -51,6 +52,7 @@ pub enum StopCycleError {
     Header(HeaderError),
     NotStopping(LifecycleAction),
     Evidence(AxisEvidenceError),
+    Feedback(Cia402FeedbackError),
     Command(ProcBufCia402CommandError),
     Abort(LifecycleError),
 }
@@ -728,6 +730,7 @@ pub struct StopCycleContext<
     pub other: OtherCycleFacts,
     pub maps: &'a [Cia402PdoMap; AXES],
     pub modes: &'a [OperatingMode; AXES],
+    pub axis_policies: &'a [Cia402AxisCommandPolicy; AXES],
     pub max_stationary_velocities: &'a [u32; AXES],
     pub safe_process_image: &'a [u8; BYTES],
     pub plan: &'a FramePlan<DATAGRAMS>,
@@ -850,7 +853,6 @@ impl<
     pub fn run_with_procbuf_command(
         &mut self,
         command: &CommandPage<AXES, IO>,
-        policies: &[Cia402AxisCommandPolicy; AXES],
         cycle_period_ns: u64,
         guards: &mut [CyclicSetpointGuard; AXES],
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
@@ -858,7 +860,7 @@ impl<
             command,
             self.guard,
             self.modes,
-            policies,
+            self.axis_policies,
             cycle_period_ns,
             self.port.now_ns().max(self.now_ns),
         )
@@ -880,7 +882,6 @@ impl<
     pub fn run_with_procbuf_command_until(
         &mut self,
         command: &CommandPage<AXES, IO>,
-        policies: &[Cia402AxisCommandPolicy; AXES],
         cycle_period_ns: u64,
         guards: &mut [CyclicSetpointGuard; AXES],
         cycle_deadline_ns: u64,
@@ -889,7 +890,7 @@ impl<
             command,
             self.guard,
             self.modes,
-            policies,
+            self.axis_policies,
             cycle_period_ns,
             self.port.now_ns().max(self.now_ns),
         )
@@ -998,7 +999,6 @@ impl<
         domains: &[ScheduledDomainQuality; DOMAINS],
         motion_domain_id: u8,
         command: &CommandPage<AXES, IO>,
-        policies: &[Cia402AxisCommandPolicy; AXES],
         cycle_period_ns: u64,
         guards: &mut [CyclicSetpointGuard; AXES],
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
@@ -1006,7 +1006,7 @@ impl<
             command,
             self.guard,
             self.modes,
-            policies,
+            self.axis_policies,
             cycle_period_ns,
             self.port.now_ns().max(self.now_ns),
         )
@@ -1033,7 +1033,6 @@ impl<
         domains: &[ScheduledDomainQuality; DOMAINS],
         motion_domain_id: u8,
         command: &CommandPage<AXES, IO>,
-        policies: &[Cia402AxisCommandPolicy; AXES],
         cycle_period_ns: u64,
         guards: &mut [CyclicSetpointGuard; AXES],
         cycle_deadline_ns: u64,
@@ -1042,7 +1041,7 @@ impl<
             command,
             self.guard,
             self.modes,
-            policies,
+            self.axis_policies,
             cycle_period_ns,
             self.port.now_ns().max(self.now_ns),
         )
@@ -1371,7 +1370,6 @@ impl<
         motion_domain_id: u8,
         outputs: &ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
         command: &CommandPage<AXES, IO>,
-        policies: &[Cia402AxisCommandPolicy; AXES],
         cycle_period_ns: u64,
         guards: &mut [CyclicSetpointGuard; AXES],
         controlled: &mut ControlledStopCycleState<AXES>,
@@ -1381,7 +1379,7 @@ impl<
             command,
             self.guard,
             self.modes,
-            policies,
+            self.axis_policies,
             cycle_period_ns,
             self.port.now_ns().max(self.now_ns),
         )
@@ -1841,6 +1839,7 @@ impl<
             mut controlled_stop_used,
             mut controlled_stop_fallback,
             controlled_stop_failure,
+            mut accepted_outputs,
         ) = {
             let mut decision = self.guard.cycle_axes(self.report.cycle, decision_now_ns);
             let action = decision.action();
@@ -2027,6 +2026,11 @@ impl<
                         .map_err(StopCycleError::Evidence)?;
                 }
             }
+            let accepted_outputs = transmission.as_ref().ok().map(|_| {
+                controlled_report
+                    .as_ref()
+                    .map_or(outputs, |report| report.outputs)
+            });
             (
                 action,
                 transmission,
@@ -2035,6 +2039,7 @@ impl<
                 controlled_stop_used,
                 controlled_stop_fallback,
                 controlled_stop_failure,
+                accepted_outputs,
             )
         };
         let mut active_failure = None;
@@ -2072,6 +2077,7 @@ impl<
             axis_stops_to_procbuf(self.state, &stop_decision, &stop_outputs, None)
                 .map_err(StopCycleError::Evidence)?;
             stop_mask = stop_decision.stopping_axis_mask();
+            accepted_outputs = stop_transmission.as_ref().ok().map(|_| stop_outputs);
             transmission = stop_transmission;
         }
         let mut active_tx_before_deadline_miss = false;
@@ -2117,6 +2123,16 @@ impl<
                     .acknowledge_stopped(self.report.cycle, proof)
                     .is_ok()
             });
+        cia402_feedback_to_procbuf(
+            self.state,
+            self.domain.input(),
+            self.maps,
+            self.modes,
+            self.axis_policies,
+            quality.domain_valid && quality.wkc_valid,
+            accepted_outputs.as_ref(),
+        )
+        .map_err(StopCycleError::Feedback)?;
         self.state.lifecycle = lifecycle_to_procbuf(
             self.guard.snapshot(self.report.cycle, publish_now_ns),
             if self.guard.transition_sequence != previous_transition_sequence {
@@ -2125,9 +2141,7 @@ impl<
                 self.transition_time_ns
             },
         );
-        if cycle_deadline_ns.is_some() {
-            self.state.monotonic_time_ns = publish_now_ns;
-        }
+        self.state.monotonic_time_ns = publish_now_ns;
         let state_publish = self.buffer.publish_state(*self.state);
         let event_publish = state_publish.as_ref().ok().map(|_| {
             lifecycle_events_to_procbuf(self.guard, self.buffer, self.event_cursor, publish_now_ns)

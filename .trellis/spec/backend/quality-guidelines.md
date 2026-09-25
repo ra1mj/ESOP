@@ -168,7 +168,7 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   must reset the planners and latch every later cycle in that sequence to the
   default Disable/QuickStop path; a new transition sequence clears that latch.
   An active-frame failure that creates the stop sequence must enter the same
-  latched fallback path. ProcBuf v5 carries per-axis requested and issued
+  latched fallback path. ProcBuf v6 carries per-axis requested and issued
   actions plus fresh, quality-checked feedback proof bits. Use the controlled
   evidence projector only for an accepted controlled frame so an enabled
   Hold/Ramp target is recorded as the policy action and its terminal Disable
@@ -419,7 +419,7 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
 
 ### 1. Scope / Trigger
 
-- Trigger: adding or changing the real-time path that converts a ProcBuf v5
+- Trigger: adding or changing the real-time path that converts a ProcBuf v6
   CSP, CSV, or CST command into a lifecycle-qualified EtherCAT output.
 - Scope: allocation-free software validation, deterministic SI-to-raw
   conversion, enable-edge target selection, and transactional PDO submission.
@@ -1880,6 +1880,10 @@ from actual hosted fault injection and performance claims.
   `prepare_procbuf_command_frame`, `prepare_motion_command_for_procbuf` and
   `AdmittedProcBufCommand::publish`; Zenoh must delegate its ProcBuf projection
   and MotionCommand target mapping to the same owner.
+- RT feedback: `cia402_feedback_to_procbuf(state, image, maps, modes, policies,
+  input_current, accepted_outputs)` stages one fixed `[JointState; AXES]`; every
+  `StopCycleContext` supplies the same frozen `axis_policies` used by ProcBuf
+  command conversion.
 
 ### 3. Contracts
 
@@ -1909,7 +1913,10 @@ from actual hosted fault injection and performance claims.
   and non-negative velocity/torque limits. It builds authority fields only from
   the returned permit, binds robot/boot/layout/capacity, leaves unselected and
   IO slots empty, and keeps publication separately retryable.
-- ProcBuf ABI v5 carries permit `policy_version`; v1-v4 attachments are rejected.
+- ProcBuf ABI v6 carries permit `policy_version`, per-axis CiA 402 error code,
+  and field-level feedback quality; v1-v5 attachments are rejected. RT feedback
+  projection must retain stale values with all axis quality bits clear, update
+  Controlword only from an accepted frame, and stage every axis before publish.
   RT consumers reconstruct permits only from a command returned by
   `ProcBuf::read_command` and still submit it to `LifecycleGuard`.
 
@@ -1927,6 +1934,11 @@ from actual hosted fault injection and performance claims.
 - ProcBuf header/replay/lifecycle/stop/quality/non-finite/payload failures and
   command envelope/payload/target mismatches -> stable typed payload errors. Do
   not publish partial messages or invoke ingress on structural failure.
+- Invalid axis policy -> `Cia402FeedbackError::InvalidPolicy`; malformed or
+  out-of-bounds current PDO -> `Pdo`; non-finite inverse conversion ->
+  `NonFiniteValue`. Each leaves the complete prior axis snapshot unchanged.
+  Stale/unverified input is not a conversion error: retain values and clear all
+  per-axis quality bits; absent accepted output retains the prior Controlword.
 - Existing local file/socket -> `LocalPathExists`; never remove it. Other I/O
   faults retain the originating `io::Error`.
 
@@ -1938,11 +1950,13 @@ from actual hosted fault injection and performance claims.
   and lifecycle accepts it; a same-path peer rebind with a new boot ID is
   classified Restarted.
 - Base: an empty receive is `WouldBlock`, timeout boundary is still Online, and
-  the next same-boot fresh sequence is Continued.
+  the next same-boot fresh sequence is Continued. A stale EtherCAT cycle keeps
+  the last numeric/status/error sample with zero axis quality.
 - Bad: `transmute` a ProcBuf page, duplicate projection/command mapping in each
   transport, call ingress before envelope/payload checks, retry until send
   succeeds, accept unnamed or arbitrary senders, remove a pre-existing path,
-  reuse sequence in one boot, or treat CRC/path matching as authentication.
+  reuse sequence in one boot, derive State Controlword from an unaccepted
+  lifecycle decision, or treat CRC/path matching as authentication.
 
 ### 6. Tests Required
 
@@ -1960,6 +1974,11 @@ from actual hosted fault injection and performance claims.
   publication retry, RT permit reconstruction, stale/non-finite/oversized state,
   and no ingress mutation on structural rejection. Existing Zenoh tests must
   continue through the shared implementation.
+- Feedback unit/integration tests assert signed inverse scaling and position
+  offset, optional-field retention, stale quality clearing, fault/error
+  preservation, all-axis rollback on one-axis failure, accepted active/fallback
+  Controlword truth, no-accepted-output retention, current-only DC timestamps,
+  and additive Protobuf field 11 compatibility with the frozen v1 reader.
 - Quality gates include focused Clippy/check, capability validation, full
   workspace CI and dependency-tree proof that real-time crates do not acquire
   `esop-ipc` or POSIX transport dependencies.
@@ -1969,15 +1988,18 @@ from actual hosted fault injection and performance claims.
 #### Wrong
 
 Cast a process image into a datagram, block or retry under pressure, let the
-transport authorize motion, infer restart from a path alone, or unlink whatever
-currently occupies the endpoint path.
+transport authorize motion, infer restart from a path alone, clear stale drive
+values so diagnostics disappear, publish axes incrementally, claim a requested
+but rejected Controlword, or unlink whatever currently occupies the endpoint
+path.
 
 #### Correct
 
 Encode one bounded versioned frame explicitly, return pressure to the caller,
 validate exact source plus identity/boot/sequence/time before committing peer
-state, keep safety policy outside transport, and remove only the socket inode
-owned by the endpoint.
+state, keep safety policy outside transport, stage all axis feedback before one
+assignment, retain stale values with zero quality, update Controlword only from
+an accepted frame, and remove only the socket inode owned by the endpoint.
 
 ## Code Review Checklist
 

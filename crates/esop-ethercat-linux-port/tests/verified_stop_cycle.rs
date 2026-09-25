@@ -41,6 +41,17 @@ use esop_profile_cia402::{
 };
 
 const IMAGE_BYTES: usize = 32;
+const FEEDBACK_POLICY: Cia402AxisCommandPolicy = Cia402AxisCommandPolicy {
+    position_units_per_radian: 1.0,
+    velocity_units_per_radian_per_second: 1.0,
+    torque_units_per_newton_metre: 1.0,
+    position_offset: 0,
+    min_position_radians: f64::MIN,
+    max_position_radians: f64::MAX,
+    max_velocity_radians_per_second: f64::MAX,
+    max_torque_newton_metres: f64::MAX,
+    max_position_step_radians: f64::MAX,
+};
 
 fn map_at(base: usize) -> Cia402PdoMap {
     let mut map = Cia402PdoMap::new();
@@ -608,6 +619,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
             other,
             maps: &maps,
             modes: &modes,
+            axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
             max_stationary_velocities: &[1],
             safe_process_image: &safe_image,
             plan: &motion_plan,
@@ -784,6 +796,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &[1],
         safe_process_image: &safe_image,
         plan: &motion_plan,
@@ -985,6 +998,7 @@ fn checked_cycle_records_deadline_after_tx_without_claiming_a_stop_was_sent() {
                 other,
                 maps: &maps,
                 modes: &modes,
+                axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
                 max_stationary_velocities: &[1],
                 safe_process_image: &image,
                 plan: &plan,
@@ -1101,6 +1115,7 @@ fn checked_cycle_records_deadline_after_tx_without_claiming_a_stop_was_sent() {
                 other,
                 maps: &maps,
                 modes: &modes,
+                axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
                 max_stationary_velocities: &[1],
                 safe_process_image: &image,
                 plan: &plan,
@@ -1408,6 +1423,7 @@ fn active_frame_requires_verified_feedback_and_bounded_target_committed_only_aft
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &[1],
         safe_process_image: &enable_image,
         plan: &plan,
@@ -1424,10 +1440,11 @@ fn active_frame_requires_verified_feedback_and_bounded_target_committed_only_aft
     assert_eq!(handshake.state_publish, Ok(1));
     assert!(!guards[0].seeded());
     assert_eq!(guards[0].last().position, 0.0);
-    assert_eq!(
-        buffer.read_state().unwrap().state.axis_stops[0].request_cycle,
-        0
-    );
+    let published = buffer.read_state().unwrap().state;
+    assert_eq!(published.axis_stops[0].request_cycle, 0);
+    assert_eq!(published.axes[0].statusword, 0x0040);
+    assert_eq!(published.axes[0].controlword, 0x0006);
+    assert_eq!(published.axes[0].position, 0.0);
 
     domain.begin_receive(3).unwrap();
     let third = receive(&mut master, &mut port, &mut domain, 3);
@@ -1474,6 +1491,7 @@ fn active_frame_requires_verified_feedback_and_bounded_target_committed_only_aft
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &[1],
         safe_process_image: &running_image,
         plan: &plan,
@@ -1531,6 +1549,7 @@ fn active_frame_requires_verified_feedback_and_bounded_target_committed_only_aft
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &[1],
         safe_process_image: &running_image,
         plan: &plan,
@@ -1544,6 +1563,13 @@ fn active_frame_requires_verified_feedback_and_bounded_target_committed_only_aft
     assert_eq!(running.action, LifecycleAction::EnableAllowed);
     assert!(running.transmission.is_ok());
     assert_eq!(guards[0].last().position, 26.0);
+    let published = buffer.read_state().unwrap().state;
+    assert_eq!(published.axes[0].statusword, 0x0027);
+    assert_eq!(published.axes[0].controlword, 0x000F);
+    assert_ne!(
+        published.axes[0].quality & esop_procbuf::JointStateQuality::OPERATION_ENABLED,
+        0
+    );
 
     domain.begin_receive(5).unwrap();
     let fifth = receive(&mut master, &mut port, &mut domain, 5);
@@ -1564,6 +1590,7 @@ fn active_frame_requires_verified_feedback_and_bounded_target_committed_only_aft
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &[1],
         safe_process_image: &running_image,
         plan: &plan,
@@ -1592,6 +1619,7 @@ fn active_frame_requires_verified_feedback_and_bounded_target_committed_only_aft
     assert_eq!(published.sequence, fifth.cycle);
     assert_eq!(published.axis_stops[0].request_cycle, fifth.cycle);
     assert_ne!(published.axis_stops[0].issued_action, 0);
+    assert_eq!(published.axes[0].controlword, CONTROLWORD_QUICK_STOP);
     assert!(matches!(failed_motion.event_publish, Some(Ok(_))));
 }
 
@@ -1769,6 +1797,7 @@ fn procbuf_command_executes_actual_hold_then_scaled_csp_target() {
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &policies,
         max_stationary_velocities: &[1],
         safe_process_image: &running_image,
         plan: &plan,
@@ -1777,11 +1806,24 @@ fn procbuf_command_executes_actual_hold_then_scaled_csp_target() {
         now_ns: 200_000,
         transition_time_ns: 100_000,
     }
-    .run_with_procbuf_command(&command, &policies, 100_000_000, &mut guards)
+    .run_with_procbuf_command(&command, 100_000_000, &mut guards)
     .unwrap();
     assert_eq!(held.action, LifecycleAction::EnableAllowed);
     assert!(held.transmission.is_ok());
     assert_eq!(guards[0].last().position, 25.0);
+    let published = buffer.read_state().unwrap().state;
+    assert!((published.axes[0].position - 0.25).abs() < f64::EPSILON);
+    assert_eq!(published.axes[0].statusword, 0x0023);
+    assert_eq!(published.axes[0].controlword, 0x000F);
+    assert_eq!(published.axes[0].error_code, 0);
+    assert_ne!(
+        published.axes[0].quality & esop_procbuf::JointStateQuality::CURRENT_INPUT,
+        0
+    );
+    assert_eq!(
+        published.axes[0].quality & esop_procbuf::JointStateQuality::OPERATION_ENABLED,
+        0
+    );
 
     domain.begin_receive(2).unwrap();
     let second = receive(&mut master, &mut port, &mut domain, 2);
@@ -1804,6 +1846,7 @@ fn procbuf_command_executes_actual_hold_then_scaled_csp_target() {
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &policies,
         max_stationary_velocities: &[1],
         safe_process_image: &running_image,
         plan: &plan,
@@ -1812,11 +1855,19 @@ fn procbuf_command_executes_actual_hold_then_scaled_csp_target() {
         now_ns: 300_000,
         transition_time_ns: 100_000,
     }
-    .run_with_procbuf_command(&command, &policies, 100_000_000, &mut guards)
+    .run_with_procbuf_command(&command, 100_000_000, &mut guards)
     .unwrap();
     assert_eq!(running.action, LifecycleAction::EnableAllowed);
     assert!(running.transmission.is_ok());
     assert_eq!(guards[0].last().position, 50.0);
+    let published = buffer.read_state().unwrap().state;
+    assert!((published.axes[0].position - 0.25).abs() < f64::EPSILON);
+    assert_eq!(published.axes[0].statusword, 0x0027);
+    assert_eq!(published.axes[0].controlword, 0x000F);
+    assert_ne!(
+        published.axes[0].quality & esop_procbuf::JointStateQuality::OPERATION_ENABLED,
+        0
+    );
 
     domain.begin_receive(3).unwrap();
     let third = receive(&mut master, &mut port, &mut domain, 3);
@@ -1843,6 +1894,7 @@ fn procbuf_command_executes_actual_hold_then_scaled_csp_target() {
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &policies,
         max_stationary_velocities: &[1],
         safe_process_image: &running_image,
         plan: &plan,
@@ -1851,7 +1903,7 @@ fn procbuf_command_executes_actual_hold_then_scaled_csp_target() {
         now_ns: 400_000,
         transition_time_ns: 100_000,
     }
-    .run_with_procbuf_command(&wrong_identity, &policies, 100_000_000, &mut guards);
+    .run_with_procbuf_command(&wrong_identity, 100_000_000, &mut guards);
     assert!(matches!(
         rejected,
         Err(StopCycleError::Command(
@@ -2125,6 +2177,7 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &max_stationary_velocities,
         safe_process_image: &safe_image,
         plan: &plan,
@@ -2180,6 +2233,7 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
             other,
             maps: &maps,
             modes: &modes,
+            axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
             max_stationary_velocities: &max_stationary_velocities,
             safe_process_image: &safe_image,
             plan: &plan,
@@ -2211,6 +2265,7 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &max_stationary_velocities,
         safe_process_image: &safe_image,
         plan: &plan,
@@ -2266,6 +2321,7 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &max_stationary_velocities,
         safe_process_image: &safe_image,
         plan: &plan,
@@ -2317,6 +2373,7 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &max_stationary_velocities,
         safe_process_image: &safe_image,
         plan: &plan,
@@ -2365,6 +2422,7 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &max_stationary_velocities,
         safe_process_image: &safe_image,
         plan: &plan,
@@ -2399,6 +2457,7 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &max_stationary_velocities,
         safe_process_image: &safe_image,
         plan: &plan,
@@ -2539,6 +2598,11 @@ fn stop_timeout_latches_and_still_sends_disable_with_ordered_events() {
     port.fail_next_tx();
     let mut state = StatePage::<1, 0, 1>::new(7);
     state.sequence = second.cycle;
+    state.axes[0].position = 42.0;
+    state.axes[0].statusword = 0x0027;
+    state.axes[0].controlword = 0x1234;
+    state.axes[0].error_code = 0x2310;
+    state.axes[0].quality = u8::MAX;
     let failed = StopCycleContext {
         guard: &mut guard,
         bank: &mut bank,
@@ -2553,6 +2617,7 @@ fn stop_timeout_latches_and_still_sends_disable_with_ordered_events() {
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &thresholds,
         safe_process_image: &safe_image,
         plan: &plan,
@@ -2568,10 +2633,13 @@ fn stop_timeout_latches_and_still_sends_disable_with_ordered_events() {
         Err(StopFrameError::Transmit(_))
     ));
     assert_eq!(failed.state_publish, Ok(1));
-    assert_eq!(
-        buffer.read_state().unwrap().state.axis_stops[0].issued_action,
-        0
-    );
+    let published = buffer.read_state().unwrap().state;
+    assert_eq!(published.axis_stops[0].issued_action, 0);
+    assert_eq!(published.axes[0].position, 42.0);
+    assert_eq!(published.axes[0].statusword, 0x0027);
+    assert_eq!(published.axes[0].controlword, 0x1234);
+    assert_eq!(published.axes[0].error_code, 0x2310);
+    assert_eq!(published.axes[0].quality, 0);
     while buffer.pop_event().is_some() {}
 
     domain.begin_receive(3).unwrap();
@@ -2593,6 +2661,7 @@ fn stop_timeout_latches_and_still_sends_disable_with_ordered_events() {
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &thresholds,
         safe_process_image: &safe_image,
         plan: &plan,
@@ -2604,10 +2673,9 @@ fn stop_timeout_latches_and_still_sends_disable_with_ordered_events() {
     .run()
     .unwrap();
     assert!(issued.transmission.is_ok());
-    assert_eq!(
-        buffer.read_state().unwrap().state.axis_stops[0].issued_action,
-        3
-    );
+    let published = buffer.read_state().unwrap().state;
+    assert_eq!(published.axis_stops[0].issued_action, 3);
+    assert_eq!(published.axes[0].controlword, CONTROLWORD_QUICK_STOP);
     assert_eq!(buffer.pop_event(), None);
 
     domain.begin_receive(4).unwrap();
@@ -2629,6 +2697,7 @@ fn stop_timeout_latches_and_still_sends_disable_with_ordered_events() {
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &thresholds,
         safe_process_image: &safe_image,
         plan: &plan,
@@ -2690,6 +2759,7 @@ fn stop_timeout_latches_and_still_sends_disable_with_ordered_events() {
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &thresholds,
         safe_process_image: &safe_image,
         plan: &plan,
@@ -3592,6 +3662,7 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
             other,
             maps: &maps,
             modes: &modes,
+            axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
             max_stationary_velocities: &[1],
             safe_process_image: &safe_image,
             plan: &motion_plan,
@@ -3721,6 +3792,7 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &[1],
         safe_process_image: &safe_image,
         plan: &motion_plan,
@@ -3774,6 +3846,7 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
         other,
         maps: &maps,
         modes: &modes,
+        axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &[1],
         safe_process_image: &safe_image,
         plan: &motion_plan,
@@ -4041,6 +4114,7 @@ fn due_auxiliary_output_failure_or_overrun_blocks_active_motion() {
             other,
             maps: &maps,
             modes: &modes,
+            axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
             max_stationary_velocities: &[1],
             safe_process_image: &safe_image,
             plan: &motion_plan,

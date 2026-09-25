@@ -2,7 +2,7 @@
 
 - 文档版本：1.0
 - 日期：2026-09-26
-- 状态：固定策略、permit 转换、共享 target 结构验证、ProcBuf v5 命令页交付和 Zenoh/Protobuf 命令桥接已实现；传输安全配置准入已实现，加密身份映射、远程 ACL 和生产部署仍待集成
+- 状态：固定策略、permit 转换、共享 target 结构验证、ProcBuf v6 命令页交付和 Zenoh/Protobuf 命令桥接已实现；传输安全配置准入已实现，加密身份映射、远程 ACL 和生产部署仍待集成
 - 上游需求：PRD FR-031、FR-044、FR-045、NFR-014
 
 ## 1. 边界
@@ -58,7 +58,7 @@ MLG 自身还保留 `PermitAudit`，记录实时边界再次拒绝的许可。�
 1. 合法命令转换为 `MotionPermit` 并进入 MLG 的受控 rearm 路径。
 2. 未授权来源、权限不足、策略版本错误、序号重放和限流拒绝。
 3. 固定容量审计环的时间顺序与覆盖边界。
-4. 所有 target 结构错误在 ingress 状态变化前拒绝，准入字段原样进入 ProcBuf ABI v5。
+4. 所有 target 结构错误在 ingress 状态变化前拒绝，准入字段原样进入 ProcBuf ABI v6。
 5. Unix datagram 到 ProcBuf readback、permit 重建和 MLG 接受的完整软件路径，以及错误目标 buffer 后从同一已准入对象重试发布。
 
 尚未声明完成的部分包括加密身份、远程 ACL 配置、产品机械限位、PDO 缩放、真实驱动执行、生产断连重连性能和实物 HIL。`proto/esop/v1/esop.proto` 与 `esop-zenoh-gateway` 已提供版本化契约、真实 loopback router 验证和受控命令入口；目标结构验证不能替代 RT profile 与设备资格。

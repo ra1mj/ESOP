@@ -84,7 +84,7 @@ ESOP 负责把来自控制器的每轴命令在确定周期内写入驱动，并
 | `split-linux-rt` | 高性能 ARM SoC | Linux PREEMPT_RT 用户态 ESOP | 同机或独立 Linux | P1 |
 | `single-host-dev` | PC 开发、仿真、HIL | Linux raw port | 同进程或同机 | P0，仅开发用途 |
 
-实时节点与 Linux 节点之间的 IPC 必须有版本化头、单调序号、时间戳、质量状态和掉线检测。当前 `esop-ipc` 已提供宿主机文件系统 Unix datagram 的固定容量 v1 帧、非阻塞收发、精确 peer path 准入、重启/离线/重连检测，以及 ProcBuf State/Event 与 Protobuf、MotionCommand target 经结构验证与策略准入后写入 ProcBuf v5 Command 页并由 RT 重建 permit 的共享 payload 适配。下游实时适配器已能用调用方冻结的每轴 SI 缩放和机械边界把该命令接入生命周期合格的 CiA 402 PDO 活动帧；IPC 本身仍不进入实时核心依赖图，也不代表 shared memory、RPMsg、产品策略生成、真实驱动/机械行为、产品延迟/WCET 或 HIL 资格。实时节点不能等待 ROS 2 executor、Zenoh router、DNS、磁盘或远程网络。
+实时节点与 Linux 节点之间的 IPC 必须有版本化头、单调序号、时间戳、质量状态和掉线检测。当前 `esop-ipc` 已提供宿主机文件系统 Unix datagram 的固定容量 v1 帧、非阻塞收发、精确 peer path 准入、重启/离线/重连检测，以及 ProcBuf State/Event 与 Protobuf、MotionCommand target 经结构验证与策略准入后写入 ProcBuf v6 Command 页并由 RT 重建 permit 的共享 payload 适配。下游实时适配器已能用调用方冻结的每轴 SI 缩放和机械边界把命令接入生命周期合格的 CiA 402 PDO 活动帧，并把当前验证的实际值、状态、错误码和质量回写 State/Protobuf；IPC 本身仍不进入实时核心依赖图，也不代表 shared memory、RPMsg、产品策略生成、真实驱动/机械行为、产品延迟/WCET 或 HIL 资格。实时节点不能等待 ROS 2 executor、Zenoh router、DNS、磁盘或远程网络。
 
 ## 4. 分层与软件包规划
 
@@ -314,7 +314,7 @@ ProcBuf State 同时携带 `ecat_time_ns`、`esop_monotonic_time_ns` 和转换�
 | R0：契约与仿真基线 | 目录结构、ProcBuf ABI、`.proto` v1、设备模型、PCAP/虚拟驱动仿真 | 同一 layout 从生成器产生 C header/YAML/proto descriptor；ABI/Schema 兼容检查在 CI 通过。 |
 | R1：机器人 EtherCAT 实时节点 | `esop_ecat`、CoE、DC、ProcBuf、CiA 402 单轴和分布式 IO，STM32/HPM/Linux test ports | 1/8 轴驱动 + IO 达到 OP；500 us/1 ms 目标周期的 WKC、jitter、无分配报告通过。 |
 | R2：多设备与鲁棒性 | 多 Domain、多速率、外设插件框架、事件环、诊断、恢复策略、配置生成 | EtherCAT + CAN-FD/I2C/SPI 的设备可同一 ProcBuf 表达；故障注入不破坏 RT 周期。 |
-| R3：IPC 与 Zenoh/Protobuf 网关 | `esop_ipc`、`esop_proto`、gateway、ACL、query、记录回放、fleet key namespace | IPC/网络丢失与重连、supervisor 新 boot、schema 升级、命令 TTL 和授权拒绝测试通过。当前宿主机 Unix datagram、共享 ProcBuf/Protobuf payload、严格命令 target 到 ProcBuf v5/RT permit，以及冻结策略下的 RT CiA 402 软件执行契约已完成；shared memory/RPMsg、生产 ACL、产品策略生成、WCET/实物 HIL 尚未完成。 |
+| R3：IPC 与 Zenoh/Protobuf 网关 | `esop_ipc`、`esop_proto`、gateway、ACL、query、记录回放、fleet key namespace | IPC/网络丢失与重连、supervisor 新 boot、schema 升级、命令 TTL 和授权拒绝测试通过。当前宿主机 Unix datagram、共享 ProcBuf/Protobuf payload、严格命令 target 到 ProcBuf v6/RT permit，以及冻结策略下的 RT CiA 402 命令执行与实际反馈/错误码/质量回传契约已完成；shared memory/RPMsg、生产 ACL、产品策略生成、WCET/实物 HIL 尚未完成。 |
 | R4：ROS 2 控制接入 | `esop_ros2_control`、ROS bridge、URDF/ros2_control 配置生成、DDS 与 Zenoh RMW 测试矩阵 | `joint_trajectory_controller` 驱动仿真和实机；read/write 不分配、不等待网络。 |
 | R5：产品扩展 | 力控接口、FoE、EoE/SoE/VoE、冗余、FSoE 项目集成 | 每个扩展独立编译开关，提供对周期、RAM、Flash 和故障模型的影响报告。 |
 
