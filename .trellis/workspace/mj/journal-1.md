@@ -903,3 +903,48 @@ Implemented fail-closed ProcBuf command validation and deterministic CiA 402 PDO
 ### Next Steps
 
 - None - task complete
+
+
+## Session 28: Publish CiA 402 feedback into ProcBuf state
+
+**Date**: 2026-09-26
+**Task**: Publish CiA 402 feedback into ProcBuf state
+**Branch**: `main`
+
+### Summary
+
+Published verified CiA 402 feedback and transport-accepted controlwords through ProcBuf ABI v6 and Protobuf, with transactional stale-safe projection, Linux end-to-end coverage, updated product contracts, and passing local plus GitHub quality gates.
+
+### Main Changes
+
+### Verification
+
+- `make ci` passed.
+- `make test-zenoh` passed both live integration tests.
+- `make bpf CLANG="$HOME/.local/opt/clang14/usr/bin/clang-14"` passed after installing Clang 14 under the user-local prefix.
+- GitHub Actions quality run `36189150904` passed every Rust, BPF/eBPF privileged runtime, and Zenoh job.
+
+### Remaining Qualification Scope
+
+- Physical EtherCAT HIL and servo tuning remain pending.
+- Product-specific process-image mapping and product-scale axis configuration remain pending.
+- Certified WCET measurement remains pending.
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1411fb26aa4521169904a240bf44502f80fa3931` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
