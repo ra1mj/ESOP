@@ -29,6 +29,7 @@ const POLL_SLEEP: Duration = Duration::from_millis(5);
 const POLL_DEADLINE: Duration = Duration::from_secs(2);
 const WORKER_DEADLINE: Duration = Duration::from_secs(2);
 const NO_TARGET: u32 = u32::MAX;
+const INERT_SCHEDULER_TID: u32 = i32::MAX as u32;
 const OBSERVATION_HEALTHY: u8 = 0;
 const OBSERVATION_DEGRADED: u8 = 1;
 const DEGRADED_INCIDENT_FAULT: u32 = 0x4542_2001;
@@ -289,6 +290,7 @@ fn run(object_path: PathBuf, output_path: PathBuf) -> Result<(), Box<dyn Error>>
         required_attach_mask: ATTACH_SCHED_MIGRATE_TASK,
         tracked_pid: std::process::id(),
         scheduler_latency_threshold_ns: SCHEDULER_LATENCY_THRESHOLD_NS,
+        scheduler_tid: INERT_SCHEDULER_TID,
         scheduler_migration_threshold: MIGRATION_THRESHOLD,
         scheduler_migration_window_ns: MIGRATION_WINDOW_NS,
         boot_id: BOOT_ID,

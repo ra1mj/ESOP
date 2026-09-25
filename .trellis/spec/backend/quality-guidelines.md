@@ -850,9 +850,13 @@ the measured hosted-kernel controlled wake-to-switch chain.
   threshold plus a correlated deadline/WKC/DC-risk cycle. It remains lower
   confidence than measured runqueue latency.
 - The privileged fixture requires two CPUs from its real allowed affinity set,
-  pins one runnable worker to CPU A before tracking, then forces singleton-mask
-  A-to-B-to-A movement after an exact-TID policy update. The first move must
-  emit nothing; the second must produce the only evidence and incident.
+  loads the attached runtime with the valid but unreachable `i32::MAX` inert
+  scheduler TID, pins one runnable worker to CPU A, then atomically replaces
+  the inert policy with the exact worker TID before forcing singleton-mask
+  A-to-B-to-A movement. Never leave `scheduler_tid=0` during setup: its
+  `tracked_pid` fallback can count unrelated leader migrations and contaminate
+  the exact-zero baseline. The first controlled move must emit nothing; the
+  second must produce the only evidence and incident.
 - A successful qualification has exact statistics `scheduler_migrations=2`,
   `scheduler_migration_threshold_events=1`, `emitted_events=1`, zero loss, a
   Warning/confidence-60 `HostSchedulerStall` with `DegradeHostObservation`, and

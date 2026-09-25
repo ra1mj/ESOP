@@ -85,6 +85,11 @@ host allowed CPU set
 - The implementation is a Linux-only example and reuses the runtime crate's
   existing `libc` development dependency. Production BPF and Rust ABIs remain
   unchanged.
+- Hosted validation exposed scheduler-migration fixture setup noise: loading
+  that separate fixture with `scheduler_tid=0` briefly tracked its process
+  leader before the worker TID was known. Its setup now uses the valid but
+  unreachable `i32::MAX` TID until the existing atomic exact-TID update, so
+  runner background migration cannot contaminate the exact-zero baseline.
 - BPF/Rust compilation and report validation remain unprivileged. Only the
   prebuilt fixture is elevated for BPF loading, affinity, futex, and FIFO
   scheduling operations.
