@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 14
+- **Total Sessions**: 15
 - **Last Active**: 2026-09-25
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~471 | Active |
+| `journal-1.md` | ~504 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 15 | 2026-09-25 | Qualify eBPF scheduler migration runtime | `f1aeddc` | `main` |
 | 14 | 2026-09-25 | eBPF process-exit runtime qualification | `309a835` | `main` |
 | 13 | 2026-09-25 | Privileged eBPF gateway runtime qualification | `2fc62b8` | `main` |
 | 12 | 2026-09-25 | Qualify eBPF raw-port runtime path | `3963e26` | `main` |

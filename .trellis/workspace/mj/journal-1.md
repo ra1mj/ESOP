@@ -469,3 +469,36 @@ Added and qualified the hosted Linux sched_process_exit path with synchronized w
 ### Next Steps
 
 - None - task complete
+
+
+## Session 15: Qualify eBPF scheduler migration runtime
+
+**Date**: 2026-09-25
+**Task**: Qualify eBPF scheduler migration runtime
+**Branch**: `main`
+
+### Summary
+
+Added an exact-TID two-CPU scheduler migration qualification fixture, strict report validator and tests, privileged GitHub Actions coverage, and bounded documentation claims. Local make ci and GitHub Actions run 36117944042 passed; the downloaded scheduler artifact independently validated with exact counts and zero loss.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f1aeddc` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
