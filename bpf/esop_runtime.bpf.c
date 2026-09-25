@@ -22,6 +22,10 @@ struct esop_context {
     __u32 cpu_frequency_policy_cpu;
     __u32 cpu_frequency_policy_epoch;
     __u32 reserved_cpu_frequency;
+    __u32 scheduler_tid;
+    __u32 scheduler_migration_epoch;
+    __u64 scheduler_migration_threshold;
+    __u64 scheduler_migration_window_ns;
 };
 
 struct esop_stats {
@@ -45,6 +49,8 @@ struct esop_stats {
     __u64 cpu_frequency_throttle_events;
     __u64 cpu_frequency_recoveries;
     __u64 cpu_frequency_suppressed;
+    __u64 scheduler_migrations;
+    __u64 scheduler_migration_threshold_events;
 };
 
 struct esop_interrupt_key {
@@ -81,6 +87,15 @@ struct esop_cpu_frequency_state {
     __u8 reserved[3];
 };
 
+struct esop_scheduler_migration_state {
+    __u64 window_start_ns;
+    __u32 count;
+    __u32 policy_epoch;
+    __u16 origin_cpu;
+    __u16 destination_cpu;
+    __u32 reserved;
+};
+
 struct esop_runtime_evidence {
     __u64 evidence_id;
     __u64 boot_id;
@@ -103,8 +118,8 @@ struct esop_runtime_evidence {
     __u8 detail;
 };
 
-_Static_assert(sizeof(struct esop_context) == 120, "context ABI changed");
-_Static_assert(sizeof(struct esop_stats) == 160, "stats ABI changed");
+_Static_assert(sizeof(struct esop_context) == 144, "context ABI changed");
+_Static_assert(sizeof(struct esop_stats) == 176, "stats ABI changed");
 _Static_assert(sizeof(struct esop_runtime_evidence) == 96, "evidence ABI changed");
 
 struct {
@@ -168,6 +183,13 @@ struct {
     __type(value, struct esop_cpu_frequency_state);
 } ESOP_CPU_FREQUENCY_LIMITS SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 1024);
+    __type(key, __u32);
+    __type(value, struct esop_scheduler_migration_state);
+} ESOP_SCHEDULER_MIGRATIONS SEC(".maps");
+
 static __always_inline struct esop_context *esop_context(void)
 {
     __u32 key = 0;
@@ -193,6 +215,19 @@ static __always_inline __u32 esop_tid(void)
 static __always_inline int esop_tracks(__u32 pid, const struct esop_context *context)
 {
     return context && (context->tracked_pid == 0 || context->tracked_pid == pid);
+}
+
+static __always_inline int esop_tracks_scheduler(
+    __u32 tid, const struct esop_context *context)
+{
+    if (!context) {
+        return 0;
+    }
+    __u32 target = context->scheduler_tid;
+    if (target == 0) {
+        target = context->tracked_pid;
+    }
+    return target == 0 || target == tid;
 }
 
 static __always_inline int esop_emit_resource_cpu_task(
@@ -311,7 +346,7 @@ int esop_sched_wakeup(struct trace_event_raw_sched_wakeup_template *event)
 {
     struct esop_context *context = esop_context();
     __u32 pid = (__u32)BPF_CORE_READ(event, pid);
-    if (!esop_tracks(pid, context)) {
+    if (!esop_tracks_scheduler(pid, context)) {
         return 0;
     }
     __u64 now = bpf_ktime_get_ns();
@@ -328,7 +363,7 @@ int esop_sched_switch(struct trace_event_raw_sched_switch *event)
 {
     struct esop_context *context = esop_context();
     __u32 pid = (__u32)BPF_CORE_READ(event, next_pid);
-    if (!esop_tracks(pid, context)) {
+    if (!esop_tracks_scheduler(pid, context)) {
         return 0;
     }
     __u64 *start = bpf_map_lookup_elem(&ESOP_WAKEUPS, &pid);
@@ -339,11 +374,101 @@ int esop_sched_switch(struct trace_event_raw_sched_switch *event)
     __u64 latency = now - *start;
     bpf_map_delete_elem(&ESOP_WAKEUPS, &pid);
     if (context && latency > context->scheduler_latency_threshold_ns) {
-        esop_emit(0, 0, 2, latency, context->scheduler_latency_threshold_ns, latency, 1, 0);
+        esop_emit_resource_task(0, 0, 2, latency,
+                                context->scheduler_latency_threshold_ns,
+                                latency, 1, 0, 0, 0, 0, pid);
         struct esop_stats *stats = esop_stats();
         if (stats) {
             stats->scheduler_stalls++;
         }
+    }
+    return 0;
+}
+
+SEC("tracepoint/sched/sched_migrate_task")
+int esop_sched_migrate_task(struct trace_event_raw_sched_migrate_task *event)
+{
+    struct esop_context *context = esop_context();
+    if (!context || context->scheduler_migration_threshold == 0 ||
+        context->scheduler_migration_window_ns == 0) {
+        return 0;
+    }
+
+    int raw_pid = BPF_CORE_READ(event, pid);
+    int raw_origin = BPF_CORE_READ(event, orig_cpu);
+    int raw_destination = BPF_CORE_READ(event, dest_cpu);
+    if (raw_pid <= 0 || raw_origin < 0 || raw_destination < 0 ||
+        raw_origin > 0xffff || raw_destination > 0xffff ||
+        raw_origin == raw_destination) {
+        return 0;
+    }
+
+    __u32 tid = (__u32)raw_pid;
+    if (!esop_tracks_scheduler(tid, context)) {
+        return 0;
+    }
+
+    struct esop_stats *stats = esop_stats();
+    if (stats) {
+        stats->scheduler_migrations++;
+    }
+
+    __u64 now = bpf_ktime_get_ns();
+    struct esop_scheduler_migration_state *state =
+        bpf_map_lookup_elem(&ESOP_SCHEDULER_MIGRATIONS, &tid);
+    __u32 count = 1;
+    __u64 elapsed = 0;
+    int threshold_crossed = context->scheduler_migration_threshold == 1;
+    if (!state) {
+        struct esop_scheduler_migration_state initial = {
+            .window_start_ns = now,
+            .count = 1,
+            .policy_epoch = context->scheduler_migration_epoch,
+            .origin_cpu = (__u16)raw_origin,
+            .destination_cpu = (__u16)raw_destination,
+        };
+        if (bpf_map_update_elem(&ESOP_SCHEDULER_MIGRATIONS, &tid, &initial,
+                                BPF_ANY) < 0) {
+            if (stats) {
+                stats->lost_events++;
+            }
+            return 0;
+        }
+    } else if (state->policy_epoch != context->scheduler_migration_epoch ||
+               now < state->window_start_ns ||
+               now - state->window_start_ns >=
+                   context->scheduler_migration_window_ns) {
+        state->window_start_ns = now;
+        state->count = 1;
+        state->policy_epoch = context->scheduler_migration_epoch;
+        state->origin_cpu = (__u16)raw_origin;
+        state->destination_cpu = (__u16)raw_destination;
+    } else {
+        elapsed = now - state->window_start_ns;
+        __u32 previous = state->count;
+        if (state->count != 0xffffffff) {
+            state->count++;
+        }
+        state->origin_cpu = (__u16)raw_origin;
+        state->destination_cpu = (__u16)raw_destination;
+        count = state->count;
+        threshold_crossed =
+            (__u64)previous < context->scheduler_migration_threshold &&
+            (__u64)count >= context->scheduler_migration_threshold;
+    }
+
+    if (!threshold_crossed) {
+        return 0;
+    }
+
+    int raw_priority = BPF_CORE_READ(event, prio);
+    __u8 priority = raw_priority < 0 ? 0 : esop_detail_u8((__u64)raw_priority);
+    if (esop_emit_resource_cpu_task(
+            0, 10, 1, count, context->scheduler_migration_threshold,
+            elapsed, count, (__u16)raw_origin, 0, priority, 0, tid,
+            (__u16)raw_destination) == 0 &&
+        stats) {
+        stats->scheduler_migration_threshold_events++;
     }
     return 0;
 }

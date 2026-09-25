@@ -12,7 +12,7 @@ ESOP 是面向嵌入式实时控制的 EtherCAT 简易操作系统；EtherCAT �
 - [ETG.1500、Beckhoff 与 CiA 402 主站决策](docs/esop-etg-cia402-master-requirements.md)
 - [eBPF 运行时观测与问题归因设计](docs/esop-ebpf-runtime-observability.md)
 
-Linux 观测适配器位于 `crates/esop-ebpf-runtime/`：它使用 Rust/Aya 加载预编译 CO-RE BPF ELF，按能力挂载 tracepoint，从 ringbuf 解码固定证据并送入 `RuntimeAgent`。当前 BPF bundle 已包含固定容量的硬 IRQ/softirq entry/exit 时长采集、按 EtherType/可选 ifindex 聚合的 `kfree_skb` 丢包窗口、按 CPU/进程聚合的用户态页错误窗口、按 cpufreq policy CPU 去重的低于产品频率下限 episode，以及受跟踪进程的主线程退出和 OOM victim PID 硬事实归因；普通工作线程退出只增加诊断计数，不生成 `USER_COMPONENT_EXIT`。超阈值软证据只有与 cycle 风险窗口相关时才分别归因为 `HOST_IRQ_STORM`、`HOST_NIC_DROP`、`HOST_PAGE_FAULT` 或 `HOST_CPU_THROTTLE`，OOM 与主线程退出则保持无需 cycle 上下文的 critical 事件。频率证据只说明 policy `max_freq` 低于配置下限，不代表瞬时频率、限频原因或持续时间。实时主站核心不依赖 Aya，也不等待观测器。
+Linux 观测适配器位于 `crates/esop-ebpf-runtime/`：它使用 Rust/Aya 加载预编译 CO-RE BPF ELF，按能力挂载 tracepoint，从 ringbuf 解码固定证据并送入 `RuntimeAgent`。当前 BPF bundle 已包含固定容量的调度唤醒延迟、按受跟踪 TID 聚合的 CPU 迁移窗口、硬 IRQ/softirq entry/exit 时长采集、按 EtherType/可选 ifindex 聚合的 `kfree_skb` 丢包窗口、按 CPU/进程聚合的用户态页错误窗口、按 cpufreq policy CPU 去重的低于产品频率下限 episode，以及受跟踪进程的主线程退出和 OOM victim PID 硬事实归因；普通工作线程退出只增加诊断计数，不生成 `USER_COMPONENT_EXIT`。超阈值软证据只有与 cycle 风险窗口相关时才分别归因为 `HOST_SCHEDULER_STALL`、`HOST_IRQ_STORM`、`HOST_NIC_DROP`、`HOST_PAGE_FAULT` 或 `HOST_CPU_THROTTLE`，OOM 与主线程退出则保持无需 cycle 上下文的 critical 事件。迁移证据只说明 TID 在配置窗口内跨 CPU 达到计数阈值，频率证据只说明 policy `max_freq` 低于配置下限；两者都不证明原因、持续影响或亲和性配置错误。实时主站核心不依赖 Aya，也不等待观测器。
 
 在具备 clang、bpftool 和 `/sys/kernel/btf/vmlinux` 的 Linux 主机上，可执行 `make -C bpf` 生成 BPF ELF，再用 `cargo run -p esop-ebpf-runtime --example observe -- bpf/build/esop_runtime.bpf.o` 启动只读观测进程。生产集成应由 ESOP 监督器提供真实 `boot_id`、`agent_epoch` 和每周期 `CycleContext`。
 

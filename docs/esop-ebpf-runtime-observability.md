@@ -43,7 +43,7 @@ ESOP RT node
 
 两条证据链保持独立：RT 域是运动控制事实来源；eBPF 是 Linux 环境的解释与归因来源。相关器可以合并“同一个周期窗口内的事件”，但不能以缺少 eBPF 事件证明“系统没有问题”。
 
-当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、硬 IRQ/softirq entry/exit attach、EtherCAT EtherType/可选 ifindex 丢包策略更新、页错误计数窗口策略更新、cpufreq policy 下限/CPU 策略原子更新和 `RuntimeAgent` 桥接；`bpf/` 提供固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、固定 256 项的 CPU/进程页错误窗口 map、固定 256 项的 cpufreq policy episode map、主线程退出过滤、OOM victim PID 归因、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。CI 负责 CO-RE 对象构建；目标 Linux 环境仍需完成真实权限、verifier、ringbuf、IRQ/softirq、丢包、页错误、OOM、进程退出与限频压力注入以及目标 hook 资格测试。
+当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、调度 TID/迁移计数窗口策略原子更新、硬 IRQ/softirq entry/exit attach、EtherCAT EtherType/可选 ifindex 丢包策略更新、页错误计数窗口策略更新、cpufreq policy 下限/CPU 策略原子更新和 `RuntimeAgent` 桥接；`bpf/` 提供固定 1024 项的调度 TID 迁移窗口 map、固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、固定 256 项的 CPU/进程页错误窗口 map、固定 256 项的 cpufreq policy episode map、主线程退出过滤、OOM victim PID 归因、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。CI 负责 CO-RE 对象构建；目标 Linux 环境仍需完成真实权限、verifier、ringbuf、调度迁移、IRQ/softirq、丢包、页错误、OOM、进程退出与限频压力注入以及目标 hook 资格测试。
 
 ## 4. 观测域与 attach 点
 
@@ -51,7 +51,7 @@ ESOP RT node
 
 | 域 | 观测点/机制 | 能回答的问题 | 首版输出 |
 | --- | --- | --- | --- |
-| 调度 | `sched_switch`、`sched_wakeup`、`sched_process_exec/exit` | RT 线程何时被唤醒、实际运行多久、被谁抢占、是否迁移、进程是否退出。 | run-queue latency、off-CPU time、migration、thread exit。 |
+| 调度 | `sched_switch`、`sched_wakeup`、`sched_migrate_task`、`sched_process_exec/exit` | RT 线程何时被唤醒、实际运行多久、被谁抢占、是否迁移、进程是否退出。 | run-queue latency、migration count/source/destination、thread exit。 |
 | IRQ/softirq | IRQ 与 softirq entry/exit、CPU 时间统计 | 哪个 IRQ/softirq 占满 CPU，Ethernet IRQ 是否延迟服务。 | handler duration、storm count、CPU overlap。 |
 | 网络 | `net_dev_queue`、`net_dev_xmit`、`netif_receive_skb`、`napi_poll`、`kfree_skb` 等适用点 | EtherCAT raw port 的帧是否进入/离开队列，是否被丢弃或 NAPI/IRQ 延迟。 | interface、queue、drop reason、receive/transmit latency。 |
 | 内存 | user page fault、OOM、进程 mmap/munmap 等低频点 | 周期或 gateway 是否发生页错误、内存压力或 OOM。 | fault-window count、架构错误码、OOM、address-space change；major/minor 结果需其他 hook。 |
@@ -59,6 +59,19 @@ ESOP RT node
 | 性能计数 | kernel perf event 或平台可用 PMU | CPU cycles、instructions、cache miss 等是否突然恶化。 | 只做采样/窗口统计，不在每周期输出原始样本。 |
 
 实际 attach 点由内核版本、BTF、发行版和可用 tracepoint 决定。agent 启动时必须发布 attach 成功/失败清单，不允许假定所有 Linux 内核都有同一组内核函数或字段。
+
+调度迁移首版使用 `sched:sched_migrate_task` typed context，读取 scheduler
+entity PID/TID、priority、origin CPU 和 destination CPU。产品可配置独立的
+scheduler TID；零值回退到现有 `tracked_pid`，两者均为零时保留全任务开发
+模式。每个 TID 在固定 1024 项 LRU map 中维护单调窗口、饱和迁移计数和策略
+epoch，只在窗口第一次达到计数阈值时发送一条 96 字节 `CpuMigration` 证据。
+证据 PID 为零、TID 为 tracepoint PID、`cpu` 为 destination CPU、kind-specific
+`irq` 槽为 origin CPU、`detail` 为饱和 priority。该证据必须与 deadline、WKC
+或 DC 风险周期同窗，才以低于实测 runqueue latency 的置信度合并为
+`HOST_SCHEDULER_STALL`。单次迁移和健康周期不构成事故；事件也不证明迁移
+原因、亲和性错误、cache/NUMA 影响或实际停顿时长。`sched_switch` 的
+runqueue-latency 证据同样显式记录被调度的 `next_pid` 为 TID，不再使用 hook
+执行上下文的 current task 身份。
 
 当前首版以 `irq_handler_entry`/`irq_handler_exit` 和
 `softirq_entry`/`softirq_exit` 计算单次 handler 时长。硬 IRQ 与 softirq
@@ -265,11 +278,13 @@ EBPF-005 当前已具备有界 CPU/进程页错误窗口、阈值事件、架构
 结果不等于目标内核真实页错误/内存压力/OOM/进程退出注入、victim TGID、
 major/minor 归因、verifier 和开销资格。
 
-FR-048 的 CPU 限频路径当前已具备 typed `cpu_frequency_limits` 读取、可选
-policy CPU 过滤、低于产品频率下限的 episode 去重、固定事件解码和 cycle-risk
-相关器单元测试。该实现与 CO-RE 编译结果不等于目标内核真实 policy 限制注入、
-共享 policy 拓扑、瞬时频率/驻留时间/原因归因、verifier 和开销资格；CPU 迁移
-观测也仍属于后续增量。
+FR-048 的调度迁移路径当前已具备 typed `sched_migrate_task` 读取、独立
+scheduler TID 过滤、固定 1024 项迁移窗口、策略 epoch 重置、来源/目标 CPU
+固定事件解码和 cycle-risk 相关器单元测试；CPU 限频路径已具备 typed
+`cpu_frequency_limits` 读取、可选 policy CPU 过滤、低于产品频率下限的 episode
+去重、固定事件解码和 cycle-risk 相关器单元测试。这些实现与 CO-RE 编译结果
+不等于目标内核真实迁移或 policy 限制注入、迁移原因/亲和性/cache 影响、共享
+policy 拓扑、瞬时频率/驻留时间/原因归因、verifier 和开销资格。
 
 ## 11. 运行时输出示例
 

@@ -125,7 +125,7 @@
     {
       "id": "ebpf_observation",
       "status": "partial",
-      "scope": "Linux CO-RE loader, tracepoint attach, fixed event decode, bounded IRQ/softirq duration evidence, bounded EtherType/ifindex skb drop windows, bounded tracked-process page-fault windows, bounded cpufreq policy-limit episodes, leader-thread process-exit filtering, OOM victim-PID attribution and incident correlation",
+      "scope": "Linux CO-RE loader, tracepoint attach, fixed event decode, bounded scheduler runqueue and tracked-TID migration evidence, bounded IRQ/softirq duration evidence, bounded EtherType/ifindex skb drop windows, bounded tracked-process page-fault windows, bounded cpufreq policy-limit episodes, leader-thread process-exit filtering, OOM victim-PID attribution and incident correlation",
       "evidence": [
         "crates/esop-ebpf-agent/src/lib.rs",
         "crates/esop-ebpf-runtime/src/linux.rs",
@@ -133,7 +133,7 @@
         "crates/esop-procbuf/tests/cross_layer.rs",
         "docs/esop-ebpf-runtime-observability.md"
       ],
-      "limitation": "Target-kernel permissions, verifier, IRQ/softirq pressure injection, real NIC/page-fault/OOM/process-exit/cpufreq-limit injection, major/minor fault attribution, OOM victim TGID resolution, CPU migration, instantaneous-frequency/residency/cause attribution and production hook qualification remain open"
+      "limitation": "Target-kernel permissions, verifier, scheduler migration and IRQ/softirq pressure injection, real NIC/page-fault/OOM/process-exit/cpufreq-limit injection, migration-cause/affinity/cache-impact qualification, major/minor fault attribution, OOM victim TGID resolution, instantaneous-frequency/residency/cause attribution and production hook qualification remain open"
     },
     {
       "id": "stm32_hpmicro_ports",

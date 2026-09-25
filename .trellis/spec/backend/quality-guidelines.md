@@ -624,6 +624,96 @@ Read typed policy `cpu_id`/`max_freq`, compare against the configured kHz floor,
 emit one event per bounded policy episode, and require cycle-risk correlation
 before assigning the incident code.
 
+## Scenario: eBPF Scheduler Migration Evidence
+
+### 1. Scope / Trigger
+
+- Trigger: add or change Linux scheduler-migration observation in the BPF
+  bundle, Aya runtime, or incident correlator.
+- Scope: `sched:sched_migrate_task` is a scheduler entity movement fact. It
+  must not be generalized into measured stall duration, affinity failure,
+  migration cause, or cache/NUMA impact without a separately qualified source.
+
+### 2. Signatures
+
+- Configuration: `RuntimeConfig::{tracked_pid, scheduler_tid,
+  scheduler_latency_threshold_ns, scheduler_migration_threshold,
+  scheduler_migration_window_ns}`.
+- Runtime update: `BpfRuntime::update_scheduler_tracking(tid,
+  latency_threshold_ns, migration_threshold, migration_window_ns)` writes one
+  complete `KernelContext` value.
+- Attach point: optional `sched:sched_migrate_task`; it remains outside the
+  default required mask.
+
+### 3. Contracts
+
+- A nonzero `scheduler_tid` is the exact scheduler entity filter. Zero falls
+  back to `tracked_pid`; two zero values preserve all-task development mode.
+- Migration threshold fits `u32`, and threshold/window are nonzero. The context
+  owns a nonzero epoch; every successful runtime policy update increments it.
+- One fixed-capacity LRU entry per TID stores a monotonic count window. Missing,
+  expired, backwards-time, or stale-epoch state starts at one. Emit only when
+  the count first reaches the threshold; saturate rather than wrap.
+- Fixed evidence remains 96 bytes. It writes zero PID, scheduler entity to TID,
+  destination CPU to `cpu`, origin CPU to the kind-specific `irq` slot, count
+  to `observed_value` and `count`, count threshold to `threshold`, elapsed
+  window time to `duration_ns`, and saturated priority to `detail`.
+- Runqueue-latency evidence must write `sched_switch.next_pid` as TID rather
+  than the current hook task.
+- `HOST_SCHEDULER_STALL` from migration requires a consistent count at or above
+  threshold plus a correlated deadline/WKC/DC-risk cycle. It remains lower
+  confidence than measured runqueue latency.
+
+### 4. Validation & Error Matrix
+
+- Zero latency threshold, zero/oversized migration threshold, or zero window ->
+  `InvalidConfiguration`; do not update the context map or local mirror.
+- Nonpositive PID, negative CPU, equal origin/destination, or CPU above `u16` ->
+  ignore the malformed tracepoint record.
+- Missing optional tracepoint/program -> reduced attach capability; keep the
+  required wakeup/switch/process baseline running.
+- Bounded state insertion failure or ring-buffer output failure -> increment
+  `lost_events`; never block or fabricate evidence.
+- Below-threshold migration, inconsistent count fields, or healthy cycle -> no
+  incident.
+
+### 5. Good/Base/Bad Cases
+
+- Good: tracked TID 101 migrates four times within 1 ms, last moving CPU 2 -> 7,
+  while cycle 42 has a deadline miss; emit one lower-confidence scheduler
+  incident with the raw migration evidence.
+- Base: one ordinary migration records state and statistics only; later moves
+  in the same window emit once at the threshold and not again.
+- Bad: attribute the tracepoint current task as the migrated entity, call every
+  migration a stall, or describe origin CPU in raw migration evidence as an
+  interrupt vector.
+
+### 6. Tests Required
+
+- Decode asserts zero PID, exact TID, source/destination CPU, count, threshold,
+  elapsed window, priority, append-only discriminant, and unchanged 96-byte
+  event size.
+- Configuration tests reject zero/oversized threshold and zero window without
+  mutation, and prove epoch advancement on successful updates.
+- Correlator tests reject below-threshold, inconsistent-count, and healthy-cycle
+  evidence and prove migration confidence/action are weaker than runqueue
+  latency.
+- C/Rust ABI assertions cover context/stat sizes; statistics aggregation covers
+  saturation; BPF syntax and real CO-RE compilation cover the typed record.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+Emit every `sched_migrate_task`, use current PID/TID, and label the event a
+measured scheduler stall without cycle evidence.
+
+#### Correct
+
+Filter the typed scheduler entity, count migrations in a bounded epoch-aware
+window, emit the first threshold crossing with source/destination identity, and
+require transport-risk correlation before assigning the existing incident code.
+
 ## Code Review Checklist
 
 - Is the worst-case loop bounded by a static capacity or explicit budget?

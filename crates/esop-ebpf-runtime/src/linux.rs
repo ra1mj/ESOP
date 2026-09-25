@@ -30,6 +30,7 @@ pub const ATTACH_IRQ_HANDLER_EXIT: u64 = 1 << 7;
 pub const ATTACH_SOFTIRQ_ENTRY: u64 = 1 << 8;
 pub const ATTACH_SOFTIRQ_EXIT: u64 = 1 << 9;
 pub const ATTACH_CPU_FREQUENCY_LIMIT: u64 = 1 << 10;
+pub const ATTACH_SCHED_MIGRATE_TASK: u64 = 1 << 11;
 pub const ATTACH_IRQ_HANDLER: u64 = ATTACH_IRQ_HANDLER_ENTRY | ATTACH_IRQ_HANDLER_EXIT;
 pub const ATTACH_SOFTIRQ: u64 = ATTACH_SOFTIRQ_ENTRY | ATTACH_SOFTIRQ_EXIT;
 pub const NETWORK_PROTOCOL_ETHERCAT: u16 = 0x88A4;
@@ -42,7 +43,8 @@ pub const ATTACH_ALL: u64 = ATTACH_SCHED_WAKEUP
     | ATTACH_NETWORK_DROP
     | ATTACH_IRQ_HANDLER
     | ATTACH_SOFTIRQ
-    | ATTACH_CPU_FREQUENCY_LIMIT;
+    | ATTACH_CPU_FREQUENCY_LIMIT
+    | ATTACH_SCHED_MIGRATE_TASK;
 
 const TRACEFS_EVENT_ROOTS: [&str; 2] = [
     "/sys/kernel/tracing/events",
@@ -67,6 +69,7 @@ pub enum AttachPoint {
     SoftirqEntry = 8,
     SoftirqExit = 9,
     CpuFrequencyLimit = 10,
+    SchedulerMigrateTask = 11,
 }
 
 impl AttachPoint {
@@ -83,6 +86,7 @@ impl AttachPoint {
             Self::SoftirqEntry => ATTACH_SOFTIRQ_ENTRY,
             Self::SoftirqExit => ATTACH_SOFTIRQ_EXIT,
             Self::CpuFrequencyLimit => ATTACH_CPU_FREQUENCY_LIMIT,
+            Self::SchedulerMigrateTask => ATTACH_SCHED_MIGRATE_TASK,
         }
     }
 }
@@ -94,10 +98,15 @@ pub struct RuntimeConfig {
     /// Missing bits cause a degraded capability snapshot, rather than granting
     /// an observation healthy lease.
     pub required_attach_mask: u64,
-    /// Zero observes scheduler latency for all tasks. Production deployments
-    /// should normally restrict this to the EtherCAT/gateway RT process.
+    /// Zero observes process-level hooks for every process. Scheduler hooks
+    /// also use this value when `scheduler_tid` is zero.
     pub tracked_pid: u32,
     pub scheduler_latency_threshold_ns: u64,
+    /// Exact scheduler entity TID. Zero falls back to `tracked_pid`, which
+    /// preserves the existing scheduler-filter behavior.
+    pub scheduler_tid: u32,
+    pub scheduler_migration_threshold: u64,
+    pub scheduler_migration_window_ns: u64,
     pub page_fault_threshold: u64,
     pub page_fault_window_ns: u64,
     /// Zero observes protocol-matching drops on every interface.
@@ -126,7 +135,12 @@ impl RuntimeConfig {
             && complete_pair(self.enabled_attach_mask, ATTACH_SOFTIRQ)
             && complete_pair(self.required_attach_mask, ATTACH_IRQ_HANDLER)
             && complete_pair(self.required_attach_mask, ATTACH_SOFTIRQ)
-            && self.scheduler_latency_threshold_ns > 0
+            && valid_scheduler_tracking(
+                self.scheduler_tid,
+                self.scheduler_latency_threshold_ns,
+                self.scheduler_migration_threshold,
+                self.scheduler_migration_window_ns,
+            )
             && valid_count_window(self.page_fault_threshold, self.page_fault_window_ns)
             && valid_network_tracking(
                 self.network_protocol,
@@ -148,6 +162,17 @@ const fn complete_pair(mask: u64, pair: u64) -> bool {
 
 const fn valid_count_window(threshold: u64, window_ns: u64) -> bool {
     threshold > 0 && threshold <= u32::MAX as u64 && window_ns > 0
+}
+
+const fn valid_scheduler_tracking(
+    scheduler_tid: u32,
+    scheduler_latency_threshold_ns: u64,
+    migration_threshold: u64,
+    migration_window_ns: u64,
+) -> bool {
+    scheduler_tid <= i32::MAX as u32
+        && scheduler_latency_threshold_ns > 0
+        && valid_count_window(migration_threshold, migration_window_ns)
 }
 
 const fn valid_network_tracking(protocol: u16, threshold: u64, window_ns: u64) -> bool {
@@ -175,6 +200,9 @@ impl Default for RuntimeConfig {
             required_attach_mask: ATTACH_SCHED_WAKEUP | ATTACH_SCHED_SWITCH | ATTACH_PROCESS_EXIT,
             tracked_pid: 0,
             scheduler_latency_threshold_ns: 1_000_000,
+            scheduler_tid: 0,
+            scheduler_migration_threshold: 4,
+            scheduler_migration_window_ns: 1_000_000,
             page_fault_threshold: 1,
             page_fault_window_ns: 1_000_000,
             network_ifindex: 0,
@@ -219,6 +247,10 @@ pub struct KernelContext {
     pub cpu_frequency_policy_cpu: u32,
     pub cpu_frequency_policy_epoch: u32,
     pub reserved_cpu_frequency: u32,
+    pub scheduler_tid: u32,
+    pub scheduler_migration_epoch: u32,
+    pub scheduler_migration_threshold: u64,
+    pub scheduler_migration_window_ns: u64,
 }
 
 // SAFETY: The BPF map value is an all-integer C-compatible record without
@@ -248,6 +280,10 @@ impl KernelContext {
             cpu_frequency_policy_cpu: config.cpu_frequency_policy_cpu,
             cpu_frequency_policy_epoch: 1,
             reserved_cpu_frequency: 0,
+            scheduler_tid: config.scheduler_tid,
+            scheduler_migration_epoch: 1,
+            scheduler_migration_threshold: config.scheduler_migration_threshold,
+            scheduler_migration_window_ns: config.scheduler_migration_window_ns,
         }
     }
 
@@ -273,6 +309,10 @@ impl KernelContext {
             cpu_frequency_policy_cpu: self.cpu_frequency_policy_cpu,
             cpu_frequency_policy_epoch: self.cpu_frequency_policy_epoch,
             reserved_cpu_frequency: 0,
+            scheduler_tid: self.scheduler_tid,
+            scheduler_migration_epoch: self.scheduler_migration_epoch,
+            scheduler_migration_threshold: self.scheduler_migration_threshold,
+            scheduler_migration_window_ns: self.scheduler_migration_window_ns,
         }
     }
 
@@ -315,6 +355,29 @@ impl KernelContext {
         self.cpu_frequency_policy_cpu = policy_cpu;
         true
     }
+
+    fn set_scheduler_tracking(
+        &mut self,
+        scheduler_tid: u32,
+        scheduler_latency_threshold_ns: u64,
+        scheduler_migration_threshold: u64,
+        scheduler_migration_window_ns: u64,
+    ) -> bool {
+        if !valid_scheduler_tracking(
+            scheduler_tid,
+            scheduler_latency_threshold_ns,
+            scheduler_migration_threshold,
+            scheduler_migration_window_ns,
+        ) {
+            return false;
+        }
+        self.scheduler_migration_epoch = self.scheduler_migration_epoch.wrapping_add(1).max(1);
+        self.scheduler_tid = scheduler_tid;
+        self.scheduler_latency_threshold_ns = scheduler_latency_threshold_ns;
+        self.scheduler_migration_threshold = scheduler_migration_threshold;
+        self.scheduler_migration_window_ns = scheduler_migration_window_ns;
+        true
+    }
 }
 
 /// Per-CPU counters maintained by the BPF bundle.
@@ -341,6 +404,8 @@ pub struct KernelStats {
     pub cpu_frequency_throttle_events: u64,
     pub cpu_frequency_recoveries: u64,
     pub cpu_frequency_suppressed: u64,
+    pub scheduler_migrations: u64,
+    pub scheduler_migration_threshold_events: u64,
 }
 
 // SAFETY: The BPF map value is an all-u64 C-compatible record without padding
@@ -385,6 +450,12 @@ impl KernelStats {
         self.cpu_frequency_suppressed = self
             .cpu_frequency_suppressed
             .saturating_add(other.cpu_frequency_suppressed);
+        self.scheduler_migrations = self
+            .scheduler_migrations
+            .saturating_add(other.scheduler_migrations);
+        self.scheduler_migration_threshold_events = self
+            .scheduler_migration_threshold_events
+            .saturating_add(other.scheduler_migration_threshold_events);
     }
 }
 
@@ -515,7 +586,7 @@ const SOFTIRQ_EXIT_SPEC: AttachSpec = AttachSpec {
     event: "softirq_exit",
 };
 
-const ATTACH_SPECS: [AttachSpec; 11] = [
+const ATTACH_SPECS: [AttachSpec; 12] = [
     AttachSpec {
         point: AttachPoint::SchedulerWakeup,
         program: "esop_sched_wakeup",
@@ -527,6 +598,12 @@ const ATTACH_SPECS: [AttachSpec; 11] = [
         program: "esop_sched_switch",
         category: "sched",
         event: "sched_switch",
+    },
+    AttachSpec {
+        point: AttachPoint::SchedulerMigrateTask,
+        program: "esop_sched_migrate_task",
+        category: "sched",
+        event: "sched_migrate_task",
     },
     AttachSpec {
         point: AttachPoint::ProcessExit,
@@ -699,6 +776,10 @@ impl BpfRuntime {
             return Err(RuntimeError::InvalidConfiguration);
         }
         let mut updated = self.kernel_context;
+        if updated.scheduler_tid == 0 && updated.tracked_pid != tracked_pid {
+            updated.scheduler_migration_epoch =
+                updated.scheduler_migration_epoch.wrapping_add(1).max(1);
+        }
         updated.tracked_pid = tracked_pid;
         updated.scheduler_latency_threshold_ns = scheduler_latency_threshold_ns;
         updated.network_drop_threshold = network_drop_threshold;
@@ -718,6 +799,28 @@ impl BpfRuntime {
         self.kernel_context.irq_duration_threshold_ns = irq_duration_threshold_ns;
         self.kernel_context.softirq_duration_threshold_ns = softirq_duration_threshold_ns;
         self.context.set(0, self.kernel_context, 0)?;
+        Ok(())
+    }
+
+    /// Atomically replace scheduler entity and migration-window tracking.
+    pub fn update_scheduler_tracking(
+        &mut self,
+        scheduler_tid: u32,
+        scheduler_latency_threshold_ns: u64,
+        scheduler_migration_threshold: u64,
+        scheduler_migration_window_ns: u64,
+    ) -> Result<(), RuntimeError> {
+        let mut updated = self.kernel_context;
+        if !updated.set_scheduler_tracking(
+            scheduler_tid,
+            scheduler_latency_threshold_ns,
+            scheduler_migration_threshold,
+            scheduler_migration_window_ns,
+        ) {
+            return Err(RuntimeError::InvalidConfiguration);
+        }
+        self.context.set(0, updated, 0)?;
+        self.kernel_context = updated;
         Ok(())
     }
 
@@ -987,6 +1090,7 @@ fn decode_kind(value: u8) -> Result<EvidenceKind, EvidenceDecodeError> {
         7 => Ok(EvidenceKind::GatewayStall),
         8 => Ok(EvidenceKind::AgentCapabilityFailure),
         9 => Ok(EvidenceKind::SoftirqCpuTime),
+        10 => Ok(EvidenceKind::CpuMigration),
         _ => Err(EvidenceDecodeError::InvalidKind(value)),
     }
 }
@@ -1220,6 +1324,30 @@ mod tests {
         assert_eq!(evidence.threshold, 2_000_000);
         assert_eq!(evidence.count, 1);
         assert_eq!(evidence.kind, EvidenceKind::CpuThrottle);
+
+        put_u32(&mut bytes, 48, 0);
+        put_u32(&mut bytes, 52, 101);
+        put_u16(&mut bytes, 56, 7);
+        put_u16(&mut bytes, 58, 2);
+        put_u64(&mut bytes, 64, 4);
+        put_u64(&mut bytes, 72, 4);
+        put_u64(&mut bytes, 80, 750);
+        put_u32(&mut bytes, 88, 4);
+        bytes[92] = EvidenceDomain::KernelScheduler as u8;
+        bytes[93] = EvidenceKind::CpuMigration as u8;
+        bytes[94] = IncidentSeverity::Warning as u8;
+        bytes[95] = 20;
+        let evidence = decode_evidence(&bytes).unwrap();
+        assert_eq!(evidence.pid, 0);
+        assert_eq!(evidence.tid, 101);
+        assert_eq!(evidence.cpu, 7);
+        assert_eq!(evidence.irq, 2);
+        assert_eq!(evidence.observed_value, 4);
+        assert_eq!(evidence.threshold, 4);
+        assert_eq!(evidence.duration_ns, 750);
+        assert_eq!(evidence.count, 4);
+        assert_eq!(evidence.detail, 20);
+        assert_eq!(evidence.kind, EvidenceKind::CpuMigration);
     }
 
     #[test]
@@ -1293,6 +1421,30 @@ mod tests {
         };
         assert!(!config.valid());
 
+        let config = RuntimeConfig {
+            scheduler_migration_threshold: 0,
+            ..RuntimeConfig::default()
+        };
+        assert!(!config.valid());
+
+        let config = RuntimeConfig {
+            scheduler_migration_threshold: u64::from(u32::MAX) + 1,
+            ..RuntimeConfig::default()
+        };
+        assert!(!config.valid());
+
+        let config = RuntimeConfig {
+            scheduler_migration_window_ns: 0,
+            ..RuntimeConfig::default()
+        };
+        assert!(!config.valid());
+
+        let config = RuntimeConfig {
+            scheduler_tid: i32::MAX as u32 + 1,
+            ..RuntimeConfig::default()
+        };
+        assert!(!config.valid());
+
         let mut config = RuntimeConfig::default();
         config.enabled_attach_mask &= !ATTACH_IRQ_HANDLER_EXIT;
         assert!(!config.valid());
@@ -1335,6 +1487,9 @@ mod tests {
         let config = RuntimeConfig {
             tracked_pid: 42,
             scheduler_latency_threshold_ns: 100,
+            scheduler_tid: 43,
+            scheduler_migration_threshold: 4,
+            scheduler_migration_window_ns: 500,
             page_fault_threshold: 4,
             page_fault_window_ns: 750,
             network_ifindex: 17,
@@ -1370,6 +1525,10 @@ mod tests {
         assert_eq!(context.cpu_frequency_floor_khz, 2_000_000);
         assert_eq!(context.cpu_frequency_policy_cpu, 7);
         assert_eq!(context.cpu_frequency_policy_epoch, 1);
+        assert_eq!(context.scheduler_tid, 43);
+        assert_eq!(context.scheduler_migration_threshold, 4);
+        assert_eq!(context.scheduler_migration_window_ns, 500);
+        assert_eq!(context.scheduler_migration_epoch, 1);
     }
 
     #[test]
@@ -1425,9 +1584,33 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_tracking_updates_are_validated_before_commit() {
+        let mut context = KernelContext::from_config(RuntimeConfig::default());
+        let original_epoch = context.scheduler_migration_epoch;
+        assert!(context.set_scheduler_tracking(43, 250_000, 4, 2_000_000));
+        assert_eq!(context.scheduler_tid, 43);
+        assert_eq!(context.scheduler_latency_threshold_ns, 250_000);
+        assert_eq!(context.scheduler_migration_threshold, 4);
+        assert_eq!(context.scheduler_migration_window_ns, 2_000_000);
+        assert_eq!(context.scheduler_migration_epoch, original_epoch + 1);
+
+        let unchanged = context;
+        assert!(!context.set_scheduler_tracking(44, 0, 4, 2_000_000));
+        assert_eq!(context, unchanged);
+        assert!(!context.set_scheduler_tracking(44, 250_000, 0, 2_000_000));
+        assert_eq!(context, unchanged);
+        assert!(!context.set_scheduler_tracking(44, 250_000, u64::from(u32::MAX) + 1, 2_000_000,));
+        assert_eq!(context, unchanged);
+        assert!(!context.set_scheduler_tracking(44, 250_000, 4, 0));
+        assert_eq!(context, unchanged);
+        assert!(!context.set_scheduler_tracking(i32::MAX as u32 + 1, 250_000, 4, 2_000_000,));
+        assert_eq!(context, unchanged);
+    }
+
+    #[test]
     fn kernel_map_abis_and_attach_masks_remain_explicit() {
-        assert_eq!(std::mem::size_of::<KernelContext>(), 120);
-        assert_eq!(std::mem::size_of::<KernelStats>(), 160);
+        assert_eq!(std::mem::size_of::<KernelContext>(), 144);
+        assert_eq!(std::mem::size_of::<KernelStats>(), 176);
 
         let mut observed = 0;
         for spec in ATTACH_SPECS {
@@ -1466,6 +1649,8 @@ mod tests {
             cpu_frequency_throttle_events: 3,
             cpu_frequency_recoveries: 4,
             cpu_frequency_suppressed: u64::MAX,
+            scheduler_migrations: u64::MAX,
+            scheduler_migration_threshold_events: 9,
             ..KernelStats::default()
         });
         assert_eq!(aggregate.irq_samples, u64::MAX);
@@ -1481,5 +1666,7 @@ mod tests {
         assert_eq!(aggregate.cpu_frequency_throttle_events, 3);
         assert_eq!(aggregate.cpu_frequency_recoveries, 4);
         assert_eq!(aggregate.cpu_frequency_suppressed, u64::MAX);
+        assert_eq!(aggregate.scheduler_migrations, u64::MAX);
+        assert_eq!(aggregate.scheduler_migration_threshold_events, 9);
     }
 }

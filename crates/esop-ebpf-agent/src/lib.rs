@@ -110,6 +110,7 @@ pub enum EvidenceKind {
     GatewayStall = 7,
     AgentCapabilityFailure = 8,
     SoftirqCpuTime = 9,
+    CpuMigration = 10,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -166,7 +167,9 @@ pub struct RuntimeEvidence {
     pub kind: EvidenceKind,
     pub severity: IncidentSeverity,
     /// Kind-specific bounded detail. Network drops carry the saturated kernel
-    /// skb drop reason; producers without a detail value write zero.
+    /// skb drop reason, while CPU migrations carry saturated scheduler
+    /// priority; producers without a detail value write zero. For
+    /// `CpuMigration`, `irq` is the origin CPU and `cpu` is the destination.
     pub detail: u8,
 }
 
@@ -577,6 +580,18 @@ fn classify(
             RecommendedAction::ControlledStop,
             70,
         )),
+        EvidenceKind::CpuMigration
+            if enough_count
+                && evidence.observed_value == u64::from(evidence.count)
+                && correlated =>
+        {
+            Some((
+                IncidentCode::HostSchedulerStall,
+                IncidentSeverity::Warning,
+                RecommendedAction::DegradeHostObservation,
+                60,
+            ))
+        }
         EvidenceKind::IrqCpuTime | EvidenceKind::SoftirqCpuTime if over_threshold && correlated => {
             Some((
                 IncidentCode::HostIrqStorm,
@@ -886,6 +901,75 @@ mod tests {
             incident.recommended_action,
             RecommendedAction::ControlledStop
         );
+    }
+
+    #[test]
+    fn cpu_migration_requires_threshold_count_and_cycle_risk() {
+        let mut correlator = IncidentCorrelator::<2>::new(11, 3, 1_000);
+        correlator
+            .observe_cycle(CycleContext {
+                boot_id: 11,
+                cycle_seq: 42,
+                transition_seq: 9,
+                timestamp_ns: 1_000,
+                deadline_miss: 1,
+                ..CycleContext::EMPTY
+            })
+            .unwrap();
+
+        let mut migration = evidence(EvidenceKind::CpuMigration, 1_100);
+        migration.pid = 0;
+        migration.tid = 101;
+        migration.cpu = 7;
+        migration.irq = 2;
+        migration.observed_value = 4;
+        migration.threshold = 4;
+        migration.count = 4;
+        migration.duration_ns = 750;
+        migration.detail = 20;
+
+        let incident = correlator.ingest(migration).unwrap().unwrap();
+        assert_eq!(incident.code, IncidentCode::HostSchedulerStall);
+        assert_eq!(incident.severity, IncidentSeverity::Warning);
+        assert_eq!(
+            incident.recommended_action,
+            RecommendedAction::DegradeHostObservation
+        );
+        assert_eq!(incident.confidence_percent, 60);
+        assert_eq!(incident.pid, 0);
+        assert_eq!(incident.tid, 101);
+        assert_eq!(incident.cpu, 7);
+        assert_eq!(incident.irq, 2);
+        assert_eq!(incident.evidence[0].detail, 20);
+
+        let (_, _, _, runqueue_confidence) = classify(
+            evidence(EvidenceKind::SchedulerRunqueueLatency, 1_100),
+            true,
+        )
+        .unwrap();
+        assert!(incident.confidence_percent < runqueue_confidence);
+
+        let mut below_threshold = migration;
+        below_threshold.evidence_id = 8;
+        below_threshold.observed_value = 3;
+        below_threshold.count = 3;
+        assert_eq!(correlator.ingest(below_threshold).unwrap(), None);
+
+        let mut inconsistent_count = migration;
+        inconsistent_count.evidence_id = 9;
+        inconsistent_count.observed_value = 5;
+        assert_eq!(correlator.ingest(inconsistent_count).unwrap(), None);
+
+        let mut healthy = IncidentCorrelator::<2>::new(11, 3, 1_000);
+        healthy
+            .observe_cycle(CycleContext {
+                boot_id: 11,
+                cycle_seq: 42,
+                timestamp_ns: 1_000,
+                ..CycleContext::EMPTY
+            })
+            .unwrap();
+        assert_eq!(healthy.ingest(migration).unwrap(), None);
     }
 
     #[test]

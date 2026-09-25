@@ -33,6 +33,16 @@ struct trace_event_raw_sched_wakeup_template {
     char __data[0];
 };
 
+struct trace_event_raw_sched_migrate_task {
+    struct trace_entry ent;
+    char comm[16];
+    pid_t pid;
+    int prio;
+    int orig_cpu;
+    int dest_cpu;
+    char __data[0];
+};
+
 struct trace_event_raw_sched_switch {
     struct trace_entry ent;
     char prev_comm[16];
