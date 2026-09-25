@@ -106,3 +106,36 @@ Added bounded hard IRQ and softirq duration probes, transactional attach-pair ha
 ### Next Steps
 
 - None - task complete
+
+
+## Session 4: eBPF EtherCAT drop attribution
+
+**Date**: 2026-09-25
+**Task**: eBPF EtherCAT drop attribution
+**Branch**: `main`
+
+### Summary
+
+Added bounded per-CPU/per-interface EtherCAT skb drop windows, typed CO-RE ifindex/drop-reason attribution, atomic runtime policy updates, network statistics, HOST_NIC_DROP cycle-risk correlation, tests, and PRD/capability documentation; local and GitHub quality gates passed.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `8690b77` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
