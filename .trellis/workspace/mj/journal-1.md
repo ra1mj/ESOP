@@ -537,3 +537,37 @@ Added privileged hosted-Linux exact-TID scheduler runqueue latency qualification
 ### Next Steps
 
 - None - task complete
+
+
+## Session 17: Qualify hosted eBPF softirq duration
+
+**Date**: 2026-09-25
+**Task**: Qualify hosted eBPF softirq duration
+**Branch**: `main`
+
+### Summary
+
+Added CPU/vector-filtered IRQ and softirq tracking, a controlled loopback NET_RX calibration/formal qualification, strict report validation, CI artifact proof, and documentation/spec updates. Local make ci and GitHub Actions run 36127109470 passed; the downloaded report independently validated one sample/event/incident with zero loss.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `73d05e7` | (see git log) |
+| `275a816` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
