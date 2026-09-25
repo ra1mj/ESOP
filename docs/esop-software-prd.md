@@ -214,6 +214,17 @@ eBPF 观测器只部署在 Linux 监督域或 Linux 实时端口；STM32/HPMicro
 | FR-051 | P1 | 系统应生成结构化 `RuntimeIncident`，包含 incident ID、级别、原因码、时间窗口、证据、关联周期、影响组件、丢失计数和建议动作。 | 运维界面/Zenoh/Protobuf 能按 incident ID 聚合同一问题的多条证据，而不是只显示孤立日志。 |
 | FR-052 | P1 | eBPF 观测只能向 MLG 提供 `HOST_OBSERVATION` 证据或监督心跳，不能直接修改 CiA 402 controlword、绕过 MLG 或成为认证安全通道。 | agent 停止、事件误报、恶意事件和观测延迟测试中，运动许可仍只由 MLG 与产品安全策略裁决。 |
 
+FR-048 的 process-crash 子路径现已增加特权托管 Linux 资格：
+`make test-ebpf-process-exit-runtime` 只加载并要求 `sched_process_exit`，在把
+`tracked_pid` 切换到同步子进程后，先证明一个已 join 的 worker 退出只增加
+`thread_exits_ignored` 且 observer 保持 Healthy，再证明 leader 正常退出生成
+唯一 `KernelProcess/ProcessExit`、Critical `UserComponentExit`/`LatchFault` 和
+Failed heartbeat；严格报告写入
+`build/ebpf_process_exit_qualification.json`。该结果只覆盖托管内核上的共享
+leader-exit-to-incident/health 链，不含 exit code/signal，不证明线程组完全死亡，
+也不覆盖 OOM、PID namespace/cgroup、组件重启、生产内核、开销/WCET 或长时
+HIL，因此 FR-048 仍保持部分实现。
+
 ## 8. 非功能需求
 
 ### 8.1 实时性与性能

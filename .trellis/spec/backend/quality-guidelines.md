@@ -544,6 +544,83 @@ Keep the fixed event ABI stable and treat target-kernel process/OOM injection,
 PID-namespace behavior, victim thread-group resolution, verifier behavior, and
 overhead as separate qualification evidence.
 
+## Scenario: eBPF Process-Exit Runtime Qualification
+
+### 1. Scope / Trigger
+
+- Trigger: add or change process-exit BPF filtering, fixed evidence decode,
+  hard-fact correlation, observer health projection, or its host qualification.
+- Scope: one synchronized worker exit and one tracked leader exit on a hosted
+  Linux kernel. It does not qualify exit cause, complete thread-group death,
+  PID namespaces/cgroups, restart supervision, production kernels, or timing.
+
+### 2. Signatures
+
+- Entry: `make test-ebpf-process-exit-runtime`.
+- Fixture: `process_exit_qualification <esop_runtime.bpf.o> <report.json>`;
+  `--tracked-child` is a private same-binary pipe protocol mode.
+- Artifact: `build/ebpf_process_exit_qualification.json`.
+- Validator: `scripts/validate-ebpf-process-exit-qualification.py <report>`.
+
+### 3. Contracts
+
+- Load the production CO-RE object with enabled and required masks both equal
+  to `ATTACH_PROCESS_EXIT`. Track the parent until the waiting child exists,
+  then update `tracked_pid` before releasing any child thread.
+- Join exactly one worker before its acknowledgement. It must increment only
+  `thread_exits_ignored`; poll, incident, loss, and health-fault fields remain
+  zero and the observation remains Healthy.
+- A successful leader exit produces exactly one emitted/process-exit event,
+  one `KernelProcess/ProcessExit/Critical` evidence item, one Critical
+  `UserComponentExit` with `LatchFault` and confidence 100, and one Failed
+  observation with fault `0x45422002`.
+- Remove stale report/temp files before building and publish JSON by same-dir
+  temporary write plus rename only after every assertion succeeds.
+
+### 4. Validation & Error Matrix
+
+- Missing verifier/permission/tracepoint or partial attach -> fixture fails.
+- Child protocol mismatch, early exit, or bounded wait timeout -> fixture kills
+  and reaps the child, returns nonzero, and publishes no report.
+- Worker record/incident, wrong counter, malformed/rejected evidence, or loss
+  -> fixture and validator reject qualification.
+- Wrong PID/TID, boot/epoch, kind/severity/action, scalar/cycle fields, or
+  observer state/fault/count -> validator rejects the exact-schema report.
+- No root/passwordless sudo -> runner fails explicitly after unprivileged build;
+  it never converts missing privilege into a skip.
+
+### 5. Good/Base/Bad Cases
+
+- Good: one joined worker is ignored, the leader exits normally, and the
+  report proves the exact kernel-to-incident-to-health chain with zero loss.
+- Base: source/unit/BPF-syntax checks pass but no privileged report exists;
+  implementation is tested, but host runtime qualification is not claimed.
+- Bad: count a worker as component death, infer exit code/signal, accept a
+  partial mask, retain a stale report after failure, or broaden hosted evidence
+  into production-kernel or WCET qualification.
+
+### 6. Tests Required
+
+- Rust all-target tests and Clippy must compile the parent/child fixture.
+- Validator regression tests cover valid CLI input, missing/unknown/bool fields,
+  partial masks, worker incidents, counts/loss, identity/semantic/cycle drift,
+  and observer mismatch.
+- `make ci` includes the validator suite. A dedicated privileged Actions job
+  runs the host target and uploads the validated report.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+Spawn an unsynchronized child, track all processes, sleep for timing, accept
+any process-exit record, and label it complete component death.
+
+#### Correct
+
+Track only a waiting child, release and verify the joined worker first, then
+release the leader, require exact counters/evidence/health, and preserve the
+narrow leader-exit claim in the report and documentation.
+
 ## Scenario: eBPF CPU Frequency Limit Evidence
 
 ### 1. Scope / Trigger

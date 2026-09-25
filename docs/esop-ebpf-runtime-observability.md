@@ -104,6 +104,13 @@ TGID 应用 `tracked_pid` 过滤，仅当退出 TID 等于 TGID 时生成一次
 `ProcessExit` 硬事实；受跟踪进程的普通工作线程退出只增加
 `thread_exits_ignored`，不会触发 `USER_COMPONENT_EXIT`。这条信号表示主线程
 退出，不声称线程组中所有任务已经消失，也不包含 exit code 或 signal。
+专用 `make test-ebpf-process-exit-runtime` 会在特权托管 Linux 上仅挂载该
+tracepoint，把跟踪 PID 切换到同步子进程后先创建并 join 一个 worker，要求它
+只增加 ignored 统计且不改变 Healthy lease；随后放行 leader 正常退出，要求真实
+CO-RE verifier/load、ringbuf、统计、`UserComponentExit`/`LatchFault` 和 Failed
+heartbeat 全链自洽，并原子生成
+`build/ebpf_process_exit_qualification.json`。该资格仍不提供退出原因或线程组
+完全死亡证明。
 
 OOM 首版从 `oom:mark_victim` typed context 读取内核选中的 victim PID，而不
 使用触发 OOM killer 的 current task。固定证据的 PID/TID 都写入该 victim
@@ -333,9 +340,15 @@ EBPF-004 整体保持 partial。
 
 EBPF-005 当前已具备有界 CPU/进程页错误窗口、阈值事件、架构错误码 detail
 解码和 cycle-risk 相关器单元测试，并已把进程退出限制为受跟踪 TGID 的主
-线程、把 OOM 证据绑定到 `mark_victim` 的受害 PID。该实现与 CO-RE 编译
-结果不等于目标内核真实页错误/内存压力/OOM/进程退出注入、victim TGID、
-major/minor 归因、verifier 和开销资格。
+线程、把 OOM 证据绑定到 `mark_victim` 的受害 PID。专用
+`make test-ebpf-process-exit-runtime` 还会在特权托管 Linux 上加载真实 CO-RE
+对象、只要求 `sched_process_exit`，证明一个受控 worker 退出被抑制且 observer
+保持 Healthy，再证明受跟踪 leader 正常退出生成唯一 `ProcessExit`、Critical
+`UserComponentExit`/`LatchFault` 和 Failed heartbeat，最后生成并严格校验
+`build/ebpf_process_exit_qualification.json`。该资格不含 exit code/signal，
+不证明线程组完全消失，也不覆盖 OOM、PID namespace/cgroup、组件重启或生产
+目标内核。真实页错误/内存压力/OOM、victim TGID、major/minor 归因、开销和
+长时 HIL 仍需单独资格化，因此 EBPF-005 整体保持 partial。
 
 EBPF-006 当前已完成 Zenoh gateway publish 与 callback 子路径：独立稳定 v1
 begin/end marker、共享非零 request ID、future cancellation 与 callback unwind 收口、
