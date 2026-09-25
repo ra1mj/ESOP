@@ -15,7 +15,7 @@
     },
     "known_limitations": {
       "path": "qualification/KNOWN_LIMITATIONS.md",
-      "sha256": "8dc16471edef5bf5e6d663b4d7cf4a9b25168b2f7035a13044db4d2cfcc5687b"
+      "sha256": "6fd2b80d79b3523ca266f93a989495c2e33339b4e3ea814e7350541e89acfd23"
     },
     "build_report": {
       "path": null,

@@ -9,7 +9,8 @@ use esop_ethercat_core::{
 
 #[cfg(feature = "cia402")]
 use crate::{
-    AxisCycleDecision, AxisDirective, LifecycleAction, MAX_MOTION_AXES, StopAction, StopFeedback,
+    AxisCycleDecision, AxisDirective, LifecycleAction, MAX_MOTION_AXES, MotionPermit, StopAction,
+    StopFeedback,
     cia402::{
         ControlledStopCommand, ControlledStopError, ControlledStopLimits, ControlledStopPhase,
         ControlledStopPlanner, stop_feedback_from_cia402,
@@ -34,6 +35,7 @@ use esop_profile_cia402::{
 #[derive(Debug)]
 pub enum StopFrameError<E> {
     InvalidDecision,
+    CommandPermitMismatch,
     UnverifiedInput,
     AxisCapacityExceeded,
     InvalidDeadline,
@@ -48,6 +50,101 @@ pub enum StopFrameError<E> {
     FramePool(FramePoolError),
     Build(CycleError<core::convert::Infallible>),
     Transmit(CycleError<E>),
+}
+
+/// Resolve a prepared desired command against current verified drive state,
+/// then reuse [`submit_active_frame`] for the complete active-frame contract.
+/// Handshake states emit no target, the enable edge holds verified actual
+/// feedback, and only Operation Enabled receives the desired target.
+#[cfg(feature = "cia402")]
+#[allow(clippy::too_many_arguments)]
+pub fn submit_prepared_active_frame<
+    P: EthercatPort,
+    const AXES: usize,
+    const BYTES: usize,
+    const SEGMENTS: usize,
+    const DATAGRAMS: usize,
+    const SLOTS: usize,
+    const MTU: usize,
+>(
+    decision: &AxisCycleDecision<'_>,
+    permit: MotionPermit,
+    report: CycleReport,
+    outputs: &[Cia402Output; AXES],
+    desired_targets: &[Option<Cia402Target>; AXES],
+    guards: &mut [CyclicSetpointGuard; AXES],
+    limits: &[CyclicLimits; AXES],
+    maps: &[Cia402PdoMap; AXES],
+    modes: &[OperatingMode; AXES],
+    safe_process_image: &[u8; BYTES],
+    domain: &Domain<BYTES, SEGMENTS>,
+    plan: &FramePlan<DATAGRAMS>,
+    master: &mut EthercatMaster<SLOTS, MTU>,
+    port: &mut P,
+    generation: u16,
+    deadline_ns: u64,
+) -> Result<usize, StopFrameError<P::Error>> {
+    if decision.motion_permit() != Some(permit)
+        || decision.permitted_axis_mask() != permit.axis_mask
+    {
+        return Err(StopFrameError::CommandPermitMismatch);
+    }
+
+    let permitted = decision.permitted_axis_mask();
+    let mut cycle_targets = [None; AXES];
+    for axis in 0..AXES {
+        let authorized = axis < MAX_MOTION_AXES && permitted & (1u32 << axis) != 0;
+        if !authorized {
+            if desired_targets[axis].is_some() {
+                return Err(StopFrameError::UnexpectedTarget(axis));
+            }
+            continue;
+        }
+        let inputs = maps[axis]
+            .read_inputs_for(domain.input(), modes[axis])
+            .map_err(|error| StopFrameError::Pdo(axis, error))?;
+        cycle_targets[axis] = match DriveState::from_statusword(inputs.statusword) {
+            DriveState::SwitchOnDisabled | DriveState::ReadyToSwitchOn => None,
+            DriveState::SwitchedOn => Some(match modes[axis] {
+                OperatingMode::Csp => Cia402Target::Position(
+                    inputs
+                        .actual_position
+                        .ok_or(StopFrameError::MissingTarget(axis))?,
+                ),
+                OperatingMode::Csv => Cia402Target::Velocity(
+                    inputs
+                        .actual_velocity
+                        .ok_or(StopFrameError::MissingTarget(axis))?,
+                ),
+                OperatingMode::Cst => Cia402Target::Torque(
+                    inputs
+                        .actual_torque
+                        .ok_or(StopFrameError::MissingTarget(axis))?,
+                ),
+                OperatingMode::Unknown => return Err(StopFrameError::UnsafeOutput(axis)),
+            }),
+            DriveState::OperationEnabled => desired_targets[axis],
+            _ => None,
+        };
+    }
+
+    submit_active_frame(
+        decision,
+        report,
+        outputs,
+        &cycle_targets,
+        guards,
+        limits,
+        maps,
+        modes,
+        safe_process_image,
+        domain,
+        plan,
+        master,
+        port,
+        generation,
+        deadline_ns,
+    )
 }
 
 #[cfg(feature = "cia402")]

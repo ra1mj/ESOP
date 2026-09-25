@@ -254,7 +254,10 @@ impl<const AXES: usize, const IO: usize> CommandPage<AXES, IO> {
         }
     }
 
-    fn well_formed(self) -> bool {
+    /// Validate the complete fixed-layout command record without publishing
+    /// it. Real-time adapters use this when a command snapshot is supplied
+    /// outside [`ProcBuf::read_command`].
+    pub fn is_well_formed(self) -> bool {
         let axis_mask_fits =
             AXES <= 32 && (AXES == 32 || self.axis_mask & !((1u32 << AXES) - 1) == 0);
         let targets_valid = self.axes.iter().enumerate().all(|(index, &axis)| {
@@ -951,7 +954,7 @@ impl<const AXES: usize, const IO: usize, const DOMAINS: usize, const EVENTS: usi
         if command.boot_id != self.header.boot_id {
             return Err(CommandPublishError::BootMismatch);
         }
-        if !command.well_formed() {
+        if !command.is_well_formed() {
             return Err(CommandPublishError::InvalidCommand);
         }
         self.command
@@ -975,7 +978,7 @@ impl<const AXES: usize, const IO: usize, const DOMAINS: usize, const EVENTS: usi
             return Err(CommandReadError::Replayed);
         }
         *last_sequence = command.sequence;
-        if !command.well_formed() {
+        if !command.is_well_formed() {
             return Err(CommandReadError::InvalidCommand);
         }
         if command.deadline_ns <= now_ns {

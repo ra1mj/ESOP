@@ -16,11 +16,13 @@ use esop_lifecycle_guard::ethercat::{
     OtherCycleFacts, ScheduledControlGate, ScheduledDomainQuality, StopFrameError,
     cyclic_quality_from_ethercat, cyclic_quality_from_schedule,
     other_cycle_facts_from_mailbox_cycle, submit_active_frame, submit_controlled_stopping_frame,
-    submit_inhibited_frame, submit_stopping_frame, verified_ethercat_stop_feedback,
+    submit_inhibited_frame, submit_prepared_active_frame, submit_stopping_frame,
+    verified_ethercat_stop_feedback,
 };
 use esop_lifecycle_guard::procbuf::{
-    LifecycleEventCursor, axis_stops_to_procbuf, controlled_axis_stops_to_procbuf,
-    lifecycle_events_to_procbuf, lifecycle_to_procbuf,
+    Cia402AxisCommandPolicy, LifecycleEventCursor, axis_stops_to_procbuf,
+    controlled_axis_stops_to_procbuf, lifecycle_events_to_procbuf, lifecycle_to_procbuf,
+    motion_permit_from_command,
 };
 use esop_lifecycle_guard::stop_cycle::{
     AuxiliaryOutputEntry, AuxiliaryOutputPlanError, ControlledStopCycleState,
@@ -31,7 +33,7 @@ use esop_lifecycle_guard::{
     AxisStopPolicy, GateId, GuardPolicy, LifecycleAction, LifecycleError, LifecycleGuard,
     LifecycleState, MotionPermit, StopAction,
 };
-use esop_procbuf::{ProcBuf, QualityFact, StatePage};
+use esop_procbuf::{CommandPage, ControlMode, JointCommand, ProcBuf, QualityFact, StatePage};
 use esop_profile_cia402::{
     CONTROLWORD_DISABLE_VOLTAGE, CONTROLWORD_QUICK_STOP, Cia402AxisBank, Cia402PdoField,
     Cia402PdoMap, Cia402Target, CyclicLimits, CyclicSetpoint, CyclicSetpointError,
@@ -1591,6 +1593,274 @@ fn active_frame_requires_verified_feedback_and_bounded_target_committed_only_aft
     assert_eq!(published.axis_stops[0].request_cycle, fifth.cycle);
     assert_ne!(published.axis_stops[0].issued_action, 0);
     assert!(matches!(failed_motion.event_publish, Some(Ok(_))));
+}
+
+#[test]
+fn procbuf_command_executes_actual_hold_then_scaled_csp_target() {
+    let mut master = EthercatMaster::<1, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut domain = Domain::<IMAGE_BYTES, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: IMAGE_BYTES,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut plan = FramePlan::<1>::new();
+    plan.push(DatagramPlan {
+        command: Command::Lrw,
+        index: 12,
+        address: 0x1000,
+        payload_offset: 0,
+        payload_len: IMAGE_BYTES,
+        expected_wkc: 1,
+    })
+    .unwrap();
+    let dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x2000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let mut port = SimulatedPort::new(1);
+    submit(
+        &mut master,
+        &mut port,
+        &mut domain,
+        &plan,
+        1,
+        &csp_input_image(0x0023, 25, 0),
+        false,
+    );
+    let first = receive(&mut master, &mut port, &mut domain, 1);
+
+    let buffer = ProcBuf::<1, 0, 1, 8>::new(1, 7);
+    let command = CommandPage {
+        boot_id: 7,
+        sequence: 1,
+        deadline_ns: 1_000_000,
+        source_id: 1,
+        permit_epoch: 1,
+        permit_expires_at_ns: 1_000_000,
+        axis_mask: 1,
+        requested_mode: ControlMode::Csp,
+        motion_enable_request: 1,
+        authority: 1,
+        reserved: [0; 3],
+        policy_version: 1,
+        axes: [JointCommand {
+            position: 0.5,
+            velocity: 0.0,
+            torque: 0.0,
+            max_velocity: 10.0,
+            max_torque: 1.0,
+        }],
+        io: [],
+    };
+    buffer.publish_command(command).unwrap();
+    let mut command_sequence = 0;
+    let command = buffer
+        .read_command(100_000, &mut command_sequence)
+        .unwrap()
+        .command;
+    assert_eq!(command_sequence, 1);
+
+    let mut guard = LifecycleGuard::new(
+        GateId::Link.bit(),
+        7,
+        GuardPolicy {
+            enter_good_cycles: 1,
+            allowed_axis_mask: 1,
+            ..GuardPolicy::conservative()
+        },
+    );
+    guard.update_gate(GateId::Link, true, first.cycle, 0);
+    let permit = motion_permit_from_command(&command).unwrap();
+    guard.request_rearm(permit, first.cycle, 100_000).unwrap();
+
+    let maps = [map()];
+    let modes = [OperatingMode::Csp];
+    let policies = [Cia402AxisCommandPolicy {
+        position_units_per_radian: 100.0,
+        velocity_units_per_radian_per_second: 10.0,
+        torque_units_per_newton_metre: 10.0,
+        position_offset: 0,
+        min_position_radians: -2.0,
+        max_position_radians: 2.0,
+        max_velocity_radians_per_second: 10.0,
+        max_torque_newton_metres: 5.0,
+        max_position_step_radians: 0.5,
+    }];
+    let mut running_image = csp_input_image(0x0027, 25, 0);
+    running_image[19..23].copy_from_slice(&999i32.to_le_bytes());
+    let tx_before_recheck = port.tx_frames();
+    {
+        let decision = guard.cycle_axes(first.cycle, 150_000);
+        let mut recheck_bank = Cia402AxisBank::<1>::new();
+        let outputs = step_axis_bank(
+            &mut recheck_bank,
+            &decision,
+            [0x0023],
+            [DriveRequest::Enable],
+        );
+        let mut wrong_permit = permit;
+        wrong_permit.sequence += 1;
+        let mut recheck_guards = [CyclicSetpointGuard::new()];
+        let limits = [CyclicLimits {
+            max_position_step: 50.0,
+            max_velocity: 100.0,
+            max_torque: 10.0,
+        }];
+        assert!(matches!(
+            submit_prepared_active_frame(
+                &decision,
+                wrong_permit,
+                first,
+                &outputs,
+                &[Some(Cia402Target::Position(50))],
+                &mut recheck_guards,
+                &limits,
+                &maps,
+                &modes,
+                &running_image,
+                &domain,
+                &plan,
+                &mut master,
+                &mut port,
+                2,
+                250_000,
+            ),
+            Err(StopFrameError::CommandPermitMismatch)
+        ));
+        assert!(!recheck_guards[0].seeded());
+    }
+    assert_eq!(port.tx_frames(), tx_before_recheck);
+    assert_eq!(guard.permit(), Some(permit));
+
+    let mut bank = Cia402AxisBank::<1>::new();
+    let mut guards = [CyclicSetpointGuard::new()];
+    let mut cursor = LifecycleEventCursor::new(&guard);
+    let other = OtherCycleFacts {
+        platform_ready: true,
+        coe_ready: true,
+        topology_valid: true,
+        drive_ready: true,
+        command_current: true,
+        supervisor_healthy: true,
+        external_safety_clear: true,
+        deadline_met: true,
+    };
+    port.set_now_ns(200_000);
+    let mut first_state = StatePage::<1, 0, 1>::new(7);
+    first_state.sequence = first.cycle;
+    let held = StopCycleContext {
+        guard: &mut guard,
+        bank: &mut bank,
+        master: &mut master,
+        port: &mut port,
+        domain: &domain,
+        dc: &dc,
+        buffer: &buffer,
+        event_cursor: &mut cursor,
+        state: &mut first_state,
+        report: first,
+        other,
+        maps: &maps,
+        modes: &modes,
+        max_stationary_velocities: &[1],
+        safe_process_image: &running_image,
+        plan: &plan,
+        next_generation: 2,
+        deadline_ns: 250_000,
+        now_ns: 200_000,
+        transition_time_ns: 100_000,
+    }
+    .run_with_procbuf_command(&command, &policies, 100_000_000, &mut guards)
+    .unwrap();
+    assert_eq!(held.action, LifecycleAction::EnableAllowed);
+    assert!(held.transmission.is_ok());
+    assert_eq!(guards[0].last().position, 25.0);
+
+    domain.begin_receive(2).unwrap();
+    let second = receive(&mut master, &mut port, &mut domain, 2);
+    assert_eq!(domain.input()[19..23], 25i32.to_le_bytes());
+
+    port.set_now_ns(300_000);
+    let mut second_state = StatePage::<1, 0, 1>::new(7);
+    second_state.sequence = second.cycle;
+    let running = StopCycleContext {
+        guard: &mut guard,
+        bank: &mut bank,
+        master: &mut master,
+        port: &mut port,
+        domain: &domain,
+        dc: &dc,
+        buffer: &buffer,
+        event_cursor: &mut cursor,
+        state: &mut second_state,
+        report: second,
+        other,
+        maps: &maps,
+        modes: &modes,
+        max_stationary_velocities: &[1],
+        safe_process_image: &running_image,
+        plan: &plan,
+        next_generation: 3,
+        deadline_ns: 350_000,
+        now_ns: 300_000,
+        transition_time_ns: 100_000,
+    }
+    .run_with_procbuf_command(&command, &policies, 100_000_000, &mut guards)
+    .unwrap();
+    assert_eq!(running.action, LifecycleAction::EnableAllowed);
+    assert!(running.transmission.is_ok());
+    assert_eq!(guards[0].last().position, 50.0);
+
+    domain.begin_receive(3).unwrap();
+    let third = receive(&mut master, &mut port, &mut domain, 3);
+    assert_eq!(domain.input()[19..23], 50i32.to_le_bytes());
+
+    let tx_before = port.tx_frames();
+    let guard_before = guards[0].last();
+    let permit_before = guard.permit();
+    let mut wrong_identity = command;
+    wrong_identity.sequence = 2;
+    let mut rejected_state = StatePage::<1, 0, 1>::new(7);
+    rejected_state.sequence = third.cycle;
+    let rejected = StopCycleContext {
+        guard: &mut guard,
+        bank: &mut bank,
+        master: &mut master,
+        port: &mut port,
+        domain: &domain,
+        dc: &dc,
+        buffer: &buffer,
+        event_cursor: &mut cursor,
+        state: &mut rejected_state,
+        report: third,
+        other,
+        maps: &maps,
+        modes: &modes,
+        max_stationary_velocities: &[1],
+        safe_process_image: &running_image,
+        plan: &plan,
+        next_generation: 4,
+        deadline_ns: 450_000,
+        now_ns: 400_000,
+        transition_time_ns: 100_000,
+    }
+    .run_with_procbuf_command(&wrong_identity, &policies, 100_000_000, &mut guards);
+    assert!(matches!(
+        rejected,
+        Err(StopCycleError::Command(
+            esop_lifecycle_guard::procbuf::ProcBufCia402CommandError::PermitMismatch
+        ))
+    ));
+    assert_eq!(port.tx_frames(), tx_before);
+    assert_eq!(guards[0].last(), guard_before);
+    assert_eq!(guard.permit(), permit_before);
 }
 
 #[test]

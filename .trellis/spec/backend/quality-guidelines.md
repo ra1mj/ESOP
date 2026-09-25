@@ -107,6 +107,18 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   send Enable Operation with a stale target from the safe image. Reject target
   and Controlword aliases even
   against an unpermitted axis. Commit setpoint guards only after successful TX.
+  For ProcBuf SI commands, validate the complete page again with
+  `prepare_cia402_command`, require exact equality with the guard's current
+  permit, and apply only caller-frozen `Cia402AxisCommandPolicy` values. Signed
+  scales carry axis direction; position offset applies only to absolute CSP
+  positions. Round targets to the nearest raw integer and round non-negative
+  guard limits down. Reject policy errors, product/command cap violations,
+  mechanical bounds, mode/mask mismatch, expiry and numeric overflow before
+  touching guards, Domain images, frame slots or the port. At execution,
+  recheck the decision's permit and use `submit_prepared_active_frame` so the
+  enable edge holds verified actual feedback before desired targets are used.
+  Do not infer scales from runtime feedback or claim simulator evidence as a
+  generated product configuration or physical-drive qualification.
   On an active validation/build/TX error, preserve the initial error, abort
   motion and attempt a stop PDO in the same cycle; even if that stop TX also
   fails, publish zero issued evidence, the Stopping State, and ordered events.
@@ -402,6 +414,156 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   fault matrix, known limitations, and safety/license/source reviews. Reuse the
   build/performance validators; never treat simulator tests, placeholder target
   data, or a structurally valid manifest as product qualification.
+
+## Scenario: ProcBuf SI Command Execution Through CiA 402
+
+### 1. Scope / Trigger
+
+- Trigger: adding or changing the real-time path that converts a ProcBuf v5
+  CSP, CSV, or CST command into a lifecycle-qualified EtherCAT output.
+- Scope: allocation-free software validation, deterministic SI-to-raw
+  conversion, enable-edge target selection, and transactional PDO submission.
+  Product policy generation, physical drive response, braking/mechanical
+  suitability, target WCET, HIL, and safety qualification remain external.
+
+### 2. Signatures
+
+```rust
+pub fn prepare_cia402_command<const AXES: usize, const IO: usize>(
+    command: &CommandPage<AXES, IO>,
+    guard: &LifecycleGuard,
+    modes: &[OperatingMode; AXES],
+    policies: &[Cia402AxisCommandPolicy; AXES],
+    cycle_period_ns: u64,
+    now_ns: u64,
+) -> Result<PreparedCia402Command<AXES>, ProcBufCia402CommandError>;
+```
+
+- Execution boundary:
+  `submit_prepared_active_frame(decision, permit, report, outputs,
+  desired_targets, guards, limits, maps, modes, safe_process_image, domain,
+  plan, master, port, generation, deadline_ns) -> Result<usize,
+  StopFrameError<P::Error>>`.
+- Direct lifecycle entries: `run_with_procbuf_command` and
+  `run_with_procbuf_command_until`.
+- Scheduled entries: `run_scheduled_with_procbuf_command` and
+  `run_scheduled_with_procbuf_command_until`.
+- Unified production entry:
+  `run_service_cycle_with_procbuf_command_and_controlled_stop_until`.
+
+### 3. Contracts
+
+- `CommandPage` position is radians, velocity is radians/second, and torque is
+  newton-metres. The page must be structurally well formed, motion-enabled,
+  unexpired, and bound to the exact permit currently held by `LifecycleGuard`.
+- `Cia402AxisCommandPolicy` is frozen before activation. Its three scales are
+  finite, nonzero, and signed; position offset is raw `i32`; position bounds
+  and velocity, torque, and per-cycle position-step limits are finite SI values.
+- Signed scales encode axis inversion. Position offset applies only to CSP
+  absolute targets. Target values round to nearest integer with ties away from
+  zero. Non-negative raw guard limits round down.
+- The command velocity and torque caps may narrow, but never widen, the product
+  policy. CSP raw step is `min(product_step, command_velocity * cycle_period)`.
+- `PreparedCia402Command` retains permit, command sequence, deadline, axis mask,
+  mode, per-axis desired targets, and raw limits in fixed-size arrays.
+- At execution, Switch On Disabled and Ready To Switch On write no target;
+  Switched On writes current verified actual feedback; Operation Enabled writes
+  the prepared desired target. The existing active-frame path remains the sole
+  owner of PDO coverage, alias, setpoint, frame-build, TX, and commit checks.
+- Existing raw-target lifecycle APIs remain valid for simulation and low-level
+  integrations; they do not acquire the ProcBuf identity guarantee implicitly.
+
+### 4. Validation & Error Matrix
+
+- Malformed page -> `InvalidCommand`; zero axes or excessive capacity ->
+  `AxisCapacityExceeded`; zero cycle period -> `InvalidCyclePeriod`.
+- Motion disabled -> `MotionDisabled`; expired command or permit -> `Expired`;
+  guard identity mismatch -> `PermitMismatch`.
+- Unknown global mode -> `UnsupportedMode`; selected-axis configured-mode
+  mismatch -> `ModeMismatch(axis)`.
+- Non-finite/zero scale, invalid position bounds, or non-finite/negative limit
+  -> `InvalidPolicy(axis, policy_error)`.
+- Command cap above product cap -> `VelocityCapExceeded(axis)` or
+  `TorqueCapExceeded(axis)`.
+- CSP/CSV/CST target outside its applicable bound ->
+  `PositionOutOfBounds(axis)`, `VelocityOutOfBounds(axis)`, or
+  `TorqueOutOfBounds(axis)`.
+- Quantized target or limit outside its raw integer range ->
+  `RawTargetOverflow(axis)` or `RawLimitOverflow(axis)`.
+- Decision/permit mismatch at the output boundary ->
+  `StopFrameError::CommandPermitMismatch` before target-guard or TX mutation.
+- Verified-input, PDO, frame-build, and TX failures retain the existing typed
+  `StopFrameError` path; setpoint guards commit only after accepted TX.
+
+### 5. Good/Base/Bad Cases
+
+- Good: an inverted CSP axis with a raw offset converts deterministically,
+  holds verified actual position on the enable edge, and sends the desired raw
+  target only after Operation Enabled feedback is current.
+- Good: CSV and CST commands stay inside both command and product caps; their
+  guard limits use absolute scale magnitudes and conservative quantization.
+- Base: an unselected axis has `None` target and zero limits, and a selected
+  axis in a handshake state emits no cyclic target.
+- Bad: a structurally valid command with an older permit epoch is rejected
+  before the port, frame pool, process image, or setpoint guards change.
+- Bad: inferring scale or offset from runtime feedback converts observation into
+  configuration and is forbidden.
+
+### 6. Tests Required
+
+- Unit: policy validation; CSP/CSV/CST conversion; signed inversion; position
+  offset; nearest target rounding; conservative limit rounding; cycle-period
+  step limiting; cap, bound, mode, mask, permit, expiry, and overflow failures.
+- Mutation assertions: every preparation failure leaves the lifecycle guard and
+  caller-owned buffers unchanged; rejected execution sends no frame and does
+  not advance the cyclic setpoint guard.
+- Public integration: ProcBuf publish/read, permit reconstruction and rearm,
+  handshake target suppression, enable-edge actual hold, next-cycle desired
+  PDO bytes, simulated feedback, identity rejection, TX retry/fallback behavior.
+- Regression: all existing raw-target cycle APIs and tests remain green.
+- Quality gate: strict all-feature Clippy and `make ci` must pass.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+// Runtime feedback is not product configuration, and direct raw scaling loses
+// command/permit identity at the execution boundary.
+let target = Cia402Target::Position((command.axes[axis].position * observed_scale) as i32);
+context.run_with_motion(&[Some(target)], guards, limits)?;
+```
+
+#### Correct
+
+```rust
+let prepared = prepare_cia402_command(
+    command,
+    guard,
+    modes,
+    frozen_policies,
+    cycle_period_ns,
+    now_ns,
+)?;
+submit_prepared_active_frame(
+    decision,
+    prepared.permit(),
+    report,
+    outputs,
+    prepared.targets(),
+    guards,
+    prepared.limits(),
+    maps,
+    modes,
+    safe_process_image,
+    domain,
+    plan,
+    master,
+    port,
+    generation,
+    deadline_ns,
+)?;
+```
 
 ## Scenario: Unified Production Service Scheduling
 
@@ -1698,8 +1860,10 @@ from actual hosted fault injection and performance claims.
   boundary.
 - Scope: this contract covers hosted filesystem Unix datagrams and the optional
   host-only ProcBuf/Protobuf payload adapter. It does not qualify shared memory,
-  RPMsg, cryptographic identity, deployment ACL, product mechanical limits,
-  PDO scaling, actual drive execution, production WCET, stress, or HIL.
+  RPMsg, cryptographic identity, deployment ACL, generated product policies,
+  physical drive response, production WCET, stress, or HIL. The downstream RT
+  lifecycle adapter may execute validated commands through a separately tested
+  frozen-policy CiA 402 path; that does not widen the IPC claim.
 - The transport must remain absent from EtherCAT, lifecycle, profile and
   ProcBuf real-time dependency trees.
 

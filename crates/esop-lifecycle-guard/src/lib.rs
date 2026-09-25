@@ -368,6 +368,12 @@ impl AxisCycleDecision<'_> {
         self.guard.transition_sequence
     }
 
+    /// Exact permit borrowed by this cycle decision. Active output adapters
+    /// use it to reject commands prepared for an older renewal or activation.
+    pub const fn motion_permit(&self) -> Option<MotionPermit> {
+        self.guard.permit
+    }
+
     pub const fn stop_transmitted(&self) -> bool {
         self.stop_transmitted
     }

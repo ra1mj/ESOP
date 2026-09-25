@@ -1,6 +1,6 @@
 # ESOP R2 Known Limitations
 
-Qualification status: **not qualified** as of 2026-09-21.
+Qualification status: **not qualified** as of 2026-09-26.
 
 ## Functional Safety Boundary
 
@@ -11,8 +11,9 @@ PLC, guarded machinery, braking analysis, or a product risk assessment.
 ## Missing Qualification Evidence
 
 - No product board, PHY, DMA/cache policy, RTOS, or target clock is frozen.
-- No product-specific CiA 402 raw-unit scaling or controlled-stop limits are
-  frozen for any axis.
+- The runtime accepts frozen product-specific CiA 402 active-command scaling,
+  mechanical bounds and controlled-stop limits, but no release supplies a
+  generated and reviewed per-axis policy artifact for a real product.
 - No two-vendor real-drive plus EtherCAT IO topology has completed the R2 HIL
   startup, cyclic, fault, stop, recovery, and soak matrix.
 - No target-hardware Q1 or Q2 WCET/performance report is supplied.
@@ -31,7 +32,8 @@ hardware qualification evidence.
 
 ## Residual Risks
 
-Drive firmware differences, PDO scaling, braking behavior, mechanical load,
-network fault response, cache maintenance, interrupt latency, and external
-safety-chain behavior can invalidate a software-only result. A structurally
-valid manifest is not permission to energize a machine.
+Drive firmware differences, incorrect frozen PDO scaling, braking behavior,
+mechanical load, network fault response, cache maintenance, interrupt latency,
+and external safety-chain behavior can invalidate a software-only result. The
+simulator proves command conversion and accepted frame contents only. A
+structurally valid manifest is not permission to energize a machine.

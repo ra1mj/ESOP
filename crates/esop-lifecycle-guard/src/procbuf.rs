@@ -9,9 +9,12 @@ use esop_procbuf::{EventPushError, EventSeverity, HeaderError, ProcBuf, ProcBufE
 #[cfg(feature = "cia402")]
 use crate::{AxisCycleDecision, AxisDirective, StopFeedback};
 #[cfg(feature = "cia402")]
-use esop_procbuf::AxisStopEvidence;
+use esop_procbuf::{AxisStopEvidence, ControlMode};
 #[cfg(feature = "cia402")]
-use esop_profile_cia402::{CONTROLWORD_DISABLE_VOLTAGE, CONTROLWORD_QUICK_STOP, Cia402Output};
+use esop_profile_cia402::{
+    CONTROLWORD_DISABLE_VOLTAGE, CONTROLWORD_QUICK_STOP, Cia402Output, Cia402Target, CyclicLimits,
+    OperatingMode,
+};
 
 #[cfg(all(feature = "cia402", feature = "ethercat"))]
 use crate::ethercat::ControlledStopFrameReport;
@@ -48,6 +51,302 @@ pub const fn motion_permit_from_command<const AXES: usize, const IO: usize>(
         reserved: [0; 3],
         policy_version: command.policy_version,
     })
+}
+
+/// Frozen product conversion and mechanical policy for one CiA 402 axis.
+/// Signed scales carry the product's axis direction. The raw position offset
+/// applies only to absolute CSP positions.
+#[cfg(feature = "cia402")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Cia402AxisCommandPolicy {
+    pub position_units_per_radian: f64,
+    pub velocity_units_per_radian_per_second: f64,
+    pub torque_units_per_newton_metre: f64,
+    pub position_offset: i32,
+    pub min_position_radians: f64,
+    pub max_position_radians: f64,
+    pub max_velocity_radians_per_second: f64,
+    pub max_torque_newton_metres: f64,
+    pub max_position_step_radians: f64,
+}
+
+#[cfg(feature = "cia402")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Cia402AxisCommandPolicyError {
+    NonFiniteScale,
+    ZeroScale,
+    NonFinitePositionBounds,
+    ReversedPositionBounds,
+    NonFiniteLimit,
+    NegativeLimit,
+}
+
+#[cfg(feature = "cia402")]
+impl Cia402AxisCommandPolicy {
+    pub fn validate(self) -> Result<(), Cia402AxisCommandPolicyError> {
+        let scales = [
+            self.position_units_per_radian,
+            self.velocity_units_per_radian_per_second,
+            self.torque_units_per_newton_metre,
+        ];
+        if scales.iter().any(|value| !value.is_finite()) {
+            return Err(Cia402AxisCommandPolicyError::NonFiniteScale);
+        }
+        if scales.contains(&0.0) {
+            return Err(Cia402AxisCommandPolicyError::ZeroScale);
+        }
+        if !self.min_position_radians.is_finite() || !self.max_position_radians.is_finite() {
+            return Err(Cia402AxisCommandPolicyError::NonFinitePositionBounds);
+        }
+        if self.min_position_radians > self.max_position_radians {
+            return Err(Cia402AxisCommandPolicyError::ReversedPositionBounds);
+        }
+        let limits = [
+            self.max_velocity_radians_per_second,
+            self.max_torque_newton_metres,
+            self.max_position_step_radians,
+        ];
+        if limits.iter().any(|value| !value.is_finite()) {
+            return Err(Cia402AxisCommandPolicyError::NonFiniteLimit);
+        }
+        if limits.iter().any(|value| *value < 0.0) {
+            return Err(Cia402AxisCommandPolicyError::NegativeLimit);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "cia402")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcBufCia402CommandError {
+    InvalidCommand,
+    MotionDisabled,
+    Expired,
+    AxisCapacityExceeded,
+    PermitMismatch,
+    UnsupportedMode,
+    ModeMismatch(usize),
+    InvalidCyclePeriod,
+    InvalidPolicy(usize, Cia402AxisCommandPolicyError),
+    VelocityCapExceeded(usize),
+    TorqueCapExceeded(usize),
+    PositionOutOfBounds(usize),
+    VelocityOutOfBounds(usize),
+    TorqueOutOfBounds(usize),
+    RawTargetOverflow(usize),
+    RawLimitOverflow(usize),
+}
+
+/// Transactionally prepared, fixed-size raw command. Identity is retained so
+/// the EtherCAT execution boundary can reject a superseded lifecycle permit.
+#[cfg(feature = "cia402")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreparedCia402Command<const AXES: usize> {
+    permit: MotionPermit,
+    command_sequence: u64,
+    deadline_ns: u64,
+    axis_mask: u32,
+    mode: OperatingMode,
+    targets: [Option<Cia402Target>; AXES],
+    limits: [CyclicLimits; AXES],
+}
+
+#[cfg(feature = "cia402")]
+impl<const AXES: usize> PreparedCia402Command<AXES> {
+    pub const fn permit(&self) -> MotionPermit {
+        self.permit
+    }
+
+    pub const fn command_sequence(&self) -> u64 {
+        self.command_sequence
+    }
+
+    pub const fn deadline_ns(&self) -> u64 {
+        self.deadline_ns
+    }
+
+    pub const fn axis_mask(&self) -> u32 {
+        self.axis_mask
+    }
+
+    pub const fn mode(&self) -> OperatingMode {
+        self.mode
+    }
+
+    pub const fn targets(&self) -> &[Option<Cia402Target>; AXES] {
+        &self.targets
+    }
+
+    pub const fn limits(&self) -> &[CyclicLimits; AXES] {
+        &self.limits
+    }
+}
+
+/// Validate and stage one SI-valued ProcBuf command without mutating the
+/// lifecycle guard, setpoint guards, process image, frame pool, or port.
+#[cfg(feature = "cia402")]
+pub fn prepare_cia402_command<const AXES: usize, const IO: usize>(
+    command: &CommandPage<AXES, IO>,
+    guard: &LifecycleGuard,
+    modes: &[OperatingMode; AXES],
+    policies: &[Cia402AxisCommandPolicy; AXES],
+    cycle_period_ns: u64,
+    now_ns: u64,
+) -> Result<PreparedCia402Command<AXES>, ProcBufCia402CommandError> {
+    if !command.is_well_formed() {
+        return Err(ProcBufCia402CommandError::InvalidCommand);
+    }
+    if AXES == 0 || AXES > MAX_MOTION_AXES {
+        return Err(ProcBufCia402CommandError::AxisCapacityExceeded);
+    }
+    if cycle_period_ns == 0 {
+        return Err(ProcBufCia402CommandError::InvalidCyclePeriod);
+    }
+    if command.motion_enable_request == 0 {
+        return Err(ProcBufCia402CommandError::MotionDisabled);
+    }
+    if command.deadline_ns <= now_ns || command.permit_expires_at_ns <= now_ns {
+        return Err(ProcBufCia402CommandError::Expired);
+    }
+    let Some(permit) = motion_permit_from_command(command) else {
+        return Err(ProcBufCia402CommandError::MotionDisabled);
+    };
+    if guard.permit() != Some(permit) {
+        return Err(ProcBufCia402CommandError::PermitMismatch);
+    }
+    let mode = match command.requested_mode {
+        ControlMode::Csp => OperatingMode::Csp,
+        ControlMode::Csv => OperatingMode::Csv,
+        ControlMode::Cst => OperatingMode::Cst,
+        ControlMode::Unknown => return Err(ProcBufCia402CommandError::UnsupportedMode),
+    };
+    let cycle_seconds = cycle_period_ns as f64 / 1_000_000_000.0;
+    let mut targets = [None; AXES];
+    let mut limits = [CyclicLimits {
+        max_position_step: 0.0,
+        max_velocity: 0.0,
+        max_torque: 0.0,
+    }; AXES];
+
+    for axis in 0..AXES {
+        if command.axis_mask & (1u32 << axis) == 0 {
+            continue;
+        }
+        if modes[axis] != mode {
+            return Err(ProcBufCia402CommandError::ModeMismatch(axis));
+        }
+        let policy = policies[axis];
+        policy
+            .validate()
+            .map_err(|error| ProcBufCia402CommandError::InvalidPolicy(axis, error))?;
+        let joint = command.axes[axis];
+        if joint.max_velocity > policy.max_velocity_radians_per_second {
+            return Err(ProcBufCia402CommandError::VelocityCapExceeded(axis));
+        }
+        if joint.max_torque > policy.max_torque_newton_metres {
+            return Err(ProcBufCia402CommandError::TorqueCapExceeded(axis));
+        }
+
+        targets[axis] = Some(match mode {
+            OperatingMode::Csp => {
+                if joint.position < policy.min_position_radians
+                    || joint.position > policy.max_position_radians
+                {
+                    return Err(ProcBufCia402CommandError::PositionOutOfBounds(axis));
+                }
+                Cia402Target::Position(
+                    rounded_i32(
+                        joint.position * policy.position_units_per_radian
+                            + f64::from(policy.position_offset),
+                    )
+                    .ok_or(ProcBufCia402CommandError::RawTargetOverflow(axis))?,
+                )
+            }
+            OperatingMode::Csv => {
+                if joint.velocity.abs() > joint.max_velocity
+                    || joint.velocity.abs() > policy.max_velocity_radians_per_second
+                {
+                    return Err(ProcBufCia402CommandError::VelocityOutOfBounds(axis));
+                }
+                Cia402Target::Velocity(
+                    rounded_i32(joint.velocity * policy.velocity_units_per_radian_per_second)
+                        .ok_or(ProcBufCia402CommandError::RawTargetOverflow(axis))?,
+                )
+            }
+            OperatingMode::Cst => {
+                if joint.torque.abs() > joint.max_torque
+                    || joint.torque.abs() > policy.max_torque_newton_metres
+                {
+                    return Err(ProcBufCia402CommandError::TorqueOutOfBounds(axis));
+                }
+                Cia402Target::Torque(
+                    rounded_i16(joint.torque * policy.torque_units_per_newton_metre)
+                        .ok_or(ProcBufCia402CommandError::RawTargetOverflow(axis))?,
+                )
+            }
+            OperatingMode::Unknown => unreachable!(),
+        });
+
+        let position_step = policy
+            .max_position_step_radians
+            .min(joint.max_velocity * cycle_seconds)
+            * policy.position_units_per_radian.abs();
+        let velocity_limit = joint.max_velocity * policy.velocity_units_per_radian_per_second.abs();
+        let torque_limit = joint.max_torque * policy.torque_units_per_newton_metre.abs();
+        limits[axis] = CyclicLimits {
+            max_position_step: floored_limit(position_step, f64::from(i32::MAX))
+                .ok_or(ProcBufCia402CommandError::RawLimitOverflow(axis))?,
+            max_velocity: floored_limit(velocity_limit, f64::from(i32::MAX))
+                .ok_or(ProcBufCia402CommandError::RawLimitOverflow(axis))?,
+            max_torque: floored_limit(torque_limit, f64::from(i16::MAX))
+                .ok_or(ProcBufCia402CommandError::RawLimitOverflow(axis))?,
+        };
+    }
+
+    Ok(PreparedCia402Command {
+        permit,
+        command_sequence: command.sequence,
+        deadline_ns: command.deadline_ns,
+        axis_mask: command.axis_mask,
+        mode,
+        targets,
+        limits,
+    })
+}
+
+#[cfg(feature = "cia402")]
+fn rounded_i32(value: f64) -> Option<i32> {
+    if !value.is_finite() {
+        return None;
+    }
+    let rounded = if value >= 0.0 {
+        (value + 0.5) as i64
+    } else {
+        (value - 0.5) as i64
+    };
+    i32::try_from(rounded).ok()
+}
+
+#[cfg(feature = "cia402")]
+fn rounded_i16(value: f64) -> Option<i16> {
+    if !value.is_finite() {
+        return None;
+    }
+    let rounded = if value >= 0.0 {
+        (value + 0.5) as i64
+    } else {
+        (value - 0.5) as i64
+    };
+    i16::try_from(rounded).ok()
+}
+
+#[cfg(feature = "cia402")]
+fn floored_limit(value: f64, maximum: f64) -> Option<f64> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    let floored = (value as u64) as f64;
+    (floored <= maximum).then_some(floored)
 }
 #[cfg(feature = "ethercat")]
 use esop_procbuf::DomainQuality as ProcBufDomainQuality;
@@ -670,6 +969,303 @@ pub fn controlled_axis_stops_to_procbuf<
     }
     state.axis_stops = evidence;
     Ok(())
+}
+
+#[cfg(all(test, feature = "cia402"))]
+mod command_tests {
+    use super::*;
+    use crate::GuardPolicy;
+    use esop_procbuf::{IoCommand, JointCommand};
+
+    const POLICY: Cia402AxisCommandPolicy = Cia402AxisCommandPolicy {
+        position_units_per_radian: -100.0,
+        velocity_units_per_radian_per_second: -20.0,
+        torque_units_per_newton_metre: 10.0,
+        position_offset: 10,
+        min_position_radians: -2.0,
+        max_position_radians: 2.0,
+        max_velocity_radians_per_second: 3.0,
+        max_torque_newton_metres: 2.0,
+        max_position_step_radians: 0.15,
+    };
+
+    fn command(mode: ControlMode, sequence: u64) -> CommandPage<1, 1> {
+        CommandPage {
+            boot_id: 9,
+            sequence,
+            deadline_ns: 2_000,
+            source_id: 7,
+            permit_epoch: 3,
+            permit_expires_at_ns: 2_000,
+            axis_mask: 1,
+            requested_mode: mode,
+            motion_enable_request: 1,
+            authority: 2,
+            reserved: [0; 3],
+            policy_version: 4,
+            axes: [JointCommand {
+                position: 1.234,
+                velocity: 1.26,
+                torque: -1.25,
+                max_velocity: 2.0,
+                max_torque: 1.5,
+            }],
+            io: [IoCommand::EMPTY],
+        }
+    }
+
+    fn guard_for(command: &CommandPage<1, 1>) -> LifecycleGuard {
+        let mut guard = LifecycleGuard::new(
+            0,
+            command.boot_id,
+            GuardPolicy {
+                enter_good_cycles: 1,
+                exit_bad_cycles: 1,
+                max_age_cycles: 1,
+                stop_timeout_cycles: 1,
+                stop_action: StopAction::Disable,
+                authorized_source_id: command.source_id,
+                minimum_authority: 1,
+                permit_policy_version: command.policy_version,
+                allowed_axis_mask: 1,
+            },
+        );
+        guard
+            .accept_permit(motion_permit_from_command(command).unwrap(), 1_000)
+            .unwrap();
+        guard
+    }
+
+    #[test]
+    fn prepares_all_modes_with_signed_scales_offset_and_conservative_limits() {
+        for (control_mode, operating_mode, expected) in [
+            (
+                ControlMode::Csp,
+                OperatingMode::Csp,
+                Cia402Target::Position(-113),
+            ),
+            (
+                ControlMode::Csv,
+                OperatingMode::Csv,
+                Cia402Target::Velocity(-25),
+            ),
+            (
+                ControlMode::Cst,
+                OperatingMode::Cst,
+                Cia402Target::Torque(-13),
+            ),
+        ] {
+            let command = command(control_mode, operating_mode as u64);
+            let guard = guard_for(&command);
+            let prepared = prepare_cia402_command(
+                &command,
+                &guard,
+                &[operating_mode],
+                &[POLICY],
+                100_000_000,
+                1_000,
+            )
+            .unwrap();
+
+            assert_eq!(prepared.permit(), guard.permit().unwrap());
+            assert_eq!(prepared.targets(), &[Some(expected)]);
+            assert_eq!(
+                prepared.limits(),
+                &[CyclicLimits {
+                    max_position_step: 15.0,
+                    max_velocity: 40.0,
+                    max_torque: 15.0,
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn preparation_rejects_identity_mode_policy_bounds_and_overflow_without_mutation() {
+        let command = command(ControlMode::Csp, 8);
+        let guard = guard_for(&command);
+        let before = guard.permit();
+
+        let mut wrong_permit = command;
+        wrong_permit.sequence += 1;
+        assert_eq!(
+            prepare_cia402_command(
+                &wrong_permit,
+                &guard,
+                &[OperatingMode::Csp],
+                &[POLICY],
+                100_000_000,
+                1_000,
+            ),
+            Err(ProcBufCia402CommandError::PermitMismatch)
+        );
+        assert_eq!(
+            prepare_cia402_command(
+                &command,
+                &guard,
+                &[OperatingMode::Csv],
+                &[POLICY],
+                100_000_000,
+                1_000,
+            ),
+            Err(ProcBufCia402CommandError::ModeMismatch(0))
+        );
+
+        let mut outside = command;
+        outside.axes[0].position = 3.0;
+        assert_eq!(
+            prepare_cia402_command(
+                &outside,
+                &guard,
+                &[OperatingMode::Csp],
+                &[POLICY],
+                100_000_000,
+                1_000,
+            ),
+            Err(ProcBufCia402CommandError::PositionOutOfBounds(0))
+        );
+
+        let mut invalid_policy = POLICY;
+        invalid_policy.position_units_per_radian = 0.0;
+        assert_eq!(
+            prepare_cia402_command(
+                &command,
+                &guard,
+                &[OperatingMode::Csp],
+                &[invalid_policy],
+                100_000_000,
+                1_000,
+            ),
+            Err(ProcBufCia402CommandError::InvalidPolicy(
+                0,
+                Cia402AxisCommandPolicyError::ZeroScale,
+            ))
+        );
+
+        let mut overflow_policy = POLICY;
+        overflow_policy.position_units_per_radian = 1.0e20;
+        assert_eq!(
+            prepare_cia402_command(
+                &command,
+                &guard,
+                &[OperatingMode::Csp],
+                &[overflow_policy],
+                100_000_000,
+                1_000,
+            ),
+            Err(ProcBufCia402CommandError::RawTargetOverflow(0))
+        );
+        assert_eq!(
+            prepare_cia402_command(&command, &guard, &[OperatingMode::Csp], &[POLICY], 0, 1_000,),
+            Err(ProcBufCia402CommandError::InvalidCyclePeriod)
+        );
+        assert_eq!(guard.permit(), before);
+    }
+
+    #[test]
+    fn preparation_rejects_caps_expiry_disabled_motion_and_raw_limit_overflow() {
+        let csp = command(ControlMode::Csp, 11);
+        let guard = guard_for(&csp);
+
+        let mut velocity_cap = csp;
+        velocity_cap.axes[0].max_velocity = 4.0;
+        assert_eq!(
+            prepare_cia402_command(
+                &velocity_cap,
+                &guard,
+                &[OperatingMode::Csp],
+                &[POLICY],
+                100_000_000,
+                1_000,
+            ),
+            Err(ProcBufCia402CommandError::VelocityCapExceeded(0))
+        );
+
+        let mut torque_cap = csp;
+        torque_cap.axes[0].max_torque = 3.0;
+        assert_eq!(
+            prepare_cia402_command(
+                &torque_cap,
+                &guard,
+                &[OperatingMode::Csp],
+                &[POLICY],
+                100_000_000,
+                1_000,
+            ),
+            Err(ProcBufCia402CommandError::TorqueCapExceeded(0))
+        );
+
+        let mut csv = command(ControlMode::Csv, 12);
+        csv.axes[0].velocity = 2.5;
+        csv.axes[0].max_velocity = 2.0;
+        let csv_guard = guard_for(&csv);
+        assert_eq!(
+            prepare_cia402_command(
+                &csv,
+                &csv_guard,
+                &[OperatingMode::Csv],
+                &[POLICY],
+                100_000_000,
+                1_000,
+            ),
+            Err(ProcBufCia402CommandError::VelocityOutOfBounds(0))
+        );
+
+        let mut cst = command(ControlMode::Cst, 13);
+        cst.axes[0].torque = 1.75;
+        cst.axes[0].max_torque = 1.5;
+        let cst_guard = guard_for(&cst);
+        assert_eq!(
+            prepare_cia402_command(
+                &cst,
+                &cst_guard,
+                &[OperatingMode::Cst],
+                &[POLICY],
+                100_000_000,
+                1_000,
+            ),
+            Err(ProcBufCia402CommandError::TorqueOutOfBounds(0))
+        );
+
+        let mut disabled = csp;
+        disabled.motion_enable_request = 0;
+        assert_eq!(
+            prepare_cia402_command(
+                &disabled,
+                &guard,
+                &[OperatingMode::Csp],
+                &[POLICY],
+                100_000_000,
+                1_000,
+            ),
+            Err(ProcBufCia402CommandError::MotionDisabled)
+        );
+        assert_eq!(
+            prepare_cia402_command(
+                &csp,
+                &guard,
+                &[OperatingMode::Csp],
+                &[POLICY],
+                100_000_000,
+                2_000,
+            ),
+            Err(ProcBufCia402CommandError::Expired)
+        );
+
+        let mut limit_overflow = POLICY;
+        limit_overflow.velocity_units_per_radian_per_second = 1.0e20;
+        assert_eq!(
+            prepare_cia402_command(
+                &csp,
+                &guard,
+                &[OperatingMode::Csp],
+                &[limit_overflow],
+                100_000_000,
+                1_000,
+            ),
+            Err(ProcBufCia402CommandError::RawLimitOverflow(0))
+        );
+    }
 }
 
 #[cfg(all(test, feature = "ethercat"))]

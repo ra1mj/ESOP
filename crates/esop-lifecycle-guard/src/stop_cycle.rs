@@ -12,16 +12,17 @@ use crate::ethercat::{
     StopFrameError, other_cycle_facts_from_control_cycle, other_cycle_facts_from_mailbox_cycle,
     other_cycle_facts_from_process_tx, other_cycle_facts_from_production_service_cycle,
     submit_active_frame, submit_controlled_stopping_frame, submit_inhibited_frame,
-    submit_stopping_frame, verified_ethercat_stop_feedback,
+    submit_prepared_active_frame, submit_stopping_frame, verified_ethercat_stop_feedback,
 };
 use crate::procbuf::{
-    AxisEvidenceError, LifecycleEventCursor, LifecycleEventError, axis_stops_to_procbuf,
-    controlled_axis_stops_to_procbuf, cyclic_quality_to_procbuf, ethercat_cycle_to_procbuf,
-    lifecycle_events_to_procbuf, lifecycle_to_procbuf, scheduled_ethercat_cycle_to_procbuf,
+    AxisEvidenceError, Cia402AxisCommandPolicy, LifecycleEventCursor, LifecycleEventError,
+    ProcBufCia402CommandError, axis_stops_to_procbuf, controlled_axis_stops_to_procbuf,
+    cyclic_quality_to_procbuf, ethercat_cycle_to_procbuf, lifecycle_events_to_procbuf,
+    lifecycle_to_procbuf, prepare_cia402_command, scheduled_ethercat_cycle_to_procbuf,
 };
 use crate::{
     CyclicQuality, GateId, LifecycleAction, LifecycleError, LifecycleGuard, MAX_MOTION_AXES,
-    StopFeedback,
+    MotionPermit, StopFeedback,
 };
 use esop_ethercat_core::{
     CycleReport, DcCyclicSync, Domain, EthercatMaster, EthercatPort, FramePlan, FramePlanSet,
@@ -29,7 +30,7 @@ use esop_ethercat_core::{
     ScheduledProcessInputs, ScheduledProcessTxReport, ScheduledProductionServiceCycleReport,
     ScheduledReceiveReport, ScheduledServiceTxFailure, wire::Command,
 };
-use esop_procbuf::{HeaderError, ProcBuf, StatePage, StatePublishError};
+use esop_procbuf::{CommandPage, HeaderError, ProcBuf, StatePage, StatePublishError};
 use esop_profile_cia402::{
     Cia402AxisBank, Cia402PdoMap, Cia402Target, CyclicLimits, CyclicSetpointGuard, DriveRequest,
     OperatingMode,
@@ -50,6 +51,7 @@ pub enum StopCycleError {
     Header(HeaderError),
     NotStopping(LifecycleAction),
     Evidence(AxisEvidenceError),
+    Command(ProcBufCia402CommandError),
     Abort(LifecycleError),
 }
 
@@ -739,6 +741,7 @@ struct MotionInputs<'a, const AXES: usize> {
     targets: &'a [Option<Cia402Target>; AXES],
     guards: &'a mut [CyclicSetpointGuard; AXES],
     limits: &'a [CyclicLimits; AXES],
+    permit: Option<MotionPermit>,
 }
 
 type ScheduledInputs<'a, const DOMAINS: usize, const SLOTS: usize> = (
@@ -812,6 +815,7 @@ impl<
                 targets,
                 guards,
                 limits,
+                permit: None,
             }),
             None,
             None,
@@ -834,6 +838,69 @@ impl<
                 targets,
                 guards,
                 limits,
+                permit: None,
+            }),
+            None,
+            Some(cycle_deadline_ns),
+        )
+    }
+
+    /// Prepare an admitted SI-valued command against the current lifecycle
+    /// permit and execute it through the active CiA 402 path.
+    pub fn run_with_procbuf_command(
+        &mut self,
+        command: &CommandPage<AXES, IO>,
+        policies: &[Cia402AxisCommandPolicy; AXES],
+        cycle_period_ns: u64,
+        guards: &mut [CyclicSetpointGuard; AXES],
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        let prepared = prepare_cia402_command(
+            command,
+            self.guard,
+            self.modes,
+            policies,
+            cycle_period_ns,
+            self.port.now_ns().max(self.now_ns),
+        )
+        .map_err(StopCycleError::Command)?;
+        self.run_inner::<1>(
+            None,
+            Some(MotionInputs {
+                targets: prepared.targets(),
+                guards,
+                limits: prepared.limits(),
+                permit: Some(prepared.permit()),
+            }),
+            None,
+            None,
+        )
+    }
+
+    /// Deadline-checked variant of [`Self::run_with_procbuf_command`].
+    pub fn run_with_procbuf_command_until(
+        &mut self,
+        command: &CommandPage<AXES, IO>,
+        policies: &[Cia402AxisCommandPolicy; AXES],
+        cycle_period_ns: u64,
+        guards: &mut [CyclicSetpointGuard; AXES],
+        cycle_deadline_ns: u64,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        let prepared = prepare_cia402_command(
+            command,
+            self.guard,
+            self.modes,
+            policies,
+            cycle_period_ns,
+            self.port.now_ns().max(self.now_ns),
+        )
+        .map_err(StopCycleError::Command)?;
+        self.run_inner::<1>(
+            None,
+            Some(MotionInputs {
+                targets: prepared.targets(),
+                guards,
+                limits: prepared.limits(),
+                permit: Some(prepared.permit()),
             }),
             None,
             Some(cycle_deadline_ns),
@@ -890,6 +957,7 @@ impl<
                 targets,
                 guards,
                 limits,
+                permit: None,
             }),
             None,
             None,
@@ -914,6 +982,78 @@ impl<
                 targets,
                 guards,
                 limits,
+                permit: None,
+            }),
+            None,
+            Some(cycle_deadline_ns),
+        )
+    }
+
+    /// Scheduled-Domain variant using an admitted ProcBuf command rather than
+    /// caller-constructed raw targets and limits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_scheduled_with_procbuf_command<const SCHEDULE_SLOTS: usize>(
+        &mut self,
+        schedule: &ScheduleTable<DOMAINS, SCHEDULE_SLOTS>,
+        domains: &[ScheduledDomainQuality; DOMAINS],
+        motion_domain_id: u8,
+        command: &CommandPage<AXES, IO>,
+        policies: &[Cia402AxisCommandPolicy; AXES],
+        cycle_period_ns: u64,
+        guards: &mut [CyclicSetpointGuard; AXES],
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        let prepared = prepare_cia402_command(
+            command,
+            self.guard,
+            self.modes,
+            policies,
+            cycle_period_ns,
+            self.port.now_ns().max(self.now_ns),
+        )
+        .map_err(StopCycleError::Command)?;
+        self.run_inner(
+            Some((schedule, domains, motion_domain_id)),
+            Some(MotionInputs {
+                targets: prepared.targets(),
+                guards,
+                limits: prepared.limits(),
+                permit: Some(prepared.permit()),
+            }),
+            None,
+            None,
+        )
+    }
+
+    /// Deadline-checked variant of
+    /// [`Self::run_scheduled_with_procbuf_command`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_scheduled_with_procbuf_command_until<const SCHEDULE_SLOTS: usize>(
+        &mut self,
+        schedule: &ScheduleTable<DOMAINS, SCHEDULE_SLOTS>,
+        domains: &[ScheduledDomainQuality; DOMAINS],
+        motion_domain_id: u8,
+        command: &CommandPage<AXES, IO>,
+        policies: &[Cia402AxisCommandPolicy; AXES],
+        cycle_period_ns: u64,
+        guards: &mut [CyclicSetpointGuard; AXES],
+        cycle_deadline_ns: u64,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        let prepared = prepare_cia402_command(
+            command,
+            self.guard,
+            self.modes,
+            policies,
+            cycle_period_ns,
+            self.port.now_ns().max(self.now_ns),
+        )
+        .map_err(StopCycleError::Command)?;
+        self.run_inner(
+            Some((schedule, domains, motion_domain_id)),
+            Some(MotionInputs {
+                targets: prepared.targets(),
+                guards,
+                limits: prepared.limits(),
+                permit: Some(prepared.permit()),
             }),
             None,
             Some(cycle_deadline_ns),
@@ -943,6 +1083,7 @@ impl<
                 targets,
                 guards,
                 limits,
+                permit: None,
             }),
             None,
             Some(cycle_deadline_ns),
@@ -977,6 +1118,7 @@ impl<
                 targets,
                 guards,
                 limits,
+                permit: None,
             }),
             None,
             Some(cycle_deadline_ns),
@@ -1013,6 +1155,7 @@ impl<
                 targets,
                 guards,
                 limits,
+                permit: None,
             }),
             Some(controlled),
             Some(cycle_deadline_ns),
@@ -1048,6 +1191,7 @@ impl<
                 targets,
                 guards,
                 limits,
+                permit: None,
             }),
             None,
             Some(cycle_deadline_ns),
@@ -1090,6 +1234,7 @@ impl<
                 targets,
                 guards,
                 limits,
+                permit: None,
             }),
             None,
             Some(cycle_deadline_ns),
@@ -1132,6 +1277,7 @@ impl<
                 targets,
                 guards,
                 limits,
+                permit: None,
             }),
             Some(controlled),
             Some(cycle_deadline_ns),
@@ -1166,6 +1312,7 @@ impl<
                 targets,
                 guards,
                 limits,
+                permit: None,
             }),
             None,
             Some(cycle_deadline_ns),
@@ -1202,6 +1349,52 @@ impl<
                 targets,
                 guards,
                 limits,
+                permit: None,
+            }),
+            Some(controlled),
+            Some(cycle_deadline_ns),
+            Some(outputs),
+            other,
+        )
+    }
+
+    /// Unified production-service entry using the current admitted ProcBuf
+    /// command and the product-configured controlled-stop fallback.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_service_cycle_with_procbuf_command_and_controlled_stop_until<
+        const SCHEDULE_SLOTS: usize,
+        const FRAMES: usize,
+    >(
+        &mut self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        cycle: &ScheduledProductionServiceCycleReport<P::Error, DOMAINS>,
+        motion_domain_id: u8,
+        outputs: &ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
+        command: &CommandPage<AXES, IO>,
+        policies: &[Cia402AxisCommandPolicy; AXES],
+        cycle_period_ns: u64,
+        guards: &mut [CyclicSetpointGuard; AXES],
+        controlled: &mut ControlledStopCycleState<AXES>,
+        cycle_deadline_ns: u64,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        let prepared = prepare_cia402_command(
+            command,
+            self.guard,
+            self.modes,
+            policies,
+            cycle_period_ns,
+            self.port.now_ns().max(self.now_ns),
+        )
+        .map_err(StopCycleError::Command)?;
+        let (domains, other) =
+            self.service_cycle_inputs(domain_bank, cycle, motion_domain_id, outputs)?;
+        self.run_inner_with_outputs(
+            Some((outputs.schedule, &domains, motion_domain_id)),
+            Some(MotionInputs {
+                targets: prepared.targets(),
+                guards,
+                limits: prepared.limits(),
+                permit: Some(prepared.permit()),
             }),
             Some(controlled),
             Some(cycle_deadline_ns),
@@ -1252,6 +1445,7 @@ impl<
                 targets,
                 guards,
                 limits,
+                permit: None,
             }),
             None,
             Some(cycle_deadline_ns),
@@ -1308,6 +1502,7 @@ impl<
                 targets,
                 guards,
                 limits,
+                permit: None,
             }),
             None,
             Some(cycle_deadline_ns),
@@ -1356,6 +1551,7 @@ impl<
                 targets,
                 guards,
                 limits,
+                permit: None,
             }),
             None,
             Some(cycle_deadline_ns),
@@ -1760,23 +1956,44 @@ impl<
                     for guard in &mut next_guards {
                         guard.bind_activation(activation.0, activation.1);
                     }
-                    let transmission = submit_active_frame(
-                        &decision,
-                        self.report,
-                        &outputs,
-                        motion.targets,
-                        &mut next_guards,
-                        motion.limits,
-                        self.maps,
-                        self.modes,
-                        self.safe_process_image,
-                        self.domain,
-                        self.plan,
-                        self.master,
-                        self.port,
-                        self.next_generation,
-                        self.deadline_ns,
-                    );
+                    let transmission = if let Some(permit) = motion.permit {
+                        submit_prepared_active_frame(
+                            &decision,
+                            permit,
+                            self.report,
+                            &outputs,
+                            motion.targets,
+                            &mut next_guards,
+                            motion.limits,
+                            self.maps,
+                            self.modes,
+                            self.safe_process_image,
+                            self.domain,
+                            self.plan,
+                            self.master,
+                            self.port,
+                            self.next_generation,
+                            self.deadline_ns,
+                        )
+                    } else {
+                        submit_active_frame(
+                            &decision,
+                            self.report,
+                            &outputs,
+                            motion.targets,
+                            &mut next_guards,
+                            motion.limits,
+                            self.maps,
+                            self.modes,
+                            self.safe_process_image,
+                            self.domain,
+                            self.plan,
+                            self.master,
+                            self.port,
+                            self.next_generation,
+                            self.deadline_ns,
+                        )
+                    };
                     if transmission.is_ok() {
                         *motion.guards = next_guards;
                     }

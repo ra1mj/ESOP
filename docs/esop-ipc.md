@@ -78,6 +78,14 @@ version. Structural failures do not consume replay floors, rate-limit budget or
 audit slots. ACL, authority, TTL, permit epoch, axis policy and motion permits
 remain owned by `esop-command-gateway`.
 
+The downstream real-time integration now accepts that validated Command page
+through `prepare_cia402_command` and `StopCycleContext` ProcBuf entry points.
+It requires an exact match with the permit currently held by the lifecycle
+guard, applies caller-frozen per-axis SI scaling and mechanical limits, holds
+verified actual feedback on the enable edge, and only then delegates desired
+raw targets to the existing transactional CiA 402 EtherCAT frame path. This
+does not move conversion or EtherCAT dependencies into the hosted IPC crate.
+
 ## Peer Lifecycle
 
 `PeerMonitor` binds accepted traffic to an expected robot ID, layout hash and
@@ -125,8 +133,9 @@ a new boot ID, and owned-path cleanup.
 
 ## Claim Boundary
 
-This implementation does not claim shared memory or RPMsg transport,
-cryptographic peer identity, SELinux or filesystem deployment policy,
-product-specific mechanical limits, PDO scaling, setpoint-step acceptance,
-actual drive execution, production latency/WCET, long-duration stress, or
-target HIL qualification. Those remain separate acceptance gates.
+The IPC implementation itself does not claim shared memory or RPMsg transport,
+cryptographic peer identity, SELinux or filesystem deployment policy, generated
+product policies, physical drive response, braking or mechanical suitability,
+production latency/WCET, long-duration stress, or target HIL qualification.
+The downstream software conversion/frame path has separate simulator evidence;
+all physical and release-specific claims remain separate acceptance gates.

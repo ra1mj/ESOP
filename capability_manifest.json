@@ -32,13 +32,29 @@
     {
       "id": "cia402_profile",
       "status": "partial",
-      "scope": "CiA 402 FSA, CSP/CSV/CST supervision and typed cyclic PDO binding",
+      "scope": "CiA 402 FSA, CSP/CSV/CST supervision, typed cyclic PDO binding and lifecycle-qualified ProcBuf SI target execution through caller-frozen axis policies",
       "evidence": [
         "crates/esop-profile-cia402/src/lib.rs",
         "crates/esop-profile-cia402/src/pdo.rs",
-        "crates/esop-profile-cia402/tests/pdo.rs"
+        "crates/esop-profile-cia402/tests/pdo.rs",
+        "crates/esop-lifecycle-guard/src/procbuf.rs",
+        "crates/esop-lifecycle-guard/src/ethercat.rs",
+        "crates/esop-ethercat-linux-port/tests/verified_stop_cycle.rs"
       ],
-      "limitation": "Vendor quirks, scaling and two-vendor real-drive HIL remain open"
+      "limitation": "Runtime conversion accepts explicit frozen per-axis scales and limits; product configuration generation, vendor quirks and two-vendor real-drive HIL remain open"
+    },
+    {
+      "id": "procbuf_cia402_execution",
+      "status": "implemented",
+      "scope": "Allocation-free ProcBuf v5 CSP/CSV/CST command validation, exact lifecycle-permit binding, deterministic SI-to-raw conversion, enable-edge actual hold and transactional CiA 402 PDO submission",
+      "evidence": [
+        "crates/esop-procbuf/src/lib.rs",
+        "crates/esop-lifecycle-guard/src/procbuf.rs",
+        "crates/esop-lifecycle-guard/src/ethercat.rs",
+        "crates/esop-lifecycle-guard/src/stop_cycle.rs",
+        "crates/esop-ethercat-linux-port/tests/verified_stop_cycle.rs"
+      ],
+      "limitation": "Software simulation proves conversion and accepted frame contents only; no product policy artifact, physical drive response, braking/mechanical suitability, target WCET or safety qualification is claimed"
     },
     {
       "id": "motion_lifecycle_guard",
@@ -88,7 +104,7 @@
         "crates/esop-ipc/tests/unix_loopback.rs",
         "docs/esop-ipc.md"
       ],
-      "limitation": "Host filesystem Unix datagrams only; shared memory, RPMsg, cryptographic identity, deployment ACL, product mechanical limits/PDO scaling, actual drive execution, production latency/WCET, long-duration stress and HIL remain open"
+      "limitation": "Host filesystem Unix datagrams only; downstream RT target execution is tracked separately, while shared memory, RPMsg, cryptographic identity, deployment ACL, product policy generation, production latency/WCET, long-duration stress and physical HIL remain open"
     },
     {
       "id": "command_gateway_policy",
@@ -101,7 +117,7 @@
         "crates/esop-ipc/tests/payloads.rs",
         "docs/esop-command-gateway.md"
       ],
-      "limitation": "Zenoh and IPC reuse the shared strict target mapper; cryptographic identity, deployment ACL, product target semantics, actual drive execution and HIL remain open"
+      "limitation": "Zenoh and IPC reuse the shared strict target mapper and downstream RT execution adapter; cryptographic identity, deployment ACL, generated product policies, physical drive behavior and HIL remain open"
     },
     {
       "id": "protobuf_v1_contract",
