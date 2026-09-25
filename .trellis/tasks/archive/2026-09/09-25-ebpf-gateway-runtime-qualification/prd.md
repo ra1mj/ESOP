@@ -102,27 +102,27 @@ long-duration operation.
 
 ## Acceptance Criteria
 
-- [ ] AC1: The Linux fixture exact-links all four production gateway marker
+- [x] AC1: The Linux fixture exact-links all four production gateway marker
   symbols, requires both complete uprobe pairs, and drives delayed publish and
   callback lifecycles with distinct nonzero request IDs.
-- [ ] AC2: A successful run observes exactly two strict over-threshold
+- [x] AC2: A successful run observes exactly two strict over-threshold
   `UserZenoh/GatewayStall` records and merges them into one expected
   controlled-stop incident with count/evidence count two.
-- [ ] AC3: The retained evidence proves Diagnostic/success publish and
+- [x] AC3: The retained evidence proves Diagnostic/success publish and
   Command/completed callback details, request IDs, PID/TID, cycle, threshold,
   duration, and observed-value invariants.
-- [ ] AC4: Success requires exactly four gateway attach bits, two
+- [x] AC4: Success requires exactly four gateway attach bits, two
   begin/completion/stall counters, zero mismatch/loss, and bounded polling.
-- [ ] AC5: The exact-schema validator accepts the fixture report and regression
+- [x] AC5: The exact-schema validator accepts the fixture report and regression
   tests reject malformed types/schema, partial attachment, wrong route/outcome,
   duplicate IDs, inconsistent timing, loss, and mismatches.
-- [ ] AC6: `make test-ebpf-gateway-runtime` builds unprivileged, elevates only
+- [x] AC6: `make test-ebpf-gateway-runtime` builds unprivileged, elevates only
   execution, fails explicitly without privilege, and validates the output.
-- [ ] AC7: GitHub Actions executes the privileged qualification and uploads
+- [x] AC7: GitHub Actions executes the privileged qualification and uploads
   `build/ebpf_gateway_qualification.json` as evidence.
-- [ ] AC8: Focused Rust/Python tests, full `make ci`, BPF syntax/CO-RE build,
+- [x] AC8: Focused Rust/Python tests, full `make ci`, BPF syntax/CO-RE build,
   Zenoh integration, and the remote privileged qualification job pass.
-- [ ] AC9: Documentation states the qualified direct-marker path and preserves
+- [x] AC9: Documentation states the qualified direct-marker path and preserves
   all live transport, production kernel, overhead/WCET, and long-run limits.
 
 ## Out Of Scope
@@ -133,3 +133,20 @@ long-duration operation.
   provider correctness, or motion/lifecycle behavior.
 - Performance acceptance, probe overhead, WCET, soak, production kernel
   allowlists, systemd/cgroup packaging, signing, or deployment rollout.
+
+## Completion Evidence
+
+- Work commit `2fc62b8` implements the fixture, validator, regression tests,
+  privilege-minimized runner, Make/CI integration, capability claims, and
+  documentation boundary.
+- Focused Rust tests, validator tests, Clippy, formatting, `make bpf-syntax`, a
+  real local CO-RE object build, `make test-zenoh`, and the full `make ci` gate
+  passed. Local privileged execution stopped with the required explicit error
+  because passwordless sudo was unavailable and left no success artifact.
+- GitHub Actions run `36111379291` completed successfully. Its dedicated
+  `ebpf-gateway-runtime` job ran the privileged fixture and uploaded the
+  qualification report; the Rust, BPF, and raw-port runtime jobs also passed.
+- The downloaded report was revalidated locally. It records attach mask
+  `61440`, two records/evidence/stalls, one merged `GatewayStall` incident with
+  count and evidence count two, request IDs `101` and `202`, measured durations
+  above the 5 ms threshold, and zero mismatches, loss, or dropped incidents.
