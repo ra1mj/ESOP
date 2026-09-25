@@ -105,7 +105,7 @@ target-kernel attach/injection, and overhead qualification remain open.
 - [x] AC8: Documentation and capability data remove query/subscribe from the
   open gateway-hook list without claiming ROS2, recorder, real target attach,
   fault injection, or production overhead qualification.
-- [ ] AC9: `make ci`, `make test-zenoh`, a real Clang BPF object build, and the
+- [x] AC9: `make ci`, `make test-zenoh`, a real Clang BPF object build, and the
   repository GitHub Actions workflow pass before archival.
 
 ## Out of Scope

@@ -15,7 +15,7 @@
 - [x] Extend exact-symbol, decode/mask, compatibility, and live Zenoh coverage.
 - [x] Update README, gateway/runtime observability docs, FR-048, capability
   manifest, and backend quality contract with the implemented boundary.
-- [ ] Run focused tests, full local gates, live Zenoh tests, real BPF object
+- [x] Run focused tests, full local gates, live Zenoh tests, real BPF object
   compilation, then push and require GitHub Actions success.
 
 ## Focused validation
