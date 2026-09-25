@@ -111,6 +111,7 @@ pub enum EvidenceKind {
     AgentCapabilityFailure = 8,
     SoftirqCpuTime = 9,
     CpuMigration = 10,
+    RawPortStall = 11,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -125,6 +126,7 @@ pub enum IncidentCode {
     HostCpuThrottle = 6,
     GatewayStall = 7,
     ObservabilityDegraded = 8,
+    HostPortStall = 9,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -169,9 +171,11 @@ pub struct RuntimeEvidence {
     /// Kind-specific bounded detail. Network drops carry the saturated kernel
     /// skb drop reason, while CPU migrations carry saturated scheduler
     /// priority. Gateway stalls carry the route kind in bits 0-2 and publish
-    /// outcome in bits 4-5. Producers without a detail value write zero. For
-    /// `CpuMigration`, `irq` is the origin CPU and `cpu` is the destination;
-    /// for a gateway operation that changes worker threads, `tid` is zero.
+    /// outcome in bits 4-5. Raw-port stalls carry operation in the low nibble
+    /// and outcome in the high nibble. Producers without a detail value write
+    /// zero. For `CpuMigration`, `irq` is the origin CPU and `cpu` is the
+    /// destination; for a gateway operation that changes worker threads,
+    /// `tid` is zero.
     pub detail: u8,
 }
 
@@ -647,6 +651,12 @@ fn classify(
             IncidentSeverity::Error,
             RecommendedAction::ControlledStop,
             75,
+        )),
+        EvidenceKind::RawPortStall if duration_over_threshold && correlated => Some((
+            IncidentCode::HostPortStall,
+            IncidentSeverity::Error,
+            RecommendedAction::ControlledStop,
+            80,
         )),
         EvidenceKind::AgentCapabilityFailure => Some((
             IncidentCode::ObservabilityDegraded,
@@ -1137,6 +1147,73 @@ mod tests {
 
         let mut zero_threshold = stall;
         zero_threshold.evidence_id = 80;
+        zero_threshold.threshold = 0;
+        assert_eq!(correlator.ingest(zero_threshold).unwrap(), None);
+
+        let mut healthy = IncidentCorrelator::<2>::new(11, 3, 1_000);
+        healthy
+            .observe_cycle(CycleContext {
+                boot_id: 11,
+                cycle_seq: 42,
+                timestamp_ns: 1_000,
+                ..CycleContext::EMPTY
+            })
+            .unwrap();
+        assert_eq!(healthy.ingest(stall).unwrap(), None);
+    }
+
+    #[test]
+    fn raw_port_stall_requires_consistent_duration_threshold_and_cycle_risk() {
+        let mut correlator = IncidentCorrelator::<4>::new(11, 3, 1_000);
+        correlator
+            .observe_cycle(CycleContext {
+                boot_id: 11,
+                cycle_seq: 42,
+                transition_seq: 9,
+                timestamp_ns: 1_000,
+                wkc_bad: 1,
+                ..CycleContext::EMPTY
+            })
+            .unwrap();
+
+        let mut stall = evidence(EvidenceKind::RawPortStall, 1_100);
+        stall.domain = EvidenceDomain::UserEsop;
+        stall.evidence_id = 81;
+        stall.pid = 1_234;
+        stall.tid = 1_235;
+        stall.netdev_ifindex = 7;
+        stall.observed_value = 1_500_000;
+        stall.threshold = 1_000_000;
+        stall.duration_ns = 1_500_000;
+        stall.count = 1;
+        stall.detail = 0x21;
+
+        let incident = correlator.ingest(stall).unwrap().unwrap();
+        assert_eq!(incident.code, IncidentCode::HostPortStall);
+        assert_eq!(incident.severity, IncidentSeverity::Error);
+        assert_eq!(incident.pid, 1_234);
+        assert_eq!(incident.tid, 1_235);
+        assert_eq!(incident.netdev_ifindex, 7);
+        assert_eq!(incident.evidence[0].detail, 0x21);
+        assert_eq!(incident.confidence_percent, 80);
+        assert_eq!(
+            incident.recommended_action,
+            RecommendedAction::ControlledStop
+        );
+
+        let mut at_threshold = stall;
+        at_threshold.evidence_id = 82;
+        at_threshold.observed_value = at_threshold.threshold;
+        at_threshold.duration_ns = at_threshold.threshold;
+        assert_eq!(correlator.ingest(at_threshold).unwrap(), None);
+
+        let mut inconsistent = stall;
+        inconsistent.evidence_id = 83;
+        inconsistent.observed_value += 1;
+        assert_eq!(correlator.ingest(inconsistent).unwrap(), None);
+
+        let mut zero_threshold = stall;
+        zero_threshold.evidence_id = 84;
         zero_threshold.threshold = 0;
         assert_eq!(correlator.ingest(zero_threshold).unwrap(), None);
 

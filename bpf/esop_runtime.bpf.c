@@ -29,6 +29,9 @@ struct esop_context {
     __u64 gateway_stall_threshold_ns;
     __u32 gateway_probe_epoch;
     __u32 reserved_gateway;
+    __u64 raw_port_stall_threshold_ns;
+    __u32 raw_port_probe_epoch;
+    __u32 reserved_raw_port;
 };
 
 struct esop_stats {
@@ -58,6 +61,10 @@ struct esop_stats {
     __u64 gateway_probe_completions;
     __u64 gateway_stalls;
     __u64 gateway_probe_mismatches;
+    __u64 raw_port_probe_begins;
+    __u64 raw_port_probe_completions;
+    __u64 raw_port_stalls;
+    __u64 raw_port_probe_mismatches;
 };
 
 struct esop_interrupt_key {
@@ -117,6 +124,14 @@ struct esop_gateway_operation_state {
     __u32 operation_class;
 };
 
+struct esop_raw_port_operation_state {
+    __u64 start_ns;
+    __u32 policy_epoch;
+    __u32 ifindex;
+    __u32 operation;
+    __u32 reserved;
+};
+
 struct esop_runtime_evidence {
     __u64 evidence_id;
     __u64 boot_id;
@@ -139,8 +154,8 @@ struct esop_runtime_evidence {
     __u8 detail;
 };
 
-_Static_assert(sizeof(struct esop_context) == 160, "context ABI changed");
-_Static_assert(sizeof(struct esop_stats) == 208, "stats ABI changed");
+_Static_assert(sizeof(struct esop_context) == 176, "context ABI changed");
+_Static_assert(sizeof(struct esop_stats) == 240, "stats ABI changed");
 _Static_assert(sizeof(struct esop_runtime_evidence) == 96, "evidence ABI changed");
 
 struct {
@@ -217,6 +232,13 @@ struct {
     __type(key, struct esop_gateway_operation_key);
     __type(value, struct esop_gateway_operation_state);
 } ESOP_GATEWAY_OPERATIONS SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 1024);
+    __type(key, __u64);
+    __type(value, struct esop_raw_port_operation_state);
+} ESOP_RAW_PORT_OPERATIONS SEC(".maps");
 
 static __always_inline struct esop_context *esop_context(void)
 {
@@ -368,10 +390,22 @@ static __always_inline __u8 esop_detail_u8(__u64 value)
 #define ESOP_GATEWAY_PUBLISH_OUTCOMES 0x7
 #define ESOP_GATEWAY_CALLBACK_OUTCOMES 0x5
 
+#define ESOP_RAW_PORT_OPERATION_TX 0
+#define ESOP_RAW_PORT_OPERATION_RX 1
+#define ESOP_RAW_PORT_OPERATION_MAX ESOP_RAW_PORT_OPERATION_RX
+#define ESOP_RAW_PORT_TX_OUTCOMES 0x7
+#define ESOP_RAW_PORT_RX_OUTCOMES 0xf
+
 static __always_inline __u8 esop_gateway_detail(__u32 route_kind,
                                                  __u32 outcome)
 {
     return (__u8)((outcome << 4) | route_kind);
+}
+
+static __always_inline __u8 esop_raw_port_detail(__u32 operation,
+                                                  __u32 outcome)
+{
+    return (__u8)((outcome << 4) | operation);
 }
 
 static __always_inline __u32 esop_skb_ifindex(struct sk_buff *skb)
@@ -558,6 +592,135 @@ int esop_gateway_callback_end(struct pt_regs *registers)
         registers, ESOP_GATEWAY_OPERATION_CALLBACK,
         ESOP_GATEWAY_CALLBACK_ROUTE_MIN, ESOP_GATEWAY_CALLBACK_ROUTE_MAX,
         ESOP_GATEWAY_CALLBACK_OUTCOMES);
+}
+
+static __always_inline int esop_raw_port_operation_begin(
+    struct pt_regs *registers)
+{
+    struct esop_context *context = esop_context();
+    struct esop_stats *stats = esop_stats();
+    __u32 ifindex = (__u32)BPF_CORE_READ(registers, di);
+    __u32 operation = (__u32)BPF_CORE_READ(registers, si);
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 tgid = (__u32)(pid_tgid >> 32);
+    if (!context || context->raw_port_stall_threshold_ns == 0 ||
+        ifindex == 0 || operation > ESOP_RAW_PORT_OPERATION_MAX ||
+        !esop_tracks(tgid, context)) {
+        if (stats && context && esop_tracks(tgid, context)) {
+            stats->raw_port_probe_mismatches++;
+        }
+        return 0;
+    }
+
+    if (bpf_map_lookup_elem(&ESOP_RAW_PORT_OPERATIONS, &pid_tgid) && stats) {
+        stats->raw_port_probe_mismatches++;
+    }
+    struct esop_raw_port_operation_state state = {
+        .start_ns = bpf_ktime_get_ns(),
+        .policy_epoch = context->raw_port_probe_epoch,
+        .ifindex = ifindex,
+        .operation = operation,
+    };
+    if (bpf_map_update_elem(&ESOP_RAW_PORT_OPERATIONS, &pid_tgid, &state,
+                            BPF_ANY) < 0) {
+        if (stats) {
+            stats->raw_port_probe_mismatches++;
+            stats->lost_events++;
+        }
+        return 0;
+    }
+    if (stats) {
+        stats->raw_port_probe_begins++;
+    }
+    return 0;
+}
+
+static __always_inline int esop_raw_port_operation_end(
+    struct pt_regs *registers)
+{
+    struct esop_stats *stats = esop_stats();
+    __u32 ifindex = (__u32)BPF_CORE_READ(registers, di);
+    __u32 operation = (__u32)BPF_CORE_READ(registers, si);
+    __u32 outcome = (__u32)BPF_CORE_READ(registers, dx);
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 tgid = (__u32)(pid_tgid >> 32);
+    __u32 tid = (__u32)pid_tgid;
+    struct esop_raw_port_operation_state *state =
+        bpf_map_lookup_elem(&ESOP_RAW_PORT_OPERATIONS, &pid_tgid);
+    if (!state) {
+        if (stats) {
+            stats->raw_port_probe_mismatches++;
+        }
+        return 0;
+    }
+
+    __u64 start_ns = state->start_ns;
+    __u32 policy_epoch = state->policy_epoch;
+    __u32 start_ifindex = state->ifindex;
+    __u32 start_operation = state->operation;
+    if (bpf_map_delete_elem(&ESOP_RAW_PORT_OPERATIONS, &pid_tgid) < 0) {
+        if (stats) {
+            stats->raw_port_probe_mismatches++;
+        }
+        return 0;
+    }
+    if (stats) {
+        stats->raw_port_probe_completions++;
+    }
+
+    struct esop_context *context = esop_context();
+    __u32 allowed_outcomes = operation == ESOP_RAW_PORT_OPERATION_TX
+                                 ? ESOP_RAW_PORT_TX_OUTCOMES
+                                 : ESOP_RAW_PORT_RX_OUTCOMES;
+    if (!context || context->raw_port_stall_threshold_ns == 0 ||
+        !esop_tracks(tgid, context) || ifindex == 0 ||
+        operation > ESOP_RAW_PORT_OPERATION_MAX || outcome > 3 ||
+        (allowed_outcomes & (1U << outcome)) == 0 ||
+        ifindex != start_ifindex || operation != start_operation ||
+        policy_epoch != context->raw_port_probe_epoch) {
+        if (stats) {
+            stats->raw_port_probe_mismatches++;
+        }
+        return 0;
+    }
+
+    __u64 now = bpf_ktime_get_ns();
+    if (now < start_ns) {
+        if (stats) {
+            stats->raw_port_probe_mismatches++;
+        }
+        return 0;
+    }
+    __u64 duration_ns = now - start_ns;
+    if (duration_ns <= context->raw_port_stall_threshold_ns) {
+        return 0;
+    }
+
+    __u32 cpu = bpf_get_smp_processor_id();
+    __u16 event_cpu = cpu > 0xffff ? 0xffff : (__u16)cpu;
+    if (esop_emit_resource_cpu_task_id(
+            start_ns, 5, 11, 2, duration_ns,
+            context->raw_port_stall_threshold_ns, duration_ns, 1, 0,
+            start_ifindex, esop_raw_port_detail(operation, outcome), tgid,
+            tid, event_cpu) == 0) {
+        stats = esop_stats();
+        if (stats) {
+            stats->raw_port_stalls++;
+        }
+    }
+    return 0;
+}
+
+SEC("uprobe")
+int esop_raw_port_begin(struct pt_regs *registers)
+{
+    return esop_raw_port_operation_begin(registers);
+}
+
+SEC("uprobe")
+int esop_raw_port_end(struct pt_regs *registers)
+{
+    return esop_raw_port_operation_end(registers);
 }
 
 SEC("tracepoint/sched/sched_wakeup")

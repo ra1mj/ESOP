@@ -1,8 +1,8 @@
 # ESOP eBPF 运行时观测与问题归因设计
 
-- 文档版本：1.1
+- 文档版本：1.2
 - 日期：2026-09-25
-- 状态：设计基线；HostObservation、固定证据 ABI、有界 RuntimeIncident 相关器、同类事件窗口聚合、RuntimeAgent 门面、能力预检结果模型、Rust/Aya CO-RE loader、tracepoint attach、ringbuf 解码桥、有界硬 IRQ/softirq 时长证据、按 EtherType/ifindex 聚合的 `kfree_skb` 丢包证据和有界 cpufreq policy 限频 episode 已实现；目标内核 verifier/权限、真实压力/限频注入和生产 hook 资格仍需在目标 Linux 环境完成
+- 状态：设计基线；HostObservation、固定证据 ABI、有界 RuntimeIncident 相关器、同类事件窗口聚合、RuntimeAgent 门面、能力预检结果模型、Rust/Aya CO-RE loader、tracepoint attach、ringbuf 解码桥、有界硬 IRQ/softirq 时长证据、按 EtherType/ifindex 聚合的 `kfree_skb` 丢包证据、有界 cpufreq policy 限频 episode、Zenoh gateway stall 和 Linux raw-port syscall stall 证据已实现；目标内核 verifier/权限、真实压力/限频/延迟注入和生产 hook 资格仍需在目标 Linux 环境完成
 - 上游需求：[ESOP 软件产品需求文档](esop-software-prd.md) FR-047 至 FR-052、NFR-018
 
 ## 1. 设计结论
@@ -43,7 +43,7 @@ ESOP RT node
 
 两条证据链保持独立：RT 域是运动控制事实来源；eBPF 是 Linux 环境的解释与归因来源。相关器可以合并“同一个周期窗口内的事件”，但不能以缺少 eBPF 事件证明“系统没有问题”。
 
-当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、调度 TID/迁移计数窗口策略原子更新、硬 IRQ/softirq entry/exit attach、EtherCAT EtherType/可选 ifindex 丢包策略更新、页错误计数窗口策略更新、cpufreq policy 下限/CPU 策略原子更新和 `RuntimeAgent` 桥接；`bpf/` 提供固定 1024 项的调度 TID 迁移窗口 map、固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、固定 256 项的 CPU/进程页错误窗口 map、固定 256 项的 cpufreq policy episode map、主线程退出过滤、OOM victim PID 归因、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。CI 负责 CO-RE 对象构建；目标 Linux 环境仍需完成真实权限、verifier、ringbuf、调度迁移、IRQ/softirq、丢包、页错误、OOM、进程退出与限频压力注入以及目标 hook 资格测试。
+当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、调度 TID/迁移计数窗口策略原子更新、硬 IRQ/softirq entry/exit attach、EtherCAT EtherType/可选 ifindex 丢包策略更新、页错误计数窗口策略更新、cpufreq policy 下限/CPU 策略原子更新、Zenoh gateway 与 Linux raw-port syscall 成对 uprobe attach 和 `RuntimeAgent` 桥接；`bpf/` 提供固定 1024 项的调度 TID 迁移窗口 map、固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、固定 256 项的 CPU/进程页错误窗口 map、固定 256 项的 cpufreq policy episode map、固定 1024 项 gateway request 与 raw-port per-thread 操作 map、主线程退出过滤、OOM victim PID 归因、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。CI 负责 CO-RE 对象构建；目标 Linux 环境仍需完成真实权限、verifier、ringbuf、调度迁移、IRQ/softirq、丢包、页错误、OOM、进程退出、限频与 raw-port 延迟压力注入以及目标 hook 资格测试。
 
 ## 4. 观测域与 attach 点
 
@@ -132,6 +132,8 @@ esop_zenoh_gateway_publish_begin_v1(request_id: u64, route_kind: u32)
 esop_zenoh_gateway_publish_end_v1(request_id: u64, route_kind: u32, outcome: u32)
 esop_zenoh_gateway_callback_begin_v1(request_id: u64, route_kind: u32)
 esop_zenoh_gateway_callback_end_v1(request_id: u64, route_kind: u32, outcome: u32)
+esop_linux_raw_port_operation_begin_v1(ifindex: u32, operation: u32)
+esop_linux_raw_port_operation_end_v1(ifindex: u32, operation: u32, outcome: u32)
 ```
 
 gateway 为 publish 与 callback 共用一套进程内非零原子 request ID。publish 在完成
@@ -141,11 +143,14 @@ key/payload 准入后、Session put 前调用 begin；成功、传输失败和 f
 `Drop` 收口为 abandoned；typed query 的 decode、provider、encode 和同步 reply wait
 都在同一观测窗口内。marker 不解析字符串、不分配、不等待内核响应；未附加探针时
 仅保留固定参数的空调用。进程 abort 不伪造 callback end，遗留状态由固定容量 LRU
-约束。其余计划观测点仍包括：
+约束。Linux raw port 在合法 TX 的 `send(2)` 前后及每次非阻塞 `recv(2)` 前后调用
+独立 marker；TX outcome 区分成功、系统调用错误和部分写，RX outcome 区分 frame、
+empty、link-down 和其他错误。marker 不读取时钟，错误路径先保存 `errno`，guard 保证
+每个 begin 最多一个 end。其余计划观测点仍包括：
 
 1. `esop_ros2_control` 的 `read()`、`write()` 和 controller update 边界。
 2. Zenoh gateway 的 IPC、序列化、permit 和 reconnect。
-3. Linux RT port 的 cycle begin/end、RX drain、commit、prepare、send 和 error return。
+3. Linux RT port 的 cycle begin/end、RX drain、commit、prepare，以及驱动/NIC 边界。
 4. recorder、配置工具和维护进程的启动、退出、阻塞和异常返回。
 
 BPF 侧用固定 1024 项 LRU map，以 `{TGID, request_id}` 保存 begin 时间、策略
@@ -164,6 +169,15 @@ Aya runtime 只在调用方给出目标 ELF 后显式附加 publish 或 callback
 用户 hook 都必须携带固定的 `boot_id`、`cycle_seq` 或 `request_id`，不得解析动态
 字符串；稳定符号保持 ABI 版本，缺失时等价于 `USER_PROBE_UNAVAILABLE`，不影响
 RT 核心。
+
+raw-port BPF 路径使用独立固定 1024 项 LRU map，以 `pid_tgid` 保存 begin 时间、
+策略 epoch、ifindex 和 TX/RX operation。重复 begin 会替换同线程旧状态并增加 mismatch；
+匹配 end 在校验 ifindex、operation、outcome 或 epoch 前先删除状态。只有
+`duration_ns > raw_port_stall_threshold_ns` 才输出固定 96 字节
+`UserEsop/RawPortStall` 证据，携带 TGID/TID、结束 CPU、ifindex、时长、阈值以及
+operation/outcome detail。相关器还要求同 cycle 存在 deadline/WKC/DC 风险，才生成
+`HOST_PORT_STALL`。这条证据只覆盖 raw socket 系统调用边界，不覆盖调用方调度、
+驱动队列、NAPI/IRQ、NIC DMA、线缆、从站响应、WKC 或完整 EtherCAT 周期。
 
 ## 5. 事件与关联模型
 
@@ -212,6 +226,7 @@ RuntimeIncident
 | `HOST_PAGE_FAULT` | 受跟踪进程的 `{CPU, 进程}` 页错误窗口达到计数阈值，且与 deadline/WKC/DC 风险周期同窗。 | 周期可能被内存管理事件打断；当前证据不区分 major/minor。 | 性能资格失败或按策略撤销 host permit。 |
 | `HOST_OOM` | `oom:mark_victim` 为受跟踪 PID 选择 OOM victim。 | 内核已把该任务标记为 OOM victim；证据不推断 TGID 或触发者。 | 作为 hard fact 锁存观测故障；仍不直接写 controlword。 |
 | `HOST_CPU_THROTTLE` | cpufreq policy `max_freq` 低于产品配置下限，且与 deadline/WKC/DC 风险周期同窗。 | 内核 policy 上限不足以满足已配置频率前提；原因和持续时间未知。 | supervisor lease 降级。 |
+| `HOST_PORT_STALL` | Linux raw port 的 `send(2)` 或非阻塞 `recv(2)` 调用严格超过独立阈值，字段自洽且与 deadline/WKC/DC 风险周期同窗。 | raw socket 系统调用边界与周期风险相关；不证明驱动、NIC、线缆、从站或整周期根因。 | 可请求普通 controlled stop；不直接写 controlword。 |
 | `USER_COMPONENT_EXIT` | 受跟踪 gateway、ROS 2 controller、recorder 或 agent 的主线程退出。 | 用户态组件主生命周期异常；工作线程退出不升级。 | MLG 只根据固定 supervisor lease/command age 判定。 |
 | `OBSERVABILITY_DEGRADED` | BTF/attach/permission/ringbuf/agent health 失败。 | 观测证据不完整。 | 不能自动声称健康；是否禁止运动由产品 policy 决定。 |
 
@@ -291,7 +306,7 @@ BPF 对象、用户态 loader、schema 和规则版本必须绑定：
 | EBPF-001 | 能力 | 在支持/不支持 BTF、ringbuf、attach 点和权限的内核上，agent 给出可解释的 capability manifest。 |
 | EBPF-002 | 加载 | BPF verifier 拒绝、CO-RE relocation 失败、attach 失败和 agent 卸载均不会破坏 ESOP/ROS/Zenoh 主流程。 |
 | EBPF-003 | 调度 | 人为注入线程延迟、CPU 迁移、IRQ/softirq 压力和 cpufreq policy 限制，能生成 `HOST_SCHEDULER_STALL`、`HOST_IRQ_STORM` 或 `HOST_CPU_THROTTLE` 证据。 |
-| EBPF-004 | 网络 | 注入网卡队列、协议栈丢包和 raw port 延迟，能关联 `HOST_NIC_DROP` 与 EtherCAT WKC/timeout 窗口。 |
+| EBPF-004 | 网络 | 注入网卡队列、协议栈丢包和 raw-port syscall 延迟，能分别关联 `HOST_NIC_DROP`、`HOST_PORT_STALL` 与 EtherCAT WKC/timeout 窗口。 |
 | EBPF-005 | 内存 | 注入页错误、内存压力和进程 OOM/退出，能生成 `HOST_PAGE_FAULT`/`HOST_OOM`/`USER_COMPONENT_EXIT`。 |
 | EBPF-006 | 用户态 | gateway、`ros2_control`、recorder 重启或函数超时能按 PID/TID、cycle_seq 和 request_id 归因。 |
 | EBPF-007 | 完整性 | agent 无法写 MLG、controlword、permit；伪造/过期 host observation 不可清除 fault latch。 |
@@ -303,7 +318,11 @@ BPF 对象、用户态 loader、schema 和规则版本必须绑定：
 
 EBPF-004 当前已具备有界 CPU/ifindex 窗口、EtherType/ifindex 过滤、drop
 reason 证据解码和 transport-risk 相关器单元测试。该实现与 CO-RE 编译结果
-不等于目标内核真实队列压力、丢包注入、verifier 和开销资格。
+不等于目标内核真实队列压力、丢包注入、verifier 和开销资格。raw-port 子路径
+当前已具备稳定 v1 begin/end marker、TX/RX outcome、独立阈值/epoch、固定 1024 项
+per-thread LRU、原子 uprobe pair、96 字节 `RawPortStall` 解码和风险周期相关器拒绝
+条件；它仍不等于目标内核真实 attach、延迟/错误注入、驱动/NIC/线缆/从站归因、
+完整周期测量或实时开销资格。
 
 EBPF-005 当前已具备有界 CPU/进程页错误窗口、阈值事件、架构错误码 detail
 解码和 cycle-risk 相关器单元测试，并已把进程退出限制为受跟踪 TGID 的主
@@ -334,8 +353,8 @@ policy 拓扑、瞬时频率/驻留时间/原因归因、verifier 和开销资�
 ```text
 cycle 184220: deadline_miss
   -> MLG transition_seq 882: HOST_OBSERVATION degraded
-  -> USER_ESOP: gateway write() delayed 1.8 ms
-  -> KERNEL_SCHED: gateway TID runqueue latency 1.2 ms on CPU 3
+  -> USER_ESOP: raw-port send() syscall delayed 1.8 ms on ifindex 7
+  -> KERNEL_SCHED: raw-port TID runqueue latency 1.2 ms on CPU 3
   -> KERNEL_IRQ: eth IRQ/softirq consumed 0.9 ms in same window
   -> KERNEL_NET: RX queue drop count +4 on eth0
   -> EtherCAT: Domain actual WKC < expected, input age +1
@@ -347,7 +366,7 @@ cycle 184220: deadline_miss
 ## 12. 当前未决项
 
 1. 量产 Linux 内核最低版本、是否强制 CONFIG_DEBUG_INFO_BTF、目标发行版及 libbpf 版本。
-2. Linux raw port、`esop_ros2_control`、recorder 及 Zenoh IPC/序列化/permit/reconnect 的稳定用户态 hook 名称与 ABI；Zenoh publish 和 command/query callback v1 marker 已固定。
+2. Linux raw port 的 cycle/RX-drain/prepare/commit 与驱动/NIC 边界、`esop_ros2_control`、recorder 及 Zenoh IPC/序列化/permit/reconnect 的稳定用户态 hook 名称与 ABI；raw-port send/recv、Zenoh publish 和 command/query callback v1 marker 已固定。
 3. 关键 host gate 是否作为 split-linux-rt 的运动前提，以及其宽限期和停止策略。
 4. 目标网卡的可观测 tracepoint、驱动特定 attach 点、RX/TX queue 映射与丢包口径。
 5. baseline/incident/forensics 的采样率、数据留存时长、隐私字段和远程上传策略。

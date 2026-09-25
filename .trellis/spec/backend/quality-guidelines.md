@@ -824,6 +824,91 @@ separate stable begin/end markers, attach each pair transactionally, validate
 operation class in bounded request state, and require internally consistent
 over-threshold duration plus transport-risk correlation.
 
+## Scenario: eBPF Linux Raw-Port Syscall Stall Evidence
+
+### 1. Scope / Trigger
+
+- Trigger: add or change Linux raw-port markers, raw-port uprobes, threshold
+  policy, fixed evidence decode, or raw-port-stall classification.
+- Scope: this contract covers only valid TX `send(2)` and every nonblocking
+  `recv(2)` syscall in `LinuxRawPort`. It does not qualify caller scheduling,
+  driver queues, NAPI/IRQ, NIC DMA, wire, slave response, WKC, or full cycles.
+
+### 2. Signatures
+
+- Stable marker ABI:
+  `esop_linux_raw_port_operation_begin_v1(ifindex, operation)` and
+  `esop_linux_raw_port_operation_end_v1(ifindex, operation, outcome)`.
+- Configuration: `RuntimeConfig::raw_port_stall_threshold_ns` and
+  `BpfRuntime::update_raw_port_tracking(threshold_ns)`.
+- Attachment: `BpfRuntime::attach_raw_port_probes(target, pid, required)`
+  attaches the exact marker-symbol pair transactionally.
+
+### 3. Contracts
+
+- TX validation completes before begin. The marker guard brackets the syscall,
+  captures `errno` before end on failure, emits one terminal outcome, and adds
+  no allocation, lock, sleep, log, clock read, or observer wait.
+- Operation and outcome are bounded integers: TX success/error/partial and RX
+  frame/empty/link-down/error. Simulator and no-std core behavior stay intact.
+- One 1024-entry LRU map tracks each `pid_tgid`. State contains monotonic start,
+  policy epoch, interface, and operation. A duplicate begin replaces stale
+  state with mismatch accounting. Every matched end deletes state before
+  validating interface, operation, outcome, epoch, or emission.
+- Context updates are staged and atomic. Zero threshold is rejected without
+  mutation; successful threshold or tracked-PID changes advance raw-port epoch.
+- The fixed event remains 96 bytes. It writes begin timestamp to evidence ID,
+  TGID/TID and end CPU, interface index, elapsed duration/threshold, count one,
+  and operation/outcome detail.
+- `RawPortStall` classification requires a nonzero threshold, strict
+  `duration_ns > threshold`, consistent observed duration, and a correlated
+  deadline/WKC/DC-risk cycle before assigning `HOST_PORT_STALL`.
+
+### 4. Validation & Error Matrix
+
+- Zero threshold or nonpositive explicit attach PID ->
+  `InvalidConfiguration`; do not mutate context or capability state.
+- Missing optional program/symbol/target -> `Ok(false)` with all prior
+  capability intact; required mode returns the typed failure.
+- Second-probe failure -> detach the first link and publish neither attach bit.
+- Missing end state, duplicate begin, invalid interface/operation/outcome,
+  backwards time, or stale epoch -> mismatch statistics and no incident.
+- Map/ring-buffer failure -> bounded loss accounting; never block the port.
+
+### 5. Good/Base/Bad Cases
+
+- Good: TX `send(2)` on ifindex 7 takes 1.5 ms against a 1 ms threshold during
+  a WKC-risk cycle; emit one attributed controlled-stop recommendation.
+- Base: an at-threshold RX Empty call deletes state and emits no evidence.
+- Bad: include frame validation/full cycle in the duration, infer a driver or
+  slave root cause, leave stale state after an invalid end, or add a userspace
+  clock read to the activated port.
+
+### 6. Tests Required
+
+- Exact-symbol integration links both markers; unit tests freeze operation and
+  outcome values and prove one terminal guard call plus unwind fallback.
+- Decode asserts evidence ID, PID/TID, CPU, ifindex, duration, threshold,
+  detail, append-only discriminant, and unchanged 96-byte event size.
+- Configuration tests reject zero without mutation and prove epoch advancement;
+  C/Rust context and statistics sizes must match and aggregation must saturate.
+- Correlator tests reject at-threshold, inconsistent, zero-threshold, and
+  healthy-cycle evidence. BPF syntax and real CO-RE compilation cover the map,
+  x86_64 marker argument ABI, outcome masks, and state deletion path.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+Time the complete EtherCAT cycle in userspace, reuse gateway threshold/state,
+and call an over-threshold syscall proof of NIC or slave failure.
+
+#### Correct
+
+Bracket only raw socket syscalls with stable no-op markers, track each thread
+in an independent bounded epoch-aware map, attach the pair transactionally,
+and require internally consistent duration plus transport-risk correlation.
+
 ## Code Review Checklist
 
 - Is the worst-case loop bounded by a static capacity or explicit budget?

@@ -9,10 +9,103 @@ use std::mem::MaybeUninit;
 use std::os::fd::RawFd;
 use std::time::Instant;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
+
 mod sim;
 
 pub use sim::Cia402DriveSimulator;
 pub use sim::SimulatedPort;
+
+/// Stable operation codes carried by the Linux raw-port uprobe ABI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum RawPortOperation {
+    Tx = 0,
+    Rx = 1,
+}
+
+/// Stable TX outcomes carried by the Linux raw-port uprobe ABI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum RawPortTxOutcome {
+    Success = 0,
+    SyscallError = 1,
+    PartialWrite = 2,
+}
+
+/// Stable RX outcomes carried by the Linux raw-port uprobe ABI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum RawPortRxOutcome {
+    Frame = 0,
+    Empty = 1,
+    LinkDown = 2,
+    SyscallError = 3,
+}
+
+#[cfg(test)]
+static TEST_RAW_PORT_MARKER_BEGINS: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static TEST_RAW_PORT_MARKER_ENDS: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static TEST_RAW_PORT_MARKER_LAST_OUTCOME: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Stable v1 uprobe target immediately before a Linux raw-port syscall.
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn esop_linux_raw_port_operation_begin_v1(ifindex: u32, operation: u32) {
+    let _ = core::hint::black_box((ifindex, operation));
+    #[cfg(test)]
+    TEST_RAW_PORT_MARKER_BEGINS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Stable v1 uprobe target immediately after a Linux raw-port syscall.
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn esop_linux_raw_port_operation_end_v1(ifindex: u32, operation: u32, outcome: u32) {
+    let _ = core::hint::black_box((ifindex, operation, outcome));
+    #[cfg(test)]
+    {
+        TEST_RAW_PORT_MARKER_ENDS.fetch_add(1, Ordering::Relaxed);
+        TEST_RAW_PORT_MARKER_LAST_OUTCOME.store(u64::from(outcome), Ordering::Relaxed);
+    }
+}
+
+struct RawPortObservation {
+    ifindex: u32,
+    operation: u32,
+    fallback_outcome: u32,
+    finished: bool,
+}
+
+impl RawPortObservation {
+    fn begin(ifindex: u32, operation: RawPortOperation, fallback_outcome: u32) -> Self {
+        let observation = Self {
+            ifindex,
+            operation: operation as u32,
+            fallback_outcome,
+            finished: false,
+        };
+        esop_linux_raw_port_operation_begin_v1(observation.ifindex, observation.operation);
+        observation
+    }
+
+    fn finish(&mut self, outcome: u32) -> bool {
+        if self.finished {
+            return false;
+        }
+        self.finished = true;
+        esop_linux_raw_port_operation_end_v1(self.ifindex, self.operation, outcome);
+        true
+    }
+}
+
+impl Drop for RawPortObservation {
+    fn drop(&mut self) {
+        let _ = self.finish(self.fallback_outcome);
+    }
+}
 
 pub struct LinuxRawPort {
     fd: RawFd,
@@ -123,9 +216,15 @@ impl EthercatPort for LinuxRawPort {
                 "EtherCAT frame length is outside the port limit",
             ));
         }
+        let mut observation = RawPortObservation::begin(
+            self.interface_index as u32,
+            RawPortOperation::Tx,
+            RawPortTxOutcome::SyscallError as u32,
+        );
         let written = unsafe { libc::send(self.fd, frame.as_ptr().cast(), frame.len(), 0) };
         if written < 0 {
             let error = io::Error::last_os_error();
+            let _ = observation.finish(RawPortTxOutcome::SyscallError as u32);
             if matches!(
                 error.raw_os_error(),
                 Some(code) if code == libc::ENETDOWN || code == libc::ENETUNREACH
@@ -135,11 +234,13 @@ impl EthercatPort for LinuxRawPort {
             return Err(error);
         }
         if written as usize != frame.len() {
+            let _ = observation.finish(RawPortTxOutcome::PartialWrite as u32);
             return Err(io::Error::new(
                 io::ErrorKind::WriteZero,
                 "raw socket accepted only a partial frame",
             ));
         }
+        let _ = observation.finish(RawPortTxOutcome::Success as u32);
         Ok(())
     }
 
@@ -147,6 +248,11 @@ impl EthercatPort for LinuxRawPort {
         &mut self,
         destination: &mut [u8; MAX_ETHERNET_FRAME_LEN],
     ) -> Result<RxPoll, Self::Error> {
+        let mut observation = RawPortObservation::begin(
+            self.interface_index as u32,
+            RawPortOperation::Rx,
+            RawPortRxOutcome::SyscallError as u32,
+        );
         let length = unsafe {
             libc::recv(
                 self.fd,
@@ -156,17 +262,25 @@ impl EthercatPort for LinuxRawPort {
             )
         };
         if length >= 0 {
+            let _ = observation.finish(RawPortRxOutcome::Frame as u32);
             return Ok(RxPoll::Frame(length as usize));
         }
 
         let error = io::Error::last_os_error();
         match error.raw_os_error() {
-            Some(libc::EAGAIN) => Ok(RxPoll::Empty),
+            Some(libc::EAGAIN) => {
+                let _ = observation.finish(RawPortRxOutcome::Empty as u32);
+                Ok(RxPoll::Empty)
+            }
             Some(libc::ENETDOWN) | Some(libc::ENETUNREACH) => {
+                let _ = observation.finish(RawPortRxOutcome::LinkDown as u32);
                 self.link_state = LinkState::Down;
                 Ok(RxPoll::LinkDown)
             }
-            _ => Err(error),
+            _ => {
+                let _ = observation.finish(RawPortRxOutcome::SyscallError as u32);
+                Err(error)
+            }
         }
     }
 }
@@ -235,5 +349,54 @@ mod tests {
     fn port_uses_ethercat_protocol_and_fixed_mtu() {
         assert_eq!(ETHERCAT_ETHERTYPE, 0x88A4);
         assert_eq!(MAX_ETHERNET_FRAME_LEN, 1518);
+    }
+
+    #[test]
+    fn raw_port_marker_codes_are_append_only_and_bounded() {
+        assert_eq!(RawPortOperation::Tx as u32, 0);
+        assert_eq!(RawPortOperation::Rx as u32, 1);
+        assert_eq!(RawPortTxOutcome::Success as u32, 0);
+        assert_eq!(RawPortTxOutcome::SyscallError as u32, 1);
+        assert_eq!(RawPortTxOutcome::PartialWrite as u32, 2);
+        assert_eq!(RawPortRxOutcome::Frame as u32, 0);
+        assert_eq!(RawPortRxOutcome::Empty as u32, 1);
+        assert_eq!(RawPortRxOutcome::LinkDown as u32, 2);
+        assert_eq!(RawPortRxOutcome::SyscallError as u32, 3);
+    }
+
+    #[test]
+    fn raw_port_observation_finishes_once_and_drop_closes_errors() {
+        let begins = TEST_RAW_PORT_MARKER_BEGINS.load(Ordering::Relaxed);
+        let ends = TEST_RAW_PORT_MARKER_ENDS.load(Ordering::Relaxed);
+        {
+            let mut observation = RawPortObservation::begin(
+                7,
+                RawPortOperation::Tx,
+                RawPortTxOutcome::SyscallError as u32,
+            );
+            assert!(observation.finish(RawPortTxOutcome::Success as u32));
+            assert!(!observation.finish(RawPortTxOutcome::PartialWrite as u32));
+        }
+        assert_eq!(
+            TEST_RAW_PORT_MARKER_BEGINS.load(Ordering::Relaxed),
+            begins + 1
+        );
+        assert_eq!(TEST_RAW_PORT_MARKER_ENDS.load(Ordering::Relaxed), ends + 1);
+        assert_eq!(
+            TEST_RAW_PORT_MARKER_LAST_OUTCOME.load(Ordering::Relaxed),
+            u64::from(RawPortTxOutcome::Success as u32)
+        );
+
+        {
+            let _observation = RawPortObservation::begin(
+                7,
+                RawPortOperation::Rx,
+                RawPortRxOutcome::SyscallError as u32,
+            );
+        }
+        assert_eq!(
+            TEST_RAW_PORT_MARKER_LAST_OUTCOME.load(Ordering::Relaxed),
+            u64::from(RawPortRxOutcome::SyscallError as u32)
+        );
     }
 }

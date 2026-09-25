@@ -36,11 +36,14 @@ pub const ATTACH_GATEWAY_PUBLISH_BEGIN: u64 = 1 << 12;
 pub const ATTACH_GATEWAY_PUBLISH_END: u64 = 1 << 13;
 pub const ATTACH_GATEWAY_CALLBACK_BEGIN: u64 = 1 << 14;
 pub const ATTACH_GATEWAY_CALLBACK_END: u64 = 1 << 15;
+pub const ATTACH_RAW_PORT_BEGIN: u64 = 1 << 16;
+pub const ATTACH_RAW_PORT_END: u64 = 1 << 17;
 pub const ATTACH_IRQ_HANDLER: u64 = ATTACH_IRQ_HANDLER_ENTRY | ATTACH_IRQ_HANDLER_EXIT;
 pub const ATTACH_SOFTIRQ: u64 = ATTACH_SOFTIRQ_ENTRY | ATTACH_SOFTIRQ_EXIT;
 pub const ATTACH_GATEWAY_PUBLISH: u64 = ATTACH_GATEWAY_PUBLISH_BEGIN | ATTACH_GATEWAY_PUBLISH_END;
 pub const ATTACH_GATEWAY_CALLBACK: u64 =
     ATTACH_GATEWAY_CALLBACK_BEGIN | ATTACH_GATEWAY_CALLBACK_END;
+pub const ATTACH_RAW_PORT: u64 = ATTACH_RAW_PORT_BEGIN | ATTACH_RAW_PORT_END;
 pub const NETWORK_PROTOCOL_ETHERCAT: u16 = 0x88A4;
 pub const CPU_FREQUENCY_POLICY_ALL: u32 = u32::MAX;
 pub const ATTACH_ALL: u64 = ATTACH_SCHED_WAKEUP
@@ -57,6 +60,8 @@ pub const GATEWAY_PUBLISH_BEGIN_SYMBOL: &str = "esop_zenoh_gateway_publish_begin
 pub const GATEWAY_PUBLISH_END_SYMBOL: &str = "esop_zenoh_gateway_publish_end_v1";
 pub const GATEWAY_CALLBACK_BEGIN_SYMBOL: &str = "esop_zenoh_gateway_callback_begin_v1";
 pub const GATEWAY_CALLBACK_END_SYMBOL: &str = "esop_zenoh_gateway_callback_end_v1";
+pub const RAW_PORT_BEGIN_SYMBOL: &str = "esop_linux_raw_port_operation_begin_v1";
+pub const RAW_PORT_END_SYMBOL: &str = "esop_linux_raw_port_operation_end_v1";
 
 const TRACEFS_EVENT_ROOTS: [&str; 2] = [
     "/sys/kernel/tracing/events",
@@ -136,6 +141,7 @@ pub struct RuntimeConfig {
     /// [`CPU_FREQUENCY_POLICY_ALL`] to observe every policy.
     pub cpu_frequency_policy_cpu: u32,
     pub gateway_stall_threshold_ns: u64,
+    pub raw_port_stall_threshold_ns: u64,
     pub boot_id: u64,
     pub agent_epoch: u64,
 }
@@ -167,6 +173,7 @@ impl RuntimeConfig {
                 self.cpu_frequency_policy_cpu,
             )
             && self.gateway_stall_threshold_ns > 0
+            && self.raw_port_stall_threshold_ns > 0
     }
 }
 
@@ -228,6 +235,7 @@ impl Default for RuntimeConfig {
             cpu_frequency_floor_khz: 1,
             cpu_frequency_policy_cpu: CPU_FREQUENCY_POLICY_ALL,
             gateway_stall_threshold_ns: 1_000_000,
+            raw_port_stall_threshold_ns: 1_000_000,
             boot_id: 0,
             agent_epoch: 0,
         }
@@ -269,6 +277,9 @@ pub struct KernelContext {
     pub gateway_stall_threshold_ns: u64,
     pub gateway_probe_epoch: u32,
     pub reserved_gateway: u32,
+    pub raw_port_stall_threshold_ns: u64,
+    pub raw_port_probe_epoch: u32,
+    pub reserved_raw_port: u32,
 }
 
 // SAFETY: The BPF map value is an all-integer C-compatible record without
@@ -305,6 +316,9 @@ impl KernelContext {
             gateway_stall_threshold_ns: config.gateway_stall_threshold_ns,
             gateway_probe_epoch: 1,
             reserved_gateway: 0,
+            raw_port_stall_threshold_ns: config.raw_port_stall_threshold_ns,
+            raw_port_probe_epoch: 1,
+            reserved_raw_port: 0,
         }
     }
 
@@ -337,6 +351,9 @@ impl KernelContext {
             gateway_stall_threshold_ns: self.gateway_stall_threshold_ns,
             gateway_probe_epoch: self.gateway_probe_epoch,
             reserved_gateway: 0,
+            raw_port_stall_threshold_ns: self.raw_port_stall_threshold_ns,
+            raw_port_probe_epoch: self.raw_port_probe_epoch,
+            reserved_raw_port: 0,
         }
     }
 
@@ -348,6 +365,7 @@ impl KernelContext {
             self.scheduler_migration_epoch = self.scheduler_migration_epoch.wrapping_add(1).max(1);
         }
         self.gateway_probe_epoch = self.gateway_probe_epoch.wrapping_add(1).max(1);
+        self.raw_port_probe_epoch = self.raw_port_probe_epoch.wrapping_add(1).max(1);
         self.tracked_pid = tracked_pid;
     }
 
@@ -422,6 +440,15 @@ impl KernelContext {
         self.gateway_stall_threshold_ns = gateway_stall_threshold_ns;
         true
     }
+
+    fn set_raw_port_tracking(&mut self, raw_port_stall_threshold_ns: u64) -> bool {
+        if raw_port_stall_threshold_ns == 0 {
+            return false;
+        }
+        self.raw_port_probe_epoch = self.raw_port_probe_epoch.wrapping_add(1).max(1);
+        self.raw_port_stall_threshold_ns = raw_port_stall_threshold_ns;
+        true
+    }
 }
 
 /// Per-CPU counters maintained by the BPF bundle.
@@ -454,6 +481,10 @@ pub struct KernelStats {
     pub gateway_probe_completions: u64,
     pub gateway_stalls: u64,
     pub gateway_probe_mismatches: u64,
+    pub raw_port_probe_begins: u64,
+    pub raw_port_probe_completions: u64,
+    pub raw_port_stalls: u64,
+    pub raw_port_probe_mismatches: u64,
 }
 
 // SAFETY: The BPF map value is an all-u64 C-compatible record without padding
@@ -514,6 +545,16 @@ impl KernelStats {
         self.gateway_probe_mismatches = self
             .gateway_probe_mismatches
             .saturating_add(other.gateway_probe_mismatches);
+        self.raw_port_probe_begins = self
+            .raw_port_probe_begins
+            .saturating_add(other.raw_port_probe_begins);
+        self.raw_port_probe_completions = self
+            .raw_port_probe_completions
+            .saturating_add(other.raw_port_probe_completions);
+        self.raw_port_stalls = self.raw_port_stalls.saturating_add(other.raw_port_stalls);
+        self.raw_port_probe_mismatches = self
+            .raw_port_probe_mismatches
+            .saturating_add(other.raw_port_probe_mismatches);
     }
 }
 
@@ -642,6 +683,16 @@ const GATEWAY_CALLBACK_END_SPEC: UserProbeSpec = UserProbeSpec {
     mask: ATTACH_GATEWAY_CALLBACK_END,
     program: "esop_gateway_callback_end",
     symbol: GATEWAY_CALLBACK_END_SYMBOL,
+};
+const RAW_PORT_BEGIN_SPEC: UserProbeSpec = UserProbeSpec {
+    mask: ATTACH_RAW_PORT_BEGIN,
+    program: "esop_raw_port_begin",
+    symbol: RAW_PORT_BEGIN_SYMBOL,
+};
+const RAW_PORT_END_SPEC: UserProbeSpec = UserProbeSpec {
+    mask: ATTACH_RAW_PORT_END,
+    program: "esop_raw_port_end",
+    symbol: RAW_PORT_END_SYMBOL,
 };
 
 const IRQ_HANDLER_ENTRY_SPEC: AttachSpec = AttachSpec {
@@ -835,7 +886,7 @@ impl BpfRuntime {
         pid: Option<i32>,
         required: bool,
     ) -> Result<bool, RuntimeError> {
-        self.attach_gateway_probe_pair(
+        self.attach_user_probe_pair(
             target.as_ref(),
             pid,
             required,
@@ -854,7 +905,7 @@ impl BpfRuntime {
         pid: Option<i32>,
         required: bool,
     ) -> Result<bool, RuntimeError> {
-        self.attach_gateway_probe_pair(
+        self.attach_user_probe_pair(
             target.as_ref(),
             pid,
             required,
@@ -864,7 +915,26 @@ impl BpfRuntime {
         )
     }
 
-    fn attach_gateway_probe_pair(
+    /// Attach the Linux raw-port syscall begin/end markers as one logical
+    /// pair. The target must be the executable or shared object that contains
+    /// the exact versioned marker symbols.
+    pub fn attach_raw_port_probes(
+        &mut self,
+        target: impl AsRef<Path>,
+        pid: Option<i32>,
+        required: bool,
+    ) -> Result<bool, RuntimeError> {
+        self.attach_user_probe_pair(
+            target.as_ref(),
+            pid,
+            required,
+            ATTACH_RAW_PORT,
+            RAW_PORT_BEGIN_SPEC,
+            RAW_PORT_END_SPEC,
+        )
+    }
+
+    fn attach_user_probe_pair(
         &mut self,
         target: &Path,
         pid: Option<i32>,
@@ -996,6 +1066,21 @@ impl BpfRuntime {
     ) -> Result<(), RuntimeError> {
         let mut updated = self.kernel_context;
         if !updated.set_gateway_tracking(gateway_stall_threshold_ns) {
+            return Err(RuntimeError::InvalidConfiguration);
+        }
+        self.context.set(0, updated, 0)?;
+        self.kernel_context = updated;
+        Ok(())
+    }
+
+    /// Atomically replace the Linux raw-port syscall stall threshold and
+    /// invalidate operations that began under the previous policy epoch.
+    pub fn update_raw_port_tracking(
+        &mut self,
+        raw_port_stall_threshold_ns: u64,
+    ) -> Result<(), RuntimeError> {
+        let mut updated = self.kernel_context;
+        if !updated.set_raw_port_tracking(raw_port_stall_threshold_ns) {
             return Err(RuntimeError::InvalidConfiguration);
         }
         self.context.set(0, updated, 0)?;
@@ -1333,6 +1418,7 @@ fn decode_kind(value: u8) -> Result<EvidenceKind, EvidenceDecodeError> {
         8 => Ok(EvidenceKind::AgentCapabilityFailure),
         9 => Ok(EvidenceKind::SoftirqCpuTime),
         10 => Ok(EvidenceKind::CpuMigration),
+        11 => Ok(EvidenceKind::RawPortStall),
         _ => Err(EvidenceDecodeError::InvalidKind(value)),
     }
 }
@@ -1617,6 +1703,29 @@ mod tests {
         assert_eq!(evidence.domain, EvidenceDomain::UserZenoh);
         assert_eq!(evidence.kind, EvidenceKind::GatewayStall);
         assert_eq!(evidence.detail, 0x24);
+
+        put_u64(&mut bytes, 0, 123);
+        put_u32(&mut bytes, 48, 1_234);
+        put_u32(&mut bytes, 52, 1_235);
+        put_u16(&mut bytes, 56, 4);
+        put_u32(&mut bytes, 60, 7);
+        bytes[92] = EvidenceDomain::UserEsop as u8;
+        bytes[93] = EvidenceKind::RawPortStall as u8;
+        bytes[94] = IncidentSeverity::Error as u8;
+        bytes[95] = 0x21;
+        let evidence = decode_evidence(&bytes).unwrap();
+        assert_eq!(evidence.evidence_id, 123);
+        assert_eq!(evidence.pid, 1_234);
+        assert_eq!(evidence.tid, 1_235);
+        assert_eq!(evidence.cpu, 4);
+        assert_eq!(evidence.netdev_ifindex, 7);
+        assert_eq!(evidence.observed_value, 1_500_000);
+        assert_eq!(evidence.threshold, 1_000_000);
+        assert_eq!(evidence.duration_ns, 1_500_000);
+        assert_eq!(evidence.count, 1);
+        assert_eq!(evidence.domain, EvidenceDomain::UserEsop);
+        assert_eq!(evidence.kind, EvidenceKind::RawPortStall);
+        assert_eq!(evidence.detail, 0x21);
     }
 
     #[test]
@@ -1752,6 +1861,12 @@ mod tests {
         };
         assert!(!config.valid());
 
+        let config = RuntimeConfig {
+            raw_port_stall_threshold_ns: 0,
+            ..RuntimeConfig::default()
+        };
+        assert!(!config.valid());
+
         let mut config = RuntimeConfig::default();
         config.enabled_attach_mask |= 1 << 63;
         assert!(!config.valid());
@@ -1776,6 +1891,7 @@ mod tests {
             cpu_frequency_floor_khz: 2_000_000,
             cpu_frequency_policy_cpu: 7,
             gateway_stall_threshold_ns: 900_000,
+            raw_port_stall_threshold_ns: 800_000,
             boot_id: 5,
             agent_epoch: 7,
             ..RuntimeConfig::default()
@@ -1807,6 +1923,8 @@ mod tests {
         assert_eq!(context.scheduler_migration_epoch, 1);
         assert_eq!(context.gateway_stall_threshold_ns, 900_000);
         assert_eq!(context.gateway_probe_epoch, 1);
+        assert_eq!(context.raw_port_stall_threshold_ns, 800_000);
+        assert_eq!(context.raw_port_probe_epoch, 1);
     }
 
     #[test]
@@ -1899,10 +2017,12 @@ mod tests {
 
         let scheduler_epoch = context.scheduler_migration_epoch;
         let gateway_epoch = context.gateway_probe_epoch;
+        let raw_port_epoch = context.raw_port_probe_epoch;
         context.set_tracked_pid(42);
         assert_eq!(context.tracked_pid, 42);
         assert_eq!(context.scheduler_migration_epoch, scheduler_epoch + 1);
         assert_eq!(context.gateway_probe_epoch, gateway_epoch + 1);
+        assert_eq!(context.raw_port_probe_epoch, raw_port_epoch + 1);
 
         let unchanged = context;
         context.set_tracked_pid(42);
@@ -1910,9 +2030,22 @@ mod tests {
     }
 
     #[test]
+    fn raw_port_tracking_updates_are_validated_before_commit() {
+        let mut context = KernelContext::from_config(RuntimeConfig::default());
+        let original_epoch = context.raw_port_probe_epoch;
+        assert!(context.set_raw_port_tracking(2_000_000));
+        assert_eq!(context.raw_port_stall_threshold_ns, 2_000_000);
+        assert_eq!(context.raw_port_probe_epoch, original_epoch + 1);
+
+        let unchanged = context;
+        assert!(!context.set_raw_port_tracking(0));
+        assert_eq!(context, unchanged);
+    }
+
+    #[test]
     fn kernel_map_abis_and_attach_masks_remain_explicit() {
-        assert_eq!(std::mem::size_of::<KernelContext>(), 160);
-        assert_eq!(std::mem::size_of::<KernelStats>(), 208);
+        assert_eq!(std::mem::size_of::<KernelContext>(), 176);
+        assert_eq!(std::mem::size_of::<KernelStats>(), 240);
 
         let mut observed = 0;
         for spec in ATTACH_SPECS {
@@ -1922,7 +2055,10 @@ mod tests {
         assert_eq!(observed, ATTACH_ALL);
         assert_eq!(ATTACH_ALL & ATTACH_GATEWAY_PUBLISH, 0);
         assert_eq!(ATTACH_ALL & ATTACH_GATEWAY_CALLBACK, 0);
+        assert_eq!(ATTACH_ALL & ATTACH_RAW_PORT, 0);
         assert_eq!(ATTACH_GATEWAY_PUBLISH & ATTACH_GATEWAY_CALLBACK, 0);
+        assert_eq!(ATTACH_GATEWAY_PUBLISH & ATTACH_RAW_PORT, 0);
+        assert_eq!(ATTACH_GATEWAY_CALLBACK & ATTACH_RAW_PORT, 0);
         assert_eq!(
             GATEWAY_PUBLISH_BEGIN_SPEC.mask | GATEWAY_PUBLISH_END_SPEC.mask,
             ATTACH_GATEWAY_PUBLISH
@@ -1930,6 +2066,10 @@ mod tests {
         assert_eq!(
             GATEWAY_CALLBACK_BEGIN_SPEC.mask | GATEWAY_CALLBACK_END_SPEC.mask,
             ATTACH_GATEWAY_CALLBACK
+        );
+        assert_eq!(
+            RAW_PORT_BEGIN_SPEC.mask | RAW_PORT_END_SPEC.mask,
+            ATTACH_RAW_PORT
         );
         assert!(complete_pair(
             ATTACH_GATEWAY_PUBLISH,
@@ -1947,6 +2087,8 @@ mod tests {
             ATTACH_GATEWAY_CALLBACK_END,
             ATTACH_GATEWAY_CALLBACK
         ));
+        assert!(complete_pair(ATTACH_RAW_PORT, ATTACH_RAW_PORT));
+        assert!(!complete_pair(ATTACH_RAW_PORT_BEGIN, ATTACH_RAW_PORT));
         assert_eq!(
             normalize_attach_pairs(ATTACH_ALL & !ATTACH_IRQ_HANDLER_EXIT),
             ATTACH_ALL & !ATTACH_IRQ_HANDLER
@@ -1984,6 +2126,10 @@ mod tests {
             gateway_probe_completions: 11,
             gateway_stalls: 12,
             gateway_probe_mismatches: u64::MAX,
+            raw_port_probe_begins: u64::MAX,
+            raw_port_probe_completions: 13,
+            raw_port_stalls: 14,
+            raw_port_probe_mismatches: u64::MAX,
             ..KernelStats::default()
         });
         assert_eq!(aggregate.irq_samples, u64::MAX);
@@ -2005,5 +2151,9 @@ mod tests {
         assert_eq!(aggregate.gateway_probe_completions, 11);
         assert_eq!(aggregate.gateway_stalls, 12);
         assert_eq!(aggregate.gateway_probe_mismatches, u64::MAX);
+        assert_eq!(aggregate.raw_port_probe_begins, u64::MAX);
+        assert_eq!(aggregate.raw_port_probe_completions, 13);
+        assert_eq!(aggregate.raw_port_stalls, 14);
+        assert_eq!(aggregate.raw_port_probe_mismatches, u64::MAX);
     }
 }
