@@ -436,3 +436,36 @@ Implemented and documented the privileged Zenoh gateway eBPF marker-to-incident 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 14: eBPF process-exit runtime qualification
+
+**Date**: 2026-09-25
+**Task**: eBPF process-exit runtime qualification
+**Branch**: `main`
+
+### Summary
+
+Added and qualified the hosted Linux sched_process_exit path with synchronized worker suppression, leader hard-fact incident and failed observer checks, exact-schema validation, CI artifact evidence, and bounded documentation claims.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `309a835` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
