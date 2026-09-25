@@ -80,29 +80,29 @@ and object compilation cannot detect.
 
 ## Acceptance Criteria
 
-- [ ] A privileged hosted Linux run verifies production CO-RE load and required
+- [x] A privileged hosted Linux run verifies production CO-RE load and required
       `skb:kfree_skb` attachment with no unrelated hook.
-- [ ] A unique veth pair is configured with exact interface identities and a
+- [x] A unique veth pair is configured with exact interface identities and a
       process CPU affinity; protocol and direction negative controls remain
       silent before the formal run.
-- [ ] Exactly four forward EtherCAT frames produce an independent receive
+- [x] Exactly four forward EtherCAT frames produce an independent receive
       `rx_dropped` delta of at least four and exact BPF drop/threshold/emission
       statistics with zero unattributed or lost records.
-- [ ] Exactly one fixed network-drop record preserves the receive ifindex,
+- [x] Exactly one fixed network-drop record preserves the receive ifindex,
       threshold/count, kernel reason, aggregation duration, and transport-risk
       cycle identity.
-- [ ] Exactly one Error `HostNicDrop` incident has `ControlledStop`, confidence
+- [x] Exactly one Error `HostNicDrop` incident has `ControlledStop`, confidence
       75, matching evidence, and a Healthy-to-Degraded heartbeat transition
       with fault `0x45422001`.
-- [ ] The report is same-directory atomic and its validator fails closed for
+- [x] The report is same-directory atomic and its validator fails closed for
       schema, link identity/configuration, controls, attach masks, packet/drop
       counts, statistics, evidence, incident, loss, cleanup, and health
       mismatches.
-- [ ] Focused Rust/Python tests, formatting, Clippy, BPF syntax, capability
+- [x] Focused Rust/Python tests, formatting, Clippy, BPF syntax, capability
       validation, shell/Python syntax, `make ci`, and `git diff --check` pass.
-- [ ] The dedicated privileged GitHub Actions job passes and its downloaded
+- [x] The dedicated privileged GitHub Actions job passes and its downloaded
       artifact independently passes the repository validator.
-- [ ] Documentation removes hosted virtual-veth unhandled-EtherType injection
+- [x] Documentation removes hosted virtual-veth unhandled-EtherType injection
       from the open list while preserving physical NIC/driver/NAPI/qdisc,
       queue-pressure, production-kernel, overhead/WCET, and long-duration HIL
       limits.
