@@ -50,7 +50,7 @@ degraded EtherCAT cycle.
 - [x] Unit tests cover context preservation, statistics aggregation, attach
       mask completeness, and invalid configuration.
 - [x] `make ci` passes locally.
-- [ ] GitHub Actions builds the real CO-RE BPF object successfully.
+- [x] GitHub Actions builds the real CO-RE BPF object successfully.
 
 ## Non-Goals
 
