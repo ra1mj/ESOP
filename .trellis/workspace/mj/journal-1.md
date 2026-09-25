@@ -738,3 +738,36 @@ Bounded hosted softirq observation to the exact GSO injection interval, preserve
 ### Next Steps
 
 - None - task complete
+
+
+## Session 23: Runtime incident Protobuf and Zenoh projection
+
+**Date**: 2026-09-26
+**Task**: Runtime incident Protobuf and Zenoh projection
+**Branch**: `main`
+
+### Summary
+
+Added lossless eBPF agent incident projection into additive Protobuf v1 fields, strict query validation, production Zenoh publication, frozen-reader compatibility, and live router coverage.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `31dfb89` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
