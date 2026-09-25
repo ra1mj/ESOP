@@ -948,3 +948,36 @@ Published verified CiA 402 feedback and transport-accepted controlwords through 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 29: Generate deterministic product configuration artifacts
+
+**Date**: 2026-09-26
+**Task**: Generate deterministic product configuration artifacts
+**Branch**: `main`
+
+### Summary
+
+Added deterministic esop-cfggen product/ESI generation, runtime ProcBuf layout and CiA 402 policy validation, fail-closed build evidence integration, example artifacts, CI coverage, and product configuration contracts. Local make ci, BPF, and Zenoh checks passed; GitHub Actions quality run 36193856690 succeeded.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e822a8a4ad040c49f067039526e66b70ba4b8deb` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
