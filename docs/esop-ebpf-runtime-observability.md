@@ -2,7 +2,7 @@
 
 - 文档版本：1.0
 - 日期：2026-09-03
-- 状态：设计基线；HostObservation、固定证据 ABI、有界 RuntimeIncident 相关器、同类事件窗口聚合、RuntimeAgent 门面、能力预检结果模型、Rust/Aya CO-RE loader、tracepoint attach 和 ringbuf 解码桥已实现；目标 BPF ELF 构建与生产 hook 资格仍需在目标 Linux 环境完成
+- 状态：设计基线；HostObservation、固定证据 ABI、有界 RuntimeIncident 相关器、同类事件窗口聚合、RuntimeAgent 门面、能力预检结果模型、Rust/Aya CO-RE loader、tracepoint attach、ringbuf 解码桥以及有界硬 IRQ/softirq 时长证据已实现；目标 BPF ELF 构建、verifier/权限和生产 hook 资格仍需在目标 Linux 环境完成
 - 上游需求：[ESOP 软件产品需求文档](esop-software-prd.md) FR-047 至 FR-052、NFR-018
 
 ## 1. 设计结论
@@ -43,7 +43,7 @@ ESOP RT node
 
 两条证据链保持独立：RT 域是运动控制事实来源；eBPF 是 Linux 环境的解释与归因来源。相关器可以合并“同一个周期窗口内的事件”，但不能以缺少 eBPF 事件证明“系统没有问题”。
 
-当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 丢失计数读取和 `RuntimeAgent` 桥接；`bpf/` 提供首版内核程序源与构建入口。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。目标 Linux 环境仍需使用 clang 生成 BPF ELF，并完成真实权限、verifier、ringbuf 和目标 hook 资格测试。
+当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 丢失计数读取、硬 IRQ/softirq entry/exit attach 和 `RuntimeAgent` 桥接；`bpf/` 提供首版内核程序源、固定容量中断起始时间 map、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。目标 Linux 环境仍需使用 clang 生成 BPF ELF，并完成真实权限、verifier、ringbuf、IRQ/softirq 压力注入和目标 hook 资格测试。
 
 ## 4. 观测域与 attach 点
 
@@ -59,6 +59,15 @@ ESOP RT node
 | 性能计数 | kernel perf event 或平台可用 PMU | CPU cycles、instructions、cache miss 等是否突然恶化。 | 只做采样/窗口统计，不在每周期输出原始样本。 |
 
 实际 attach 点由内核版本、BTF、发行版和可用 tracepoint 决定。agent 启动时必须发布 attach 成功/失败清单，不允许假定所有 Linux 内核都有同一组内核函数或字段。
+
+当前首版以 `irq_handler_entry`/`irq_handler_exit` 和
+`softirq_entry`/`softirq_exit` 计算单次 handler 时长。硬 IRQ 与 softirq
+分别使用 `IrqCpuTime` 和 `SoftirqCpuTime` 证据 discriminant，保持既有
+96 字节事件布局；`irq` 的 `u16` 范围外编号饱和而不回绕。起始时间 map
+以 CPU/vector 为键并设置固定容量。entry/exit
+attach 必须成对启用，阈值事件仍需与 transport-risk cycle 同窗才升级为
+`HOST_IRQ_STORM`。loader 对每组 pair 执行成组挂载；第二个成员失败时回滚
+第一个 link，capability mask 也不会发布半组能力。
 
 ### 4.2 用户态观测点
 

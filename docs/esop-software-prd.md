@@ -4,7 +4,7 @@
 - 文档版本：1.1
 - 日期：2026-09-03
 - 状态：规划基线
-- 最近实现状态更新：2026-09-21
+- 最近实现状态更新：2026-09-25
 - 面向版本：首个机器人控制产品线（R0-R4）
 - 相关决策：[机器人软件规划](robotics-esop-software-plan.md)、[EtherCAT 主站需求](ethercat-master-requirements.md)、[实时与性能架构决策](esop-performance-architecture-decision.md)、[ETG/CiA 402 决策](esop-etg-cia402-master-requirements.md)、[运动生命周期守卫设计](esop-motion-lifecycle-guard.md)、[eBPF 运行时观测设计](esop-ebpf-runtime-observability.md)
 
@@ -208,7 +208,7 @@ eBPF 观测器只部署在 Linux 监督域或 Linux 实时端口；STM32/HPMicro
 | ID | 优先级 | 需求 | 验收标准 |
 | --- | --- | --- | --- |
 | FR-047 | P1 | 系统应提供 eBPF agent 生命周期：内核能力探测、程序加载/验证/挂载、map/ringbuf 初始化、版本报告、健康心跳和安全卸载。 | 在支持、缺少 BTF、权限不足、程序 verifier 拒绝、ringbuf 满和 agent 重启场景下均有明确状态与降级行为。 |
-| FR-048 | P1 | eBPF 应观测调度、IRQ/softirq、网络收发/丢弃、页错误、OOM/进程退出、CPU 迁移/限频和 ESOP/ROS/Zenoh 用户态关键函数。 | 至少能识别 scheduler stall、IRQ storm、NIC drop、page fault、CPU throttle、process crash 和 gateway stall。 |
+| FR-048 | P1 | eBPF 应观测调度、IRQ/softirq、网络收发/丢弃、页错误、OOM/进程退出、CPU 迁移/限频和 ESOP/ROS/Zenoh 用户态关键函数。 | 至少能识别 scheduler stall、IRQ storm、NIC drop、page fault、CPU throttle、process crash 和 gateway stall；当前代码已具备有界硬 IRQ/softirq entry/exit 时长证据与 `HOST_IRQ_STORM` 相关器，目标内核压力资格仍需单独完成。 |
 | FR-049 | P1 | 观测事件应与 ESOP `boot_id`、cycle sequence、组件 PID/TID、CPU、网卡、ProcBuf transition sequence 和 monotonic time 关联。 | 一次周期异常可以从 `performance_report` 追溯到对应的 eBPF 事件窗口和组件。 |
 | FR-050 | P1 | agent 应在内核侧优先聚合计数/直方图，仅在触发阈值或诊断窗口内发送固定大小事件；事件传输不得阻塞被观测进程。 | 高频调度/网络压力下 ringbuf 丢失计数可见，agent 不等待、不向 RT 线程注入锁或同步调用。 |
 | FR-051 | P1 | 系统应生成结构化 `RuntimeIncident`，包含 incident ID、级别、原因码、时间窗口、证据、关联周期、影响组件、丢失计数和建议动作。 | 运维界面/Zenoh/Protobuf 能按 incident ID 聚合同一问题的多条证据，而不是只显示孤立日志。 |

@@ -511,6 +511,13 @@ invalid-discriminant tests. New CiA 402 PDO fields must have public API tests
 for all supported modes and a failure-path test proving the output image is
 unchanged.
 
+For eBPF duration evidence, entry/exit observations must use bounded kernel
+maps, keep the fixed event size stable, validate complete attach pairs, and
+cover both the duration discriminant and its cycle-risk correlation. A local
+syntax or unit test does not qualify target-kernel verifier, permission,
+pressure-injection, or production hook behavior; those remain explicit
+environment-level evidence.
+
 ## Code Review Checklist
 
 - Is the worst-case loop bounded by a static capacity or explicit budget?

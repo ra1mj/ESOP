@@ -6,6 +6,7 @@ use std::fs;
 use std::path::Path;
 
 use aya::maps::{Array, MapData, MapError, PerCpuArray, RingBuf};
+use aya::programs::trace_point::TracePointLinkId;
 use aya::programs::{ProgramError, TracePoint};
 use aya::{Ebpf, EbpfError, Pod};
 use esop_ebpf_agent::{
@@ -24,12 +25,20 @@ pub const ATTACH_PROCESS_EXIT: u64 = 1 << 2;
 pub const ATTACH_PAGE_FAULT: u64 = 1 << 3;
 pub const ATTACH_OOM_KILL: u64 = 1 << 4;
 pub const ATTACH_NETWORK_DROP: u64 = 1 << 5;
+pub const ATTACH_IRQ_HANDLER_ENTRY: u64 = 1 << 6;
+pub const ATTACH_IRQ_HANDLER_EXIT: u64 = 1 << 7;
+pub const ATTACH_SOFTIRQ_ENTRY: u64 = 1 << 8;
+pub const ATTACH_SOFTIRQ_EXIT: u64 = 1 << 9;
+pub const ATTACH_IRQ_HANDLER: u64 = ATTACH_IRQ_HANDLER_ENTRY | ATTACH_IRQ_HANDLER_EXIT;
+pub const ATTACH_SOFTIRQ: u64 = ATTACH_SOFTIRQ_ENTRY | ATTACH_SOFTIRQ_EXIT;
 pub const ATTACH_ALL: u64 = ATTACH_SCHED_WAKEUP
     | ATTACH_SCHED_SWITCH
     | ATTACH_PROCESS_EXIT
     | ATTACH_PAGE_FAULT
     | ATTACH_OOM_KILL
-    | ATTACH_NETWORK_DROP;
+    | ATTACH_NETWORK_DROP
+    | ATTACH_IRQ_HANDLER
+    | ATTACH_SOFTIRQ;
 
 const TRACEFS_EVENT_ROOTS: [&str; 2] = [
     "/sys/kernel/tracing/events",
@@ -49,6 +58,10 @@ pub enum AttachPoint {
     PageFault = 3,
     OomKill = 4,
     NetworkDrop = 5,
+    IrqHandlerEntry = 6,
+    IrqHandlerExit = 7,
+    SoftirqEntry = 8,
+    SoftirqExit = 9,
 }
 
 impl AttachPoint {
@@ -60,6 +73,10 @@ impl AttachPoint {
             Self::PageFault => ATTACH_PAGE_FAULT,
             Self::OomKill => ATTACH_OOM_KILL,
             Self::NetworkDrop => ATTACH_NETWORK_DROP,
+            Self::IrqHandlerEntry => ATTACH_IRQ_HANDLER_ENTRY,
+            Self::IrqHandlerExit => ATTACH_IRQ_HANDLER_EXIT,
+            Self::SoftirqEntry => ATTACH_SOFTIRQ_ENTRY,
+            Self::SoftirqExit => ATTACH_SOFTIRQ_EXIT,
         }
     }
 }
@@ -76,6 +93,8 @@ pub struct RuntimeConfig {
     pub tracked_pid: u32,
     pub scheduler_latency_threshold_ns: u64,
     pub network_drop_threshold: u64,
+    pub irq_duration_threshold_ns: u64,
+    pub softirq_duration_threshold_ns: u64,
     pub boot_id: u64,
     pub agent_epoch: u64,
 }
@@ -84,9 +103,29 @@ impl RuntimeConfig {
     pub const fn valid(self) -> bool {
         self.enabled_attach_mask & !ATTACH_ALL == 0
             && self.required_attach_mask & !self.enabled_attach_mask == 0
+            && complete_pair(self.enabled_attach_mask, ATTACH_IRQ_HANDLER)
+            && complete_pair(self.enabled_attach_mask, ATTACH_SOFTIRQ)
+            && complete_pair(self.required_attach_mask, ATTACH_IRQ_HANDLER)
+            && complete_pair(self.required_attach_mask, ATTACH_SOFTIRQ)
             && self.scheduler_latency_threshold_ns > 0
             && self.network_drop_threshold > 0
+            && self.irq_duration_threshold_ns > 0
+            && self.softirq_duration_threshold_ns > 0
     }
+}
+
+const fn complete_pair(mask: u64, pair: u64) -> bool {
+    mask & pair == 0 || mask & pair == pair
+}
+
+const fn normalize_attach_pairs(mut mask: u64) -> u64 {
+    if !complete_pair(mask, ATTACH_IRQ_HANDLER) {
+        mask &= !ATTACH_IRQ_HANDLER;
+    }
+    if !complete_pair(mask, ATTACH_SOFTIRQ) {
+        mask &= !ATTACH_SOFTIRQ;
+    }
+    mask
 }
 
 impl Default for RuntimeConfig {
@@ -97,6 +136,8 @@ impl Default for RuntimeConfig {
             tracked_pid: 0,
             scheduler_latency_threshold_ns: 1_000_000,
             network_drop_threshold: 1,
+            irq_duration_threshold_ns: 250_000,
+            softirq_duration_threshold_ns: 500_000,
             boot_id: 0,
             agent_epoch: 0,
         }
@@ -119,6 +160,8 @@ pub struct KernelContext {
     pub reserved: u32,
     pub scheduler_latency_threshold_ns: u64,
     pub network_drop_threshold: u64,
+    pub irq_duration_threshold_ns: u64,
+    pub softirq_duration_threshold_ns: u64,
 }
 
 // SAFETY: The BPF map value is an all-integer C-compatible record without
@@ -136,6 +179,8 @@ impl KernelContext {
             reserved: 0,
             scheduler_latency_threshold_ns: config.scheduler_latency_threshold_ns,
             network_drop_threshold: config.network_drop_threshold,
+            irq_duration_threshold_ns: config.irq_duration_threshold_ns,
+            softirq_duration_threshold_ns: config.softirq_duration_threshold_ns,
         }
     }
 
@@ -149,6 +194,8 @@ impl KernelContext {
             reserved: 0,
             scheduler_latency_threshold_ns: self.scheduler_latency_threshold_ns,
             network_drop_threshold: self.network_drop_threshold,
+            irq_duration_threshold_ns: self.irq_duration_threshold_ns,
+            softirq_duration_threshold_ns: self.softirq_duration_threshold_ns,
         }
     }
 }
@@ -164,6 +211,10 @@ pub struct KernelStats {
     pub page_faults: u64,
     pub process_exits: u64,
     pub oom_events: u64,
+    pub irq_samples: u64,
+    pub irq_overruns: u64,
+    pub softirq_samples: u64,
+    pub softirq_overruns: u64,
 }
 
 // SAFETY: The BPF map value is an all-u64 C-compatible record without padding
@@ -179,6 +230,10 @@ impl KernelStats {
         self.page_faults = self.page_faults.saturating_add(other.page_faults);
         self.process_exits = self.process_exits.saturating_add(other.process_exits);
         self.oom_events = self.oom_events.saturating_add(other.oom_events);
+        self.irq_samples = self.irq_samples.saturating_add(other.irq_samples);
+        self.irq_overruns = self.irq_overruns.saturating_add(other.irq_overruns);
+        self.softirq_samples = self.softirq_samples.saturating_add(other.softirq_samples);
+        self.softirq_overruns = self.softirq_overruns.saturating_add(other.softirq_overruns);
     }
 }
 
@@ -284,7 +339,32 @@ struct AttachSpec {
     event: &'static str,
 }
 
-const ATTACH_SPECS: [AttachSpec; 6] = [
+const IRQ_HANDLER_ENTRY_SPEC: AttachSpec = AttachSpec {
+    point: AttachPoint::IrqHandlerEntry,
+    program: "esop_irq_handler_entry",
+    category: "irq",
+    event: "irq_handler_entry",
+};
+const IRQ_HANDLER_EXIT_SPEC: AttachSpec = AttachSpec {
+    point: AttachPoint::IrqHandlerExit,
+    program: "esop_irq_handler_exit",
+    category: "irq",
+    event: "irq_handler_exit",
+};
+const SOFTIRQ_ENTRY_SPEC: AttachSpec = AttachSpec {
+    point: AttachPoint::SoftirqEntry,
+    program: "esop_softirq_entry",
+    category: "irq",
+    event: "softirq_entry",
+};
+const SOFTIRQ_EXIT_SPEC: AttachSpec = AttachSpec {
+    point: AttachPoint::SoftirqExit,
+    program: "esop_softirq_exit",
+    category: "irq",
+    event: "softirq_exit",
+};
+
+const ATTACH_SPECS: [AttachSpec; 10] = [
     AttachSpec {
         point: AttachPoint::SchedulerWakeup,
         program: "esop_sched_wakeup",
@@ -321,6 +401,10 @@ const ATTACH_SPECS: [AttachSpec; 6] = [
         category: "skb",
         event: "kfree_skb",
     },
+    IRQ_HANDLER_ENTRY_SPEC,
+    IRQ_HANDLER_EXIT_SPEC,
+    SOFTIRQ_ENTRY_SPEC,
+    SOFTIRQ_EXIT_SPEC,
 ];
 
 /// A loaded eBPF bundle. Dropping this value drops BPF maps and tracepoint
@@ -458,6 +542,20 @@ impl BpfRuntime {
         Ok(())
     }
 
+    pub fn update_irq_thresholds(
+        &mut self,
+        irq_duration_threshold_ns: u64,
+        softirq_duration_threshold_ns: u64,
+    ) -> Result<(), RuntimeError> {
+        if irq_duration_threshold_ns == 0 || softirq_duration_threshold_ns == 0 {
+            return Err(RuntimeError::InvalidConfiguration);
+        }
+        self.kernel_context.irq_duration_threshold_ns = irq_duration_threshold_ns;
+        self.kernel_context.softirq_duration_threshold_ns = softirq_duration_threshold_ns;
+        self.context.set(0, self.kernel_context, 0)?;
+        Ok(())
+    }
+
     /// Consume at most `max_records` fixed-size ring-buffer records. Invalid
     /// records are counted and discarded; they never enter the correlator.
     pub fn poll<const INCIDENTS: usize>(
@@ -507,35 +605,106 @@ impl BpfRuntime {
         required_attach_mask: u64,
     ) -> Result<(), RuntimeError> {
         for spec in ATTACH_SPECS {
-            if enabled_attach_mask & spec.point.mask() == 0 {
+            if enabled_attach_mask & spec.point.mask() == 0
+                || spec.point.mask() & (ATTACH_IRQ_HANDLER | ATTACH_SOFTIRQ) != 0
+            {
                 continue;
             }
             let required = required_attach_mask & spec.point.mask() != 0;
-            let Some(program) = self.bpf.program_mut(spec.program) else {
-                if required {
-                    return Err(RuntimeError::MissingProgram(spec.program));
-                }
-                continue;
-            };
-            let tracepoint: &mut TracePoint = match program.try_into() {
-                Ok(tracepoint) => tracepoint,
-                Err(error) if required => return Err(RuntimeError::Program(error)),
-                Err(_) => continue,
-            };
-            if let Err(error) = tracepoint.load() {
-                if required {
-                    return Err(RuntimeError::Program(error));
-                }
-                continue;
+            if self.attach_tracepoint(spec, required)?.is_some() {
+                self.attach_mask |= spec.point.mask();
             }
-            if let Err(error) = tracepoint.attach(spec.category, spec.event) {
-                if required {
-                    return Err(RuntimeError::Program(error));
-                }
-                continue;
-            }
-            self.attach_mask |= spec.point.mask();
         }
+        self.attach_tracepoint_pair(
+            enabled_attach_mask,
+            required_attach_mask,
+            ATTACH_IRQ_HANDLER,
+            IRQ_HANDLER_EXIT_SPEC,
+            IRQ_HANDLER_ENTRY_SPEC,
+        )?;
+        self.attach_tracepoint_pair(
+            enabled_attach_mask,
+            required_attach_mask,
+            ATTACH_SOFTIRQ,
+            SOFTIRQ_EXIT_SPEC,
+            SOFTIRQ_ENTRY_SPEC,
+        )?;
+        Ok(())
+    }
+
+    fn attach_tracepoint(
+        &mut self,
+        spec: AttachSpec,
+        required: bool,
+    ) -> Result<Option<TracePointLinkId>, RuntimeError> {
+        let Some(program) = self.bpf.program_mut(spec.program) else {
+            return if required {
+                Err(RuntimeError::MissingProgram(spec.program))
+            } else {
+                Ok(None)
+            };
+        };
+        let tracepoint: &mut TracePoint = match program.try_into() {
+            Ok(tracepoint) => tracepoint,
+            Err(error) if required => return Err(RuntimeError::Program(error)),
+            Err(_) => return Ok(None),
+        };
+        if let Err(error) = tracepoint.load() {
+            return if required {
+                Err(RuntimeError::Program(error))
+            } else {
+                Ok(None)
+            };
+        }
+        match tracepoint.attach(spec.category, spec.event) {
+            Ok(link) => Ok(Some(link)),
+            Err(error) if required => Err(RuntimeError::Program(error)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn attach_tracepoint_pair(
+        &mut self,
+        enabled_attach_mask: u64,
+        required_attach_mask: u64,
+        pair_mask: u64,
+        first: AttachSpec,
+        second: AttachSpec,
+    ) -> Result<(), RuntimeError> {
+        if enabled_attach_mask & pair_mask == 0 {
+            return Ok(());
+        }
+        let required = required_attach_mask & pair_mask != 0;
+        let Some(first_link) = self.attach_tracepoint(first, required)? else {
+            return Ok(());
+        };
+        match self.attach_tracepoint(second, required) {
+            Ok(Some(_)) => {
+                self.attach_mask |= pair_mask;
+                Ok(())
+            }
+            Ok(None) => {
+                self.detach_tracepoint(first, first_link)?;
+                Ok(())
+            }
+            Err(error) => {
+                self.detach_tracepoint(first, first_link)?;
+                Err(error)
+            }
+        }
+    }
+
+    fn detach_tracepoint(
+        &mut self,
+        spec: AttachSpec,
+        link: TracePointLinkId,
+    ) -> Result<(), RuntimeError> {
+        let program = self
+            .bpf
+            .program_mut(spec.program)
+            .ok_or(RuntimeError::MissingProgram(spec.program))?;
+        let tracepoint: &mut TracePoint = program.try_into()?;
+        tracepoint.detach(link)?;
         Ok(())
     }
 }
@@ -598,6 +767,7 @@ fn decode_kind(value: u8) -> Result<EvidenceKind, EvidenceDecodeError> {
         6 => Ok(EvidenceKind::CpuThrottle),
         7 => Ok(EvidenceKind::GatewayStall),
         8 => Ok(EvidenceKind::AgentCapabilityFailure),
+        9 => Ok(EvidenceKind::SoftirqCpuTime),
         _ => Err(EvidenceDecodeError::InvalidKind(value)),
     }
 }
@@ -639,13 +809,14 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
 }
 
 fn available_attach_mask() -> u64 {
-    ATTACH_SPECS.iter().fold(0, |mask, spec| {
+    let mask = ATTACH_SPECS.iter().fold(0, |mask, spec| {
         if tracepoint_available(spec.category, spec.event) {
             mask | spec.point.mask()
         } else {
             mask
         }
-    })
+    });
+    normalize_attach_pairs(mask)
 }
 
 fn tracepoint_available(category: &str, event: &str) -> bool {
@@ -761,6 +932,12 @@ mod tests {
         assert_eq!(evidence.duration_ns, 14);
         assert_eq!(evidence.domain, EvidenceDomain::KernelScheduler);
         assert_eq!(evidence.kind, EvidenceKind::SchedulerRunqueueLatency);
+
+        bytes[92] = EvidenceDomain::KernelIrq as u8;
+        bytes[93] = EvidenceKind::SoftirqCpuTime as u8;
+        let evidence = decode_evidence(&bytes).unwrap();
+        assert_eq!(evidence.domain, EvidenceDomain::KernelIrq);
+        assert_eq!(evidence.kind, EvidenceKind::SoftirqCpuTime);
     }
 
     #[test]
@@ -797,6 +974,24 @@ mod tests {
         config.required_attach_mask = ATTACH_SCHED_WAKEUP;
         config.network_drop_threshold = 0;
         assert!(!config.valid());
+
+        let mut config = RuntimeConfig::default();
+        config.enabled_attach_mask &= !ATTACH_IRQ_HANDLER_EXIT;
+        assert!(!config.valid());
+
+        let mut config = RuntimeConfig::default();
+        config.required_attach_mask |= ATTACH_SOFTIRQ_ENTRY;
+        assert!(!config.valid());
+
+        let config = RuntimeConfig {
+            irq_duration_threshold_ns: 0,
+            ..RuntimeConfig::default()
+        };
+        assert!(!config.valid());
+
+        let mut config = RuntimeConfig::default();
+        config.enabled_attach_mask |= 1 << 63;
+        assert!(!config.valid());
     }
 
     #[test]
@@ -805,6 +1000,8 @@ mod tests {
             tracked_pid: 42,
             scheduler_latency_threshold_ns: 100,
             network_drop_threshold: 3,
+            irq_duration_threshold_ns: 250,
+            softirq_duration_threshold_ns: 500,
             boot_id: 5,
             agent_epoch: 7,
             ..RuntimeConfig::default()
@@ -819,5 +1016,48 @@ mod tests {
         assert_eq!(context.tracked_pid, 42);
         assert_eq!(context.cycle_seq, 11);
         assert_eq!(context.transition_seq, 13);
+        assert_eq!(context.irq_duration_threshold_ns, 250);
+        assert_eq!(context.softirq_duration_threshold_ns, 500);
+    }
+
+    #[test]
+    fn kernel_map_abis_and_attach_masks_remain_explicit() {
+        assert_eq!(std::mem::size_of::<KernelContext>(), 72);
+        assert_eq!(std::mem::size_of::<KernelStats>(), 88);
+
+        let mut observed = 0;
+        for spec in ATTACH_SPECS {
+            assert_eq!(observed & spec.point.mask(), 0);
+            observed |= spec.point.mask();
+        }
+        assert_eq!(observed, ATTACH_ALL);
+        assert_eq!(
+            normalize_attach_pairs(ATTACH_ALL & !ATTACH_IRQ_HANDLER_EXIT),
+            ATTACH_ALL & !ATTACH_IRQ_HANDLER
+        );
+        assert_eq!(
+            normalize_attach_pairs(ATTACH_ALL & !ATTACH_SOFTIRQ_ENTRY),
+            ATTACH_ALL & !ATTACH_SOFTIRQ
+        );
+    }
+
+    #[test]
+    fn kernel_statistics_aggregate_with_saturation() {
+        let mut aggregate = KernelStats {
+            irq_samples: u64::MAX - 1,
+            softirq_overruns: 7,
+            ..KernelStats::default()
+        };
+        aggregate.saturating_add_assign(KernelStats {
+            irq_samples: 10,
+            irq_overruns: 2,
+            softirq_samples: 3,
+            softirq_overruns: 5,
+            ..KernelStats::default()
+        });
+        assert_eq!(aggregate.irq_samples, u64::MAX);
+        assert_eq!(aggregate.irq_overruns, 2);
+        assert_eq!(aggregate.softirq_samples, 3);
+        assert_eq!(aggregate.softirq_overruns, 12);
     }
 }

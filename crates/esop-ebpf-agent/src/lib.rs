@@ -109,6 +109,7 @@ pub enum EvidenceKind {
     CpuThrottle = 6,
     GatewayStall = 7,
     AgentCapabilityFailure = 8,
+    SoftirqCpuTime = 9,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -569,12 +570,14 @@ fn classify(
             RecommendedAction::ControlledStop,
             70,
         )),
-        EvidenceKind::IrqCpuTime if over_threshold && correlated => Some((
-            IncidentCode::HostIrqStorm,
-            IncidentSeverity::Error,
-            RecommendedAction::ControlledStop,
-            70,
-        )),
+        EvidenceKind::IrqCpuTime | EvidenceKind::SoftirqCpuTime if over_threshold && correlated => {
+            Some((
+                IncidentCode::HostIrqStorm,
+                IncidentSeverity::Error,
+                RecommendedAction::ControlledStop,
+                70,
+            ))
+        }
         EvidenceKind::NetworkDrop if enough_count && correlated => Some((
             IncidentCode::HostNicDrop,
             IncidentSeverity::Error,
@@ -869,6 +872,53 @@ mod tests {
             incident.recommended_action,
             RecommendedAction::ControlledStop
         );
+    }
+
+    #[test]
+    fn correlates_hard_irq_and_softirq_overruns_with_cycle_risk() {
+        for (kind, vector) in [
+            (EvidenceKind::IrqCpuTime, 32),
+            (EvidenceKind::SoftirqCpuTime, 3),
+        ] {
+            let mut correlator = IncidentCorrelator::<2>::new(11, 3, 1_000);
+            correlator
+                .observe_cycle(CycleContext {
+                    boot_id: 11,
+                    cycle_seq: 42,
+                    transition_seq: 9,
+                    timestamp_ns: 1_000,
+                    deadline_miss: 1,
+                    ..CycleContext::EMPTY
+                })
+                .unwrap();
+            let mut interrupt = evidence(kind, 1_100);
+            interrupt.domain = EvidenceDomain::KernelIrq;
+            interrupt.irq = vector;
+
+            let incident = correlator.ingest(interrupt).unwrap().unwrap();
+            assert_eq!(incident.code, IncidentCode::HostIrqStorm);
+            assert_eq!(incident.irq, vector);
+            assert_eq!(incident.evidence[0].kind, kind);
+            assert_eq!(incident.confidence_percent, 70);
+        }
+    }
+
+    #[test]
+    fn interrupt_overruns_without_cycle_risk_are_not_called_root_causes() {
+        for kind in [EvidenceKind::IrqCpuTime, EvidenceKind::SoftirqCpuTime] {
+            let mut correlator = IncidentCorrelator::<2>::new(11, 3, 1_000);
+            correlator
+                .observe_cycle(CycleContext {
+                    boot_id: 11,
+                    cycle_seq: 42,
+                    timestamp_ns: 1_000,
+                    ..CycleContext::EMPTY
+                })
+                .unwrap();
+            let mut interrupt = evidence(kind, 1_100);
+            interrupt.domain = EvidenceDomain::KernelIrq;
+            assert_eq!(correlator.ingest(interrupt).unwrap(), None);
+        }
     }
 
     #[test]

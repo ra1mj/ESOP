@@ -45,6 +45,26 @@ struct trace_event_raw_sched_switch {
     char __data[0];
 };
 
+struct trace_event_raw_irq_handler_entry {
+    struct trace_entry ent;
+    int irq;
+    __u32 __data_loc_name;
+    char __data[0];
+};
+
+struct trace_event_raw_irq_handler_exit {
+    struct trace_entry ent;
+    int irq;
+    int ret;
+    char __data[0];
+};
+
+struct trace_event_raw_softirq {
+    struct trace_entry ent;
+    unsigned int vec;
+    char __data[0];
+};
+
 #if defined(__clang__) && !defined(BPF_NO_PRESERVE_ACCESS_INDEX)
 #pragma clang attribute pop
 #endif
