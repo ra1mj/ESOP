@@ -771,3 +771,36 @@ Added lossless eBPF agent incident projection into additive Protobuf v1 fields, 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 24: Implement bounded Unix domain IPC transport
+
+**Date**: 2026-09-26
+**Task**: Implement bounded Unix domain IPC transport
+**Branch**: `main`
+
+### Summary
+
+Added the host-only esop-ipc crate with a fixed 80-byte little-endian frame, bounded payload CRC, nonblocking Unix datagram endpoint, peer identity/replay/time/restart/offline monitoring, kernel-backed integration tests, FR-029/R3 documentation, capability evidence, and cross-layer quality guidance. Local make ci and GitHub Actions quality run 36171647431 passed.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a8cd6f7` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

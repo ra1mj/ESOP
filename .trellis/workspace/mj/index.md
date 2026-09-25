@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 23
+- **Total Sessions**: 24
 - **Last Active**: 2026-09-26
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~773 | Active |
+| `journal-1.md` | ~806 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 24 | 2026-09-26 | Implement bounded Unix domain IPC transport | `a8cd6f7` | `main` |
 | 23 | 2026-09-26 | Runtime incident Protobuf and Zenoh projection | `31dfb89` | `main` |
 | 22 | 2026-09-26 | Stabilize eBPF softirq qualification gating | `d2b7eeb9641fec87444f2aabc2ae6ba7855ae414` | `main` |
 | 21 | 2026-09-26 | Qualify eBPF observability degradation recovery | `9db984178f79157d177d2688e665b902d434d204` | `main` |
