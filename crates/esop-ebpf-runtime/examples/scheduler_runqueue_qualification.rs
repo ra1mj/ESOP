@@ -628,7 +628,7 @@ fn run(object_path: PathBuf, output_path: PathBuf) -> Result<(), Box<dyn Error>>
         || evidence.boot_id != BOOT_ID
         || evidence.agent_epoch != AGENT_EPOCH
         || evidence.timestamp_ns == 0
-        || evidence.evidence_id >= evidence.timestamp_ns
+        || evidence.evidence_id != evidence.timestamp_ns
         || evidence.pid != 0
         || evidence.tid != target.tid()
         || evidence.cpu != cpu_a
@@ -646,7 +646,10 @@ fn run(object_path: PathBuf, output_path: PathBuf) -> Result<(), Box<dyn Error>>
         || evidence.severity != IncidentSeverity::Error
         || evidence.detail != 0
     {
-        return Err(invalid_data("scheduler evidence fields were inconsistent").into());
+        return Err(invalid_data(format!(
+            "scheduler evidence fields were inconsistent: {evidence:?}"
+        ))
+        .into());
     }
     if incident.observed_value != evidence.observed_value
         || incident.first_seen_ns != evidence.timestamp_ns

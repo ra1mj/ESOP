@@ -58,7 +58,9 @@ host allowed CPU set
   threshold.
 - Evidence is Error `KernelScheduler/SchedulerRunqueueLatency`, with
   `pid=0`, `tid=target`, `cpu=CPU A`, zero IRQ/ifindex/detail, count one, and
-  identical positive `observed_value` and `duration_ns` above threshold.
+  identical positive `observed_value` and `duration_ns` above threshold. This
+  producer passes a zero explicit evidence ID, so the shared emitter writes the
+  same nonzero emit timestamp to `evidence_id` and `timestamp_ns`.
 - Correlation produces one Error `HostSchedulerStall`, action `ControlledStop`,
   confidence 70, and one retained evidence item. Capability projection first
   makes the agent Healthy; the incident changes it to Degraded with fault

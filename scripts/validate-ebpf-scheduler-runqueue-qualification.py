@@ -273,8 +273,8 @@ def validate_report(report: object) -> None:
         if report[key] == 0:
             fail(f"{key} must be nonzero")
     evidence_timestamp = report["evidence_timestamp_ns"]
-    if report["evidence_id"] >= evidence_timestamp:
-        fail("evidence_id must precede evidence_timestamp_ns")
+    if report["evidence_id"] != evidence_timestamp:
+        fail("evidence_id must equal evidence_timestamp_ns for a fallback producer ID")
     for key in ("incident_first_seen_ns", "incident_last_seen_ns"):
         if report[key] != evidence_timestamp:
             fail(f"{key} must equal evidence_timestamp_ns")

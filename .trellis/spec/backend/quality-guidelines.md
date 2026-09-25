@@ -741,7 +741,9 @@ before assigning the incident code.
 - The BPF wakeup hook stores the exact target TID timestamp. The switch hook
   matches `next_pid`, deletes state, and emits only for strict
   `duration_ns > threshold`. Fixed evidence remains 96 bytes with zero PID,
-  exact TID, destination CPU A, zero IRQ/ifindex/detail, and count one.
+  exact TID, destination CPU A, zero IRQ/ifindex/detail, and count one. Because
+  this producer supplies zero as its explicit ID, the shared emitter must set
+  `evidence_id == timestamp_ns` to the nonzero emit timestamp.
 - Successful qualification has exact statistics `wakeups=1`,
   `scheduler_stalls=1`, `emitted_events=1`, zero migrations/loss, one Error
   `HostSchedulerStall`, `ControlledStop`, confidence 70, and a Healthy-to-
@@ -765,7 +767,8 @@ before assigning the incident code.
 - Duration below the blocker hold, at/below threshold, at/above the one-second
   sanity maximum, or inconsistent incident/evidence timing -> report rejection.
 - Unknown/missing/bool-as-integer fields, wrong TID/CPU/cycle/classification,
-  or observer-health mismatch -> closed-schema validator failure.
+  a fallback evidence ID unequal to its emit timestamp, or observer-health
+  mismatch -> closed-schema validator failure.
 
 ### 5. Good/Base/Bad Cases
 

@@ -25,9 +25,9 @@ def qualified_report():
     target_tid = 4321
     cpu_a = 2
     cpu_b = 7
-    evidence_id = 100_000_000
     duration = 30_000_000
-    timestamp = evidence_id + duration
+    timestamp = 130_000_000
+    evidence_id = timestamp
     return {
         "schema_version": 1,
         "status": "qualified",
@@ -238,7 +238,7 @@ class SchedulerRunqueueQualificationTests(unittest.TestCase):
             ("evidence_duration_ns", 1_000_000_000, "cover the blocker hold"),
             ("evidence_observed_value", 30_000_001, "must equal evidence_duration_ns"),
             ("incident_first_seen_ns", 129_999_999, "must equal evidence_timestamp_ns"),
-            ("evidence_id", 130_000_000, "must precede evidence_timestamp_ns"),
+            ("evidence_id", 129_999_999, "must equal evidence_timestamp_ns"),
         ):
             with self.subTest(key=key, value=value):
                 report = qualified_report()
