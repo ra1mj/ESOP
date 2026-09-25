@@ -139,3 +139,36 @@ Added bounded per-CPU/per-interface EtherCAT skb drop windows, typed CO-RE ifind
 ### Next Steps
 
 - None - task complete
+
+
+## Session 5: eBPF page fault window attribution
+
+**Date**: 2026-09-25
+**Task**: eBPF page fault window attribution
+**Branch**: `main`
+
+### Summary
+
+Added a bounded 256-entry CPU/process page-fault window, threshold-only fixed evidence with error-code detail, atomic runtime policy updates and statistics, HOST_PAGE_FAULT cycle-risk correlation, tests, capability/PRD documentation, and successful local plus GitHub CO-RE/Rust/Zenoh validation (run 36092132507).
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `1394f6f` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
