@@ -571,3 +571,36 @@ Added CPU/vector-filtered IRQ and softirq tracking, a controlled loopback NET_RX
 ### Next Steps
 
 - None - task complete
+
+
+## Session 18: eBPF page-fault runtime qualification
+
+**Date**: 2026-09-25
+**Task**: eBPF page-fault runtime qualification
+**Branch**: `main`
+
+### Summary
+
+Added and qualified the controlled hosted x86_64 page-fault count-window chain, strict report validation, CI artifact verification, capability/docs updates, and preserved semantic and production limits.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ba26760e7750a4cd149b3e9021a0007d5eef470c` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

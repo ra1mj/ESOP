@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 17
+- **Total Sessions**: 18
 - **Last Active**: 2026-09-25
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~573 | Active |
+| `journal-1.md` | ~606 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 18 | 2026-09-25 | eBPF page-fault runtime qualification | `ba26760e7750a4cd149b3e9021a0007d5eef470c` | `main` |
 | 17 | 2026-09-25 | Qualify hosted eBPF softirq duration | `73d05e7`, `275a816` | `main` |
 | 16 | 2026-09-25 | Qualify eBPF scheduler runqueue latency | `7b89813`, `bc9891a`, `adc6131` | `main` |
 | 15 | 2026-09-25 | Qualify eBPF scheduler migration runtime | `f1aeddc` | `main` |
