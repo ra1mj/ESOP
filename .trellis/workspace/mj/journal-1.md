@@ -172,3 +172,36 @@ Added a bounded 256-entry CPU/process page-fault window, threshold-only fixed ev
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: eBPF process and OOM attribution
+
+**Date**: 2026-09-25
+**Task**: eBPF process and OOM attribution
+**Branch**: `main`
+
+### Summary
+
+Prevented tracked worker-thread exits from becoming critical component-exit incidents, attributed OOM hard facts to mark_victim PID, expanded saturating per-CPU statistics, updated lifecycle observability contracts, and verified local plus GitHub CO-RE/Rust/Zenoh quality gates.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `703be95` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
