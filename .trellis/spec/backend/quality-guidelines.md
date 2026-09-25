@@ -721,6 +721,9 @@ before assigning the incident code.
   complete `KernelContext` value.
 - Attach point: optional `sched:sched_migrate_task`; it remains outside the
   default required mask.
+- Qualification entry: `make test-ebpf-scheduler-migration-runtime` writes
+  `build/ebpf_scheduler_migration_qualification.json`; the validator is
+  `scripts/validate-ebpf-scheduler-migration-qualification.py <report>`.
 
 ### 3. Contracts
 
@@ -740,6 +743,14 @@ before assigning the incident code.
 - `HOST_SCHEDULER_STALL` from migration requires a consistent count at or above
   threshold plus a correlated deadline/WKC/DC-risk cycle. It remains lower
   confidence than measured runqueue latency.
+- The privileged fixture requires two CPUs from its real allowed affinity set,
+  pins one runnable worker to CPU A before tracking, then forces singleton-mask
+  A-to-B-to-A movement after an exact-TID policy update. The first move must
+  emit nothing; the second must produce the only evidence and incident.
+- A successful qualification has exact statistics `scheduler_migrations=2`,
+  `scheduler_migration_threshold_events=1`, `emitted_events=1`, zero loss, a
+  Warning/confidence-60 `HostSchedulerStall` with `DegradeHostObservation`, and
+  a Degraded heartbeat with fault `0x45422001`.
 
 ### 4. Validation & Error Matrix
 
@@ -753,12 +764,19 @@ before assigning the incident code.
   `lost_events`; never block or fabricate evidence.
 - Below-threshold migration, inconsistent count fields, or healthy cycle -> no
   incident.
+- Fewer than two allowed CPUs, a non-acknowledged destination, any setup/extra
+  migration, verifier/attach/poll failure, report mismatch, or unavailable
+  root/passwordless sudo -> nonzero qualification exit and no success report.
 
 ### 5. Good/Base/Bad Cases
 
 - Good: tracked TID 101 migrates four times within 1 ms, last moving CPU 2 -> 7,
   while cycle 42 has a deadline miss; emit one lower-confidence scheduler
   incident with the raw migration evidence.
+- Good qualification: a runnable worker starts on allowed CPU A, moves A -> B
+  once with no record, then B -> A to cross threshold two. The report preserves
+  worker TID, B as raw origin, A as destination, cycle 42/transition 9, and the
+  Healthy-to-Degraded observation transition.
 - Base: one ordinary migration records state and statistics only; later moves
   in the same window emit once at the threshold and not again.
 - Bad: attribute the tracepoint current task as the migrated entity, call every
@@ -777,6 +795,11 @@ before assigning the incident code.
   latency.
 - C/Rust ABI assertions cover context/stat sizes; statistics aggregation covers
   saturation; BPF syntax and real CO-RE compilation cover the typed record.
+- The closed-schema report tests reject missing/unknown/bool fields, partial
+  attachment, invalid/same CPUs, setup or first-move emissions, count/loss
+  drift, wrong TID or B-to-A endpoint, wrong cycle/classification, invalid
+  duration/priority width, and observer-health mismatches. Dedicated Actions
+  must run the privileged target and upload the validated JSON report.
 
 ### 7. Wrong vs Correct
 

@@ -2,7 +2,7 @@
 
 - 文档版本：1.2
 - 日期：2026-09-25
-- 状态：设计基线；HostObservation、固定证据 ABI、有界 RuntimeIncident 相关器、同类事件窗口聚合、RuntimeAgent 门面、能力预检结果模型、Rust/Aya CO-RE loader、tracepoint attach、ringbuf 解码桥、有界硬 IRQ/softirq 时长证据、按 EtherType/ifindex 聚合的 `kfree_skb` 丢包证据、有界 cpufreq policy 限频 episode、Zenoh gateway stall 和 Linux raw-port syscall stall 证据已实现；托管 Linux 已覆盖 gateway/raw-port 共享 marker 链的 verifier/load/真实 uprobe/ringbuf/相关器资格，生产目标内核、真实 transport/NIC/压力/限频注入、开销和其余 hook 资格仍需单独完成
+- 状态：设计基线；HostObservation、固定证据 ABI、有界 RuntimeIncident 相关器、同类事件窗口聚合、RuntimeAgent 门面、能力预检结果模型、Rust/Aya CO-RE loader、tracepoint attach、ringbuf 解码桥、有界硬 IRQ/softirq 时长证据、按 EtherType/ifindex 聚合的 `kfree_skb` 丢包证据、有界 cpufreq policy 限频 episode、Zenoh gateway stall 和 Linux raw-port syscall stall 证据已实现；托管 Linux 已覆盖 gateway/raw-port 共享 marker、进程 leader 退出和精确 TID 调度迁移链的 verifier/load/真实 attach/ringbuf/相关器资格，生产目标内核、真实 transport/NIC/其余压力/限频注入、开销和其余 hook 资格仍需单独完成
 - 上游需求：[ESOP 软件产品需求文档](esop-software-prd.md) FR-047 至 FR-052、NFR-018
 
 ## 1. 设计结论
@@ -43,7 +43,7 @@ ESOP RT node
 
 两条证据链保持独立：RT 域是运动控制事实来源；eBPF 是 Linux 环境的解释与归因来源。相关器可以合并“同一个周期窗口内的事件”，但不能以缺少 eBPF 事件证明“系统没有问题”。
 
-当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、调度 TID/迁移计数窗口策略原子更新、硬 IRQ/softirq entry/exit attach、EtherCAT EtherType/可选 ifindex 丢包策略更新、页错误计数窗口策略更新、cpufreq policy 下限/CPU 策略原子更新、Zenoh gateway 与 Linux raw-port syscall 成对 uprobe attach 和 `RuntimeAgent` 桥接；`bpf/` 提供固定 1024 项的调度 TID 迁移窗口 map、固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、固定 256 项的 CPU/进程页错误窗口 map、固定 256 项的 cpufreq policy episode map、固定 1024 项 gateway request 与 raw-port per-thread 操作 map、主线程退出过滤、OOM victim PID 归因、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。专用托管 Linux CI 已验证 gateway 与 raw-port 的 CO-RE verifier/load、真实 marker uprobe、ringbuf、统计和相关器共享链；生产目标内核与真实 Zenoh transport、AF_PACKET/NIC、调度迁移、IRQ/softirq、丢包、页错误、OOM、进程退出、限频压力及开销资格仍需单独完成。
+当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、调度 TID/迁移计数窗口策略原子更新、硬 IRQ/softirq entry/exit attach、EtherCAT EtherType/可选 ifindex 丢包策略更新、页错误计数窗口策略更新、cpufreq policy 下限/CPU 策略原子更新、Zenoh gateway 与 Linux raw-port syscall 成对 uprobe attach 和 `RuntimeAgent` 桥接；`bpf/` 提供固定 1024 项的调度 TID 迁移窗口 map、固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、固定 256 项的 CPU/进程页错误窗口 map、固定 256 项的 cpufreq policy episode map、固定 1024 项 gateway request 与 raw-port per-thread 操作 map、主线程退出过滤、OOM victim PID 归因、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。专用托管 Linux CI 已验证 gateway、raw-port、leader 退出和两 CPU 精确 TID 调度迁移的 CO-RE verifier/load、真实 tracepoint/uprobe attach、ringbuf、统计、相关器和 observer health 共享链；生产目标内核与真实 Zenoh transport、AF_PACKET/NIC、runqueue/IRQ/softirq/丢包/页错误/OOM/限频压力、迁移原因/亲和性/cache 影响及开销资格仍需单独完成。
 
 ## 4. 观测域与 attach 点
 
@@ -72,6 +72,15 @@ epoch，只在窗口第一次达到计数阈值时发送一条 96 字节 `CpuMig
 原因、亲和性错误、cache/NUMA 影响或实际停顿时长。`sched_switch` 的
 runqueue-latency 证据同样显式记录被调度的 `next_pid` 为 TID，不再使用 hook
 执行上下文的 current task 身份。
+
+专用 `make test-ebpf-scheduler-migration-runtime` 在至少允许两个 CPU 的特权
+托管 Linux 上只要求 `sched_migrate_task`，把持续可运行 worker 固定到 CPU A 后
+启用精确 TID 跟踪，再以 singleton affinity 强制 A→B→A。第一次迁移必须仅增加
+`scheduler_migrations`，第二次才允许唯一阈值事件、Warning/confidence-60
+`HostSchedulerStall`/`DegradeHostObservation` 和 Degraded heartbeat；完整字段原子
+写入 `build/ebpf_scheduler_migration_qualification.json` 并做封闭 schema 校验。
+该资格证明 hosted-kernel migration-to-incident 链，不把窗口跨度解释为停顿时长，
+也不证明迁移原因、亲和性策略错误、cache/NUMA 影响或生产实时性能。
 
 当前首版以 `irq_handler_entry`/`irq_handler_exit` 和
 `softirq_entry`/`softirq_exit` 计算单次 handler 时长。硬 IRQ 与 softirq
@@ -323,6 +332,17 @@ BPF 对象、用户态 loader、schema 和规则版本必须绑定：
 | EBPF-011 | 长测 | 至少 30 分钟 Q1/Q2 Linux 监督域压力测试，无 agent 内存增长、无无限 map 增长、无周期阻塞。 |
 | EBPF-012 | 安全边界 | 产品测试报告明确 eBPF 不是安全通道；STO/FSoE/安全 PLC 仍独立验证。 |
 
+EBPF-003 的调度迁移子路径已增加专用特权托管 Linux 资格。
+`make test-ebpf-scheduler-migration-runtime` 从实际 allowed affinity 中选择两个 CPU，
+仅挂载 `sched_migrate_task`，在精确跟踪同步 worker TID 后强制 A→B→A，并证明
+第一次移动没有 ringbuf 记录、第二次移动产生唯一 `CpuMigration` 和
+Warning/confidence-60 `HostSchedulerStall`，统计严格为两次迁移、一次阈值事件、
+一次发出且零 loss，observer 从 Healthy 转为 fault `0x45422001` 的 Degraded。
+报告写入 `build/ebpf_scheduler_migration_qualification.json` 并由封闭 schema 独立
+校验。runqueue 延迟、IRQ/softirq 压力、cpufreq policy 限制、生产目标内核、
+迁移原因/亲和性/cache/NUMA、开销/WCET 和长测仍未资格化，因此 EBPF-003
+整体保持 partial。
+
 EBPF-004 当前已具备有界 CPU/ifindex 窗口、EtherType/ifindex 过滤、drop
 reason 证据解码和 transport-risk 相关器单元测试。该实现与 CO-RE 编译结果
 不等于目标内核真实队列压力、丢包注入、verifier 和开销资格。raw-port 子路径
@@ -366,13 +386,13 @@ begin/completion/stall 统计全部自洽、零 mismatch/loss，最后生成并�
 生产目标内核和开销仍未资格化，ROS 2 与 recorder hook 也未完成，因此 EBPF-006
 整体保持 partial。
 
-FR-048 的调度迁移路径当前已具备 typed `sched_migrate_task` 读取、独立
-scheduler TID 过滤、固定 1024 项迁移窗口、策略 epoch 重置、来源/目标 CPU
-固定事件解码和 cycle-risk 相关器单元测试；CPU 限频路径已具备 typed
-`cpu_frequency_limits` 读取、可选 policy CPU 过滤、低于产品频率下限的 episode
-去重、固定事件解码和 cycle-risk 相关器单元测试。这些实现与 CO-RE 编译结果
-不等于目标内核真实迁移或 policy 限制注入、迁移原因/亲和性/cache 影响、共享
-policy 拓扑、瞬时频率/驻留时间/原因归因、verifier 和开销资格。
+FR-048 的调度迁移路径除 typed 读取、独立 scheduler TID、固定迁移窗口、策略
+epoch、来源/目标 CPU 解码和相关器单元测试外，现已具备上述 hosted-kernel
+两 CPU 真实 attach/迁移/ringbuf/统计/incident/health 资格。该结果仍不等于生产
+目标内核、runqueue/IRQ 压力、迁移原因/亲和性/cache/NUMA 或开销资格。CPU 限频
+路径已具备 typed `cpu_frequency_limits`、policy CPU 过滤、低于产品下限 episode
+去重、固定事件解码和相关器单元测试，但真实 policy 限制注入、共享 policy
+拓扑、瞬时频率/驻留时间/原因归因、verifier 和开销资格仍未完成。
 
 ## 11. 运行时输出示例
 

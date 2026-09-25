@@ -130,7 +130,7 @@
     {
       "id": "ebpf_observation",
       "status": "partial",
-      "scope": "Linux CO-RE loader, tracepoint attach, optional atomic Zenoh publish/callback and Linux raw-port syscall uprobe pairs, fixed event decode, privileged gateway, raw-port and synchronized process-leader-exit host qualifications, bounded scheduler runqueue and tracked-TID migration evidence, bounded IRQ/softirq duration evidence, bounded EtherType/ifindex skb drop windows, bounded tracked-process page-fault windows, bounded cpufreq policy-limit episodes, bounded request-correlated gateway and per-thread raw-port syscall duration evidence, leader-thread process-exit filtering, OOM victim-PID attribution and incident correlation",
+      "scope": "Linux CO-RE loader, tracepoint attach, optional atomic Zenoh publish/callback and Linux raw-port syscall uprobe pairs, fixed event decode, privileged gateway, raw-port, synchronized process-leader-exit and controlled scheduler-migration host qualifications, bounded scheduler runqueue and tracked-TID migration evidence, bounded IRQ/softirq duration evidence, bounded EtherType/ifindex skb drop windows, bounded tracked-process page-fault windows, bounded cpufreq policy-limit episodes, bounded request-correlated gateway and per-thread raw-port syscall duration evidence, leader-thread process-exit filtering, OOM victim-PID attribution and incident correlation",
       "evidence": [
         "crates/esop-ebpf-agent/src/lib.rs",
         "crates/esop-ebpf-runtime/src/linux.rs",
@@ -152,10 +152,14 @@
         "scripts/test-ebpf-process-exit-runtime.sh",
         "scripts/validate-ebpf-process-exit-qualification.py",
         "scripts/tests/test_ebpf_process_exit_qualification.py",
+        "crates/esop-ebpf-runtime/examples/scheduler_migration_qualification.rs",
+        "scripts/test-ebpf-scheduler-migration-runtime.sh",
+        "scripts/validate-ebpf-scheduler-migration-qualification.py",
+        "scripts/tests/test_ebpf_scheduler_migration_qualification.py",
         ".github/workflows/ci.yml",
         "docs/esop-ebpf-runtime-observability.md"
       ],
-      "limitation": "Hosted privileged Linux qualifies the gateway publish/callback and raw-port shared marker chains plus one synchronized worker-suppression/leader-exit chain through CO-RE verifier/load, real tracepoint or uprobe attachment, ringbuf decode, statistics, incident correlation and observer health projection. Process-exit evidence contains no exit code/signal, does not prove complete thread-group death, and does not qualify OOM, PID namespace/cgroup identity or restart supervision. Gateway evidence does not qualify a live Zenoh session, router/transport queue, IPC, serialization, permit or reconnect cause. Raw-port evidence does not qualify real AF_PACKET/NIC load or cycle/driver/NIC/wire/slave timing. Production target kernels, overhead/WCET, ROS2, recorder, scheduler migration and IRQ/softirq pressure, real NIC/page-fault/OOM/cpufreq-limit injection, migration-cause/affinity/cache-impact, major/minor fault attribution, OOM victim TGID resolution and instantaneous-frequency/residency/cause qualification remain open"
+      "limitation": "Hosted privileged Linux qualifies the gateway publish/callback and raw-port shared marker chains, one synchronized worker-suppression/leader-exit chain, and one exact-TID two-CPU scheduler-migration threshold chain through CO-RE verifier/load, real tracepoint or uprobe attachment, ringbuf decode, statistics, incident correlation and observer health projection. Scheduler evidence proves controlled A-to-B-to-A movement and count-threshold correlation only; it does not prove migration cause, affinity-policy failure, measured stall latency or cache/NUMA impact. Process-exit evidence contains no exit code/signal, does not prove complete thread-group death, and does not qualify OOM, PID namespace/cgroup identity or restart supervision. Gateway evidence does not qualify a live Zenoh session, router/transport queue, IPC, serialization, permit or reconnect cause. Raw-port evidence does not qualify real AF_PACKET/NIC load or cycle/driver/NIC/wire/slave timing. Production target kernels, overhead/WCET, ROS2, recorder, runqueue and IRQ/softirq pressure, real NIC/page-fault/OOM/cpufreq-limit injection, major/minor fault attribution, OOM victim TGID resolution and instantaneous-frequency/residency/cause qualification remain open"
     },
     {
       "id": "stm32_hpmicro_ports",

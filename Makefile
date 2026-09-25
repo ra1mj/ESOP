@@ -4,7 +4,7 @@ CARGO ?= cargo
 RUSTUP ?= rustup
 RUST_TARGET ?= aarch64-unknown-none
 
-.PHONY: test test-hil test-zenoh test-ebpf-gateway-runtime test-ebpf-raw-port-runtime test-ebpf-process-exit-runtime check fmt-check lint release no-std bpf-syntax bpf capability-manifest proto-schema build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report r2-qualification zenoh-check setup-rust ci
+.PHONY: test test-hil test-zenoh test-ebpf-gateway-runtime test-ebpf-raw-port-runtime test-ebpf-process-exit-runtime test-ebpf-scheduler-migration-runtime check fmt-check lint release no-std bpf-syntax bpf capability-manifest proto-schema build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-scheduler-migration-report r2-qualification zenoh-check setup-rust ci
 
 test:
 	$(CARGO) test --workspace --all-features
@@ -23,6 +23,9 @@ test-ebpf-raw-port-runtime:
 
 test-ebpf-process-exit-runtime:
 	./scripts/test-ebpf-process-exit-runtime.sh
+
+test-ebpf-scheduler-migration-runtime:
+	./scripts/test-ebpf-scheduler-migration-runtime.sh
 
 check:
 	$(CARGO) check --workspace --all-features
@@ -76,6 +79,9 @@ ebpf-raw-port-report:
 ebpf-process-exit-report:
 	python3 -m unittest discover -s scripts/tests -p 'test_ebpf_process_exit_qualification.py'
 
+ebpf-scheduler-migration-report:
+	python3 -m unittest discover -s scripts/tests -p 'test_ebpf_scheduler_migration_qualification.py'
+
 r2-qualification:
 	python3 scripts/validate-r2-qualification.py --expected-commit $$(git rev-parse HEAD) --output build/r2_qualification_report.json
 	python3 -m unittest discover -s scripts/tests -p 'test_r2_qualification.py'
@@ -86,4 +92,4 @@ zenoh-check:
 setup-rust:
 	$(RUSTUP) target add $(RUST_TARGET)
 
-ci: fmt-check check test lint release no-std bpf-syntax capability-manifest proto-schema build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report r2-qualification zenoh-check
+ci: fmt-check check test lint release no-std bpf-syntax capability-manifest proto-schema build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-scheduler-migration-report r2-qualification zenoh-check
