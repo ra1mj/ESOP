@@ -7,11 +7,15 @@ struct esop_context {
     __u64 cycle_seq;
     __u64 transition_seq;
     __u32 tracked_pid;
-    __u32 reserved;
+    __u32 network_ifindex;
     __u64 scheduler_latency_threshold_ns;
     __u64 network_drop_threshold;
+    __u64 network_drop_window_ns;
     __u64 irq_duration_threshold_ns;
     __u64 softirq_duration_threshold_ns;
+    __u16 network_protocol;
+    __u16 reserved16;
+    __u32 reserved32;
 };
 
 struct esop_stats {
@@ -26,11 +30,25 @@ struct esop_stats {
     __u64 irq_overruns;
     __u64 softirq_samples;
     __u64 softirq_overruns;
+    __u64 network_drops;
+    __u64 network_unattributed;
+    __u64 network_threshold_events;
 };
 
 struct esop_interrupt_key {
     __u32 cpu;
     __u32 vector;
+};
+
+struct esop_network_drop_key {
+    __u32 cpu;
+    __u32 ifindex;
+};
+
+struct esop_network_drop_state {
+    __u64 window_start_ns;
+    __u32 count;
+    __u32 last_reason;
 };
 
 struct esop_runtime_evidence {
@@ -52,11 +70,11 @@ struct esop_runtime_evidence {
     __u8 domain;
     __u8 kind;
     __u8 severity;
-    __u8 reserved;
+    __u8 detail;
 };
 
-_Static_assert(sizeof(struct esop_context) == 72, "context ABI changed");
-_Static_assert(sizeof(struct esop_stats) == 88, "stats ABI changed");
+_Static_assert(sizeof(struct esop_context) == 88, "context ABI changed");
+_Static_assert(sizeof(struct esop_stats) == 112, "stats ABI changed");
 _Static_assert(sizeof(struct esop_runtime_evidence) == 96, "evidence ABI changed");
 
 struct {
@@ -99,6 +117,13 @@ struct {
     __type(value, __u64);
 } ESOP_SOFTIRQ_STARTS SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 256);
+    __type(key, struct esop_network_drop_key);
+    __type(value, struct esop_network_drop_state);
+} ESOP_NETWORK_DROPS SEC(".maps");
+
 static __always_inline struct esop_context *esop_context(void)
 {
     __u32 key = 0;
@@ -126,14 +151,15 @@ static __always_inline int esop_tracks(__u32 pid, const struct esop_context *con
     return context && (context->tracked_pid == 0 || context->tracked_pid == pid);
 }
 
-static __always_inline void esop_emit(__u8 domain, __u8 kind, __u8 severity,
-                                      __u64 observed_value, __u64 threshold,
-                                      __u64 duration_ns, __u32 count, __u16 irq)
+static __always_inline int esop_emit_resource(
+    __u8 domain, __u8 kind, __u8 severity, __u64 observed_value,
+    __u64 threshold, __u64 duration_ns, __u32 count, __u16 irq,
+    __u32 netdev_ifindex, __u8 detail, __u8 include_task)
 {
     struct esop_context *context = esop_context();
     struct esop_stats *stats = esop_stats();
     if (!context) {
-        return;
+        return -1;
     }
 
     __u64 now = bpf_ktime_get_ns();
@@ -147,11 +173,11 @@ static __always_inline void esop_emit(__u8 domain, __u8 kind, __u8 severity,
     event.timestamp_ns = timestamp;
     event.cycle_seq = context->cycle_seq;
     event.transition_seq = context->transition_seq;
-    event.pid = esop_tgid();
-    event.tid = esop_tid();
+    event.pid = include_task ? esop_tgid() : 0;
+    event.tid = include_task ? esop_tid() : 0;
     event.cpu = (__u16)bpf_get_smp_processor_id();
     event.irq = irq;
-    event.netdev_ifindex = 0;
+    event.netdev_ifindex = netdev_ifindex;
     event.observed_value = observed_value;
     event.threshold = threshold;
     event.duration_ns = duration_ns;
@@ -159,19 +185,57 @@ static __always_inline void esop_emit(__u8 domain, __u8 kind, __u8 severity,
     event.domain = domain;
     event.kind = kind;
     event.severity = severity;
-    event.reserved = 0;
+    event.detail = detail;
     if (bpf_ringbuf_output(&ESOP_EVENTS, &event, sizeof(event), 0) < 0) {
         if (stats) {
             stats->lost_events++;
         }
-    } else if (stats) {
+        return -1;
+    }
+    if (stats) {
         stats->emitted_events++;
     }
+    return 0;
+}
+
+static __always_inline void esop_emit(__u8 domain, __u8 kind, __u8 severity,
+                                      __u64 observed_value, __u64 threshold,
+                                      __u64 duration_ns, __u32 count, __u16 irq)
+{
+    esop_emit_resource(domain, kind, severity, observed_value, threshold,
+                       duration_ns, count, irq, 0, 0, 1);
 }
 
 static __always_inline __u16 esop_vector_u16(__u32 vector)
 {
     return vector > 0xffff ? 0xffff : (__u16)vector;
+}
+
+static __always_inline __u8 esop_detail_u8(__u32 value)
+{
+    return value > 0xff ? 0xff : (__u8)value;
+}
+
+static __always_inline __u32 esop_skb_ifindex(struct sk_buff *skb)
+{
+    if (!skb) {
+        return 0;
+    }
+
+    struct net_device *device = 0;
+    int ifindex = 0;
+    if (bpf_core_read(&device, sizeof(device), &skb->dev) == 0 && device &&
+        bpf_core_read(&ifindex, sizeof(ifindex), &device->ifindex) == 0 &&
+        ifindex > 0) {
+        return (__u32)ifindex;
+    }
+
+    int skb_iif = 0;
+    if (bpf_core_read(&skb_iif, sizeof(skb_iif), &skb->skb_iif) == 0 &&
+        skb_iif > 0) {
+        return (__u32)skb_iif;
+    }
+    return 0;
 }
 
 SEC("tracepoint/sched/sched_wakeup")
@@ -262,12 +326,83 @@ int esop_oom_kill(void *ctx)
 }
 
 SEC("tracepoint/skb/kfree_skb")
-int esop_network_drop(void *ctx)
+int esop_network_drop(struct trace_event_raw_kfree_skb *event)
 {
-    (void)ctx;
     struct esop_context *context = esop_context();
-    if (esop_tracks(esop_tgid(), context)) {
-        esop_emit(2, 2, 2, 1, context ? context->network_drop_threshold : 1, 0, 1, 0);
+    if (!context) {
+        return 0;
+    }
+
+    __u16 protocol = (__u16)BPF_CORE_READ(event, protocol);
+    if (protocol != context->network_protocol) {
+        return 0;
+    }
+
+    struct sk_buff *skb = (struct sk_buff *)BPF_CORE_READ(event, skbaddr);
+    __u32 ifindex = esop_skb_ifindex(skb);
+    struct esop_stats *stats = esop_stats();
+    if (ifindex == 0) {
+        if (stats) {
+            stats->network_unattributed++;
+        }
+        return 0;
+    }
+    if (context->network_ifindex != 0 &&
+        context->network_ifindex != ifindex) {
+        return 0;
+    }
+    if (stats) {
+        stats->network_drops++;
+    }
+
+    int raw_reason = BPF_CORE_READ(event, reason);
+    __u32 reason = raw_reason < 0 ? 0 : (__u32)raw_reason;
+    __u64 now = bpf_ktime_get_ns();
+    struct esop_network_drop_key key = {
+        .cpu = bpf_get_smp_processor_id(),
+        .ifindex = ifindex,
+    };
+    struct esop_network_drop_state *state =
+        bpf_map_lookup_elem(&ESOP_NETWORK_DROPS, &key);
+    __u32 count = 1;
+    __u64 elapsed = 0;
+    if (!state) {
+        struct esop_network_drop_state initial = {
+            .window_start_ns = now,
+            .count = 1,
+            .last_reason = reason,
+        };
+        if (bpf_map_update_elem(&ESOP_NETWORK_DROPS, &key, &initial,
+                                BPF_ANY) < 0) {
+            stats = esop_stats();
+            if (stats) {
+                stats->lost_events++;
+            }
+            return 0;
+        }
+    } else if (now < state->window_start_ns ||
+               now - state->window_start_ns >=
+                   context->network_drop_window_ns) {
+        state->window_start_ns = now;
+        state->count = 1;
+        state->last_reason = reason;
+    } else {
+        elapsed = now - state->window_start_ns;
+        if (state->count != 0xffffffff) {
+            state->count++;
+        }
+        state->last_reason = reason;
+        count = state->count;
+    }
+
+    if ((__u64)count == context->network_drop_threshold) {
+        if (esop_emit_resource(2, 2, 2, count,
+                               context->network_drop_threshold, elapsed,
+                               count, 0, ifindex, esop_detail_u8(reason), 0) ==
+                0 &&
+            stats) {
+            stats->network_threshold_events++;
+        }
     }
     return 0;
 }

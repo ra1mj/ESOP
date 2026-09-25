@@ -165,7 +165,9 @@ pub struct RuntimeEvidence {
     pub domain: EvidenceDomain,
     pub kind: EvidenceKind,
     pub severity: IncidentSeverity,
-    pub reserved: u8,
+    /// Kind-specific bounded detail. Network drops carry the saturated kernel
+    /// skb drop reason; producers without a detail value write zero.
+    pub detail: u8,
 }
 
 impl RuntimeEvidence {
@@ -188,7 +190,7 @@ impl RuntimeEvidence {
         domain: EvidenceDomain::Correlator,
         kind: EvidenceKind::AgentCapabilityFailure,
         severity: IncidentSeverity::Info,
-        reserved: 0,
+        detail: 0,
     };
 }
 
@@ -562,7 +564,7 @@ fn classify(
     correlated: bool,
 ) -> Option<(IncidentCode, IncidentSeverity, RecommendedAction, u8)> {
     let over_threshold = evidence.observed_value > evidence.threshold;
-    let enough_count = evidence.count > 0 && evidence.count >= evidence.threshold as u32;
+    let enough_count = evidence.count > 0 && u64::from(evidence.count) >= evidence.threshold;
     match evidence.kind {
         EvidenceKind::SchedulerRunqueueLatency if over_threshold && correlated => Some((
             IncidentCode::HostSchedulerStall,
@@ -845,7 +847,7 @@ mod tests {
             domain: EvidenceDomain::KernelScheduler,
             kind,
             severity: IncidentSeverity::Error,
-            reserved: 0,
+            detail: 0,
         }
     }
 
@@ -919,6 +921,50 @@ mod tests {
             interrupt.domain = EvidenceDomain::KernelIrq;
             assert_eq!(correlator.ingest(interrupt).unwrap(), None);
         }
+    }
+
+    #[test]
+    fn network_drop_requires_threshold_and_transport_risk() {
+        let mut correlator = IncidentCorrelator::<2>::new(11, 3, 1_000);
+        correlator
+            .observe_cycle(CycleContext {
+                boot_id: 11,
+                cycle_seq: 42,
+                transition_seq: 9,
+                timestamp_ns: 1_000,
+                wkc_bad: 1,
+                ..CycleContext::EMPTY
+            })
+            .unwrap();
+
+        let mut drop = evidence(EvidenceKind::NetworkDrop, 1_100);
+        drop.domain = EvidenceDomain::KernelNetwork;
+        drop.netdev_ifindex = 7;
+        drop.observed_value = 4;
+        drop.threshold = 4;
+        drop.count = 4;
+        drop.detail = 12;
+        let incident = correlator.ingest(drop).unwrap().unwrap();
+        assert_eq!(incident.code, IncidentCode::HostNicDrop);
+        assert_eq!(incident.netdev_ifindex, 7);
+        assert_eq!(incident.evidence[0].detail, 12);
+
+        let mut below_threshold = drop;
+        below_threshold.evidence_id = 8;
+        below_threshold.observed_value = 3;
+        below_threshold.count = 3;
+        assert_eq!(correlator.ingest(below_threshold).unwrap(), None);
+
+        let mut healthy = IncidentCorrelator::<2>::new(11, 3, 1_000);
+        healthy
+            .observe_cycle(CycleContext {
+                boot_id: 11,
+                cycle_seq: 42,
+                timestamp_ns: 1_000,
+                ..CycleContext::EMPTY
+            })
+            .unwrap();
+        assert_eq!(healthy.ingest(drop).unwrap(), None);
     }
 
     #[test]

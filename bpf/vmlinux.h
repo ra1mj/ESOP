@@ -65,6 +65,27 @@ struct trace_event_raw_softirq {
     char __data[0];
 };
 
+struct net_device {
+    int ifindex;
+};
+
+struct sk_buff {
+    struct sk_buff *next;
+    struct sk_buff *prev;
+    struct net_device *dev;
+    int skb_iif;
+};
+
+struct trace_event_raw_kfree_skb {
+    struct trace_entry ent;
+    void *skbaddr;
+    void *location;
+    const void *rx_sk;
+    unsigned short protocol;
+    int reason;
+    char __data[0];
+};
+
 #if defined(__clang__) && !defined(BPF_NO_PRESERVE_ACCESS_INDEX)
 #pragma clang attribute pop
 #endif

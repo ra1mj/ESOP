@@ -31,6 +31,7 @@ pub const ATTACH_SOFTIRQ_ENTRY: u64 = 1 << 8;
 pub const ATTACH_SOFTIRQ_EXIT: u64 = 1 << 9;
 pub const ATTACH_IRQ_HANDLER: u64 = ATTACH_IRQ_HANDLER_ENTRY | ATTACH_IRQ_HANDLER_EXIT;
 pub const ATTACH_SOFTIRQ: u64 = ATTACH_SOFTIRQ_ENTRY | ATTACH_SOFTIRQ_EXIT;
+pub const NETWORK_PROTOCOL_ETHERCAT: u16 = 0x88A4;
 pub const ATTACH_ALL: u64 = ATTACH_SCHED_WAKEUP
     | ATTACH_SCHED_SWITCH
     | ATTACH_PROCESS_EXIT
@@ -92,7 +93,12 @@ pub struct RuntimeConfig {
     /// should normally restrict this to the EtherCAT/gateway RT process.
     pub tracked_pid: u32,
     pub scheduler_latency_threshold_ns: u64,
+    /// Zero observes protocol-matching drops on every interface.
+    pub network_ifindex: u32,
+    /// Host-order EtherType reported by `skb:kfree_skb`.
+    pub network_protocol: u16,
     pub network_drop_threshold: u64,
+    pub network_drop_window_ns: u64,
     pub irq_duration_threshold_ns: u64,
     pub softirq_duration_threshold_ns: u64,
     pub boot_id: u64,
@@ -108,7 +114,11 @@ impl RuntimeConfig {
             && complete_pair(self.required_attach_mask, ATTACH_IRQ_HANDLER)
             && complete_pair(self.required_attach_mask, ATTACH_SOFTIRQ)
             && self.scheduler_latency_threshold_ns > 0
-            && self.network_drop_threshold > 0
+            && valid_network_tracking(
+                self.network_protocol,
+                self.network_drop_threshold,
+                self.network_drop_window_ns,
+            )
             && self.irq_duration_threshold_ns > 0
             && self.softirq_duration_threshold_ns > 0
     }
@@ -116,6 +126,10 @@ impl RuntimeConfig {
 
 const fn complete_pair(mask: u64, pair: u64) -> bool {
     mask & pair == 0 || mask & pair == pair
+}
+
+const fn valid_network_tracking(protocol: u16, threshold: u64, window_ns: u64) -> bool {
+    protocol > 0 && threshold > 0 && threshold <= u32::MAX as u64 && window_ns > 0
 }
 
 const fn normalize_attach_pairs(mut mask: u64) -> u64 {
@@ -135,7 +149,10 @@ impl Default for RuntimeConfig {
             required_attach_mask: ATTACH_SCHED_WAKEUP | ATTACH_SCHED_SWITCH | ATTACH_PROCESS_EXIT,
             tracked_pid: 0,
             scheduler_latency_threshold_ns: 1_000_000,
+            network_ifindex: 0,
+            network_protocol: NETWORK_PROTOCOL_ETHERCAT,
             network_drop_threshold: 1,
+            network_drop_window_ns: 1_000_000,
             irq_duration_threshold_ns: 250_000,
             softirq_duration_threshold_ns: 500_000,
             boot_id: 0,
@@ -157,11 +174,15 @@ pub struct KernelContext {
     pub cycle_seq: u64,
     pub transition_seq: u64,
     pub tracked_pid: u32,
-    pub reserved: u32,
+    pub network_ifindex: u32,
     pub scheduler_latency_threshold_ns: u64,
     pub network_drop_threshold: u64,
+    pub network_drop_window_ns: u64,
     pub irq_duration_threshold_ns: u64,
     pub softirq_duration_threshold_ns: u64,
+    pub network_protocol: u16,
+    pub reserved16: u16,
+    pub reserved32: u32,
 }
 
 // SAFETY: The BPF map value is an all-integer C-compatible record without
@@ -176,11 +197,15 @@ impl KernelContext {
             cycle_seq: 0,
             transition_seq: 0,
             tracked_pid: config.tracked_pid,
-            reserved: 0,
+            network_ifindex: config.network_ifindex,
             scheduler_latency_threshold_ns: config.scheduler_latency_threshold_ns,
             network_drop_threshold: config.network_drop_threshold,
+            network_drop_window_ns: config.network_drop_window_ns,
             irq_duration_threshold_ns: config.irq_duration_threshold_ns,
             softirq_duration_threshold_ns: config.softirq_duration_threshold_ns,
+            network_protocol: config.network_protocol,
+            reserved16: 0,
+            reserved32: 0,
         }
     }
 
@@ -191,12 +216,37 @@ impl KernelContext {
             cycle_seq: cycle.cycle_seq,
             transition_seq: cycle.transition_seq,
             tracked_pid: self.tracked_pid,
-            reserved: 0,
+            network_ifindex: self.network_ifindex,
             scheduler_latency_threshold_ns: self.scheduler_latency_threshold_ns,
             network_drop_threshold: self.network_drop_threshold,
+            network_drop_window_ns: self.network_drop_window_ns,
             irq_duration_threshold_ns: self.irq_duration_threshold_ns,
             softirq_duration_threshold_ns: self.softirq_duration_threshold_ns,
+            network_protocol: self.network_protocol,
+            reserved16: 0,
+            reserved32: 0,
         }
+    }
+
+    fn set_network_tracking(
+        &mut self,
+        network_ifindex: u32,
+        network_protocol: u16,
+        network_drop_threshold: u64,
+        network_drop_window_ns: u64,
+    ) -> bool {
+        if !valid_network_tracking(
+            network_protocol,
+            network_drop_threshold,
+            network_drop_window_ns,
+        ) {
+            return false;
+        }
+        self.network_ifindex = network_ifindex;
+        self.network_protocol = network_protocol;
+        self.network_drop_threshold = network_drop_threshold;
+        self.network_drop_window_ns = network_drop_window_ns;
+        true
     }
 }
 
@@ -215,6 +265,9 @@ pub struct KernelStats {
     pub irq_overruns: u64,
     pub softirq_samples: u64,
     pub softirq_overruns: u64,
+    pub network_drops: u64,
+    pub network_unattributed: u64,
+    pub network_threshold_events: u64,
 }
 
 // SAFETY: The BPF map value is an all-u64 C-compatible record without padding
@@ -234,6 +287,13 @@ impl KernelStats {
         self.irq_overruns = self.irq_overruns.saturating_add(other.irq_overruns);
         self.softirq_samples = self.softirq_samples.saturating_add(other.softirq_samples);
         self.softirq_overruns = self.softirq_overruns.saturating_add(other.softirq_overruns);
+        self.network_drops = self.network_drops.saturating_add(other.network_drops);
+        self.network_unattributed = self
+            .network_unattributed
+            .saturating_add(other.network_unattributed);
+        self.network_threshold_events = self
+            .network_threshold_events
+            .saturating_add(other.network_threshold_events);
     }
 }
 
@@ -532,13 +592,21 @@ impl BpfRuntime {
         scheduler_latency_threshold_ns: u64,
         network_drop_threshold: u64,
     ) -> Result<(), RuntimeError> {
-        if scheduler_latency_threshold_ns == 0 || network_drop_threshold == 0 {
+        if scheduler_latency_threshold_ns == 0
+            || !valid_network_tracking(
+                self.kernel_context.network_protocol,
+                network_drop_threshold,
+                self.kernel_context.network_drop_window_ns,
+            )
+        {
             return Err(RuntimeError::InvalidConfiguration);
         }
-        self.kernel_context.tracked_pid = tracked_pid;
-        self.kernel_context.scheduler_latency_threshold_ns = scheduler_latency_threshold_ns;
-        self.kernel_context.network_drop_threshold = network_drop_threshold;
-        self.context.set(0, self.kernel_context, 0)?;
+        let mut updated = self.kernel_context;
+        updated.tracked_pid = tracked_pid;
+        updated.scheduler_latency_threshold_ns = scheduler_latency_threshold_ns;
+        updated.network_drop_threshold = network_drop_threshold;
+        self.context.set(0, updated, 0)?;
+        self.kernel_context = updated;
         Ok(())
     }
 
@@ -553,6 +621,30 @@ impl BpfRuntime {
         self.kernel_context.irq_duration_threshold_ns = irq_duration_threshold_ns;
         self.kernel_context.softirq_duration_threshold_ns = softirq_duration_threshold_ns;
         self.context.set(0, self.kernel_context, 0)?;
+        Ok(())
+    }
+
+    /// Atomically replace the network attribution policy in the context map.
+    /// An ifindex of zero accepts every interface carrying the configured
+    /// host-order EtherType.
+    pub fn update_network_tracking(
+        &mut self,
+        network_ifindex: u32,
+        network_protocol: u16,
+        network_drop_threshold: u64,
+        network_drop_window_ns: u64,
+    ) -> Result<(), RuntimeError> {
+        let mut updated = self.kernel_context;
+        if !updated.set_network_tracking(
+            network_ifindex,
+            network_protocol,
+            network_drop_threshold,
+            network_drop_window_ns,
+        ) {
+            return Err(RuntimeError::InvalidConfiguration);
+        }
+        self.context.set(0, updated, 0)?;
+        self.kernel_context = updated;
         Ok(())
     }
 
@@ -737,7 +829,7 @@ pub fn decode_evidence(bytes: &[u8]) -> Result<RuntimeEvidence, EvidenceDecodeEr
         domain,
         kind,
         severity,
-        reserved: bytes[95],
+        detail: bytes[95],
     })
 }
 
@@ -938,6 +1030,14 @@ mod tests {
         let evidence = decode_evidence(&bytes).unwrap();
         assert_eq!(evidence.domain, EvidenceDomain::KernelIrq);
         assert_eq!(evidence.kind, EvidenceKind::SoftirqCpuTime);
+
+        put_u32(&mut bytes, 60, 17);
+        bytes[92] = EvidenceDomain::KernelNetwork as u8;
+        bytes[93] = EvidenceKind::NetworkDrop as u8;
+        bytes[95] = 23;
+        let evidence = decode_evidence(&bytes).unwrap();
+        assert_eq!(evidence.netdev_ifindex, 17);
+        assert_eq!(evidence.detail, 23);
     }
 
     #[test]
@@ -975,6 +1075,24 @@ mod tests {
         config.network_drop_threshold = 0;
         assert!(!config.valid());
 
+        let config = RuntimeConfig {
+            network_protocol: 0,
+            ..RuntimeConfig::default()
+        };
+        assert!(!config.valid());
+
+        let config = RuntimeConfig {
+            network_drop_window_ns: 0,
+            ..RuntimeConfig::default()
+        };
+        assert!(!config.valid());
+
+        let config = RuntimeConfig {
+            network_drop_threshold: u64::from(u32::MAX) + 1,
+            ..RuntimeConfig::default()
+        };
+        assert!(!config.valid());
+
         let mut config = RuntimeConfig::default();
         config.enabled_attach_mask &= !ATTACH_IRQ_HANDLER_EXIT;
         assert!(!config.valid());
@@ -999,7 +1117,10 @@ mod tests {
         let config = RuntimeConfig {
             tracked_pid: 42,
             scheduler_latency_threshold_ns: 100,
+            network_ifindex: 17,
+            network_protocol: NETWORK_PROTOCOL_ETHERCAT,
             network_drop_threshold: 3,
+            network_drop_window_ns: 1_000,
             irq_duration_threshold_ns: 250,
             softirq_duration_threshold_ns: 500,
             boot_id: 5,
@@ -1016,14 +1137,36 @@ mod tests {
         assert_eq!(context.tracked_pid, 42);
         assert_eq!(context.cycle_seq, 11);
         assert_eq!(context.transition_seq, 13);
+        assert_eq!(context.network_ifindex, 17);
+        assert_eq!(context.network_protocol, NETWORK_PROTOCOL_ETHERCAT);
+        assert_eq!(context.network_drop_threshold, 3);
+        assert_eq!(context.network_drop_window_ns, 1_000);
         assert_eq!(context.irq_duration_threshold_ns, 250);
         assert_eq!(context.softirq_duration_threshold_ns, 500);
     }
 
     #[test]
+    fn network_tracking_updates_are_validated_before_commit() {
+        let mut context = KernelContext::from_config(RuntimeConfig::default());
+        assert!(context.set_network_tracking(9, 0x88A4, 4, 2_000_000));
+        assert_eq!(context.network_ifindex, 9);
+        assert_eq!(context.network_protocol, 0x88A4);
+        assert_eq!(context.network_drop_threshold, 4);
+        assert_eq!(context.network_drop_window_ns, 2_000_000);
+
+        let unchanged = context;
+        assert!(!context.set_network_tracking(10, 0, 4, 2_000_000));
+        assert_eq!(context, unchanged);
+        assert!(!context.set_network_tracking(10, 0x88A4, 0, 2_000_000));
+        assert_eq!(context, unchanged);
+        assert!(!context.set_network_tracking(10, 0x88A4, 4, 0));
+        assert_eq!(context, unchanged);
+    }
+
+    #[test]
     fn kernel_map_abis_and_attach_masks_remain_explicit() {
-        assert_eq!(std::mem::size_of::<KernelContext>(), 72);
-        assert_eq!(std::mem::size_of::<KernelStats>(), 88);
+        assert_eq!(std::mem::size_of::<KernelContext>(), 88);
+        assert_eq!(std::mem::size_of::<KernelStats>(), 112);
 
         let mut observed = 0;
         for spec in ATTACH_SPECS {
@@ -1053,11 +1196,17 @@ mod tests {
             irq_overruns: 2,
             softirq_samples: 3,
             softirq_overruns: 5,
+            network_drops: u64::MAX,
+            network_unattributed: 6,
+            network_threshold_events: 8,
             ..KernelStats::default()
         });
         assert_eq!(aggregate.irq_samples, u64::MAX);
         assert_eq!(aggregate.irq_overruns, 2);
         assert_eq!(aggregate.softirq_samples, 3);
         assert_eq!(aggregate.softirq_overruns, 12);
+        assert_eq!(aggregate.network_drops, u64::MAX);
+        assert_eq!(aggregate.network_unattributed, 6);
+        assert_eq!(aggregate.network_threshold_events, 8);
     }
 }

@@ -12,7 +12,7 @@ ESOP 是面向嵌入式实时控制的 EtherCAT 简易操作系统；EtherCAT �
 - [ETG.1500、Beckhoff 与 CiA 402 主站决策](docs/esop-etg-cia402-master-requirements.md)
 - [eBPF 运行时观测与问题归因设计](docs/esop-ebpf-runtime-observability.md)
 
-Linux 观测适配器位于 `crates/esop-ebpf-runtime/`：它使用 Rust/Aya 加载预编译 CO-RE BPF ELF，按能力挂载 tracepoint，从 ringbuf 解码固定证据并送入 `RuntimeAgent`。当前 BPF bundle 已包含固定容量的硬 IRQ/softirq entry/exit 时长采集，并将超阈值事件按 cycle 风险窗口归因到 `HOST_IRQ_STORM`；实时主站核心不依赖 Aya，也不等待观测器。
+Linux 观测适配器位于 `crates/esop-ebpf-runtime/`：它使用 Rust/Aya 加载预编译 CO-RE BPF ELF，按能力挂载 tracepoint，从 ringbuf 解码固定证据并送入 `RuntimeAgent`。当前 BPF bundle 已包含固定容量的硬 IRQ/softirq entry/exit 时长采集，以及按 EtherType、可选 ifindex 和固定窗口聚合的 `kfree_skb` 丢包证据；超阈值事件只有与 cycle 风险窗口相关时才分别归因为 `HOST_IRQ_STORM` 或 `HOST_NIC_DROP`。实时主站核心不依赖 Aya，也不等待观测器。
 
 在具备 clang、bpftool 和 `/sys/kernel/btf/vmlinux` 的 Linux 主机上，可执行 `make -C bpf` 生成 BPF ELF，再用 `cargo run -p esop-ebpf-runtime --example observe -- bpf/build/esop_runtime.bpf.o` 启动只读观测进程。生产集成应由 ESOP 监督器提供真实 `boot_id`、`agent_epoch` 和每周期 `CycleContext`。
 

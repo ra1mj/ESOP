@@ -1,8 +1,8 @@
 # ESOP eBPF 运行时观测与问题归因设计
 
-- 文档版本：1.0
-- 日期：2026-09-03
-- 状态：设计基线；HostObservation、固定证据 ABI、有界 RuntimeIncident 相关器、同类事件窗口聚合、RuntimeAgent 门面、能力预检结果模型、Rust/Aya CO-RE loader、tracepoint attach、ringbuf 解码桥以及有界硬 IRQ/softirq 时长证据已实现；目标 BPF ELF 构建、verifier/权限和生产 hook 资格仍需在目标 Linux 环境完成
+- 文档版本：1.1
+- 日期：2026-09-25
+- 状态：设计基线；HostObservation、固定证据 ABI、有界 RuntimeIncident 相关器、同类事件窗口聚合、RuntimeAgent 门面、能力预检结果模型、Rust/Aya CO-RE loader、tracepoint attach、ringbuf 解码桥、有界硬 IRQ/softirq 时长证据，以及按 EtherType/ifindex 聚合的 `kfree_skb` 丢包证据已实现；目标内核 verifier/权限、真实丢包注入和生产 hook 资格仍需在目标 Linux 环境完成
 - 上游需求：[ESOP 软件产品需求文档](esop-software-prd.md) FR-047 至 FR-052、NFR-018
 
 ## 1. 设计结论
@@ -43,7 +43,7 @@ ESOP RT node
 
 两条证据链保持独立：RT 域是运动控制事实来源；eBPF 是 Linux 环境的解释与归因来源。相关器可以合并“同一个周期窗口内的事件”，但不能以缺少 eBPF 事件证明“系统没有问题”。
 
-当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 丢失计数读取、硬 IRQ/softirq entry/exit attach 和 `RuntimeAgent` 桥接；`bpf/` 提供首版内核程序源、固定容量中断起始时间 map、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。目标 Linux 环境仍需使用 clang 生成 BPF ELF，并完成真实权限、verifier、ringbuf、IRQ/softirq 压力注入和目标 hook 资格测试。
+当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、硬 IRQ/softirq entry/exit attach、EtherCAT EtherType/可选 ifindex 丢包策略更新和 `RuntimeAgent` 桥接；`bpf/` 提供固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。CI 负责 CO-RE 对象构建；目标 Linux 环境仍需完成真实权限、verifier、ringbuf、IRQ/softirq 与丢包压力注入以及目标 hook 资格测试。
 
 ## 4. 观测域与 attach 点
 
@@ -68,6 +68,15 @@ ESOP RT node
 attach 必须成对启用，阈值事件仍需与 transport-risk cycle 同窗才升级为
 `HOST_IRQ_STORM`。loader 对每组 pair 执行成组挂载；第二个成员失败时回滚
 第一个 link，capability mask 也不会发布半组能力。
+
+网络首版使用 `skb:kfree_skb` 的 typed tracepoint context，只接受配置的
+host-order EtherType（默认 EtherCAT `0x88A4`），并可选精确匹配 ifindex。
+程序通过 CO-RE 读取 `skb->dev->ifindex`，无法取得时回退 `skb_iif`；仍无法
+解析的协议匹配事件只增加 `network_unattributed`，不生成事故证据。可归因
+事件按 `{CPU, ifindex}` 写入固定 256 项 LRU map，在固定窗口第一次达到计数
+阈值时输出一条 96 字节证据，携带 ifindex、窗口计数和饱和为一字节的内核
+drop reason。由于软中断上下文中的 current task 不代表数据包所有者，网络
+证据的 PID/TID 固定为零，也不使用 `tracked_pid` 过滤。
 
 ### 4.2 用户态观测点
 
@@ -123,7 +132,7 @@ RuntimeIncident
 | --- | --- | --- | --- |
 | `HOST_SCHEDULER_STALL` | RT/gateway 线程唤醒到运行的延迟超过阈值，且与 cycle deadline miss 同窗。 | 主机调度导致软件周期风险。 | 可使 supervisor lease 失效；不直接写 controlword。 |
 | `HOST_IRQ_STORM` | 单 IRQ/softirq 在窗口内占用超预算 CPU，伴随 RT 线程 off-CPU。 | 中断或软中断干扰实时线程。 | 按产品策略触发普通 controlled stop。 |
-| `HOST_NIC_DROP` | 网卡/协议栈丢帧、队列溢出或 receive/transmit gap 与 WKC/timeout 同窗。 | Linux 网络路径有丢包或拥塞。 | 提供 `HOST_OBSERVATION`，不能替代 EtherCAT WKC。 |
+| `HOST_NIC_DROP` | 指定 EtherType/网卡的 `kfree_skb` 窗口达到计数阈值，且与 WKC/timeout/deadline 风险同窗。 | Linux 网络路径存在可归因的协议栈丢弃。 | 提供 `HOST_OBSERVATION`，不能替代 EtherCAT WKC。 |
 | `HOST_PAGE_FAULT` | ESOP/ROS/Zenoh 关键线程在 cycle 窗口发生页错误。 | 周期可能被内存管理事件打断。 | 性能资格失败或按策略撤销 host permit。 |
 | `HOST_CPU_THROTTLE` | cgroup/CPU pressure/频率窗口异常与 gateway stall 同窗。 | 监督域资源受到限制。 | supervisor lease 降级。 |
 | `USER_COMPONENT_EXIT` | gateway、ROS 2 controller、recorder 或 agent 退出/收到信号。 | 用户态组件生命周期异常。 | MLG 只根据固定 supervisor lease/command age 判定。 |
@@ -132,7 +141,7 @@ RuntimeIncident
 ### 6.2 检测规则原则
 
 1. 每条规则包含 `enter_threshold`、`exit_threshold`、`window_ns`、`min_count`、`max_age_ns` 和严重级别。
-2. 连续周期、时间窗口和滞回逻辑由用户态相关器执行；内核程序只做轻量采集和聚合。
+2. 内核程序只做固定容量计数/窗口聚合；跨证据关联、cycle 风险判断和事故合并由用户态相关器执行。
 3. 单个 eBPF 事件不直接判定根因；至少需要 ESOP/MLG 状态或第二类主机证据进行关联，除非是明确的进程退出、OOM 等硬事实。
 4. 所有规则都保留 `observed`、`threshold`、`evidence_ids` 和 `confidence`，并区分事实、相关性和推断。
 5. `RuntimeIncident` 产生后不能覆盖 RT 原始事件；事件环满、ringbuf 满或 agent 重启都必须记录丢失计数。
@@ -214,6 +223,10 @@ BPF 对象、用户态 loader、schema 和规则版本必须绑定：
 | EBPF-010 | 开销 | baseline/incident/forensics 三档测得 CPU、内存、ringbuf、事件丢失和 host RT 影响；不改变 MCU 资格结论。 |
 | EBPF-011 | 长测 | 至少 30 分钟 Q1/Q2 Linux 监督域压力测试，无 agent 内存增长、无无限 map 增长、无周期阻塞。 |
 | EBPF-012 | 安全边界 | 产品测试报告明确 eBPF 不是安全通道；STO/FSoE/安全 PLC 仍独立验证。 |
+
+EBPF-004 当前已具备有界 CPU/ifindex 窗口、EtherType/ifindex 过滤、drop
+reason 证据解码和 transport-risk 相关器单元测试。该实现与 CO-RE 编译结果
+不等于目标内核真实队列压力、丢包注入、verifier 和开销资格。
 
 ## 11. 运行时输出示例
 

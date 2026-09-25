@@ -20,14 +20,20 @@ typedef signed long long __s64;
 #define __type(name, value) typeof(value) *name
 #ifdef __clang__
 #define BPF_CORE_READ(src, field) __builtin_preserve_access_index((src)->field)
+#define bpf_core_read(dst, size, src)                                         \
+    bpf_probe_read_kernel((dst), (__u32)(size),                              \
+                          (const void *)__builtin_preserve_access_index(src))
 #else
 #define BPF_CORE_READ(src, field) ((src)->field)
+#define bpf_core_read(dst, size, src)                                        \
+    bpf_probe_read_kernel((dst), (__u32)(size), (const void *)(src))
 #endif
 
 #define BPF_ANY 0
 #define BPF_MAP_TYPE_HASH 1
 #define BPF_MAP_TYPE_ARRAY 2
 #define BPF_MAP_TYPE_PERCPU_ARRAY 6
+#define BPF_MAP_TYPE_LRU_HASH 9
 #define BPF_MAP_TYPE_RINGBUF 27
 
 static void *(*bpf_map_lookup_elem)(void *map, const void *key) = (void *)1;
@@ -37,6 +43,8 @@ static long (*bpf_map_delete_elem)(void *map, const void *key) = (void *)3;
 static __u64 (*bpf_ktime_get_ns)(void) = (void *)5;
 static __u32 (*bpf_get_smp_processor_id)(void) = (void *)8;
 static __u64 (*bpf_get_current_pid_tgid)(void) = (void *)14;
+static long (*bpf_probe_read_kernel)(void *dst, __u32 size,
+                                     const void *unsafe_ptr) = (void *)113;
 static long (*bpf_ringbuf_output)(void *ringbuf, void *data, __u64 size,
                                   __u64 flags) = (void *)130;
 

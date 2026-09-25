@@ -518,6 +518,14 @@ syntax or unit test does not qualify target-kernel verifier, permission,
 pressure-injection, or production hook behavior; those remain explicit
 environment-level evidence.
 
+For eBPF network-drop evidence, filter by protocol and optional interface
+identity rather than current PID/TID, because receive/drop processing may run
+in softirq context. Aggregate in a fixed-capacity map and emit only the first
+threshold crossing in a bounded window. An unresolved interface may increment
+a diagnostic counter but must not produce `HOST_NIC_DROP`; that incident also
+requires a correlated transport-risk cycle. Preserve the fixed event size and
+treat target-kernel packet injection/verifier results as separate evidence.
+
 ## Code Review Checklist
 
 - Is the worst-case loop bounded by a static capacity or explicit budget?
