@@ -337,3 +337,36 @@ Added stable Zenoh command/query callback markers, shared gateway request IDs, B
 ### Next Steps
 
 - None - task complete
+
+
+## Session 11: eBPF Linux raw-port stall attribution
+
+**Date**: 2026-09-25
+**Task**: eBPF Linux raw-port stall attribution
+**Branch**: `main`
+
+### Summary
+
+Added stable Linux raw-port syscall markers, bounded eBPF duration tracking, transactional runtime attachment, HOST_PORT_STALL correlation, ABI tests, documentation, and qualification checks; local and GitHub quality gates passed.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `45e633b` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
