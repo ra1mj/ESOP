@@ -205,3 +205,23 @@ jobs:
           name: esop-ebpf-page-fault-runtime-qualification
           path: build/ebpf_page_fault_qualification.json
           if-no-files-found: error
+
+  ebpf-network-drop-runtime:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install eBPF and network build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang iproute2
+      - name: Run privileged network-drop runtime qualification
+        run: make test-ebpf-network-drop-runtime
+      - name: Upload network-drop runtime qualification
+        uses: actions/upload-artifact@v4
+        with:
+          name: esop-ebpf-network-drop-runtime-qualification
+          path: build/ebpf_network_drop_qualification.json
+          if-no-files-found: error

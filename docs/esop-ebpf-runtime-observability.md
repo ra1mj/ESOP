@@ -2,7 +2,7 @@
 
 - 文档版本：1.2
 - 日期：2026-09-25
-- 状态：设计基线；HostObservation、固定证据 ABI、有界 RuntimeIncident 相关器、同类事件窗口聚合、RuntimeAgent 门面、能力预检结果模型、Rust/Aya CO-RE loader、tracepoint attach、ringbuf 解码桥、有界硬 IRQ/softirq 时长证据、按 EtherType/ifindex 聚合的 `kfree_skb` 丢包证据、有界 cpufreq policy 限频 episode、Zenoh gateway stall 和 Linux raw-port syscall stall 证据已实现；托管 Linux 已覆盖 gateway/raw-port 共享 marker、进程 leader 退出、独立 cgroup v2 单进程 OOM victim、精确 TID 调度迁移、受控 wake-to-switch runqueue、受控 loopback `NET_RX` softirq 和受控 x86_64 匿名页首次写入 page-fault 链的 verifier/load/真实 attach/ringbuf/相关器资格，生产目标内核、真实 transport/NIC/自然负载根因、全局 OOM/受害 TGID 与 cgroup 归因、硬 IRQ 与持续压力/限频注入、页错误内存压力/major-minor 归因、开销和其余 hook 资格仍需单独完成
+- 状态：设计基线；HostObservation、固定证据 ABI、有界 RuntimeIncident 相关器、同类事件窗口聚合、RuntimeAgent 门面、能力预检结果模型、Rust/Aya CO-RE loader、tracepoint attach、ringbuf 解码桥、有界硬 IRQ/softirq 时长证据、按 EtherType/ifindex 聚合的 `kfree_skb` 丢包证据、有界 cpufreq policy 限频 episode、Zenoh gateway stall 和 Linux raw-port syscall stall 证据已实现；托管 Linux 已覆盖 gateway/raw-port 共享 marker、进程 leader 退出、独立 cgroup v2 单进程 OOM victim、精确 TID 调度迁移、受控 wake-to-switch runqueue、受控 loopback `NET_RX` softirq、受控 virtual-veth unhandled-EtherType 接收丢包和受控 x86_64 匿名页首次写入 page-fault 链的 verifier/load/真实 attach/ringbuf/相关器资格，生产目标内核、真实 transport/物理 NIC/自然负载根因、全局 OOM/受害 TGID 与 cgroup 归因、硬 IRQ 与持续压力/限频注入、物理网卡/driver/NAPI/qdisc/队列压力丢包、页错误内存压力/major-minor 归因、开销和其余 hook 资格仍需单独完成
 - 上游需求：[ESOP 软件产品需求文档](esop-software-prd.md) FR-047 至 FR-052、NFR-018
 
 ## 1. 设计结论
@@ -43,7 +43,7 @@ ESOP RT node
 
 两条证据链保持独立：RT 域是运动控制事实来源；eBPF 是 Linux 环境的解释与归因来源。相关器可以合并“同一个周期窗口内的事件”，但不能以缺少 eBPF 事件证明“系统没有问题”。
 
-当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、调度 TID/迁移计数窗口策略原子更新、硬 IRQ/softirq entry/exit attach、IRQ/softirq CPU/vector 过滤、EtherCAT EtherType/可选 ifindex 丢包策略更新、页错误计数窗口策略更新、cpufreq policy 下限/CPU 策略原子更新、Zenoh gateway 与 Linux raw-port syscall 成对 uprobe attach 和 `RuntimeAgent` 桥接；`bpf/` 提供固定 1024 项的调度 TID 迁移窗口 map、固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、固定 256 项的 CPU/进程页错误窗口 map、固定 256 项的 cpufreq policy episode map、固定 1024 项 gateway request 与 raw-port per-thread 操作 map、主线程退出过滤、OOM victim PID 归因、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。专用托管 Linux CI 已验证 gateway、raw-port、leader 退出、独立 cgroup v2 单进程 OOM victim、两 CPU 精确 TID 调度迁移、受控 FIFO 竞争下精确 TID 唤醒到切换时长、CPU/vector 过滤的 loopback `NET_RX` softirq 时长，以及预热独立子进程的 16 页匿名内存首次写入 page-fault 计数阈值链的 CO-RE verifier/load、真实 tracepoint/uprobe attach、ringbuf、统计、相关器和 observer health 共享链；生产目标内核与真实 Zenoh transport、AF_PACKET/NIC、自然负载 runqueue 根因、硬 IRQ、真实 NIC/持续 softirq、丢包/页错误内存压力与 major-minor 归因、全局 OOM/受害 TGID/namespace/cgroup 归因、限频压力、迁移原因/亲和性/cache 影响及开销资格仍需单独完成。
+当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、调度 TID/迁移计数窗口策略原子更新、硬 IRQ/softirq entry/exit attach、IRQ/softirq CPU/vector 过滤、EtherCAT EtherType/可选 ifindex 丢包策略更新、页错误计数窗口策略更新、cpufreq policy 下限/CPU 策略原子更新、Zenoh gateway 与 Linux raw-port syscall 成对 uprobe attach 和 `RuntimeAgent` 桥接；`bpf/` 提供固定 1024 项的调度 TID 迁移窗口 map、固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、固定 256 项的 CPU/进程页错误窗口 map、固定 256 项的 cpufreq policy episode map、固定 1024 项 gateway request 与 raw-port per-thread 操作 map、主线程退出过滤、OOM victim PID 归因、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。专用托管 Linux CI 已验证 gateway、raw-port、leader 退出、独立 cgroup v2 单进程 OOM victim、两 CPU 精确 TID 调度迁移、受控 FIFO 竞争下精确 TID 唤醒到切换时长、CPU/vector 过滤的 loopback `NET_RX` softirq 时长、唯一 virtual-veth 上四帧 unhandled EtherCAT receive-drop threshold，以及预热独立子进程的 16 页匿名内存首次写入 page-fault 计数阈值链的 CO-RE verifier/load、真实 tracepoint/uprobe attach、ringbuf、统计、相关器和 observer health 共享链；生产目标内核与真实 Zenoh transport、物理 AF_PACKET/NIC、自然负载 runqueue 根因、硬 IRQ、真实 NIC/持续 softirq、物理 NIC/driver/NAPI/qdisc/队列压力丢包、页错误内存压力与 major-minor 归因、全局 OOM/受害 TGID/namespace/cgroup 归因、限频压力、迁移原因/亲和性/cache 影响及开销资格仍需单独完成。
 
 ## 4. 观测域与 attach 点
 
@@ -123,6 +123,21 @@ host-order EtherType（默认 EtherCAT `0x88A4`），并可选精确匹配 ifind
 阈值时输出一条 96 字节证据，携带 ifindex、窗口计数和饱和为一字节的内核
 drop reason。由于软中断上下文中的 current task 不代表数据包所有者，网络
 证据的 PID/TID 固定为零，也不使用 `tracked_pid` 过滤。
+
+专用 `make test-ebpf-network-drop-runtime` 在特权托管 Linux 上创建唯一 veth 对，
+关闭可用的接口级 IPv6 自动流量并把夹具固定在一个 inherited allowed CPU。runtime
+只启用和要求 `skb:kfree_skb`，精确过滤接收端 ifindex 与 host-order EtherCAT
+EtherType `0x88a4`，阈值四、窗口一秒。错误 EtherType 的正向帧和 EtherCAT 反向帧
+必须分别推进 RX/TX 端独立 `rx_dropped`，同时保持 BPF statistics、ringbuf、incident
+和 Healthy lease 全部静默；正式四个正向 EtherCAT 帧必须使接收端 drop delta 至少为
+四、BPF `network_drops` 精确为四且只在阈值处发出一个事件。唯一 evidence 必须是
+`KernelNetwork/NetworkDrop/Error`，携带目标 CPU、接收 ifindex、窗口跨度和非零饱和
+kernel drop reason；它与 WKC-risk cycle 关联后只生成 confidence-75
+`HostNicDrop`/`ControlledStop` 和 fault `0x45422001` 的 Degraded heartbeat。严格报告
+写入 `build/ebpf_network_drop_qualification.json`，且仅在 BPF 拆卸、raw socket 关闭、
+veth 双端删除和 affinity 恢复后原子发布。该资格只覆盖 hosted virtual-veth
+unhandled-EtherType 接收丢包，不扩展为物理 NIC、driver/NAPI/XDP/qdisc、队列压力、
+拥塞、真实 EtherCAT 设备、生产内核、开销或 WCET 证据。
 
 页错误首版使用 `exceptions:page_fault_user` 的 typed tracepoint context，并
 按 `tracked_pid` 过滤。每个 `{CPU, 进程}` 在固定 256 项 LRU map 中维护窗口
@@ -391,8 +406,14 @@ NIC/driver/NAPI、持续 softirq 压力与产品预算，不再包含这条受�
 `NET_RX` 单次执行链；因此 EBPF-003 整体仍保持 partial。
 
 EBPF-004 当前已具备有界 CPU/ifindex 窗口、EtherType/ifindex 过滤、drop
-reason 证据解码和 transport-risk 相关器单元测试。该实现与 CO-RE 编译结果
-不等于目标内核真实队列压力、丢包注入、verifier 和开销资格。raw-port 子路径
+reason 证据解码和 transport-risk 相关器单元测试。专用
+`make test-ebpf-network-drop-runtime` 进一步在特权托管 Linux 上加载真实 CO-RE
+对象并只要求 `skb:kfree_skb`，通过唯一 veth 的错误协议/反向负向控制和四个正向
+unhandled EtherCAT 帧证明 ifindex/协议过滤、独立 `rx_dropped`、精确 BPF 计数、
+唯一 `HostNicDrop` controlled-stop incident、零 loss、Degraded health 与完整清理，
+严格报告写入 `build/ebpf_network_drop_qualification.json`。该资格不等于物理 NIC、
+driver/NAPI/XDP/qdisc、队列压力、拥塞、真实 EtherCAT 设备、生产内核或开销资格。
+raw-port 子路径
 当前已具备稳定 v1 begin/end marker、TX/RX outcome、独立阈值/epoch、固定 1024 项
 per-thread LRU、原子 uprobe pair、96 字节 `RawPortStall` 解码和风险周期相关器拒绝
 条件。专用 `make test-ebpf-raw-port-runtime` 还会在特权托管 Linux 上关闭无关
@@ -450,11 +471,14 @@ epoch、来源/目标 CPU 解码和相关器单元测试外，现已具备上述
 两 CPU 真实 attach/迁移/ringbuf/统计/incident/health 资格；runqueue 路径也已
 具备精确 TID、真实 wakeup/switch pair、受控 FIFO 竞争和 measured
 wake-to-switch/incident/health 资格；softirq 路径已具备 CPU/vector 过滤的受控
-loopback `NET_RX` duration/incident/health 资格；page-fault 路径已具备预热独立
+loopback `NET_RX` duration/incident/health 资格；network-drop 路径已具备唯一 veth、
+协议/方向负向控制、四帧 unhandled EtherCAT receive-drop、精确 threshold event、
+incident/health 与清理资格；page-fault 路径已具备预热独立
 子进程、16 页匿名内存首次写入、精确 `ru_minflt`/BPF/evidence 计数和唯一
 incident/health 资格；OOM 路径已具备独立 cgroup v2 单进程、局部事件计数、
 `SIGKILL`、精确 victim PID、incident 和 health 资格。这些结果仍不等于生产目标内核、自然负载 runqueue 根因、
-硬 IRQ 或真实 NIC/持续 softirq 压力、页错误内存压力/major-minor 归因、产品
+硬 IRQ 或真实 NIC/持续 softirq 压力、物理 NIC/driver/NAPI/XDP/qdisc/队列压力
+丢包、页错误内存压力/major-minor 归因、产品
 优先级/CPU 隔离、全局 OOM/受害 TGID/namespace/cgroup 归因、迁移原因/亲和性/cache/NUMA 或开销资格。CPU 限频路径已具备
 typed `cpu_frequency_limits`、policy CPU 过滤、
 低于产品下限 episode 去重、固定事件解码和相关器单元测试，但真实 policy 限制

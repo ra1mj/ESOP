@@ -524,7 +524,87 @@ in softirq context. Aggregate in a fixed-capacity map and emit only the first
 threshold crossing in a bounded window. An unresolved interface may increment
 a diagnostic counter but must not produce `HOST_NIC_DROP`; that incident also
 requires a correlated transport-risk cycle. Preserve the fixed event size and
-treat target-kernel packet injection/verifier results as separate evidence.
+treat target-kernel packet injection/verifier results as separate evidence. A
+hosted virtual-veth unhandled-protocol fixture can qualify the shared
+filter/window/ringbuf/incident path, but physical NIC, driver, NAPI, XDP,
+qdisc, queue-pressure, congestion, real EtherCAT-device, production-kernel,
+overhead, and WCET claims remain separate.
+
+## Scenario: eBPF Network-Drop Runtime Qualification
+
+### 1. Scope / Trigger
+
+- Trigger: add or change `skb:kfree_skb` protocol/ifindex filtering, bounded
+  network-drop aggregation, fixed evidence decode, cycle correlation, observer
+  health projection, or its hosted qualification.
+- Scope: one unique virtual-veth pair receives controlled unhandled EtherType
+  frames on one inherited allowed CPU. This does not qualify physical NICs,
+  drivers, NAPI, XDP, qdisc, queue pressure, congestion, real EtherCAT devices,
+  production kernels, overhead, WCET, or long-running HIL.
+
+### 2. Signatures
+
+- Entry: `make test-ebpf-network-drop-runtime`.
+- Fixture: `network_drop_qualification <esop_runtime.bpf.o> <report.json>`.
+- Artifact: `build/ebpf_network_drop_qualification.json`.
+- Validator: `scripts/validate-ebpf-network-drop-qualification.py <report>`.
+
+### 3. Deterministic Fixture
+
+- Build the BPF object and Rust fixture unprivileged; require `iproute2` and
+  elevate only the final fixture with root or passwordless sudo.
+- Create two unique, bounded interface names in the current network namespace.
+  Disable IPv6 only on those disposable links when their per-interface sysctls
+  exist, bring both ends up, and read exact ifindex/MAC/MTU/drop counters from
+  sysfs.
+- Pin the fixture to the first CPU in its inherited affinity mask. Open one
+  `AF_PACKET/SOCK_RAW` socket with protocol zero so injection does not register
+  a receive handler for the protocol under test.
+- Attach only `skb:kfree_skb`; require the attach; filter exact receive ifindex
+  and host-order EtherCAT `0x88a4`; use threshold four and a one-second window.
+- Before the formal run, send one wrong-EtherType frame forward and one
+  EtherCAT frame in reverse. Both independent receive-drop counters advance,
+  while BPF stats, ringbuf, incident retention, loss, and health remain empty.
+- Publish a WKC-risk cycle, then send exactly four forward EtherCAT frames.
+  Require receive `rx_dropped` delta at least four and no formal reverse delta.
+
+### 4. Required Assertions
+
+- Final `network_drops=4`, `network_unattributed=0`,
+  `network_threshold_events=1`, `emitted_events=1`, and `lost_events=0`; all
+  unrelated BPF statistics remain zero.
+- Exactly one evidence item is `KernelNetwork/NetworkDrop/Error` with zero
+  PID/TID/IRQ, selected CPU, receive ifindex, count/value/threshold four,
+  positive duration below one second, nonzero bounded kernel reason, and exact
+  cycle/transition identity.
+- Exactly one Error/confidence-75 `HostNicDrop` recommends `ControlledStop`;
+  observer health moves Healthy to Degraded with fault `0x45422001`.
+- Drop the runtime, explicitly close the packet socket, delete the veth pair,
+  verify both sysfs entries disappear, restore inherited CPU affinity, and only
+  then atomically publish the closed-schema report.
+
+### 5. Failure Policy
+
+- Missing `ip`, root/raw-socket/net-admin/BPF permission, tracepoint, complete
+  attach, exact controls, drop counters, event/stat counts, or cleanup -> fail
+  and publish no qualified report.
+- Any control BPF activity, malformed/rejected record, event loss, extra
+  incident, wrong classification/cycle/identity, zero reason, or observer drift
+  invalidates qualification.
+- Do not hard-code a kernel drop-reason enum number and do not weaken exact BPF
+  counts into ranges; the independent interface counter is the lower-bound
+  cross-check.
+
+### 6. Tests Required
+
+- Rust build and Clippy cover veth, affinity, raw-socket, evidence, and RAII
+  cleanup paths; BPF syntax and CO-RE compilation cover production code.
+- Validator regressions reject missing/unknown/bool fields, invalid interface
+  identity, silent-control drift, counter inconsistencies, partial masks,
+  stats/loss, incident/evidence semantics, timing/reason, health, and cleanup.
+- Dedicated Actions must install clang/iproute2, execute the privileged fixture,
+  upload the report, and the downloaded artifact must independently pass the
+  repository validator.
 
 For eBPF page-fault evidence, filter by the tracked process and aggregate by a
 bounded CPU/process key. Emit only the first count-threshold crossing in a
