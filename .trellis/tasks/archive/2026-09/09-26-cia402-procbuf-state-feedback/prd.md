@@ -67,7 +67,7 @@ The result must let local and remote consumers distinguish current verified feed
 - [x] Linux simulated end-to-end tests cover PDO receive, output acceptance, ProcBuf publication, and IPC/Protobuf projection.
 - [x] Existing lifecycle, EtherCAT, ProcBuf, IPC, BPF/eBPF, and Zenoh tests remain green.
 - [x] Documentation and `capability_manifest.json` consistently report ABI v6 and the implemented feedback capability.
-- [ ] Changes are committed, pushed to `ra1mj/ESOP`, and the resulting GitHub Actions run succeeds.
+- [x] Changes are committed, pushed to `ra1mj/ESOP`, and the resulting GitHub Actions run succeeds.
 
 ## Out of Scope
 

@@ -81,9 +81,9 @@ rg -n "ABI_VERSION|ABI v5|ABI v6|procbuf_abi|cia402_procbuf_feedback" README.md 
 - [x] Run formatting and workspace checks.
 - [x] Run the repository's complete local CI-equivalent commands, including BPF/eBPF checks where available.
 - [x] Review the diff for unintended ABI, lifecycle, or documentation changes.
-- [ ] Update task acceptance checkboxes and Trellis journal.
-- [ ] Commit and push to `origin/main`.
-- [ ] Monitor the resulting GitHub Actions run to success; fix and repush any failure.
+- [x] Update task acceptance checkboxes and Trellis journal.
+- [x] Commit and push to `origin/main`.
+- [x] Monitor the resulting GitHub Actions run to success; fix and repush any failure.
 
 Validation:
 
