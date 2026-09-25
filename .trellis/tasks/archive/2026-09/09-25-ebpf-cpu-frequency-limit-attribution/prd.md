@@ -52,21 +52,21 @@ clock, thermal cause, power-budget cause, or time spent throttled.
 
 ## Acceptance Criteria
 
-- [ ] The BPF bundle contains a bounded policy-CPU state map and a typed
+- [x] The BPF bundle contains a bounded policy-CPU state map and a typed
       `power:cpu_frequency_limits` program.
-- [ ] The first below-floor policy update emits one record, repeated
+- [x] The first below-floor policy update emits one record, repeated
       below-floor changes are suppressed, and an at/above-floor update rearms
       the next episode.
-- [ ] The fixed event decodes the affected policy CPU, maximum frequency, and
+- [x] The fixed event decodes the affected policy CPU, maximum frequency, and
       configured floor without changing its 96-byte size.
-- [ ] Runtime configuration rejects a zero floor and invalid CPU-filter
+- [x] Runtime configuration rejects a zero floor and invalid CPU-filter
       combinations without partially mutating the kernel context.
-- [ ] Unit tests prove `HOST_CPU_THROTTLE` requires both a below-floor maximum
+- [x] Unit tests prove `HOST_CPU_THROTTLE` requires both a below-floor maximum
       and a correlated transport-risk cycle.
-- [ ] C and Rust agree on expanded context/stat map sizes, attach masks remain
+- [x] C and Rust agree on expanded context/stat map sizes, attach masks remain
       explicit, and statistics aggregation tests cover saturation.
-- [ ] `make bpf-syntax` and `make ci` pass locally.
-- [ ] GitHub Actions builds the real CO-RE BPF object and passes the Rust gate.
+- [x] `make bpf-syntax` and `make ci` pass locally.
+- [x] GitHub Actions builds the real CO-RE BPF object and passes the Rust gate.
 
 ## Non-Goals
 
