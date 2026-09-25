@@ -594,11 +594,18 @@ overhead, and WCET claims remain separate.
 - Do not hard-code a kernel drop-reason enum number and do not weaken exact BPF
   counts into ranges; the independent interface counter is the lower-bound
   cross-check.
+- Model `trace_event_raw_kfree_skb.reason` as an unsigned 32-bit field in the
+  vendored BTF and keep the BPF read unsigned. A signed comparison can make
+  Clang emit a `FIELD_SIGNED` CO-RE relocation that Aya 0.13 leaves as an
+  invalid pseudo-helper call, so syntax/compile checks alone are insufficient;
+  the hosted verifier/load gate is mandatory.
 
 ### 6. Tests Required
 
 - Rust build and Clippy cover veth, affinity, raw-socket, evidence, and RAII
   cleanup paths; BPF syntax and CO-RE compilation cover production code.
+- Object inspection must not leave compiler CO-RE pseudo-helper calls in the
+  network-drop program; the target-kernel verifier/load is the final check.
 - Validator regressions reject missing/unknown/bool fields, invalid interface
   identity, silent-control drift, counter inconsistencies, partial masks,
   stats/loss, incident/evidence semantics, timing/reason, health, and cleanup.

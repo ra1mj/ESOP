@@ -132,7 +132,7 @@ struct trace_event_raw_kfree_skb {
     void *location;
     const void *rx_sk;
     unsigned short protocol;
-    int reason;
+    unsigned int reason;
     char __data[0];
 };
 

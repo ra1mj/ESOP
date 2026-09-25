@@ -1016,8 +1016,7 @@ int esop_network_drop(struct trace_event_raw_kfree_skb *event)
         stats->network_drops++;
     }
 
-    int raw_reason = BPF_CORE_READ(event, reason);
-    __u32 reason = raw_reason < 0 ? 0 : (__u32)raw_reason;
+    __u32 reason = (__u32)BPF_CORE_READ(event, reason);
     __u64 now = bpf_ktime_get_ns();
     struct esop_network_drop_key key = {
         .cpu = bpf_get_smp_processor_id(),

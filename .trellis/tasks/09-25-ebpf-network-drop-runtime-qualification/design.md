@@ -56,8 +56,10 @@ privilege/tool preflight
 
 ## Runtime and correlation contract
 
-- The runtime enables and requires only `ATTACH_NETWORK_DROP`. Existing
-  production BPF, decoder, statistics, correlator, and health policy remain
+- The runtime enables and requires only `ATTACH_NETWORK_DROP`. The hosted load
+  gate also verifies that the vendored `kfree_skb.reason` type is unsigned and
+  the BPF read does not require a `FIELD_SIGNED` relocation unsupported by the
+  current Aya loader. Decoder, statistics, correlator, and health policy remain
   unchanged.
 - The BPF aggregation key is `{cpu, ifindex}`. CPU affinity plus synchronous
   veth receive processing makes one deterministic key; the emitted CPU must
@@ -98,8 +100,10 @@ privilege/tool preflight
 
 ## Compatibility and safety
 
-- This task adds a qualification harness only. Production BPF maps, programs,
-  fixed ABIs, runtime APIs, and incident policy are unchanged.
+- This task adds the qualification harness and, if the target verifier exposes
+  a CO-RE portability defect, may minimally align the vendored tracepoint field
+  type/read with the target kernel. Production maps, fixed ABIs, runtime APIs,
+  attachment shape, and incident policy remain unchanged.
 - The example is Linux-only and uses existing `libc` support. Production
   crates gain no dependency.
 - BPF/Rust compilation and report validation remain unprivileged. Only the
@@ -111,4 +115,5 @@ privilege/tool preflight
   chain. It does not qualify physical NICs, drivers, NAPI, XDP, qdisc, queue
   pressure, real EtherCAT devices, production kernels, overhead, or WCET.
 - Rollback removes the example, runner, validator/tests, Make/CI targets, docs,
-  and capability-evidence entry. Production runtime behavior is unaffected.
+  capability-evidence entry, and the paired unsigned tracepoint field/read
+  alignment if the network-drop program is removed.
