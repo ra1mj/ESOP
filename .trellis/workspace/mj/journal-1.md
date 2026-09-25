@@ -604,3 +604,36 @@ Added and qualified the controlled hosted x86_64 page-fault count-window chain, 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 19: Qualify hosted memcg OOM eBPF path
+
+**Date**: 2026-09-25
+**Task**: Qualify hosted memcg OOM eBPF path
+**Branch**: `main`
+
+### Summary
+
+Added a fail-closed cgroup-v2 OOM runtime fixture, strict report validator/tests, dedicated privileged CI artifact, and narrow FR-048/EBPF-005 documentation. GitHub Actions run 36134613286 passed all 10 jobs; the downloaded report independently validated one local OOM kill, one BPF incident, zero loss, Failed observation, and successful cleanup.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `560e85d` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
