@@ -532,8 +532,64 @@ bounded window, preserve the triggering task and architecture error code, and
 require a correlated cycle-risk window before producing `HOST_PAGE_FAULT`.
 Do not infer major/minor outcome or handler duration from
 `exceptions:page_fault_user`; those require a separate qualified observation
-point. Preserve the fixed event size and treat target-kernel fault injection,
-verifier behavior, and overhead as separate evidence.
+point. Preserve the fixed event size. Hosted x86_64 qualification may prove the
+controlled anonymous-page first-write count-to-incident chain, but memory
+pressure, major/minor attribution, production kernels, verifier portability,
+and overhead remain separate evidence.
+
+## Scenario: eBPF Page-Fault Runtime Qualification
+
+### 1. Scope / Trigger
+
+- Trigger: add or change page-fault BPF filtering, window aggregation, fixed
+  evidence decode, cycle correlation, observer health projection, or its host
+  qualification.
+- Scope: one pre-warmed, CPU-pinned child performs first writes to exactly 16
+  isolated anonymous pages on hosted x86_64 Linux. This does not qualify fault
+  address/IP, BPF major/minor attribution, handler duration, memory pressure,
+  swap/storage behavior, natural workload root cause, product thresholds,
+  production kernels, overhead, WCET, or long-running HIL.
+
+### 2. Deterministic Fixture
+
+- Build the BPF object and Rust fixture unprivileged; elevate only the final
+  fixture with root or passwordless sudo.
+- Before loading BPF, start a separate child, pin it to one allowed `u16` CPU,
+  warm the executable/control path, and prepare 16 separate anonymous mappings.
+- Each mapping must contain one writable page followed by a `PROT_NONE` guard
+  page and must request `MADV_NOHUGEPAGE`; do not touch the writable page before
+  the formal injection.
+- Attach only `exceptions:page_fault_user`, require that attach, set
+  `tracked_pid` to the child TGID, set the count threshold to 16, and provide one
+  transport-risk cycle before releasing the child.
+- The formal injection performs exactly one first write per page. Keep the child
+  blocked after reporting until BPF evidence, stats, incident, and health have
+  been captured and the runtime has been dropped, so teardown faults cannot
+  contaminate the window.
+
+### 3. Required Assertions
+
+- Child `getrusage(RUSAGE_SELF).ru_minflt` delta is exactly 16.
+- `page_faults`, emitted event count, decoded evidence count, evidence value,
+  and incident count are exactly 16/1/1/16/16 as applicable; ring-buffer loss is
+  zero and all unrelated attach/stat counters remain zero.
+- The sole evidence is `KernelMemory/PageFault`, belongs to the child PID on the
+  selected CPU, uses the x86_64 user/write/not-present error-code detail, and
+  carries the configured threshold/window and correlated cycle.
+- The sole incident is Warning/confidence-65 `HostPageFault` with
+  `DegradeHostObservation`; the final heartbeat is Degraded with fault
+  `0x45422001` and the expected monotonic epoch/sequence transition.
+- Atomically write `build/ebpf_page_fault_qualification.json`, validate it with
+  the closed-schema validator, and upload it from the dedicated hosted CI job.
+
+### 4. Failure Policy
+
+- Fail closed on unavailable x86_64 architecture, missing tracepoint, attach or
+  verifier error, PID/CPU mismatch, any count mismatch, unexpected event,
+  ring-buffer loss, wrong classification/action/health transition, malformed
+  report, or child protocol/exit failure.
+- Do not weaken exact counts to ranges to mask cold-path or teardown faults.
+  Move all setup before attach and all cleanup after detach instead.
 
 For eBPF lifecycle hard facts, remember that `sched_process_exit` fires for
 threads. Apply the configured process filter to TGID, emit `ProcessExit` only
