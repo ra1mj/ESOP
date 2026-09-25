@@ -99,9 +99,9 @@ python3 -m unittest discover -s scripts/tests -p 'test_robot_build_report.py'
 - [x] Run cfggen example reproduction and generated-header compilation.
 - [x] Run BPF/eBPF and Zenoh integration checks available on the host.
 - [x] Review generated artifacts and source diff for host-path/time leakage.
-- [ ] Complete task acceptance and Trellis journal.
-- [ ] Commit and push to `origin/main`.
-- [ ] Monitor GitHub Actions to success and fix/repush any failure.
+- [x] Complete task acceptance and Trellis journal.
+- [x] Commit and push to `origin/main`.
+- [x] Monitor GitHub Actions to success and fix/repush any failure.
 
 Validation:
 

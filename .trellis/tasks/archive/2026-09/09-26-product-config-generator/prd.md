@@ -126,7 +126,7 @@ contracts.
       implemented subset and its qualification boundaries.
 - [x] `make ci`, cfggen tests, build-report tests, BPF build, and Zenoh tests
       pass locally.
-- [ ] Changes are committed, pushed to `ra1mj/ESOP`, and the resulting GitHub
+- [x] Changes are committed, pushed to `ra1mj/ESOP`, and the resulting GitHub
       Actions run succeeds.
 
 ## Out of Scope
