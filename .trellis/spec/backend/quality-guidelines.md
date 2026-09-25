@@ -1047,6 +1047,12 @@ the measured hosted-kernel controlled wake-to-switch chain.
 - Apply CPU/vector filters on entry before inserting a start timestamp. A
   filtered event creates no map state or statistics; exit naturally ignores
   it. Cycle updates must preserve both selectors.
+- CPU/vector matching is spatial filtering, not temporal isolation. The hosted
+  qualifier must load each fresh runtime with an exact impossible softirq
+  vector, open vector 3 only after the pre-injection `NET_RX` counter read, and
+  close it immediately after the post-send counter read, before receive/poll.
+  `u32::MAX` remains the production all-vector sentinel and must not be used as
+  the closed value. Record and validate both phases' closed/open/closed states.
 - Use two fresh runtimes and agents. Calibration uses threshold one nanosecond
   and must produce exactly one record/incident/sample/overrun/emission with
   zero loss. Formal threshold is
@@ -1070,9 +1076,10 @@ the measured hosted-kernel controlled wake-to-switch chain.
 
 ### 4. Validation & Error Matrix
 
-- Missing softirq pair, partial capability, invalid filter, CPU sentinel use,
-  affinity mismatch, unavailable UDP GSO, or incomplete send/receive -> hard
-  prerequisite failure and no final report.
+- Missing softirq pair, partial capability, invalid/unchanged gate state, CPU
+  sentinel use, affinity mismatch, unavailable UDP GSO, incomplete send/receive,
+  or failure to close after an opened gate -> hard prerequisite failure and no
+  final report.
 - More or fewer than one target-CPU `NET_RX` execution, nonempty baseline,
   extra/missing ringbuf record, count drift, or any loss -> qualification
   failure; do not retry with weakened counts.
@@ -1087,14 +1094,16 @@ the measured hosted-kernel controlled wake-to-switch chain.
 ### 5. Good/Base/Bad Cases
 
 - Good: select allowed CPU 7, pin and verify it, inject one 54-segment GSO
-  payload, observe exactly one vector-3 action, and produce one matching
-  controlled-stop incident with zero loss.
+  payload while the filter transitions closed/vector-3/closed, observe exactly
+  one vector-3 action, and produce one matching controlled-stop incident with
+  zero loss.
 - Base: source/unit/BPF-syntax checks pass, but a host without BPF permission,
   tracepoints, UDP GSO, root/passwordless sudo, or exact counts produces no
   qualification claim.
-- Bad: count all CPUs, filter only at exit, reuse calibration runtime state,
-  accept `>= 1` records, infer ownership from current PID/TID, or call the
-  loopback threshold a product interrupt budget.
+- Bad: count all CPUs, leave vector 3 open during setup/receive/poll, filter only
+  at exit, reuse calibration runtime state, accept `>= 1` records, infer
+  ownership from current PID/TID, or call the loopback threshold a product
+  interrupt budget.
 
 ### 6. Tests Required
 
@@ -1102,8 +1111,9 @@ the measured hosted-kernel controlled wake-to-switch chain.
   defaults, filter updates, cycle preservation, and incident identity by kind,
   CPU, and vector. BPF syntax and CO-RE compilation cover entry filtering.
 - Fixture build and Clippy cover affinity/socket/cleanup paths. Closed-schema
-  tests reject filter/attach, CPU/vector, GSO, calibration, counter/loss,
-  identity/cycle/timing, and health-transition failures.
+  tests reject filter/attach, closed/open/closed gate state, CPU/vector, GSO,
+  calibration, counter/loss, identity/cycle/timing, and health-transition
+  failures.
 - Dedicated Actions must run the privileged fixture, upload
   `ebpf_softirq_qualification.json`, and the downloaded artifact must
   independently pass the repository validator.
@@ -1118,9 +1128,10 @@ or a production budget.
 
 #### Correct
 
-Filter one allowed CPU and vector before state insertion, use isolated
-calibration and formal runs, require one complete GSO/NET_RX/event/incident
-chain with zero loss, and claim only controlled hosted loopback qualification.
+Filter one allowed CPU, open vector 3 only around the counter-bounded GSO send,
+close it before receive/poll, use isolated calibration and formal runs, require
+one complete GSO/NET_RX/event/incident chain with zero loss, and claim only
+controlled hosted loopback qualification.
 
 ## Scenario: eBPF Scheduler Migration Evidence
 

@@ -112,13 +112,15 @@ attach 必须成对启用，阈值事件仍需与 transport-risk cycle 同窗才
 第一个 link，capability mask 也不会发布半组能力。
 
 专用 `make test-ebpf-softirq-runtime` 在特权托管 Linux 上从实际 allowed affinity
-选择并固定一个安静 CPU，只要求 softirq pair，并在 entry 写入起始 map 前精确过滤
-该 CPU 与 `NET_RX` vector 3。夹具通过一次 `UDP_SEGMENT=1200` 的 64,800 字节
-loopback 发送产生 54 个 datagram；一次独立校准运行测得完整 vector action 时长，
+选择并固定一个安静 CPU，只要求 softirq pair。每个运行时先把该 CPU 的精确 vector
+过滤器置于关闭向量，只在注入前后 `/proc/softirqs` 计数采样包围的一次 GSO 发送期间
+开放 `NET_RX` vector 3，然后在接收 datagram 与 ringbuf 轮询前恢复关闭；这避免把同
+CPU/vector 的非注入窗口活动误计入资格。夹具通过一次 `UDP_SEGMENT=1200` 的
+64,800 字节 loopback 发送产生 54 个 datagram；一次独立校准运行测得完整 vector action 时长，
 正式运行使用 `max(1, calibration_duration_ns / 8)` 阈值并要求恰好一次目标 CPU
 `NET_RX`、一条 `KernelIrq/SoftirqCpuTime/Error`、一个 confidence-70
 `HostIrqStorm`/`ControlledStop` incident、零 loss 和 Healthy-to-Degraded heartbeat。
-CPU/vector、socket、校准、统计、cycle、incident 和健康字段原子写入
+CPU/vector 门控前/中/后状态、socket、校准、统计、cycle、incident 和健康字段原子写入
 `build/ebpf_softirq_qualification.json` 并由封闭 schema 校验。PID/TID 只表示 inline
 softirq 返回时的 task context，不表示 softirq 所有权或根因。该资格不覆盖硬 IRQ、
 真实 NIC/driver/NAPI、产品中断预算、持续压力、生产内核、开销或 WCET。
@@ -428,7 +430,7 @@ heartbeat 资格。自然负载 runqueue 根因、IRQ/softirq 压力、cpufreq p
 和长测仍未资格化，因此 EBPF-003 整体保持 partial。
 
 EBPF-003 的 softirq-duration 子路径还通过 `make test-ebpf-softirq-runtime` 完成真实
-softirq pair 挂载、目标 CPU/vector 过滤、54-segment loopback UDP GSO 注入、独立
+softirq pair 挂载、目标 CPU/vector 短时门控、54-segment loopback UDP GSO 注入、独立
 校准和正式阈值、唯一 `SoftirqCpuTime`/`HostIrqStorm`/`ControlledStop` 以及
 Degraded heartbeat 资格。这里“仍未资格化的 IRQ/softirq 压力”明确指硬 IRQ、真实
 NIC/driver/NAPI、持续 softirq 压力与产品预算，不再包含这条受控 hosted loopback

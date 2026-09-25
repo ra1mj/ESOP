@@ -15,7 +15,10 @@ use esop_ebpf_agent::{
     AgentState, CycleContext, EvidenceDomain, EvidenceKind, IncidentCode, IncidentSeverity,
     RecommendedAction, RuntimeAgent, RuntimeIncident,
 };
-use esop_ebpf_runtime::{ATTACH_SOFTIRQ, BpfRuntime, KernelStats, PollReport, RuntimeConfig};
+use esop_ebpf_runtime::{
+    ATTACH_SOFTIRQ, BpfRuntime, INTERRUPT_FILTER_ALL_VECTORS, KernelStats, PollReport,
+    RuntimeConfig,
+};
 
 const BOOT_ID: u64 = 0x4553_4f50_534f_4654;
 const AGENT_EPOCH: u64 = 1;
@@ -26,6 +29,7 @@ const INCIDENT_WINDOW_NS: u64 = 1_000_000_000;
 const CALIBRATION_THRESHOLD_NS: u64 = 1;
 const CALIBRATION_DIVISOR: u64 = 8;
 const NET_RX_VECTOR: u32 = 3;
+const INTERRUPT_GATE_CLOSED_VECTOR: u32 = INTERRUPT_FILTER_ALL_VECTORS - 1;
 const UDP_SEGMENT_BYTES: usize = 1_200;
 const UDP_SEGMENT_COUNT: usize = 54;
 const UDP_PAYLOAD_BYTES: usize = UDP_SEGMENT_BYTES * UDP_SEGMENT_COUNT;
@@ -193,29 +197,56 @@ impl GsoSockets {
         Ok(Self { sender, receiver })
     }
 
-    fn inject(self, cpu: u16) -> Result<InjectionResult, Box<dyn Error>> {
+    fn inject(self, runtime: &mut BpfRuntime, cpu: u16) -> Result<InjectionResult, Box<dyn Error>> {
         if current_cpu()? != cpu {
             return Err(invalid_data("fixture migrated before softirq injection").into());
+        }
+        let filter_before = runtime.kernel_context();
+        if filter_before.interrupt_filter_cpu != cpu
+            || filter_before.interrupt_filter_vector != INTERRUPT_GATE_CLOSED_VECTOR
+        {
+            return Err(invalid_data("softirq observation gate was not initially closed").into());
         }
         let counts_before = net_rx_counts()?;
         let net_rx_before = *counts_before
             .get(usize::from(cpu))
             .ok_or_else(|| invalid_data("selected CPU had no NET_RX counter"))?;
-        let payload = vec![0x5a; UDP_PAYLOAD_BYTES];
-        let sent_bytes = send_udp_segment(&self.sender, &payload, UDP_SEGMENT_BYTES as u16)?;
-        if sent_bytes != UDP_PAYLOAD_BYTES {
-            return Err(invalid_data(format!(
-                "UDP GSO send was partial: {sent_bytes}/{UDP_PAYLOAD_BYTES}"
-            ))
-            .into());
+
+        runtime.update_interrupt_filter(cpu, NET_RX_VECTOR)?;
+        let filter_active = runtime.kernel_context();
+        let gated_result = (|| -> Result<(usize, u64), Box<dyn Error>> {
+            if filter_active.interrupt_filter_cpu != cpu
+                || filter_active.interrupt_filter_vector != NET_RX_VECTOR
+            {
+                return Err(invalid_data("softirq observation gate did not open").into());
+            }
+            let payload = vec![0x5a; UDP_PAYLOAD_BYTES];
+            let sent_bytes = send_udp_segment(&self.sender, &payload, UDP_SEGMENT_BYTES as u16)?;
+            if sent_bytes != UDP_PAYLOAD_BYTES {
+                return Err(invalid_data(format!(
+                    "UDP GSO send was partial: {sent_bytes}/{UDP_PAYLOAD_BYTES}"
+                ))
+                .into());
+            }
+            if current_cpu()? != cpu {
+                return Err(invalid_data("fixture migrated during softirq injection").into());
+            }
+            let counts_after = net_rx_counts()?;
+            let net_rx_after = *counts_after
+                .get(usize::from(cpu))
+                .ok_or_else(|| invalid_data("selected CPU lost its NET_RX counter"))?;
+            Ok((sent_bytes, net_rx_after))
+        })();
+
+        runtime.update_interrupt_filter(cpu, INTERRUPT_GATE_CLOSED_VECTOR)?;
+        let filter_after = runtime.kernel_context();
+        if filter_after.interrupt_filter_cpu != cpu
+            || filter_after.interrupt_filter_vector != INTERRUPT_GATE_CLOSED_VECTOR
+        {
+            return Err(invalid_data("softirq observation gate did not close").into());
         }
-        if current_cpu()? != cpu {
-            return Err(invalid_data("fixture migrated during softirq injection").into());
-        }
-        let counts_after = net_rx_counts()?;
-        let net_rx_after = *counts_after
-            .get(usize::from(cpu))
-            .ok_or_else(|| invalid_data("selected CPU lost its NET_RX counter"))?;
+
+        let (sent_bytes, net_rx_after) = gated_result?;
         let net_rx_delta = net_rx_after.saturating_sub(net_rx_before);
         if net_rx_delta != 1 {
             return Err(invalid_data(format!(
@@ -242,6 +273,9 @@ impl GsoSockets {
             net_rx_before,
             net_rx_after,
             net_rx_delta,
+            filter_vector_before: filter_before.interrupt_filter_vector,
+            filter_vector_active: filter_active.interrupt_filter_vector,
+            filter_vector_after: filter_after.interrupt_filter_vector,
         })
     }
 }
@@ -301,6 +335,9 @@ struct InjectionResult {
     net_rx_before: u64,
     net_rx_after: u64,
     net_rx_delta: u64,
+    filter_vector_before: u32,
+    filter_vector_active: u32,
+    filter_vector_after: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -345,7 +382,7 @@ fn run_phase(
         irq_duration_threshold_ns: u64::MAX,
         softirq_duration_threshold_ns: threshold_ns,
         interrupt_filter_cpu: cpu,
-        interrupt_filter_vector: NET_RX_VECTOR,
+        interrupt_filter_vector: INTERRUPT_GATE_CLOSED_VECTOR,
         boot_id: BOOT_ID,
         agent_epoch: AGENT_EPOCH,
         ..RuntimeConfig::default()
@@ -357,7 +394,7 @@ fn run_phase(
         || snapshot.required_attach_mask != ATTACH_SOFTIRQ
         || !snapshot.attach_ready()
         || runtime.kernel_context().interrupt_filter_cpu != cpu
-        || runtime.kernel_context().interrupt_filter_vector != NET_RX_VECTOR
+        || runtime.kernel_context().interrupt_filter_vector != INTERRUPT_GATE_CLOSED_VECTOR
     {
         return Err(invalid_data("softirq tracepoint capability or filter was incomplete").into());
     }
@@ -404,7 +441,7 @@ fn run_phase(
 
     let baseline = runtime.statistics()?;
     require_empty_interrupt_statistics(baseline, "softirq baseline")?;
-    let injection = sockets.inject(cpu)?;
+    let injection = sockets.inject(&mut runtime, cpu)?;
 
     let mut poll = PollReport::default();
     let started = Instant::now();
@@ -640,6 +677,7 @@ fn run(object_path: PathBuf, output_path: PathBuf) -> Result<(), Box<dyn Error>>
         json_number("quiet_net_rx_after", selection.after),
         json_number("quiet_net_rx_delta", selection.delta),
         json_number("softirq_vector", NET_RX_VECTOR),
+        json_number("interrupt_gate_closed_vector", INTERRUPT_GATE_CLOSED_VECTOR),
         json_number("udp_segment_bytes", UDP_SEGMENT_BYTES),
         json_number("udp_segment_count", UDP_SEGMENT_COUNT),
         json_number("udp_payload_bytes", UDP_PAYLOAD_BYTES),
@@ -662,6 +700,18 @@ fn run(object_path: PathBuf, output_path: PathBuf) -> Result<(), Box<dyn Error>>
         json_number(
             "calibration_net_rx_delta",
             calibration.injection.net_rx_delta,
+        ),
+        json_number(
+            "calibration_filter_vector_before",
+            calibration.injection.filter_vector_before,
+        ),
+        json_number(
+            "calibration_filter_vector_active",
+            calibration.injection.filter_vector_active,
+        ),
+        json_number(
+            "calibration_filter_vector_after",
+            calibration.injection.filter_vector_after,
         ),
         json_number(
             "calibration_runtime_attach_mask",
@@ -749,6 +799,15 @@ fn run(object_path: PathBuf, output_path: PathBuf) -> Result<(), Box<dyn Error>>
         json_number("formal_net_rx_before", formal.injection.net_rx_before),
         json_number("formal_net_rx_after", formal.injection.net_rx_after),
         json_number("formal_net_rx_delta", formal.injection.net_rx_delta),
+        json_number(
+            "filter_vector_before",
+            formal.injection.filter_vector_before,
+        ),
+        json_number(
+            "filter_vector_active",
+            formal.injection.filter_vector_active,
+        ),
+        json_number("filter_vector_after", formal.injection.filter_vector_after),
         json_number("runtime_attach_mask", formal.runtime_attach_mask),
         json_number("required_attach_mask", formal.required_attach_mask),
         json_number("interrupt_filter_cpu", selection.cpu),

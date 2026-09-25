@@ -18,6 +18,7 @@ ATTACH_SOFTIRQ = 768
 BOOT_ID = 0x4553_4F50_534F_4654
 PAYLOAD_BYTES = 64_800
 DEGRADED_INCIDENT_FAULT = 0x4542_2001
+INTERRUPT_GATE_CLOSED_VECTOR = (1 << 32) - 2
 
 
 def qualified_report():
@@ -38,6 +39,7 @@ def qualified_report():
         "quiet_net_rx_after": 100,
         "quiet_net_rx_delta": 0,
         "softirq_vector": 3,
+        "interrupt_gate_closed_vector": INTERRUPT_GATE_CLOSED_VECTOR,
         "udp_segment_bytes": 1_200,
         "udp_segment_count": 54,
         "udp_payload_bytes": PAYLOAD_BYTES,
@@ -49,6 +51,9 @@ def qualified_report():
         "calibration_net_rx_before": 101,
         "calibration_net_rx_after": 102,
         "calibration_net_rx_delta": 1,
+        "calibration_filter_vector_before": INTERRUPT_GATE_CLOSED_VECTOR,
+        "calibration_filter_vector_active": 3,
+        "calibration_filter_vector_after": INTERRUPT_GATE_CLOSED_VECTOR,
         "calibration_runtime_attach_mask": ATTACH_SOFTIRQ,
         "calibration_required_attach_mask": ATTACH_SOFTIRQ,
         "calibration_baseline_emitted_events": 0,
@@ -75,6 +80,9 @@ def qualified_report():
         "formal_net_rx_before": 103,
         "formal_net_rx_after": 104,
         "formal_net_rx_delta": 1,
+        "filter_vector_before": INTERRUPT_GATE_CLOSED_VECTOR,
+        "filter_vector_active": 3,
+        "filter_vector_after": INTERRUPT_GATE_CLOSED_VECTOR,
         "runtime_attach_mask": ATTACH_SOFTIRQ,
         "required_attach_mask": ATTACH_SOFTIRQ,
         "interrupt_filter_cpu": target_cpu,
@@ -203,6 +211,25 @@ class SoftirqQualificationTests(unittest.TestCase):
             ("udp_segment_bytes", 1_199, "must be 1200"),
             ("udp_segment_count", 53, "must be 54"),
             ("formal_received_datagrams", 53, "must be 54"),
+        ):
+            with self.subTest(key=key):
+                report = qualified_report()
+                report[key] = value
+                self.assert_rejected(report, reason)
+
+    def test_interrupt_gate_sequence_is_exact(self):
+        for key, value, reason in (
+            ("interrupt_gate_closed_vector", 3, "must be 4294967294"),
+            ("calibration_filter_vector_before", 3, "must be 4294967294"),
+            (
+                "calibration_filter_vector_active",
+                INTERRUPT_GATE_CLOSED_VECTOR,
+                "must be 3",
+            ),
+            ("calibration_filter_vector_after", 3, "must be 4294967294"),
+            ("filter_vector_before", 3, "must be 4294967294"),
+            ("filter_vector_active", INTERRUPT_GATE_CLOSED_VECTOR, "must be 3"),
+            ("filter_vector_after", 3, "must be 4294967294"),
         ):
             with self.subTest(key=key):
                 report = qualified_report()

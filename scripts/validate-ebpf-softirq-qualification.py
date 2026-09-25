@@ -13,6 +13,7 @@ CALIBRATION_CYCLE_SEQ = 41
 FORMAL_CYCLE_SEQ = 42
 TRANSITION_SEQ = 9
 NET_RX_VECTOR = 3
+INTERRUPT_GATE_CLOSED_VECTOR = (1 << 32) - 2
 UDP_SEGMENT_BYTES = 1_200
 UDP_SEGMENT_COUNT = 54
 UDP_PAYLOAD_BYTES = UDP_SEGMENT_BYTES * UDP_SEGMENT_COUNT
@@ -30,6 +31,7 @@ REQUIRED_KEYS = {
     "quiet_net_rx_after",
     "quiet_net_rx_delta",
     "softirq_vector",
+    "interrupt_gate_closed_vector",
     "udp_segment_bytes",
     "udp_segment_count",
     "udp_payload_bytes",
@@ -41,6 +43,9 @@ REQUIRED_KEYS = {
     "calibration_net_rx_before",
     "calibration_net_rx_after",
     "calibration_net_rx_delta",
+    "calibration_filter_vector_before",
+    "calibration_filter_vector_active",
+    "calibration_filter_vector_after",
     "calibration_runtime_attach_mask",
     "calibration_required_attach_mask",
     "calibration_baseline_emitted_events",
@@ -67,6 +72,9 @@ REQUIRED_KEYS = {
     "formal_net_rx_before",
     "formal_net_rx_after",
     "formal_net_rx_delta",
+    "filter_vector_before",
+    "filter_vector_active",
+    "filter_vector_after",
     "runtime_attach_mask",
     "required_attach_mask",
     "interrupt_filter_cpu",
@@ -207,6 +215,7 @@ def validate_report(report: object) -> None:
     require_counter_delta(report, "formal_net_rx", 1)
     constants = {
         "softirq_vector": NET_RX_VECTOR,
+        "interrupt_gate_closed_vector": INTERRUPT_GATE_CLOSED_VECTOR,
         "udp_segment_bytes": UDP_SEGMENT_BYTES,
         "udp_segment_count": UDP_SEGMENT_COUNT,
         "udp_payload_bytes": UDP_PAYLOAD_BYTES,
@@ -218,6 +227,12 @@ def validate_report(report: object) -> None:
         "formal_received_datagrams": UDP_SEGMENT_COUNT,
         "interrupt_filter_cpu": target_cpu,
         "interrupt_filter_vector": NET_RX_VECTOR,
+        "calibration_filter_vector_before": INTERRUPT_GATE_CLOSED_VECTOR,
+        "calibration_filter_vector_active": NET_RX_VECTOR,
+        "calibration_filter_vector_after": INTERRUPT_GATE_CLOSED_VECTOR,
+        "filter_vector_before": INTERRUPT_GATE_CLOSED_VECTOR,
+        "filter_vector_active": NET_RX_VECTOR,
+        "filter_vector_after": INTERRUPT_GATE_CLOSED_VECTOR,
     }
     for key, expected in constants.items():
         require_value(report, key, expected)
