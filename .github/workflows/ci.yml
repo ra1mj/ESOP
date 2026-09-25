@@ -145,3 +145,23 @@ jobs:
           name: esop-ebpf-scheduler-runqueue-runtime-qualification
           path: build/ebpf_scheduler_runqueue_qualification.json
           if-no-files-found: error
+
+  ebpf-softirq-runtime:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install eBPF build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+      - name: Run privileged softirq runtime qualification
+        run: make test-ebpf-softirq-runtime
+      - name: Upload softirq runtime qualification
+        uses: actions/upload-artifact@v4
+        with:
+          name: esop-ebpf-softirq-runtime-qualification
+          path: build/ebpf_softirq_qualification.json
+          if-no-files-found: error

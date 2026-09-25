@@ -807,6 +807,115 @@ Isolate one sleeping exact-TID target and one bounded FIFO blocker on CPU A,
 control release from CPU B, require exact counts and zero loss, and claim only
 the measured hosted-kernel controlled wake-to-switch chain.
 
+## Scenario: eBPF Softirq Duration Runtime Qualification
+
+### 1. Scope / Trigger
+
+- Trigger: add or change IRQ/softirq CPU/vector filtering, duration pairing,
+  `HostIrqStorm` identity, or the privileged softirq host qualification.
+- Scope: one controlled loopback `NET_RX` vector action on one allowed hosted
+  Linux CPU. It does not qualify hard IRQ, NIC/driver/NAPI behavior, product
+  interrupt budgets, sustained pressure, production kernels, overhead, or WCET.
+
+### 2. Signatures
+
+- Configuration: `RuntimeConfig::{softirq_duration_threshold_ns,
+  interrupt_filter_cpu, interrupt_filter_vector}` with enabled and required
+  masks exactly `ATTACH_SOFTIRQ_ENTRY | ATTACH_SOFTIRQ_EXIT`.
+- Runtime update: `BpfRuntime::update_interrupt_filter(cpu, vector)` updates
+  both selectors through one complete kernel-context map write.
+- Qualification entry: `make test-ebpf-softirq-runtime` writes
+  `build/ebpf_softirq_qualification.json`; validate it with
+  `scripts/validate-ebpf-softirq-qualification.py <report>`.
+- Injection: one connected IPv4 loopback `sendmsg` with
+  `UDP_SEGMENT=1200`, a 64,800-byte payload, and exactly 54 receives.
+
+### 3. Contracts
+
+- Keep the 176-byte C/Rust kernel-context ABI stable by assigning the existing
+  reserved `u16`/`u32` fields to CPU/vector filtering. `u16::MAX` and
+  `u32::MAX` mean all CPUs/vectors and preserve existing behavior.
+- Read the actual process affinity, choose an allowed CPU representable by the
+  evidence ABI after a bounded `/proc/softirqs` quiet sample, pin the fixture,
+  and verify the active CPU before loading the runtime.
+- Apply CPU/vector filters on entry before inserting a start timestamp. A
+  filtered event creates no map state or statistics; exit naturally ignores
+  it. Cycle updates must preserve both selectors.
+- Use two fresh runtimes and agents. Calibration uses threshold one nanosecond
+  and must produce exactly one record/incident/sample/overrun/emission with
+  zero loss. Formal threshold is
+  `max(1, calibration_duration_ns / 8)` and the formal duration must be
+  strictly greater than it.
+- Both injections must send the full payload, receive exactly 54 datagrams of
+  1,200 bytes, and advance the selected CPU's `NET_RX` count by exactly one.
+  `/proc/softirqs` supports the claim but does not replace BPF CPU/vector proof.
+- Formal evidence is one Error `KernelIrq/SoftirqCpuTime` item with fixture
+  PID/TID, exact CPU, vector 3, zero ifindex/detail, formal cycle/transition,
+  count one, and equal positive observed/duration values. PID/TID is execution
+  context only and must not be described as softirq ownership or root cause.
+- Correlation yields one Error `HostIrqStorm`, `ControlledStop`, confidence 70,
+  one retained evidence item, and a Healthy-to-Degraded heartbeat transition
+  with fault `0x45422001`. Merge identity includes interrupt kind, CPU, and
+  vector so hard IRQ and softirq or different CPU/vector pairs remain distinct.
+- Formal statistics are exact: one softirq sample, overrun, and emission; zero
+  hard-IRQ samples/overruns, loss, malformed/rejected evidence, newly reported
+  loss, and dropped incidents. Publish only by same-directory rename after all
+  assertions pass.
+
+### 4. Validation & Error Matrix
+
+- Missing softirq pair, partial capability, invalid filter, CPU sentinel use,
+  affinity mismatch, unavailable UDP GSO, or incomplete send/receive -> hard
+  prerequisite failure and no final report.
+- More or fewer than one target-CPU `NET_RX` execution, nonempty baseline,
+  extra/missing ringbuf record, count drift, or any loss -> qualification
+  failure; do not retry with weakened counts.
+- Calibration duration at/below one nanosecond, incorrect divisor/formula, or
+  formal duration at/below the derived threshold -> report rejection.
+- Wrong PID/TID/CPU/vector/cycle/classification, inconsistent timestamps or
+  duration, hard-IRQ statistics, or observer-health mismatch -> closed-schema
+  validator failure.
+- Unknown/missing fields, booleans used as integers, stale final/temp output,
+  or a non-atomic success artifact -> fail closed.
+
+### 5. Good/Base/Bad Cases
+
+- Good: select allowed CPU 7, pin and verify it, inject one 54-segment GSO
+  payload, observe exactly one vector-3 action, and produce one matching
+  controlled-stop incident with zero loss.
+- Base: source/unit/BPF-syntax checks pass, but a host without BPF permission,
+  tracepoints, UDP GSO, root/passwordless sudo, or exact counts produces no
+  qualification claim.
+- Bad: count all CPUs, filter only at exit, reuse calibration runtime state,
+  accept `>= 1` records, infer ownership from current PID/TID, or call the
+  loopback threshold a product interrupt budget.
+
+### 6. Tests Required
+
+- C/Rust ABI assertions cover the 176-byte context; unit tests cover unfiltered
+  defaults, filter updates, cycle preservation, and incident identity by kind,
+  CPU, and vector. BPF syntax and CO-RE compilation cover entry filtering.
+- Fixture build and Clippy cover affinity/socket/cleanup paths. Closed-schema
+  tests reject filter/attach, CPU/vector, GSO, calibration, counter/loss,
+  identity/cycle/timing, and health-transition failures.
+- Dedicated Actions must run the privileged fixture, upload
+  `ebpf_softirq_qualification.json`, and the downloaded artifact must
+  independently pass the repository validator.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+Send arbitrary loopback packets, accept any softirq event on any CPU, and
+describe current task identity or a hosted calibration threshold as causality
+or a production budget.
+
+#### Correct
+
+Filter one allowed CPU and vector before state insertion, use isolated
+calibration and formal runs, require one complete GSO/NET_RX/event/incident
+chain with zero loss, and claim only controlled hosted loopback qualification.
+
 ## Scenario: eBPF Scheduler Migration Evidence
 
 ### 1. Scope / Trigger

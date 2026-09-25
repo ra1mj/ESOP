@@ -483,6 +483,13 @@ impl<const INCIDENTS: usize> IncidentCorrelator<INCIDENTS> {
             if code == IncidentCode::HostCpuThrottle && existing.cpu != evidence.cpu {
                 continue;
             }
+            if code == IncidentCode::HostIrqStorm
+                && (existing.cpu != evidence.cpu
+                    || existing.irq != evidence.irq
+                    || existing.evidence[0].kind != evidence.kind)
+            {
+                continue;
+            }
             if existing.last_seen_ns.abs_diff(evidence.timestamp_ns) <= self.window_ns {
                 return Some(index);
             }
@@ -1032,6 +1039,53 @@ mod tests {
             interrupt.domain = EvidenceDomain::KernelIrq;
             assert_eq!(correlator.ingest(interrupt).unwrap(), None);
         }
+    }
+
+    #[test]
+    fn interrupt_incidents_merge_only_for_the_same_class_cpu_and_vector() {
+        let mut correlator = IncidentCorrelator::<8>::new(11, 3, 1_000);
+        correlator
+            .observe_cycle(CycleContext {
+                boot_id: 11,
+                cycle_seq: 42,
+                timestamp_ns: 1_000,
+                deadline_miss: 1,
+                ..CycleContext::EMPTY
+            })
+            .unwrap();
+
+        let mut first = evidence(EvidenceKind::SoftirqCpuTime, 1_100);
+        first.domain = EvidenceDomain::KernelIrq;
+        first.cpu = 2;
+        first.irq = 3;
+        correlator.ingest(first).unwrap().unwrap();
+
+        let mut same_identity = first;
+        same_identity.evidence_id = 8;
+        same_identity.timestamp_ns = 1_200;
+        let merged = correlator.ingest(same_identity).unwrap().unwrap();
+        assert_eq!(correlator.len(), 1);
+        assert_eq!(merged.evidence_count, 2);
+
+        let mut other_cpu = same_identity;
+        other_cpu.evidence_id = 9;
+        other_cpu.timestamp_ns = 1_300;
+        other_cpu.cpu = 3;
+        correlator.ingest(other_cpu).unwrap().unwrap();
+
+        let mut other_vector = same_identity;
+        other_vector.evidence_id = 10;
+        other_vector.timestamp_ns = 1_400;
+        other_vector.irq = 4;
+        correlator.ingest(other_vector).unwrap().unwrap();
+
+        let mut hard_irq = same_identity;
+        hard_irq.evidence_id = 11;
+        hard_irq.timestamp_ns = 1_500;
+        hard_irq.kind = EvidenceKind::IrqCpuTime;
+        correlator.ingest(hard_irq).unwrap().unwrap();
+
+        assert_eq!(correlator.len(), 4);
     }
 
     #[test]

@@ -62,6 +62,8 @@ pub const GATEWAY_CALLBACK_BEGIN_SYMBOL: &str = "esop_zenoh_gateway_callback_beg
 pub const GATEWAY_CALLBACK_END_SYMBOL: &str = "esop_zenoh_gateway_callback_end_v1";
 pub const RAW_PORT_BEGIN_SYMBOL: &str = "esop_linux_raw_port_operation_begin_v1";
 pub const RAW_PORT_END_SYMBOL: &str = "esop_linux_raw_port_operation_end_v1";
+pub const INTERRUPT_FILTER_ALL_CPUS: u16 = u16::MAX;
+pub const INTERRUPT_FILTER_ALL_VECTORS: u32 = u32::MAX;
 
 const TRACEFS_EVENT_ROOTS: [&str; 2] = [
     "/sys/kernel/tracing/events",
@@ -134,6 +136,12 @@ pub struct RuntimeConfig {
     pub network_drop_window_ns: u64,
     pub irq_duration_threshold_ns: u64,
     pub softirq_duration_threshold_ns: u64,
+    /// Exact CPU admitted to the IRQ/softirq duration maps, or
+    /// [`INTERRUPT_FILTER_ALL_CPUS`] for every representable CPU.
+    pub interrupt_filter_cpu: u16,
+    /// Exact hard-IRQ or softirq vector, or
+    /// [`INTERRUPT_FILTER_ALL_VECTORS`] for every vector.
+    pub interrupt_filter_vector: u32,
     /// Product-qualified minimum cpufreq policy maximum, in kHz. A default of
     /// 1 keeps the observer inert until deployment supplies its real floor.
     pub cpu_frequency_floor_khz: u32,
@@ -232,6 +240,8 @@ impl Default for RuntimeConfig {
             network_drop_window_ns: 1_000_000,
             irq_duration_threshold_ns: 250_000,
             softirq_duration_threshold_ns: 500_000,
+            interrupt_filter_cpu: INTERRUPT_FILTER_ALL_CPUS,
+            interrupt_filter_vector: INTERRUPT_FILTER_ALL_VECTORS,
             cpu_frequency_floor_khz: 1,
             cpu_frequency_policy_cpu: CPU_FREQUENCY_POLICY_ALL,
             gateway_stall_threshold_ns: 1_000_000,
@@ -264,8 +274,8 @@ pub struct KernelContext {
     pub irq_duration_threshold_ns: u64,
     pub softirq_duration_threshold_ns: u64,
     pub network_protocol: u16,
-    pub reserved16: u16,
-    pub reserved32: u32,
+    pub interrupt_filter_cpu: u16,
+    pub interrupt_filter_vector: u32,
     pub cpu_frequency_floor_khz: u32,
     pub cpu_frequency_policy_cpu: u32,
     pub cpu_frequency_policy_epoch: u32,
@@ -303,8 +313,8 @@ impl KernelContext {
             irq_duration_threshold_ns: config.irq_duration_threshold_ns,
             softirq_duration_threshold_ns: config.softirq_duration_threshold_ns,
             network_protocol: config.network_protocol,
-            reserved16: 0,
-            reserved32: 0,
+            interrupt_filter_cpu: config.interrupt_filter_cpu,
+            interrupt_filter_vector: config.interrupt_filter_vector,
             cpu_frequency_floor_khz: config.cpu_frequency_floor_khz,
             cpu_frequency_policy_cpu: config.cpu_frequency_policy_cpu,
             cpu_frequency_policy_epoch: 1,
@@ -338,8 +348,8 @@ impl KernelContext {
             irq_duration_threshold_ns: self.irq_duration_threshold_ns,
             softirq_duration_threshold_ns: self.softirq_duration_threshold_ns,
             network_protocol: self.network_protocol,
-            reserved16: 0,
-            reserved32: 0,
+            interrupt_filter_cpu: self.interrupt_filter_cpu,
+            interrupt_filter_vector: self.interrupt_filter_vector,
             cpu_frequency_floor_khz: self.cpu_frequency_floor_khz,
             cpu_frequency_policy_cpu: self.cpu_frequency_policy_cpu,
             cpu_frequency_policy_epoch: self.cpu_frequency_policy_epoch,
@@ -397,6 +407,11 @@ impl KernelContext {
         self.page_fault_threshold = threshold;
         self.page_fault_window_ns = window_ns;
         true
+    }
+
+    fn set_interrupt_filter(&mut self, cpu: u16, vector: u32) {
+        self.interrupt_filter_cpu = cpu;
+        self.interrupt_filter_vector = vector;
     }
 
     fn set_cpu_frequency_tracking(&mut self, floor_khz: u32, policy_cpu: u32) -> bool {
@@ -1033,6 +1048,20 @@ impl BpfRuntime {
         self.kernel_context.irq_duration_threshold_ns = irq_duration_threshold_ns;
         self.kernel_context.softirq_duration_threshold_ns = softirq_duration_threshold_ns;
         self.context.set(0, self.kernel_context, 0)?;
+        Ok(())
+    }
+
+    /// Atomically replace the CPU/vector filter applied before IRQ or softirq
+    /// start timestamps enter the bounded kernel maps.
+    pub fn update_interrupt_filter(
+        &mut self,
+        interrupt_filter_cpu: u16,
+        interrupt_filter_vector: u32,
+    ) -> Result<(), RuntimeError> {
+        let mut updated = self.kernel_context;
+        updated.set_interrupt_filter(interrupt_filter_cpu, interrupt_filter_vector);
+        self.context.set(0, updated, 0)?;
+        self.kernel_context = updated;
         Ok(())
     }
 
@@ -1888,6 +1917,8 @@ mod tests {
             network_drop_window_ns: 1_000,
             irq_duration_threshold_ns: 250,
             softirq_duration_threshold_ns: 500,
+            interrupt_filter_cpu: 7,
+            interrupt_filter_vector: 3,
             cpu_frequency_floor_khz: 2_000_000,
             cpu_frequency_policy_cpu: 7,
             gateway_stall_threshold_ns: 900_000,
@@ -1914,6 +1945,8 @@ mod tests {
         assert_eq!(context.network_drop_window_ns, 1_000);
         assert_eq!(context.irq_duration_threshold_ns, 250);
         assert_eq!(context.softirq_duration_threshold_ns, 500);
+        assert_eq!(context.interrupt_filter_cpu, 7);
+        assert_eq!(context.interrupt_filter_vector, 3);
         assert_eq!(context.cpu_frequency_floor_khz, 2_000_000);
         assert_eq!(context.cpu_frequency_policy_cpu, 7);
         assert_eq!(context.cpu_frequency_policy_epoch, 1);
@@ -1959,6 +1992,27 @@ mod tests {
         assert_eq!(context, unchanged);
         assert!(!context.set_page_fault_tracking(u64::from(u32::MAX) + 1, 1));
         assert_eq!(context, unchanged);
+    }
+
+    #[test]
+    fn interrupt_filter_defaults_and_updates_remain_explicit() {
+        let mut context = KernelContext::from_config(RuntimeConfig::default());
+        assert_eq!(context.interrupt_filter_cpu, INTERRUPT_FILTER_ALL_CPUS);
+        assert_eq!(
+            context.interrupt_filter_vector,
+            INTERRUPT_FILTER_ALL_VECTORS
+        );
+
+        context.set_interrupt_filter(7, 3);
+        assert_eq!(context.interrupt_filter_cpu, 7);
+        assert_eq!(context.interrupt_filter_vector, 3);
+        let cycled = context.with_cycle(CycleContext {
+            boot_id: 11,
+            cycle_seq: 42,
+            ..CycleContext::EMPTY
+        });
+        assert_eq!(cycled.interrupt_filter_cpu, 7);
+        assert_eq!(cycled.interrupt_filter_vector, 3);
     }
 
     #[test]

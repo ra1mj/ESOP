@@ -2,7 +2,7 @@
 
 - 文档版本：1.2
 - 日期：2026-09-25
-- 状态：设计基线；HostObservation、固定证据 ABI、有界 RuntimeIncident 相关器、同类事件窗口聚合、RuntimeAgent 门面、能力预检结果模型、Rust/Aya CO-RE loader、tracepoint attach、ringbuf 解码桥、有界硬 IRQ/softirq 时长证据、按 EtherType/ifindex 聚合的 `kfree_skb` 丢包证据、有界 cpufreq policy 限频 episode、Zenoh gateway stall 和 Linux raw-port syscall stall 证据已实现；托管 Linux 已覆盖 gateway/raw-port 共享 marker、进程 leader 退出、精确 TID 调度迁移和受控 wake-to-switch runqueue 链的 verifier/load/真实 attach/ringbuf/相关器资格，生产目标内核、真实 transport/NIC/自然负载根因、其余压力/限频注入、开销和其余 hook 资格仍需单独完成
+- 状态：设计基线；HostObservation、固定证据 ABI、有界 RuntimeIncident 相关器、同类事件窗口聚合、RuntimeAgent 门面、能力预检结果模型、Rust/Aya CO-RE loader、tracepoint attach、ringbuf 解码桥、有界硬 IRQ/softirq 时长证据、按 EtherType/ifindex 聚合的 `kfree_skb` 丢包证据、有界 cpufreq policy 限频 episode、Zenoh gateway stall 和 Linux raw-port syscall stall 证据已实现；托管 Linux 已覆盖 gateway/raw-port 共享 marker、进程 leader 退出、精确 TID 调度迁移、受控 wake-to-switch runqueue 和受控 loopback `NET_RX` softirq 链的 verifier/load/真实 attach/ringbuf/相关器资格，生产目标内核、真实 transport/NIC/自然负载根因、硬 IRQ 与持续压力/限频注入、开销和其余 hook 资格仍需单独完成
 - 上游需求：[ESOP 软件产品需求文档](esop-software-prd.md) FR-047 至 FR-052、NFR-018
 
 ## 1. 设计结论
@@ -43,7 +43,7 @@ ESOP RT node
 
 两条证据链保持独立：RT 域是运动控制事实来源；eBPF 是 Linux 环境的解释与归因来源。相关器可以合并“同一个周期窗口内的事件”，但不能以缺少 eBPF 事件证明“系统没有问题”。
 
-当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、调度 TID/迁移计数窗口策略原子更新、硬 IRQ/softirq entry/exit attach、EtherCAT EtherType/可选 ifindex 丢包策略更新、页错误计数窗口策略更新、cpufreq policy 下限/CPU 策略原子更新、Zenoh gateway 与 Linux raw-port syscall 成对 uprobe attach 和 `RuntimeAgent` 桥接；`bpf/` 提供固定 1024 项的调度 TID 迁移窗口 map、固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、固定 256 项的 CPU/进程页错误窗口 map、固定 256 项的 cpufreq policy episode map、固定 1024 项 gateway request 与 raw-port per-thread 操作 map、主线程退出过滤、OOM victim PID 归因、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。专用托管 Linux CI 已验证 gateway、raw-port、leader 退出、两 CPU 精确 TID 调度迁移和受控 FIFO 竞争下精确 TID 唤醒到切换时长的 CO-RE verifier/load、真实 tracepoint/uprobe attach、ringbuf、统计、相关器和 observer health 共享链；生产目标内核与真实 Zenoh transport、AF_PACKET/NIC、自然负载 runqueue 根因、IRQ/softirq/丢包/页错误/OOM/限频压力、迁移原因/亲和性/cache 影响及开销资格仍需单独完成。
+当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、调度 TID/迁移计数窗口策略原子更新、硬 IRQ/softirq entry/exit attach、IRQ/softirq CPU/vector 过滤、EtherCAT EtherType/可选 ifindex 丢包策略更新、页错误计数窗口策略更新、cpufreq policy 下限/CPU 策略原子更新、Zenoh gateway 与 Linux raw-port syscall 成对 uprobe attach 和 `RuntimeAgent` 桥接；`bpf/` 提供固定 1024 项的调度 TID 迁移窗口 map、固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、固定 256 项的 CPU/进程页错误窗口 map、固定 256 项的 cpufreq policy episode map、固定 1024 项 gateway request 与 raw-port per-thread 操作 map、主线程退出过滤、OOM victim PID 归因、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。专用托管 Linux CI 已验证 gateway、raw-port、leader 退出、两 CPU 精确 TID 调度迁移、受控 FIFO 竞争下精确 TID 唤醒到切换时长，以及 CPU/vector 过滤的 loopback `NET_RX` softirq 时长的 CO-RE verifier/load、真实 tracepoint/uprobe attach、ringbuf、统计、相关器和 observer health 共享链；生产目标内核与真实 Zenoh transport、AF_PACKET/NIC、自然负载 runqueue 根因、硬 IRQ、真实 NIC/持续 softirq、丢包/页错误/OOM/限频压力、迁移原因/亲和性/cache 影响及开销资格仍需单独完成。
 
 ## 4. 观测域与 attach 点
 
@@ -102,6 +102,18 @@ incident 与健康字段原子写入
 attach 必须成对启用，阈值事件仍需与 transport-risk cycle 同窗才升级为
 `HOST_IRQ_STORM`。loader 对每组 pair 执行成组挂载；第二个成员失败时回滚
 第一个 link，capability mask 也不会发布半组能力。
+
+专用 `make test-ebpf-softirq-runtime` 在特权托管 Linux 上从实际 allowed affinity
+选择并固定一个安静 CPU，只要求 softirq pair，并在 entry 写入起始 map 前精确过滤
+该 CPU 与 `NET_RX` vector 3。夹具通过一次 `UDP_SEGMENT=1200` 的 64,800 字节
+loopback 发送产生 54 个 datagram；一次独立校准运行测得完整 vector action 时长，
+正式运行使用 `max(1, calibration_duration_ns / 8)` 阈值并要求恰好一次目标 CPU
+`NET_RX`、一条 `KernelIrq/SoftirqCpuTime/Error`、一个 confidence-70
+`HostIrqStorm`/`ControlledStop` incident、零 loss 和 Healthy-to-Degraded heartbeat。
+CPU/vector、socket、校准、统计、cycle、incident 和健康字段原子写入
+`build/ebpf_softirq_qualification.json` 并由封闭 schema 校验。PID/TID 只表示 inline
+softirq 返回时的 task context，不表示 softirq 所有权或根因。该资格不覆盖硬 IRQ、
+真实 NIC/driver/NAPI、产品中断预算、持续压力、生产内核、开销或 WCET。
 
 网络首版使用 `skb:kfree_skb` 的 typed tracepoint context，只接受配置的
 host-order EtherType（默认 EtherCAT `0x88A4`），并可选精确匹配 ifindex。
@@ -359,6 +371,13 @@ heartbeat 资格。自然负载 runqueue 根因、IRQ/softirq 压力、cpufreq p
 产品优先级/CPU 隔离、生产目标内核、迁移原因/亲和性/cache/NUMA、开销/WCET
 和长测仍未资格化，因此 EBPF-003 整体保持 partial。
 
+EBPF-003 的 softirq-duration 子路径还通过 `make test-ebpf-softirq-runtime` 完成真实
+softirq pair 挂载、目标 CPU/vector 过滤、54-segment loopback UDP GSO 注入、独立
+校准和正式阈值、唯一 `SoftirqCpuTime`/`HostIrqStorm`/`ControlledStop` 以及
+Degraded heartbeat 资格。这里“仍未资格化的 IRQ/softirq 压力”明确指硬 IRQ、真实
+NIC/driver/NAPI、持续 softirq 压力与产品预算，不再包含这条受控 hosted loopback
+`NET_RX` 单次执行链；因此 EBPF-003 整体仍保持 partial。
+
 EBPF-004 当前已具备有界 CPU/ifindex 窗口、EtherType/ifindex 过滤、drop
 reason 证据解码和 transport-risk 相关器单元测试。该实现与 CO-RE 编译结果
 不等于目标内核真实队列压力、丢包注入、verifier 和开销资格。raw-port 子路径
@@ -406,8 +425,10 @@ FR-048 的调度迁移路径除 typed 读取、独立 scheduler TID、固定迁�
 epoch、来源/目标 CPU 解码和相关器单元测试外，现已具备上述 hosted-kernel
 两 CPU 真实 attach/迁移/ringbuf/统计/incident/health 资格；runqueue 路径也已
 具备精确 TID、真实 wakeup/switch pair、受控 FIFO 竞争和 measured
-wake-to-switch/incident/health 资格。这些结果仍不等于生产目标内核、自然负载
-runqueue 根因、IRQ 压力、产品优先级/CPU 隔离、迁移原因/亲和性/cache/NUMA 或
+wake-to-switch/incident/health 资格；softirq 路径已具备 CPU/vector 过滤的受控
+loopback `NET_RX` duration/incident/health 资格。这些结果仍不等于生产目标内核、
+自然负载 runqueue 根因、硬 IRQ 或真实 NIC/持续 softirq 压力、产品优先级/CPU
+隔离、迁移原因/亲和性/cache/NUMA 或
 开销资格。CPU 限频路径已具备 typed `cpu_frequency_limits`、policy CPU 过滤、
 低于产品下限 episode 去重、固定事件解码和相关器单元测试，但真实 policy 限制
 注入、共享 policy 拓扑、瞬时频率/驻留时间/原因归因、verifier 和开销资格仍未完成。

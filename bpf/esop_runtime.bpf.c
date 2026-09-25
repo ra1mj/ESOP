@@ -16,8 +16,8 @@ struct esop_context {
     __u64 irq_duration_threshold_ns;
     __u64 softirq_duration_threshold_ns;
     __u16 network_protocol;
-    __u16 reserved16;
-    __u32 reserved32;
+    __u16 interrupt_filter_cpu;
+    __u32 interrupt_filter_vector;
     __u32 cpu_frequency_floor_khz;
     __u32 cpu_frequency_policy_cpu;
     __u32 cpu_frequency_policy_epoch;
@@ -278,6 +278,18 @@ static __always_inline int esop_tracks_scheduler(
         target = context->tracked_pid;
     }
     return target == 0 || target == tid;
+}
+
+static __always_inline int esop_tracks_interrupt(
+    __u32 cpu, __u32 vector, const struct esop_context *context)
+{
+    if (!context) {
+        return 0;
+    }
+    return (context->interrupt_filter_cpu == 0xffff ||
+            context->interrupt_filter_cpu == cpu) &&
+           (context->interrupt_filter_vector == 0xffffffff ||
+            context->interrupt_filter_vector == vector);
 }
 
 static __always_inline int esop_emit_resource_cpu_task_id(
@@ -1141,8 +1153,13 @@ int esop_irq_handler_entry(struct trace_event_raw_irq_handler_entry *event)
     if (irq < 0) {
         return 0;
     }
+    __u32 cpu = bpf_get_smp_processor_id();
+    struct esop_context *context = esop_context();
+    if (!esop_tracks_interrupt(cpu, (__u32)irq, context)) {
+        return 0;
+    }
     struct esop_interrupt_key key = {
-        .cpu = bpf_get_smp_processor_id(),
+        .cpu = cpu,
         .vector = (__u32)irq,
     };
     __u64 now = bpf_ktime_get_ns();
@@ -1198,8 +1215,13 @@ SEC("tracepoint/irq/softirq_entry")
 int esop_softirq_entry(struct trace_event_raw_softirq *event)
 {
     __u32 vector = (__u32)BPF_CORE_READ(event, vec);
+    __u32 cpu = bpf_get_smp_processor_id();
+    struct esop_context *context = esop_context();
+    if (!esop_tracks_interrupt(cpu, vector, context)) {
+        return 0;
+    }
     struct esop_interrupt_key key = {
-        .cpu = bpf_get_smp_processor_id(),
+        .cpu = cpu,
         .vector = vector,
     };
     __u64 now = bpf_ktime_get_ns();

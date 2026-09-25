@@ -249,6 +249,19 @@ controlled wake-to-switch/incident/health 共享链，不证明自然负载根�
 行为、产品优先级/CPU 隔离、生产内核、开销/WCET 或长时 HIL，因此 FR-048
 仍保持部分实现。
 
+FR-048 的 softirq-duration 子路径现已增加独立特权托管 Linux 资格：
+`make test-ebpf-softirq-runtime` 从实际 allowed affinity 选择并固定一个安静 CPU，
+只加载并要求 `softirq_entry`/`softirq_exit`，在不改变 176 字节 context ABI 的前提下
+精确过滤该 CPU 与 Linux `NET_RX` vector 3。夹具使用一次
+`UDP_SEGMENT=1200` 的 64,800 字节 loopback 发送并完整接收 54 个 datagram；独立
+校准运行测得 handler 时长后，正式运行使用其八分之一作为阈值，并要求唯一
+`KernelIrq/SoftirqCpuTime`、Error/confidence-70 `HostIrqStorm`/`ControlledStop`、
+零 loss 和 fault `0x45422001` 的 Degraded heartbeat。严格报告写入
+`build/ebpf_softirq_qualification.json`。该结果把“受控 hosted loopback `NET_RX`
+softirq 注入”从开放项中移除，但不证明硬 IRQ、真实 NIC/driver/NAPI、产品中断
+预算、持续 softirq 压力、任务因果归属、生产内核、开销/WCET 或长时 HIL，
+因此 FR-048 仍保持部分实现。
+
 ## 8. 非功能需求
 
 ### 8.1 实时性与性能

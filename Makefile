@@ -4,7 +4,7 @@ CARGO ?= cargo
 RUSTUP ?= rustup
 RUST_TARGET ?= aarch64-unknown-none
 
-.PHONY: test test-hil test-zenoh test-ebpf-gateway-runtime test-ebpf-raw-port-runtime test-ebpf-process-exit-runtime test-ebpf-scheduler-migration-runtime test-ebpf-scheduler-runqueue-runtime check fmt-check lint release no-std bpf-syntax bpf capability-manifest proto-schema build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-scheduler-migration-report ebpf-scheduler-runqueue-report r2-qualification zenoh-check setup-rust ci
+.PHONY: test test-hil test-zenoh test-ebpf-gateway-runtime test-ebpf-raw-port-runtime test-ebpf-process-exit-runtime test-ebpf-scheduler-migration-runtime test-ebpf-scheduler-runqueue-runtime test-ebpf-softirq-runtime check fmt-check lint release no-std bpf-syntax bpf capability-manifest proto-schema build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-scheduler-migration-report ebpf-scheduler-runqueue-report ebpf-softirq-report r2-qualification zenoh-check setup-rust ci
 
 test:
 	$(CARGO) test --workspace --all-features
@@ -29,6 +29,9 @@ test-ebpf-scheduler-migration-runtime:
 
 test-ebpf-scheduler-runqueue-runtime:
 	./scripts/test-ebpf-scheduler-runqueue-runtime.sh
+
+test-ebpf-softirq-runtime:
+	./scripts/test-ebpf-softirq-runtime.sh
 
 check:
 	$(CARGO) check --workspace --all-features
@@ -88,6 +91,9 @@ ebpf-scheduler-migration-report:
 ebpf-scheduler-runqueue-report:
 	python3 -m unittest discover -s scripts/tests -p 'test_ebpf_scheduler_runqueue_qualification.py'
 
+ebpf-softirq-report:
+	python3 -m unittest discover -s scripts/tests -p 'test_ebpf_softirq_qualification.py'
+
 r2-qualification:
 	python3 scripts/validate-r2-qualification.py --expected-commit $$(git rev-parse HEAD) --output build/r2_qualification_report.json
 	python3 -m unittest discover -s scripts/tests -p 'test_r2_qualification.py'
@@ -98,4 +104,4 @@ zenoh-check:
 setup-rust:
 	$(RUSTUP) target add $(RUST_TARGET)
 
-ci: fmt-check check test lint release no-std bpf-syntax capability-manifest proto-schema build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-scheduler-migration-report ebpf-scheduler-runqueue-report r2-qualification zenoh-check
+ci: fmt-check check test lint release no-std bpf-syntax capability-manifest proto-schema build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-scheduler-migration-report ebpf-scheduler-runqueue-report ebpf-softirq-report r2-qualification zenoh-check
