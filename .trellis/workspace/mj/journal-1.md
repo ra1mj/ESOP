@@ -672,3 +672,36 @@ Added an isolated veth/AF_PACKET network-drop runtime fixture, strict validator/
 ### Next Steps
 
 - None - task complete
+
+
+## Session 21: Qualify eBPF observability degradation recovery
+
+**Date**: 2026-09-26
+**Task**: Qualify eBPF observability degradation recovery
+**Branch**: `main`
+
+### Summary
+
+Added sticky epoch-local eBPF event-loss health, restart reset semantics, a production 4 MiB ringbuf saturation/unload-reload qualification, strict validator/tests, CI artifact, and synchronized PRD/spec/capability evidence. GitHub Actions run 36151603726 passed all 12 jobs; the downloaded artifact independently validated 40,329 emitted events, 8,823 exact projected losses, epoch-2 Healthy recovery, zero recovery loss/rejection, and complete cleanup.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `9db984178f79157d177d2688e665b902d434d204` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
