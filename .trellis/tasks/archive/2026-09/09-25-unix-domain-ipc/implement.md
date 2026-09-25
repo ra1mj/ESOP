@@ -20,5 +20,5 @@
       validate RT dependency trees remain free of `esop-ipc`/POSIX transport.
 - [x] Run `cargo test -p esop-ipc`, focused Clippy/check, capability validation,
       formatting, `git diff --check`, dependency-tree checks and full `make ci`.
-- [ ] Review trust boundaries and version compatibility, commit, push, track
+- [x] Review trust boundaries and version compatibility, commit, push, track
       the matching GitHub Actions run, then archive and record the task.

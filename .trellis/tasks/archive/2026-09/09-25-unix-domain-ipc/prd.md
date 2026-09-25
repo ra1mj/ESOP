@@ -78,7 +78,7 @@ ProcBuf crates.
       dependency; existing no-std checks remain green.
 - [x] Focused tests/Clippy, workspace `make ci`, formatting, capability
       validation and `git diff --check` pass.
-- [ ] Changes are committed and pushed to `ra1mj/ESOP`; the matching final
+- [x] Changes are committed and pushed to `ra1mj/ESOP`; the matching final
       GitHub Actions run succeeds before task archive.
 
 ## Out Of Scope
