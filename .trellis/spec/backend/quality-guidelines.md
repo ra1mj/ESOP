@@ -701,6 +701,109 @@ Read typed policy `cpu_id`/`max_freq`, compare against the configured kHz floor,
 emit one event per bounded policy episode, and require cycle-risk correlation
 before assigning the incident code.
 
+## Scenario: eBPF Scheduler Runqueue-Latency Evidence
+
+### 1. Scope / Trigger
+
+- Trigger: add or change Linux `sched_wakeup`/`sched_switch` runqueue-latency
+  observation, exact scheduler-TID filtering, or its privileged host
+  qualification.
+- Scope: the hosted qualification proves one controlled wake-to-switch interval
+  behind an injected FIFO blocker. It must not be generalized into ordinary
+  workload behavior, a natural root cause, product priority/CPU-isolation
+  policy, WCET, or production-kernel qualification.
+
+### 2. Signatures
+
+- Configuration: `RuntimeConfig::{scheduler_tid,
+  scheduler_latency_threshold_ns}` with enabled and required masks exactly
+  `ATTACH_SCHED_WAKEUP | ATTACH_SCHED_SWITCH`.
+- Qualification entry: `make test-ebpf-scheduler-runqueue-runtime` writes
+  `build/ebpf_scheduler_runqueue_qualification.json`; validate it with
+  `scripts/validate-ebpf-scheduler-runqueue-qualification.py <report>`.
+- Fixture platform calls: `sched_getaffinity`, singleton
+  `sched_setaffinity`, process-private `FUTEX_WAIT|FUTEX_PRIVATE_FLAG` and
+  `FUTEX_WAKE|FUTEX_PRIVATE_FLAG`, plus verified `SCHED_FIFO` policy.
+
+### 3. Contracts
+
+- Select two distinct CPUs from the process's actual allowed affinity set.
+  Keep the controller on CPU B; pin the target and blocker to CPU A.
+- The target reports its Linux TID, confirms CPU A, then enters private futex
+  sleep. `/proc/self/task/<tid>/stat` must show interruptible sleep before the
+  runtime loads the exact-TID policy.
+- The blocker moves to CPU A, enters a valid nonzero `SCHED_FIFO` priority,
+  publishes readiness, and then only spins on an atomic stop flag. It performs
+  no allocation, channel operation, sleep, yield, or logging while active.
+- Store one to the target gate and require the futex wake result to be exactly
+  one. During the configured 25 ms hold, target completion must remain false;
+  after blocker release, both threads must join within bounded deadlines.
+- The BPF wakeup hook stores the exact target TID timestamp. The switch hook
+  matches `next_pid`, deletes state, and emits only for strict
+  `duration_ns > threshold`. Fixed evidence remains 96 bytes with zero PID,
+  exact TID, destination CPU A, zero IRQ/ifindex/detail, and count one.
+- Successful qualification has exact statistics `wakeups=1`,
+  `scheduler_stalls=1`, `emitted_events=1`, zero migrations/loss, one Error
+  `HostSchedulerStall`, `ControlledStop`, confidence 70, and a Healthy-to-
+  Degraded heartbeat transition with fault `0x45422001`.
+- Delete stale final/temp reports before setup. Publish the report only by a
+  same-directory rename after all assertions pass. Every failure path releases,
+  wakes, stops, and joins any remaining target or FIFO blocker.
+
+### 4. Validation & Error Matrix
+
+- Fewer than two allowed CPUs, CPU IDs outside `u16`, equal CPUs, affinity
+  acknowledgement failure, or target sleep timeout -> nonzero exit and no
+  success report.
+- Invalid host FIFO range, denied scheduler transition, policy verification
+  mismatch, or blocker readiness timeout -> hard prerequisite failure.
+- Futex wake count other than one or target completion during the blocker hold
+  -> injection failure; do not accept a latency record.
+- Partial wakeup/switch attach, nonempty baseline, poll timeout, extra record,
+  count drift, malformed/rejected evidence, or any loss -> qualification
+  failure.
+- Duration below the blocker hold, at/below threshold, at/above the one-second
+  sanity maximum, or inconsistent incident/evidence timing -> report rejection.
+- Unknown/missing/bool-as-integer fields, wrong TID/CPU/cycle/classification,
+  or observer-health mismatch -> closed-schema validator failure.
+
+### 5. Good/Base/Bad Cases
+
+- Good: target TID 101 sleeps on CPU A, the CPU-A FIFO blocker becomes ready,
+  CPU-B controller wakes one waiter, target stays incomplete for 25 ms, then
+  runs after release and produces one matching controlled-stop incident.
+- Base: source/unit/BPF-syntax checks pass, but a host without two CPUs,
+  `SCHED_FIFO`, tracepoint capability, root/passwordless sudo, or exact counts
+  produces no qualification claim.
+- Bad: run the controller on CPU A, treat a readiness flag as proof of futex
+  sleep, accept `>= 1` records, leave a FIFO spinner alive on error, or call the
+  injected interval product scheduler WCET.
+
+### 6. Tests Required
+
+- Rust build and Clippy cover the Linux fixture and RAII cleanup paths; BPF
+  syntax and CO-RE compilation cover the production tracepoint programs.
+- Closed-schema tests reject missing/unknown/bool fields, partial attachment,
+  invalid CPU/TID/sleep/FIFO prerequisites, zero or multiple wakes, early target
+  completion, baseline/final count drift, loss, wrong classification/cycle,
+  timing inconsistencies, and health-transition mismatches.
+- Dedicated Actions must run the privileged fixture, upload
+  `ebpf_scheduler_runqueue_qualification.json`, and the downloaded artifact
+  must independently pass the repository validator.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+Wake a thread under uncontrolled system load, accept any scheduler record, and
+describe the result as a production root-cause or WCET qualification.
+
+#### Correct
+
+Isolate one sleeping exact-TID target and one bounded FIFO blocker on CPU A,
+control release from CPU B, require exact counts and zero loss, and claim only
+the measured hosted-kernel controlled wake-to-switch chain.
+
 ## Scenario: eBPF Scheduler Migration Evidence
 
 ### 1. Scope / Trigger
