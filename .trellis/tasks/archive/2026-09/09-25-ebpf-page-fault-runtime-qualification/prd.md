@@ -72,27 +72,27 @@ address, classify major versus minor faults, or measure handler duration.
 
 ## Acceptance Criteria
 
-- [ ] A privileged hosted x86_64 Linux run verifies production CO-RE load and
+- [x] A privileged hosted x86_64 Linux run verifies production CO-RE load and
       required `exceptions:page_fault_user` attachment with no unrelated hook.
-- [ ] A prepared child remains fault-quiet after BPF load until release, then
+- [x] A prepared child remains fault-quiet after BPF load until release, then
       records exactly 16 minor faults from 16 distinct anonymous-page writes on
       one pinned CPU.
-- [ ] Baseline counters are zero; the formal run produces exactly one fixed
+- [x] Baseline counters are zero; the formal run produces exactly one fixed
       page-fault record and exact final page-fault/emission/loss statistics.
-- [ ] The record preserves child PID/TID, target CPU, injected cycle identity,
+- [x] The record preserves child PID/TID, target CPU, injected cycle identity,
       threshold/count 16, positive in-window duration, and x86 error detail 6.
-- [ ] Correlation produces exactly one Warning `HostPageFault` with
+- [x] Correlation produces exactly one Warning `HostPageFault` with
       `DegradeHostObservation`, confidence 65, and a Healthy-to-Degraded
       heartbeat transition with fault `0x45422001`.
-- [ ] The report is same-directory atomic and its validator is fail-closed for
+- [x] The report is same-directory atomic and its validator is fail-closed for
       schema, integer ranges, attach mask, child/CPU identity, fault counts,
       window timing, x86 detail, incident semantics, cycle identity, loss, and
       observer health.
-- [ ] Focused Rust/Python tests, formatting, Clippy, BPF syntax, capability
+- [x] Focused Rust/Python tests, formatting, Clippy, BPF syntax, capability
       validation, shell/Python syntax, `make ci`, and `git diff --check` pass.
-- [ ] The dedicated privileged GitHub Actions job passes and its downloaded
+- [x] The dedicated privileged GitHub Actions job passes and its downloaded
       artifact independently passes the repository validator.
-- [ ] Documentation removes controlled hosted anonymous-page first-write
+- [x] Documentation removes controlled hosted anonymous-page first-write
       injection from the open list while preserving major/minor attribution,
       fault address, handler duration, natural workload/root-cause, production
       threshold/kernel, overhead/WCET, and long-duration limits.
