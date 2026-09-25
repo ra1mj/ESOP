@@ -660,6 +660,7 @@ dependencies = [
  "aya",
  "esop-ebpf-agent",
  "esop-ethercat-linux-port",
+ "esop-zenoh-gateway",
  "libc",
 ]
 

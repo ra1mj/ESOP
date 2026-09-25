@@ -67,6 +67,20 @@ cargo install zenohd --version 1.10.1 --locked
 make test-zenoh
 ```
 
+特权托管 Linux 的 marker-to-incident 资格入口：
+
+```bash
+make test-ebpf-gateway-runtime
+```
+
+该入口以普通用户编译 BPF 与 Rust，仅提升最终夹具执行；夹具关闭无关 tracepoint，
+要求自身 publish/callback 四个精确 marker 符号，以同一 WKC-risk cycle 分别注入
+25 ms 的 Diagnostic/success publish 与 Command/completed callback 延迟，并要求两条
+证据合并为一个 `GatewayStall` incident、统计与附着位自洽且零 mismatch/loss。成功后
+生成并严格校验 `build/ebpf_gateway_qualification.json`。它验证共享 marker、CO-RE
+verifier/load、真实 uprobe、ringbuf 和相关器链路，不验证 live Zenoh Session、router/
+transport queue、IPC、序列化、permit、reconnect、开销/WCET 或生产实时环境。
+
 测试脚本只监听动态分配的 loopback TCP 端口，退出时自动关闭 router；它不是实时周期依赖，也不代表生产环境已经完成认证、远程 ACL、证书生命周期或重连配置。
 
 callback 运行在 Zenoh host runtime：命令 callback 应只把数据投递到有界命令队列，query callback 可完成查询应答，但两者都不能直接操作 EtherCAT 周期或绕过 `esop-command-gateway`。会话关闭或传输失败会将状态标为 `Disconnected` 或 `Degraded`；重连不会自动恢复运动许可。

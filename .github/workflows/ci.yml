@@ -46,6 +46,26 @@ jobs:
           cp bpf/vmlinux.h bpf/build/vmlinux.h
           make -C bpf
 
+  ebpf-gateway-runtime:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install eBPF build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+      - name: Run privileged gateway runtime qualification
+        run: make test-ebpf-gateway-runtime
+      - name: Upload gateway runtime qualification
+        uses: actions/upload-artifact@v4
+        with:
+          name: esop-ebpf-gateway-runtime-qualification
+          path: build/ebpf_gateway_qualification.json
+          if-no-files-found: error
+
   ebpf-raw-port-runtime:
     runs-on: ubuntu-24.04
     steps:

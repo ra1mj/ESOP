@@ -12,6 +12,7 @@ esop-ebpf-agent = { path = "../esop-ebpf-agent" }
 
 [dev-dependencies]
 esop-ethercat-linux-port = { path = "../esop-ethercat-linux-port" }
+esop-zenoh-gateway = { path = "../esop-zenoh-gateway", features = ["zenoh"] }
 libc = "0.2"
 
 [lib]

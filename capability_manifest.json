@@ -130,7 +130,7 @@
     {
       "id": "ebpf_observation",
       "status": "partial",
-      "scope": "Linux CO-RE loader, tracepoint attach, optional atomic Zenoh publish/callback and Linux raw-port syscall uprobe pairs, fixed event decode, privileged raw-port marker-to-incident host qualification, bounded scheduler runqueue and tracked-TID migration evidence, bounded IRQ/softirq duration evidence, bounded EtherType/ifindex skb drop windows, bounded tracked-process page-fault windows, bounded cpufreq policy-limit episodes, bounded request-correlated gateway and per-thread raw-port syscall duration evidence, leader-thread process-exit filtering, OOM victim-PID attribution and incident correlation",
+      "scope": "Linux CO-RE loader, tracepoint attach, optional atomic Zenoh publish/callback and Linux raw-port syscall uprobe pairs, fixed event decode, privileged gateway and raw-port marker-to-incident host qualifications, bounded scheduler runqueue and tracked-TID migration evidence, bounded IRQ/softirq duration evidence, bounded EtherType/ifindex skb drop windows, bounded tracked-process page-fault windows, bounded cpufreq policy-limit episodes, bounded request-correlated gateway and per-thread raw-port syscall duration evidence, leader-thread process-exit filtering, OOM victim-PID attribution and incident correlation",
       "evidence": [
         "crates/esop-ebpf-agent/src/lib.rs",
         "crates/esop-ebpf-runtime/src/linux.rs",
@@ -140,6 +140,10 @@
         "crates/esop-zenoh-gateway/tests/uprobe_abi.rs",
         "bpf/esop_runtime.bpf.c",
         "crates/esop-procbuf/tests/cross_layer.rs",
+        "crates/esop-ebpf-runtime/examples/gateway_qualification.rs",
+        "scripts/test-ebpf-gateway-runtime.sh",
+        "scripts/validate-ebpf-gateway-qualification.py",
+        "scripts/tests/test_ebpf_gateway_qualification.py",
         "crates/esop-ebpf-runtime/examples/raw_port_qualification.rs",
         "scripts/test-ebpf-raw-port-runtime.sh",
         "scripts/validate-ebpf-raw-port-qualification.py",
@@ -147,7 +151,7 @@
         ".github/workflows/ci.yml",
         "docs/esop-ebpf-runtime-observability.md"
       ],
-      "limitation": "Hosted privileged Linux qualifies the raw-port shared marker pair through CO-RE verifier/load, real uprobe attachment, delayed Unix recv, ringbuf decode and HostPortStall correlation. It does not qualify real AF_PACKET/NIC load, production target kernels, raw-port cycle/driver/NIC/wire/slave timing, overhead/WCET or production hooks. ROS2, recorder, Zenoh IPC/serialization/permit/reconnect, scheduler migration and IRQ/softirq pressure, real NIC/page-fault/OOM/process-exit/cpufreq-limit/gateway injection, migration-cause/affinity/cache-impact, major/minor fault attribution, OOM victim TGID resolution and instantaneous-frequency/residency/cause qualification remain open"
+      "limitation": "Hosted privileged Linux qualifies the gateway publish/callback and raw-port shared marker chains through CO-RE verifier/load, real uprobe attachment, bounded direct-marker or Unix-recv delay, ringbuf decode, statistics and incident correlation. Gateway evidence does not qualify a live Zenoh session, router/transport queue, IPC, serialization, permit or reconnect cause. Raw-port evidence does not qualify real AF_PACKET/NIC load or cycle/driver/NIC/wire/slave timing. Production target kernels, overhead/WCET, ROS2, recorder, scheduler migration and IRQ/softirq pressure, real NIC/page-fault/OOM/process-exit/cpufreq-limit injection, migration-cause/affinity/cache-impact, major/minor fault attribution, OOM victim TGID resolution and instantaneous-frequency/residency/cause qualification remain open"
     },
     {
       "id": "stm32_hpmicro_ports",

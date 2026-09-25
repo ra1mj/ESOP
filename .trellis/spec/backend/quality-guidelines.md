@@ -723,8 +723,13 @@ require transport-risk correlation before assigning the existing incident code.
   classification.
 - Scope: this contract covers the complete asynchronous `publish` operation
   and synchronous command-subscription and query callback invocation. It does
-  not qualify Zenoh internal queueing, ROS2, recorder, target-kernel
-  attachment, fault injection, or production overhead.
+  not qualify Zenoh internal queueing, ROS2, recorder, live transport behavior,
+  production target kernels, or production overhead.
+- The privileged host qualification covers the shared marker/load/attach/
+  ring-buffer/correlator path using bounded direct-marker delays for both
+  operation classes. It does not convert those calls into live Zenoh transport,
+  router queue, IPC, serialization, permit, reconnect, WCET, or production
+  realtime evidence.
 
 ### 2. Signatures
 
@@ -738,6 +743,9 @@ require transport-risk correlation before assigning the existing incident code.
 - Attachment: `BpfRuntime::attach_gateway_publish_probes(target, pid,
   required)` and `BpfRuntime::attach_gateway_callback_probes(target, pid,
   required)` attach each exact marker-symbol pair transactionally.
+- Qualification entry: `make test-ebpf-gateway-runtime`; successful execution
+  writes `build/ebpf_gateway_qualification.json`, which is independently
+  checked by `scripts/validate-ebpf-gateway-qualification.py`.
 
 ### 3. Contracts
 
@@ -764,6 +772,12 @@ require transport-risk correlation before assigning the existing incident code.
 - `GatewayStall` classification requires nonzero threshold, strict
   `duration_ns > threshold`, consistent observed duration, and a correlated
   deadline/WKC/DC-risk cycle.
+- The qualification disables unrelated tracepoints, tracks its own PID,
+  requires all four gateway attach bits, publishes the same risk cycle to
+  kernel and agent, and bounds polling by iteration count and elapsed time. It
+  may publish `qualified` only after one Diagnostic/success publish and one
+  Command/completed callback have produced two classified records merged into
+  one count-two incident with zero mismatch/loss.
 
 ### 4. Validation & Error Matrix
 
@@ -777,6 +791,9 @@ require transport-risk correlation before assigning the existing incident code.
   and emit no incident.
 - Map insertion or ring-buffer failure -> bounded diagnostics/loss accounting;
   never block the gateway or control path.
+- Missing root/passwordless sudo, verifier/load failure, partial pair attach,
+  poll timeout, malformed/rejected evidence, wrong merge/detail/request ID, or
+  report-schema mismatch -> nonzero qualification exit and no success artifact.
 
 ### 5. Good/Base/Bad Cases
 
@@ -785,6 +802,10 @@ require transport-risk correlation before assigning the existing incident code.
   one PID-attributed/TID-zero gateway incident. A command callback that exceeds
   the threshold during the same risk cycle emits the same fixed evidence with
   callback class and Command route validation.
+- Good qualification: a 25 ms Diagnostic/success publish and 25 ms
+  Command/completed callback against a 5 ms threshold produce request IDs 101
+  and 202, complete four-bit attachment, two begin/completion/stall counts, and
+  one merged count-two incident with zero mismatch/loss.
 - Base: an at-threshold publish or callback completes and removes state without
   evidence; publish cancellation and callback unwind each close marker state
   exactly once.
@@ -808,6 +829,9 @@ require transport-risk correlation before assigning the existing incident code.
   threshold, inconsistent duration, zero threshold, and healthy-cycle cases.
 - Statistics aggregation saturates; BPF syntax and CO-RE object compilation
   cover the bounded map and x86_64 marker argument ABI.
+- The report validator accepts the privileged baseline and rejects missing,
+  unknown, bool-as-int, partial-pair, wrong route/outcome, duplicate ID,
+  at-threshold, inconsistent-duration, mismatch, loss, and wrong-incident data.
 
 ### 7. Wrong vs Correct
 

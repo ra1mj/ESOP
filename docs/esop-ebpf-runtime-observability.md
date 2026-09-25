@@ -2,7 +2,7 @@
 
 - 文档版本：1.2
 - 日期：2026-09-25
-- 状态：设计基线；HostObservation、固定证据 ABI、有界 RuntimeIncident 相关器、同类事件窗口聚合、RuntimeAgent 门面、能力预检结果模型、Rust/Aya CO-RE loader、tracepoint attach、ringbuf 解码桥、有界硬 IRQ/softirq 时长证据、按 EtherType/ifindex 聚合的 `kfree_skb` 丢包证据、有界 cpufreq policy 限频 episode、Zenoh gateway stall 和 Linux raw-port syscall stall 证据已实现；目标内核 verifier/权限、真实压力/限频/延迟注入和生产 hook 资格仍需在目标 Linux 环境完成
+- 状态：设计基线；HostObservation、固定证据 ABI、有界 RuntimeIncident 相关器、同类事件窗口聚合、RuntimeAgent 门面、能力预检结果模型、Rust/Aya CO-RE loader、tracepoint attach、ringbuf 解码桥、有界硬 IRQ/softirq 时长证据、按 EtherType/ifindex 聚合的 `kfree_skb` 丢包证据、有界 cpufreq policy 限频 episode、Zenoh gateway stall 和 Linux raw-port syscall stall 证据已实现；托管 Linux 已覆盖 gateway/raw-port 共享 marker 链的 verifier/load/真实 uprobe/ringbuf/相关器资格，生产目标内核、真实 transport/NIC/压力/限频注入、开销和其余 hook 资格仍需单独完成
 - 上游需求：[ESOP 软件产品需求文档](esop-software-prd.md) FR-047 至 FR-052、NFR-018
 
 ## 1. 设计结论
@@ -43,7 +43,7 @@ ESOP RT node
 
 两条证据链保持独立：RT 域是运动控制事实来源；eBPF 是 Linux 环境的解释与归因来源。相关器可以合并“同一个周期窗口内的事件”，但不能以缺少 eBPF 事件证明“系统没有问题”。
 
-当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、调度 TID/迁移计数窗口策略原子更新、硬 IRQ/softirq entry/exit attach、EtherCAT EtherType/可选 ifindex 丢包策略更新、页错误计数窗口策略更新、cpufreq policy 下限/CPU 策略原子更新、Zenoh gateway 与 Linux raw-port syscall 成对 uprobe attach 和 `RuntimeAgent` 桥接；`bpf/` 提供固定 1024 项的调度 TID 迁移窗口 map、固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、固定 256 项的 CPU/进程页错误窗口 map、固定 256 项的 cpufreq policy episode map、固定 1024 项 gateway request 与 raw-port per-thread 操作 map、主线程退出过滤、OOM victim PID 归因、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。CI 负责 CO-RE 对象构建；目标 Linux 环境仍需完成真实权限、verifier、ringbuf、调度迁移、IRQ/softirq、丢包、页错误、OOM、进程退出、限频与 raw-port 延迟压力注入以及目标 hook 资格测试。
+当前代码已在 `crates/esop-lifecycle-guard/` 落地固定大小的 `HostObservation`、`agent_epoch`/`heartbeat_seq` 防重放、单调时间年龄校验和 `HostObservation` 生命周期门槛；`crates/esop-ebpf-agent/` 已落地固定证据 ABI、cycle/WKC/DC 风险关联、有界 incident 环、同一代码/组件/时间窗口内的证据聚合、incident 有界消费、`RuntimeAgent` 健康租约门面和 BTF/ringbuf/verifier/permission/attach 能力预检结果模型。`crates/esop-ebpf-runtime/` 现在提供实际的 Rust/Aya BPF ELF loader、逐点 tracepoint attach、固定 96 字节事件解码、kernel context map 更新、per-CPU 统计读取、调度 TID/迁移计数窗口策略原子更新、硬 IRQ/softirq entry/exit attach、EtherCAT EtherType/可选 ifindex 丢包策略更新、页错误计数窗口策略更新、cpufreq policy 下限/CPU 策略原子更新、Zenoh gateway 与 Linux raw-port syscall 成对 uprobe attach 和 `RuntimeAgent` 桥接；`bpf/` 提供固定 1024 项的调度 TID 迁移窗口 map、固定容量中断起始时间 map、固定 256 项的 CPU/ifindex 丢包窗口 map、固定 256 项的 CPU/进程页错误窗口 map、固定 256 项的 cpufreq policy episode map、固定 1024 项 gateway request 与 raw-port per-thread 操作 map、主线程退出过滤、OOM victim PID 归因、阈值事件和统计计数。`crates/esop-procbuf/tests/cross_layer.rs` 已验证健康心跳可通过 MLG 观测门槛，能力退化心跳会触发配置的 Quick Stop。专用托管 Linux CI 已验证 gateway 与 raw-port 的 CO-RE verifier/load、真实 marker uprobe、ringbuf、统计和相关器共享链；生产目标内核与真实 Zenoh transport、AF_PACKET/NIC、调度迁移、IRQ/softirq、丢包、页错误、OOM、进程退出、限频压力及开销资格仍需单独完成。
 
 ## 4. 观测域与 attach 点
 
@@ -341,9 +341,17 @@ EBPF-006 当前已完成 Zenoh gateway publish 与 callback 子路径：独立�
 begin/end marker、共享非零 request ID、future cancellation 与 callback unwind 收口、
 两组可选原子 uprobe 对、记录操作类别的固定 1024 项 epoch-aware LRU 状态、96 字节
 request-correlated 证据解码和 transport-risk 相关器拒绝条件已有源码/单元测试。
-command subscription 及 raw/typed query 的同步 callback 调用均已覆盖。该结果不等于
-目标内核真实 symbol attach、gateway stall 注入或开销资格；ROS 2、recorder、IPC、
-序列化、permit 和 reconnect hook 仍未完成，因此 EBPF-006 整体保持 partial。
+command subscription 及 raw/typed query 的同步 callback 调用均已覆盖。专用
+`make test-ebpf-gateway-runtime` 还会在特权托管 Linux 上关闭无关 tracepoint，加载真实
+CO-RE 对象并通过 verifier，把 publish/callback 四个 marker 精确附加到夹具自身，以
+同一 WKC-risk cycle 分别包围 25 ms 的 Diagnostic/success publish 和
+Command/completed callback 延迟，再要求两条 ringbuf 证据合并为一个 count/evidence
+count 均为 2 的 `GatewayStall` controlled-stop incident，且附着位、request ID、detail、
+begin/completion/stall 统计全部自洽、零 mismatch/loss，最后生成并校验
+`build/ebpf_gateway_qualification.json`。该资格只覆盖 direct-marker 到 incident 的共享
+路径；live Zenoh Session、router/transport queue、IPC、序列化、permit、reconnect、
+生产目标内核和开销仍未资格化，ROS 2 与 recorder hook 也未完成，因此 EBPF-006
+整体保持 partial。
 
 FR-048 的调度迁移路径当前已具备 typed `sched_migrate_task` 读取、独立
 scheduler TID 过滤、固定 1024 项迁移窗口、策略 epoch 重置、来源/目标 CPU
