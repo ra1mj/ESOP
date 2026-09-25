@@ -43,7 +43,7 @@ than adding retries or accepting extra records.
 | P0 | Architecture | Load with an impossible exact vector, open vector 3 only around send/counter sampling, then close before receive/poll | Done |
 | P0 | Test contract | Preserve exact one record/incident/statistics and add closed/open/closed report fields with mutation tests | Done |
 | P1 | Documentation | Record that spatial selectors do not establish temporal isolation in backend quality guidance | Done |
-| P1 | Remote integration | Require the dedicated privileged hosted job and independently validated artifact | Pending push |
+| P1 | Remote integration | Require the dedicated privileged hosted job and independently validated artifact | Done |
 
 ## 4. Systematic Expansion
 
@@ -62,4 +62,4 @@ than adding retries or accepting extra records.
       contract and wrong/correct examples.
 - [x] Update the report schema, validator, and mutation tests.
 - [x] Update README, product PRD, observability design, and capability manifest.
-- [ ] Capture hosted run and artifact measurements in `result.md` after push.
+- [x] Capture hosted run and artifact measurements in `result.md` after push.

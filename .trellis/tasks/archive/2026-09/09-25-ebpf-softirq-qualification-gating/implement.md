@@ -11,9 +11,9 @@
       and backend quality guidance with the temporal-gating contract.
 - [x] Run `cargo fmt --check`, focused Rust/Python checks, BPF/shell/Python
       syntax checks, capability validation, `git diff --check`, and `make ci`.
-- [ ] Review the diff for unchanged production ABI/behavior and strict failure
+- [x] Review the diff for unchanged production ABI/behavior and strict failure
       cleanup, then commit and push.
-- [ ] Track the final GitHub Actions run to completion, inspect the softirq job,
+- [x] Track the final GitHub Actions run to completion, inspect the softirq job,
       download and hash the artifact, and independently rerun its validator.
-- [ ] Complete/archive the Trellis task and record the session journal only
+- [x] Complete/archive the Trellis task and record the session journal only
       after remote qualification succeeds.

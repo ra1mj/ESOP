@@ -61,21 +61,21 @@ therefore cover that same bounded interval instead of the entire phase.
 
 ## Acceptance Criteria
 
-- [ ] Both runtime phases start with the selected CPU plus the closed vector,
+- [x] Both runtime phases start with the selected CPU plus the closed vector,
       expose vector 3 only across the controlled send/counter interval, and
       return to the closed vector before receive/poll work.
-- [ ] Every opened gate is closed even when the send or post-send counter read
+- [x] Every opened gate is closed even when the send or post-send counter read
       fails; no retry or relaxed count contract is introduced.
-- [ ] The qualifier still requires exactly one target-CPU `NET_RX` delta,
+- [x] The qualifier still requires exactly one target-CPU `NET_RX` delta,
       record, incident, sample, overrun, and emission with zero loss.
-- [ ] The report validator proves the closed/open/closed sequence for both
+- [x] The report validator proves the closed/open/closed sequence for both
       calibration and formal phases and rejects gate-field mutations.
-- [ ] Existing eBPF runtime/unit/report tests, formatting, Clippy, BPF syntax,
+- [x] Existing eBPF runtime/unit/report tests, formatting, Clippy, BPF syntax,
       capability validation, shell/Python syntax, and `make ci` pass locally.
-- [ ] The final pushed commit's complete GitHub Actions workflow succeeds; the
+- [x] The final pushed commit's complete GitHub Actions workflow succeeds; the
       softirq artifact is downloaded, checksum-accounted, and independently
       accepted by `validate-ebpf-softirq-qualification.py`.
-- [ ] Durable quality guidance records that exact CPU/vector filtering is not
+- [x] Durable quality guidance records that exact CPU/vector filtering is not
       temporal isolation unless the qualification closes the filter outside
       the controlled injection interval.
 
