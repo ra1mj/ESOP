@@ -76,29 +76,29 @@ identity.
 
 ## Acceptance Criteria
 
-- [ ] A privileged hosted Linux run verifies production CO-RE load and required
+- [x] A privileged hosted Linux run verifies production CO-RE load and required
       `oom:mark_victim` attachment with no unrelated hook.
-- [ ] A unique cgroup v2 leaf confines one prepared single-threaded child; the
+- [x] A unique cgroup v2 leaf confines one prepared single-threaded child; the
       child is the only member and is terminated by `SIGKILL` after bounded
       anonymous-memory pressure exceeds the configured hard limit.
-- [ ] Independent `memory.events.local` evidence records at least one OOM,
+- [x] Independent `memory.events.local` evidence records at least one OOM,
       exactly one OOM kill, and no group OOM kill while the runner remains
       alive and the cgroup is removed successfully.
-- [ ] Baseline BPF counters are zero; the formal run produces exactly one fixed
+- [x] Baseline BPF counters are zero; the formal run produces exactly one fixed
       OOM record and exact final OOM/emission/loss statistics.
-- [ ] The record and incident preserve the exact victim PID/TID and hard-fact
+- [x] The record and incident preserve the exact victim PID/TID and hard-fact
       semantics: Critical `HostOom`, `LatchFault`, confidence 100, no cycle
       dependency, and Healthy-to-Failed heartbeat transition with fault
       `0x45422002`.
-- [ ] The report is same-directory atomic and its validator fails closed for
+- [x] The report is same-directory atomic and its validator fails closed for
       schema, cgroup configuration/counters, child termination, attach mask,
       victim identity, event/statistics, incident policy, loss, cleanup, and
       observer-health mismatches.
-- [ ] Focused Rust/Python tests, formatting, Clippy, BPF syntax, capability
+- [x] Focused Rust/Python tests, formatting, Clippy, BPF syntax, capability
       validation, shell/Python syntax, `make ci`, and `git diff --check` pass.
-- [ ] The dedicated privileged GitHub Actions job passes and its downloaded
+- [x] The dedicated privileged GitHub Actions job passes and its downloaded
       artifact independently passes the repository validator.
-- [ ] Documentation removes controlled hosted single-process memcg OOM
+- [x] Documentation removes controlled hosted single-process memcg OOM
       injection from the open list while preserving victim TGID, namespace,
       cgroup attribution, OOM trigger/root cause, global pressure, production
       kernel, overhead/WCET, restart supervision, and long-duration limits.
