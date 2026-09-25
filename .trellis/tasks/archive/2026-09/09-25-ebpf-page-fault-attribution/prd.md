@@ -63,7 +63,7 @@ unbounded event stream or an unsupported duration claim.
 - [x] Unit tests cover context preservation, C/Rust map ABI sizes, and
       saturating page-fault statistics.
 - [x] `make ci` passes locally.
-- [ ] GitHub Actions builds the real CO-RE BPF object successfully.
+- [x] GitHub Actions builds the real CO-RE BPF object successfully.
 
 ## Non-Goals
 
