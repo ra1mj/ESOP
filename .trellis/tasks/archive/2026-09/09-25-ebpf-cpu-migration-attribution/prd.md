@@ -59,24 +59,24 @@ also require a configured migration-count threshold and transport-risk cycle.
 
 ## Acceptance Criteria
 
-- [ ] The BPF bundle contains a typed `sched_migrate_task` program and a
+- [x] The BPF bundle contains a typed `sched_migrate_task` program and a
       fixed-capacity per-TID migration-window map.
-- [ ] Migration state resets on window expiry and policy epoch change, emits
+- [x] Migration state resets on window expiry and policy epoch change, emits
       once on the threshold crossing, and cannot grow without bound.
-- [ ] Fixed evidence decodes tracked TID, origin/destination CPU, count,
+- [x] Fixed evidence decodes tracked TID, origin/destination CPU, count,
       threshold, window duration, and priority without changing its 96-byte
       size or existing discriminants.
-- [ ] Scheduler configuration rejects zero/oversized thresholds and zero
+- [x] Scheduler configuration rejects zero/oversized thresholds and zero
       windows without partially mutating the kernel context.
-- [ ] Runqueue-latency evidence and migration evidence both carry the actual
+- [x] Runqueue-latency evidence and migration evidence both carry the actual
       tracked scheduler TID rather than the task executing the hook.
-- [ ] Unit tests prove migration attribution requires both threshold evidence
+- [x] Unit tests prove migration attribution requires both threshold evidence
       and a correlated transport-risk cycle and remains lower confidence than
       measured runqueue latency.
-- [ ] C and Rust agree on expanded context/stat sizes, attach masks remain
+- [x] C and Rust agree on expanded context/stat sizes, attach masks remain
       explicit, and statistics aggregation tests cover saturation.
-- [ ] `make bpf-syntax` and `make ci` pass locally.
-- [ ] GitHub Actions builds the real CO-RE BPF object and passes the Rust gate.
+- [x] `make bpf-syntax` and `make ci` pass locally.
+- [x] GitHub Actions builds the real CO-RE BPF object and passes the Rust gate.
 
 ## Non-Goals
 
