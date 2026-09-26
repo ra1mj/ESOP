@@ -88,7 +88,7 @@ pub use mapping_config::{
 pub use pdo::{PdoDirection, PdoEntry, PdoError, PdoLayout};
 pub use pdo_config::{
     MAX_PDO_SDO_DATA, PdoConfigAction, PdoConfigController, PdoConfigError, PdoConfigPhase,
-    PdoConfigPlan, PdoConfigPlanError, PdoConfigProgress, PdoEntrySpec, PdoSdoWrite,
+    PdoConfigPlan, PdoConfigPlanError, PdoConfigProgress, PdoConfigStep, PdoEntrySpec, PdoSdoWrite,
 };
 pub use plan::{DatagramPlan, FramePlan, FramePlanSet, FramePlanSetError, PlanError};
 pub use port::{EthercatDmaTxPort, EthercatPort, LinkState, PortError, RxPoll};

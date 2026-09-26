@@ -26,12 +26,12 @@
         "scripts/tests/test_robot_build_report.py",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "The supported ESI subset is byte-aligned and explicit; modular devices, bit-packed PDOs, vendor scaling/quirks, artifact signing/distribution, runtime SII/PDO assignment read-back, physical slave interoperability, measured wire timing, target resource/WCET and safety qualification remain open"
+      "limitation": "The supported ESI subset is byte-aligned and explicit; modular devices, bit-packed PDOs, vendor scaling/quirks, artifact signing/distribution, production-scheduled live PDO readback, physical slave interoperability, measured wire timing, target resource/WCET and safety qualification remain open"
     },
     {
       "id": "product_runtime_attachment",
       "status": "implemented",
-      "scope": "Allocation-free no_std activation of generated Rust product configuration with exact hash, ProcBuf v6, observed topology, Domain/PDO/datagram/WKC, schedule/frame-plan, CiA 402 map and axis-policy validation",
+      "scope": "Allocation-free no_std activation of generated Rust product configuration with exact hash, ProcBuf v6, observed topology, Domain/PDO/datagram/WKC, schedule/frame-plan, CiA 402 map and axis-policy validation plus deterministic per-slave PDO startup-plan construction",
       "evidence": [
         "crates/esop-product-config/src/lib.rs",
         "crates/esop-product-config/tests/generated_product.rs",
@@ -40,7 +40,19 @@
         "Makefile",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Activation validates static expectations against caller-supplied observed slave records; live SII/PDO assignment read-back, artifact signing/deployment policy, physical interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
+      "limitation": "Activation validates static expectations and builds bounded PDO plans; production service/mailbox execution, authentic physical readback, artifact signing/deployment policy, interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
+    },
+    {
+      "id": "pdo_configuration_readback",
+      "status": "implemented",
+      "scope": "Allocation-free CoE PDO assignment/mapping controller that downloads every planned value, uploads the same object, and advances only after exact length and byte verification",
+      "evidence": [
+        "crates/esop-ethercat-core/src/pdo_config.rs",
+        "crates/esop-product-config/src/lib.rs",
+        "crates/esop-product-config/tests/generated_product.rs",
+        "docs/esop-product-configuration.md"
+      ],
+      "limitation": "The controller and generated plans are software contracts; ScheduledProductionServiceScheduler integration, mailbox transport ownership, physical response authenticity, device interoperability and HIL remain open"
     },
     {
       "id": "linux_raw_port",

@@ -1,9 +1,10 @@
 //! Fixed-capacity CoE PDO assignment/mapping configuration.
 //!
-//! The plan is built before activation and contains only expedited SDO
-//! downloads. The controller advances one mailbox transaction at a time, so
-//! it can share the existing asynchronous mailbox budget without touching the
-//! cyclic PDO path.
+//! The plan is built before activation and contains only expedited SDO write
+//! values. The controller downloads each value and then uploads the same
+//! object for exact readback verification. It advances one mailbox transaction
+//! at a time, so it can share the existing asynchronous mailbox budget without
+//! touching the cyclic PDO path.
 
 use crate::coe::{SdoError, SdoTransfer};
 use crate::mailbox::MAX_MAILBOX_BYTES;
@@ -186,11 +187,18 @@ pub enum PdoConfigPhase {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PdoConfigStep {
+    Download,
+    VerifyUpload,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PdoConfigAction {
     pub token: u8,
     pub generation: u16,
     pub station_address: u16,
     pub operation_index: u16,
+    pub step: PdoConfigStep,
     pub sdo_index: u16,
     pub sdo_subindex: u8,
     pub request_payload: [u8; MAX_MAILBOX_BYTES],
@@ -220,6 +228,15 @@ pub enum PdoConfigError {
     PayloadLengthMismatch,
     Timeout,
     RequestTooLarge,
+    ReadbackLengthMismatch {
+        expected: u8,
+        actual: u8,
+    },
+    ReadbackValueMismatch {
+        byte_index: u8,
+        expected: u8,
+        actual: u8,
+    },
     Plan(PdoConfigPlanError),
     Sdo(SdoError),
 }
@@ -228,6 +245,7 @@ pub struct PdoConfigController<const OPS: usize> {
     phase: PdoConfigPhase,
     plan: PdoConfigPlan<OPS>,
     operation_index: usize,
+    step: PdoConfigStep,
     station_address: u16,
     generation: u16,
     configuration_deadline_ns: u64,
@@ -244,6 +262,7 @@ impl<const OPS: usize> PdoConfigController<OPS> {
             phase: PdoConfigPhase::Idle,
             plan: PdoConfigPlan::new(),
             operation_index: 0,
+            step: PdoConfigStep::Download,
             station_address: 0,
             generation: 0,
             configuration_deadline_ns: 0,
@@ -267,6 +286,10 @@ impl<const OPS: usize> PdoConfigController<OPS> {
         self.operation_index
     }
 
+    pub const fn step(&self) -> PdoConfigStep {
+        self.step
+    }
+
     pub const fn last_error(&self) -> Option<PdoConfigError> {
         self.last_error
     }
@@ -288,10 +311,12 @@ impl<const OPS: usize> PdoConfigController<OPS> {
         }
         self.plan = plan;
         self.operation_index = 0;
+        self.step = PdoConfigStep::Download;
         self.station_address = station_address;
         self.generation = generation;
         self.configuration_deadline_ns = now_ns.saturating_add(timeout_ns);
         self.request_timeout_ns = request_timeout_ns;
+        self.transfer = SdoTransfer::new();
         self.pending = None;
         self.next_token = 1;
         self.last_error = None;
@@ -338,6 +363,7 @@ impl<const OPS: usize> PdoConfigController<OPS> {
             generation: self.generation,
             station_address: self.station_address,
             operation_index: self.operation_index as u16,
+            step: self.step,
             sdo_index: write.index,
             sdo_subindex: write.subindex,
             request_payload,
@@ -379,14 +405,30 @@ impl<const OPS: usize> PdoConfigController<OPS> {
             }
             Ok(crate::coe::SdoProgress::Complete) => {
                 self.pending = None;
-                self.operation_index += 1;
-                if self.operation_index >= self.plan.len() {
-                    self.phase = PdoConfigPhase::Complete;
-                    Ok(PdoConfigProgress::Complete)
-                } else {
-                    self.start_current_transfer()?;
-                    self.phase = PdoConfigPhase::Sending;
-                    Ok(PdoConfigProgress::Advanced)
+                match self.step {
+                    PdoConfigStep::Download => {
+                        self.step = PdoConfigStep::VerifyUpload;
+                        if let Err(error) = self.start_current_transfer() {
+                            return self.fail(error);
+                        }
+                        self.phase = PdoConfigPhase::Sending;
+                        Ok(PdoConfigProgress::Advanced)
+                    }
+                    PdoConfigStep::VerifyUpload => {
+                        self.verify_readback()?;
+                        self.operation_index += 1;
+                        self.step = PdoConfigStep::Download;
+                        if self.operation_index >= self.plan.len() {
+                            self.phase = PdoConfigPhase::Complete;
+                            Ok(PdoConfigProgress::Complete)
+                        } else {
+                            if let Err(error) = self.start_current_transfer() {
+                                return self.fail(error);
+                            }
+                            self.phase = PdoConfigPhase::Sending;
+                            Ok(PdoConfigProgress::Advanced)
+                        }
+                    }
                 }
             }
             Err(error) => self.fail(PdoConfigError::Sdo(error)),
@@ -409,14 +451,44 @@ impl<const OPS: usize> PdoConfigController<OPS> {
 
     fn start_current_transfer(&mut self) -> Result<(), PdoConfigError> {
         let write = self.plan.writes()[self.operation_index];
-        self.transfer
-            .start_download(
-                write.index,
-                write.subindex,
-                &write.data[..write.data_len as usize],
-                false,
-            )
-            .map_err(PdoConfigError::Sdo)
+        match self.step {
+            PdoConfigStep::Download => self
+                .transfer
+                .start_download(
+                    write.index,
+                    write.subindex,
+                    &write.data[..write.data_len as usize],
+                    false,
+                )
+                .map_err(PdoConfigError::Sdo),
+            PdoConfigStep::VerifyUpload => self
+                .transfer
+                .start_upload(write.index, write.subindex, false)
+                .map_err(PdoConfigError::Sdo),
+        }
+    }
+
+    fn verify_readback(&mut self) -> Result<(), PdoConfigError> {
+        let write = self.plan.writes()[self.operation_index];
+        let actual_len = self.transfer.data_len();
+        if actual_len != write.data_len as usize {
+            return self.fail(PdoConfigError::ReadbackLengthMismatch {
+                expected: write.data_len,
+                actual: actual_len.min(u8::MAX as usize) as u8,
+            });
+        }
+        for byte_index in 0..actual_len {
+            let expected = write.data[byte_index];
+            let actual = self.transfer.data()[byte_index];
+            if actual != expected {
+                return self.fail(PdoConfigError::ReadbackValueMismatch {
+                    byte_index: byte_index as u8,
+                    expected,
+                    actual,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn fail<T>(&mut self, error: PdoConfigError) -> Result<T, PdoConfigError> {
@@ -437,6 +509,35 @@ impl<const OPS: usize> Default for PdoConfigController<OPS> {
 mod tests {
     use super::*;
     use crate::coe::{CoeHeader, CoeService};
+
+    fn response_header(dst: &mut [u8]) {
+        CoeHeader {
+            number: 0,
+            service: CoeService::SdoResponse,
+        }
+        .encode(dst)
+        .unwrap();
+    }
+
+    fn download_response(action: PdoConfigAction) -> [u8; 6] {
+        let mut response = [0; 6];
+        response_header(&mut response);
+        response[2] = 0x60;
+        response[3..5].copy_from_slice(&action.sdo_index.to_le_bytes());
+        response[5] = action.sdo_subindex;
+        response
+    }
+
+    fn expedited_upload_response(action: PdoConfigAction, data: &[u8]) -> [u8; 10] {
+        assert!((1..=4).contains(&data.len()));
+        let mut response = [0; 10];
+        response_header(&mut response);
+        response[2] = 0x43 | (((4 - data.len()) as u8) << 2);
+        response[3..5].copy_from_slice(&action.sdo_index.to_le_bytes());
+        response[5] = action.sdo_subindex;
+        response[6..6 + data.len()].copy_from_slice(data);
+        response
+    }
 
     #[test]
     fn plan_emits_clear_entries_and_final_counts_in_order() {
@@ -471,29 +572,35 @@ mod tests {
     }
 
     #[test]
-    fn controller_runs_each_pdo_write_through_expedited_sdo() {
+    fn controller_downloads_and_verifies_every_pdo_write() {
         let mut plan = PdoConfigPlan::<3>::new();
         plan.append_assignment(0x1C12, &[0x1600]).unwrap();
         let mut controller = PdoConfigController::<3>::new();
         controller.start(plan, 0x1000, 9, 0, 10_000, 100).unwrap();
+        let expected_values: [&[u8]; 3] = [&[0], &0x1600u16.to_le_bytes(), &[1]];
 
-        for expected_operation in 0..3 {
-            let action = controller
+        for (expected_operation, expected_value) in expected_values.iter().enumerate() {
+            let download = controller
                 .next_action(1 + expected_operation as u64)
                 .unwrap()
                 .unwrap();
-            assert_eq!(action.operation_index, expected_operation as u16);
-            let mut response = [0; 6];
-            CoeHeader {
-                number: 0,
-                service: CoeService::SdoResponse,
-            }
-            .encode(&mut response)
-            .unwrap();
-            response[2] = 0x60;
-            response[3..5].copy_from_slice(&action.sdo_index.to_le_bytes());
-            response[5] = action.sdo_subindex;
-            let progress = controller.accept(action, 9, &response, 2).unwrap();
+            assert_eq!(download.operation_index, expected_operation as u16);
+            assert_eq!(download.step, PdoConfigStep::Download);
+            assert_eq!(controller.step(), PdoConfigStep::Download);
+            assert_eq!(
+                controller
+                    .accept(download, 9, &download_response(download), 2)
+                    .unwrap(),
+                PdoConfigProgress::Advanced
+            );
+            assert_eq!(controller.operation_index(), expected_operation);
+
+            let verify = controller.next_action(3).unwrap().unwrap();
+            assert_eq!(verify.operation_index, expected_operation as u16);
+            assert_eq!(verify.step, PdoConfigStep::VerifyUpload);
+            assert_eq!(verify.payload()[2], 0x40);
+            let response = expedited_upload_response(verify, expected_value);
+            let progress = controller.accept(verify, 9, &response, 4).unwrap();
             let expected_progress = if expected_operation == 2 {
                 PdoConfigProgress::Complete
             } else {
@@ -504,6 +611,165 @@ mod tests {
 
         assert_eq!(controller.phase(), PdoConfigPhase::Complete);
         assert_eq!(controller.next_action(3), Ok(None));
+    }
+
+    #[test]
+    fn controller_accepts_segmented_verification_upload() {
+        let mut plan = PdoConfigPlan::<1>::new();
+        plan.push(PdoSdoWrite::new(0x6040, 0, &[0x06, 0]).unwrap())
+            .unwrap();
+        let mut controller = PdoConfigController::<1>::new();
+        controller.start(plan, 0x1000, 9, 0, 10_000, 100).unwrap();
+
+        let download = controller.next_action(1).unwrap().unwrap();
+        controller
+            .accept(download, 9, &download_response(download), 2)
+            .unwrap();
+        let initiate = controller.next_action(3).unwrap().unwrap();
+        let mut initiate_response = [0; 10];
+        response_header(&mut initiate_response);
+        initiate_response[2] = 0x41;
+        initiate_response[3..5].copy_from_slice(&initiate.sdo_index.to_le_bytes());
+        initiate_response[5] = initiate.sdo_subindex;
+        initiate_response[6..10].copy_from_slice(&2u32.to_le_bytes());
+        assert_eq!(
+            controller
+                .accept(initiate, 9, &initiate_response, 4)
+                .unwrap(),
+            PdoConfigProgress::Advanced
+        );
+
+        let segment = controller.next_action(5).unwrap().unwrap();
+        assert_eq!(segment.step, PdoConfigStep::VerifyUpload);
+        assert_eq!(segment.payload(), &[0, 0x20, 0x60]);
+        let mut segment_response = [0; 10];
+        response_header(&mut segment_response);
+        segment_response[2] = 0x0B;
+        segment_response[3..5].copy_from_slice(&[0x06, 0]);
+        assert_eq!(
+            controller.accept(segment, 9, &segment_response, 6).unwrap(),
+            PdoConfigProgress::Complete
+        );
+        assert_eq!(controller.operation_index(), 1);
+    }
+
+    #[test]
+    fn readback_length_mismatch_faults_without_advancing() {
+        let mut plan = PdoConfigPlan::<1>::new();
+        plan.push(PdoSdoWrite::new(0x6040, 0, &[0x06, 0]).unwrap())
+            .unwrap();
+        let mut controller = PdoConfigController::<1>::new();
+        controller.start(plan, 0x1000, 9, 0, 10_000, 100).unwrap();
+        let download = controller.next_action(1).unwrap().unwrap();
+        controller
+            .accept(download, 9, &download_response(download), 2)
+            .unwrap();
+        let verify = controller.next_action(3).unwrap().unwrap();
+
+        assert_eq!(
+            controller.accept(verify, 9, &expedited_upload_response(verify, &[0x06]), 4,),
+            Err(PdoConfigError::ReadbackLengthMismatch {
+                expected: 2,
+                actual: 1,
+            })
+        );
+        assert_eq!(controller.phase(), PdoConfigPhase::Faulted);
+        assert_eq!(controller.operation_index(), 0);
+    }
+
+    #[test]
+    fn readback_value_mismatch_reports_first_changed_byte() {
+        let mut plan = PdoConfigPlan::<1>::new();
+        plan.push(PdoSdoWrite::new(0x6040, 0, &[0x06, 0]).unwrap())
+            .unwrap();
+        let mut controller = PdoConfigController::<1>::new();
+        controller.start(plan, 0x1000, 9, 0, 10_000, 100).unwrap();
+        let download = controller.next_action(1).unwrap().unwrap();
+        controller
+            .accept(download, 9, &download_response(download), 2)
+            .unwrap();
+        let verify = controller.next_action(3).unwrap().unwrap();
+
+        assert_eq!(
+            controller.accept(
+                verify,
+                9,
+                &expedited_upload_response(verify, &[0x06, 0x7F]),
+                4,
+            ),
+            Err(PdoConfigError::ReadbackValueMismatch {
+                byte_index: 1,
+                expected: 0,
+                actual: 0x7F,
+            })
+        );
+        assert_eq!(controller.operation_index(), 0);
+    }
+
+    #[test]
+    fn verification_action_matching_generation_and_deadline_fail_closed() {
+        let mut plan = PdoConfigPlan::<1>::new();
+        plan.push(PdoSdoWrite::new(0x6040, 0, &[0x06, 0]).unwrap())
+            .unwrap();
+        let mut controller = PdoConfigController::<1>::new();
+        controller.start(plan, 0x1000, 9, 0, 10_000, 100).unwrap();
+        let download = controller.next_action(1).unwrap().unwrap();
+        controller
+            .accept(download, 9, &download_response(download), 2)
+            .unwrap();
+        let verify = controller.next_action(3).unwrap().unwrap();
+        let mut modified = verify;
+        modified.step = PdoConfigStep::Download;
+        assert_eq!(
+            controller.accept(modified, 9, &[0; 6], 4),
+            Err(PdoConfigError::ActionMismatch)
+        );
+        assert_eq!(controller.operation_index(), 0);
+
+        let mut plan = PdoConfigPlan::<1>::new();
+        plan.push(PdoSdoWrite::new(0x6040, 0, &[0x06, 0]).unwrap())
+            .unwrap();
+        controller.start(plan, 0x1000, 9, 0, 10_000, 100).unwrap();
+        let download = controller.next_action(1).unwrap().unwrap();
+        controller
+            .accept(download, 9, &download_response(download), 2)
+            .unwrap();
+        let verify = controller.next_action(3).unwrap().unwrap();
+        assert_eq!(
+            controller.accept(verify, 10, &[0; 6], 4),
+            Err(PdoConfigError::GenerationMismatch)
+        );
+        assert_eq!(controller.operation_index(), 0);
+
+        let mut plan = PdoConfigPlan::<1>::new();
+        plan.push(PdoSdoWrite::new(0x6040, 0, &[0x06, 0]).unwrap())
+            .unwrap();
+        controller.start(plan, 0x1000, 9, 0, 10_000, 100).unwrap();
+        let download = controller.next_action(1).unwrap().unwrap();
+        controller
+            .accept(download, 9, &download_response(download), 2)
+            .unwrap();
+        let verify = controller.next_action(3).unwrap().unwrap();
+        assert_eq!(
+            controller.accept(verify, 9, &[], 4),
+            Err(PdoConfigError::PayloadLengthMismatch)
+        );
+        assert_eq!(controller.operation_index(), 0);
+
+        let mut plan = PdoConfigPlan::<1>::new();
+        plan.push(PdoSdoWrite::new(0x6040, 0, &[0x06, 0]).unwrap())
+            .unwrap();
+        controller.start(plan, 0x1000, 9, 0, 10_000, 100).unwrap();
+        let download = controller.next_action(1).unwrap().unwrap();
+        controller
+            .accept(download, 9, &download_response(download), 2)
+            .unwrap();
+        let verify = controller.next_action(3).unwrap().unwrap();
+        assert_eq!(
+            controller.timeout(verify, verify.deadline_ns),
+            Err(PdoConfigError::Timeout)
+        );
+        assert_eq!(controller.operation_index(), 0);
     }
 
     #[test]

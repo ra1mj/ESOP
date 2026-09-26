@@ -129,6 +129,13 @@ ESOP 要解决以下产品问题：
 | FR-005 | P1 | 系统应支持显式设备识别与完整 SII PDO/SM 信息校验，用于防止同型号设备错位或换线。 | 交换同型号设备或变更识别对象后，按配置拒绝激活并给出原因。 |
 | FR-006 | P0 | 配置生成工具应把设备/ESI/产品配置转为静态固件配置和可读报告，不将 XML 运行时带入固件。 | 生成 C/Rust 配置、ProcBuf 布局、设备清单和构建报告；同一输入生成一致的配置 hash；固件运行时对 hash、拓扑、布局和计划 fail-closed 激活。 |
 
+FR-004 当前软件增量已把生成的 ESI PDO 选择转换为逐从站固定容量配置计划：
+每个 SyncManager 先清 assignment，再写 mapping entry，最后发布 assignment；
+`PdoConfigController` 对每个 SDO download 执行同对象 upload，并仅在长度和字节
+精确一致后推进。错误长度、首个差异字节、代际、动作和超时均类型化锁存。
+生产服务调度/邮箱传输接入、真实响应来源、物理从站互操作和 HIL 仍未完成，
+因此 FR-004 的完整产品验收仍保持开放。
+
 FR-006 当前增量由宿主机 `esop-cfggen` 与 `no_std` 的 `esop-product-config` 共同实现：前者严格解析 `esop.product.v1` 和 byte-aligned ESI 子集，通过既有 Domain/Frame Plan/CiA 402/ProcBuf 校验路径，原子输出静态 C/Rust 配置、规范化产品、设备清单、ProcBuf ABI v6 布局和 build input；后者在固件激活时重新校验配置 hash、ProcBuf header/layout、精确从站拓扑、Domain/PDO/datagram/WKC、schedule/frame plan、轴策略和 CiA 402 PDO map，并仅在全部成功后返回冻结配置。同一语义的 JSON/ESI 排版变化不改变 SHA-256 或输出字节。模块化设备、bit-packed PDO、厂商 scaling/quirk、完整 ENI/ESI 和真实 SII/PDO read-back 仍明确拒绝或留待硬件集成，不能被解释为完整 ESI 兼容或 HIL 资格。
 
 ### 7.2 EtherCAT 周期数据与 Domain

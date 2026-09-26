@@ -13,7 +13,9 @@ use esop_ethercat_core::{
 };
 use esop_lifecycle_guard::procbuf::Cia402AxisCommandPolicy;
 use esop_procbuf::{ABI_VERSION, ProcBufDimensions, ProcBufLayoutDescriptor, describe_layout};
-use esop_product_config::{MAX_PRODUCT_AXIS_PDOS, PRODUCT_RUNTIME_SCHEMA};
+use esop_product_config::{
+    MAX_PRODUCT_AXIS_PDOS, MAX_PRODUCT_PDO_ENTRIES_PER_DOMAIN, PRODUCT_RUNTIME_SCHEMA,
+};
 use esop_profile_cia402::{Cia402PdoMap, OperatingMode};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -25,7 +27,6 @@ use std::path::{Component, Path, PathBuf};
 
 const PRODUCT_SCHEMA: &str = "esop.product.v1";
 const MAX_DOMAINS: usize = 16;
-const MAX_PDOS_PER_DOMAIN: usize = 256;
 const MAX_DATAGRAMS_PER_DOMAIN: usize = 2;
 const MAX_FRAMES_PER_DOMAIN: usize = 8;
 const MAX_DATAGRAMS_PER_FRAME: usize = 16;
@@ -382,7 +383,7 @@ fn normalize_and_validate_manifest(manifest: &mut ProductManifest) -> Result<()>
         || capacities.max_datagrams_per_domain == 0
         || capacities.max_frames_per_domain == 0
         || capacities.max_schedule_slots == 0
-        || capacities.max_pdo_entries_per_domain > MAX_PDOS_PER_DOMAIN
+        || capacities.max_pdo_entries_per_domain > MAX_PRODUCT_PDO_ENTRIES_PER_DOMAIN
         || capacities.max_datagrams_per_domain > MAX_DATAGRAMS_PER_DOMAIN
         || capacities.max_frames_per_domain > MAX_FRAMES_PER_DOMAIN
         || capacities.max_schedule_slots > MAX_SCHEDULE_SLOTS
@@ -639,7 +640,8 @@ fn validate_selected_entries(
     Ok(())
 }
 
-type Registry = DomainRegistry<MAX_DOMAINS, MAX_PDOS_PER_DOMAIN, MAX_DATAGRAMS_PER_DOMAIN>;
+type Registry =
+    DomainRegistry<MAX_DOMAINS, MAX_PRODUCT_PDO_ENTRIES_PER_DOMAIN, MAX_DATAGRAMS_PER_DOMAIN>;
 
 struct BuiltDomainPlan {
     registry: Registry,

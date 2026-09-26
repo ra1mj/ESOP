@@ -1,7 +1,7 @@
 use esop_product_config::{
     ActivatedProduct, Cia402AxisCommandPolicyError, DomainRegistryError, FramePlanSetError,
-    OperatingMode, ProcBuf, ProcBufHeaderError, ProductActivationError, ProductSlaveKind,
-    SlaveRecord,
+    OperatingMode, PdoSdoWrite, ProcBuf, ProcBufHeaderError, ProductActivationError,
+    ProductSlaveKind, SlaveRecord,
 };
 
 mod generated {
@@ -69,6 +69,59 @@ fn checked_in_product_activates_exact_generated_evidence() {
     for map in active.axis_pdo_maps() {
         map.validate_for(OperatingMode::Csp).unwrap();
     }
+}
+
+#[test]
+fn checked_in_product_builds_exact_per_slave_pdo_startup_plans() {
+    let left = generated::PRODUCT_CONFIG
+        .build_pdo_startup_plan::<17>(0)
+        .unwrap();
+    let right = generated::PRODUCT_CONFIG
+        .build_pdo_startup_plan::<17>(1)
+        .unwrap();
+    let io = generated::PRODUCT_CONFIG
+        .build_pdo_startup_plan::<12>(2)
+        .unwrap();
+
+    assert_eq!(left.station_address(), 0x1001);
+    assert_eq!(right.station_address(), 0x1002);
+    assert_eq!(io.station_address(), 0x1003);
+    assert_eq!(left.plan().writes(), right.plan().writes());
+    assert_eq!(left.plan().len(), 17);
+    assert_eq!(io.plan().len(), 12);
+
+    let left_writes = left.plan().writes();
+    assert_eq!(left_writes[0], PdoSdoWrite::new(0x1C12, 0, &[0]).unwrap());
+    assert_eq!(left_writes[1], PdoSdoWrite::new(0x1600, 0, &[0]).unwrap());
+    assert_eq!(
+        left_writes[2],
+        PdoSdoWrite::new(0x1600, 1, &0x1000_6040u32.to_le_bytes()).unwrap()
+    );
+    assert_eq!(left_writes[5], PdoSdoWrite::new(0x1600, 0, &[3]).unwrap());
+    assert_eq!(
+        left_writes[6],
+        PdoSdoWrite::new(0x1C12, 1, &[0, 0x16]).unwrap()
+    );
+    assert_eq!(left_writes[7], PdoSdoWrite::new(0x1C12, 0, &[1]).unwrap());
+    assert_eq!(left_writes[8], PdoSdoWrite::new(0x1C13, 0, &[0]).unwrap());
+    assert_eq!(left_writes[9], PdoSdoWrite::new(0x1A00, 0, &[0]).unwrap());
+    assert_eq!(left_writes[14], PdoSdoWrite::new(0x1A00, 0, &[4]).unwrap());
+    assert_eq!(left_writes[16], PdoSdoWrite::new(0x1C13, 0, &[1]).unwrap());
+
+    let io_writes = io.plan().writes();
+    assert_eq!(io_writes[0], PdoSdoWrite::new(0x1C12, 0, &[0]).unwrap());
+    assert_eq!(io_writes[1], PdoSdoWrite::new(0x1601, 0, &[0]).unwrap());
+    assert_eq!(
+        io_writes[2],
+        PdoSdoWrite::new(0x1601, 1, &0x1001_7000u32.to_le_bytes()).unwrap()
+    );
+    assert_eq!(io_writes[6], PdoSdoWrite::new(0x1C13, 0, &[0]).unwrap());
+    assert_eq!(io_writes[7], PdoSdoWrite::new(0x1A01, 0, &[0]).unwrap());
+    assert_eq!(
+        io_writes[8],
+        PdoSdoWrite::new(0x1A01, 1, &0x1001_6000u32.to_le_bytes()).unwrap()
+    );
+    assert_eq!(io_writes[11], PdoSdoWrite::new(0x1C13, 0, &[1]).unwrap());
 }
 
 #[test]

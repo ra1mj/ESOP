@@ -30,6 +30,8 @@ pub fn Cia402AxisCommandPolicy::validate_for_product(
 ) -> Result<(), Cia402AxisCommandPolicyError>;
 pub fn StaticProductConfig::activate(...) ->
     Result<ActivatedProduct<...>, ProductActivationError>;
+pub fn StaticProductConfig::build_pdo_startup_plan<const OPS: usize>(...) ->
+    Result<ProductPdoStartupPlan<OPS>, ProductPdoPlanError>;
 ```
 
 ## 3. Contracts
@@ -64,6 +66,14 @@ schedule/frame plans, drive ownership, product policies, and selected-mode
 CiA 402 PDO maps.
 It returns the owning frozen result only after all checks pass.
 
+Per-slave PDO startup-plan construction uses the same generated order and the
+shared 256-entry cfggen bound. For each SyncManager it clears assignment
+subindex zero, writes each mapping object, then publishes the ordered mapping
+indexes and final assignment count. `PdoConfigController` executes each plan
+write as download plus exact upload readback; operation progress is published
+only after length and bytes match. The caller still owns production scheduling,
+mailbox transport, retry policy, and CONFIGURING lifecycle admission.
+
 The configuration SHA-256 covers normalized product semantics and a sorted
 label-to-semantic-ESI-hash map. It excludes timestamps, host paths, compiler,
 output directory, JSON key order, and XML formatting.
@@ -96,6 +106,8 @@ datagrams, FCS, and inter-packet gap respectively.
 | Successful regeneration | Replace the directory and remove stale schema files. |
 | Runtime schema/hash/ProcBuf/topology mismatch | Reject before registry activation. |
 | Runtime Domain/axis evidence or capacity mismatch | Reject with typed owning-contract evidence and return no partial configuration. |
+| PDO plan owner/SM/group/capacity mismatch | Reject before returning any startup plan. |
+| PDO upload readback length or byte mismatch | Latch controller fault and keep the current operation index. |
 | Product build input with unknown fields, invalid hash/budget, or `passed=true` | Reject before report write. |
 | Missing target/HIL/WCET/resource evidence | Keep report unqualified. |
 
@@ -122,6 +134,9 @@ datagrams, FCS, and inter-packet gap respectively.
 - Compare the generated Rust module byte-for-byte with the checked-in example,
   activate it in integration tests, and check `esop-product-config` for
   `aarch64-unknown-none`.
+- Build exact per-slave drive/IO PDO plans from the checked-in generated module;
+  cover assignment-disable ordering, mapping grouping, all typed rejection
+  paths, exact/segmented readback, mismatches, stale actions and restart.
 - Validate both default and product-input build reports, including forged pass
   rejection and exact wire metric projection.
 - Run `make ci`, `make bpf`, and `make test-zenoh` before delivery.
@@ -145,5 +160,6 @@ let schedule = registry.activate_with_frame_plans(period_ns, &mut plans)?;
 let wire_bytes = 8 + mac_frame_bytes + 12;
 ```
 
-Generated artifacts are configuration expectations, not proof of runtime SII
-read-back, physical drive behavior, measured timing, or functional safety.
+Generated plans and exact comparison of supplied SDO responses are software
+evidence, not proof of production mailbox execution, authentic physical
+read-back, drive behavior, measured timing, or functional safety.

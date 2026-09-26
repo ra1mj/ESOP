@@ -97,6 +97,14 @@ ProcBuf。激活按以下顺序 fail-closed：
 schedule、frame plan、轴模式、策略和 PDO map。每轴 PDO 临时映射上限固定为
 32，cfggen 与运行时共享同一常量并在超限时拒绝。
 
+配置期可进一步调用 `PRODUCT_CONFIG.build_pdo_startup_plan::<OPS>(position)`：
+它按生成顺序为一个从站构建固定容量 CoE 计划，先清除 `0x1C10 + SM` 的
+assignment count，再写该 SM 的 mapping 对象，最后发布 mapping index 列表和
+count，并返回固定站地址。核心 `PdoConfigController` 对每个写值执行 download
+和同对象 upload 回读，只有长度与字节完全一致才推进；分段 upload、代际、
+动作、超时和 mismatch 均沿类型化故障路径 fail-closed。该控制器尚未接入
+`ScheduledProductionServiceScheduler` 的生产邮箱预算。
+
 ## 6. 构建报告接入
 
 `generate-robot-build-report.py` 可选接收严格的产品输入：
@@ -114,7 +122,8 @@ make build-report \
 ## 7. 资格边界
 
 配置生成证明的是输入合同、静态布局和软件规划的一致性，不证明 ESI 与
-真实从站固件一致。运行时激活证明静态期望与调用方提供的拓扑/ProcBuf
-记录一致，但不等于真实 SII/PDO assignment read-back，也不证明驱动接受映射、
+真实从站固件一致。运行时可生成 PDO 配置计划并对调用方交付的 SDO 响应做
+逐字节 read-back 校验，但在生产调度/邮箱传输接入和真实设备 HIL 前，不等于
+真实从站 PDO assignment/mapping 证据，也不证明驱动接受映射、
 实际线缆时间、WCET、DMA/cache 正确性、制动/机械适配、STO/FSoE 或功能安全。生成示例和构建报告必须保持
 `passed: false`，直到独立的目标构建、HIL、周期测量和发布审核提供证据。

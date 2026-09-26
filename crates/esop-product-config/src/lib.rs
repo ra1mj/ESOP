@@ -9,8 +9,8 @@
 pub use esop_ethercat_core::wire::Command;
 pub use esop_ethercat_core::{
     DomainConfig, DomainDatagramSpec, DomainInfo, DomainRegistry, DomainRegistryError,
-    FramePlanSet, FramePlanSetError, PdoDirection, PdoEntry, PdoRegistrationRequest, ScheduleTable,
-    SlaveIdentity, SlaveRecord,
+    FramePlanSet, FramePlanSetError, PdoConfigPlan, PdoConfigPlanError, PdoDirection, PdoEntry,
+    PdoEntrySpec, PdoRegistrationRequest, PdoSdoWrite, ScheduleTable, SlaveIdentity, SlaveRecord,
 };
 pub use esop_lifecycle_guard::procbuf::{Cia402AxisCommandPolicy, Cia402AxisCommandPolicyError};
 pub use esop_procbuf::{
@@ -22,6 +22,8 @@ pub use esop_profile_cia402::{Cia402PdoError, Cia402PdoMap, OperatingMode};
 pub const PRODUCT_RUNTIME_SCHEMA: &str = "esop.product-runtime.v1";
 pub const CONFIG_SHA256_BYTES: usize = 32;
 pub const MAX_PRODUCT_AXIS_PDOS: usize = 32;
+pub const MAX_PRODUCT_PDO_ENTRIES_PER_DOMAIN: usize = 256;
+const MAX_PRODUCT_SYNC_MANAGERS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProductMetadata {
@@ -67,6 +69,68 @@ pub struct ProductPdoConfig {
     pub sync_manager: u8,
     pub bit_offset: usize,
     pub request: PdoRegistrationRequest,
+}
+
+pub struct ProductPdoStartupPlan<const OPS: usize> {
+    station_address: u16,
+    plan: PdoConfigPlan<OPS>,
+}
+
+impl<const OPS: usize> ProductPdoStartupPlan<OPS> {
+    pub const fn station_address(&self) -> u16 {
+        self.station_address
+    }
+
+    pub const fn plan(&self) -> &PdoConfigPlan<OPS> {
+        &self.plan
+    }
+
+    pub fn into_plan(self) -> PdoConfigPlan<OPS> {
+        self.plan
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductPdoPlanError {
+    UnknownSlave {
+        position: u16,
+    },
+    PdoDomainMismatch {
+        pdo_index: usize,
+    },
+    InvalidSyncManager {
+        pdo_index: usize,
+        sync_manager: u8,
+    },
+    MappingSyncManagerMismatch {
+        mapping_index: u16,
+        expected: u8,
+        actual: u8,
+    },
+    MappingDirectionMismatch {
+        mapping_index: u16,
+        expected: PdoDirection,
+        actual: PdoDirection,
+    },
+    PdoCapacityExceeded {
+        position: u16,
+    },
+    Plan(PdoConfigPlanError),
+}
+
+#[derive(Clone, Copy)]
+struct ProductPdoMappingGroup {
+    mapping_index: u16,
+    sync_manager: u8,
+    direction: PdoDirection,
+}
+
+impl ProductPdoMappingGroup {
+    const EMPTY: Self = Self {
+        mapping_index: 0,
+        sync_manager: 0,
+        direction: PdoDirection::Rx,
+    };
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -250,6 +314,148 @@ type ActivatedAxes<const AXES: usize> = (
 impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
     StaticProductConfig<'a, SLAVES, DOMAINS, AXES>
 {
+    pub fn build_pdo_startup_plan<const OPS: usize>(
+        &self,
+        slave_position: u16,
+    ) -> Result<ProductPdoStartupPlan<OPS>, ProductPdoPlanError> {
+        let slave = self
+            .slaves
+            .iter()
+            .find(|slave| slave.position == slave_position)
+            .ok_or(ProductPdoPlanError::UnknownSlave {
+                position: slave_position,
+            })?;
+
+        let mut groups = [ProductPdoMappingGroup::EMPTY; MAX_PRODUCT_PDO_ENTRIES_PER_DOMAIN];
+        let mut group_count = 0;
+        for (pdo_index, pdo) in self.pdos.iter().copied().enumerate() {
+            if pdo.request.slave_position != slave_position {
+                continue;
+            }
+            if pdo.domain_id != slave.domain_id {
+                return Err(ProductPdoPlanError::PdoDomainMismatch { pdo_index });
+            }
+            if usize::from(pdo.sync_manager) >= MAX_PRODUCT_SYNC_MANAGERS {
+                return Err(ProductPdoPlanError::InvalidSyncManager {
+                    pdo_index,
+                    sync_manager: pdo.sync_manager,
+                });
+            }
+            if let Some(group) = groups[..group_count]
+                .iter()
+                .find(|group| group.mapping_index == pdo.assignment_index)
+            {
+                if group.sync_manager != pdo.sync_manager {
+                    return Err(ProductPdoPlanError::MappingSyncManagerMismatch {
+                        mapping_index: pdo.assignment_index,
+                        expected: group.sync_manager,
+                        actual: pdo.sync_manager,
+                    });
+                }
+                if group.direction != pdo.request.direction {
+                    return Err(ProductPdoPlanError::MappingDirectionMismatch {
+                        mapping_index: pdo.assignment_index,
+                        expected: group.direction,
+                        actual: pdo.request.direction,
+                    });
+                }
+                continue;
+            }
+            if group_count == groups.len() {
+                return Err(ProductPdoPlanError::PdoCapacityExceeded {
+                    position: slave_position,
+                });
+            }
+            groups[group_count] = ProductPdoMappingGroup {
+                mapping_index: pdo.assignment_index,
+                sync_manager: pdo.sync_manager,
+                direction: pdo.request.direction,
+            };
+            group_count += 1;
+        }
+
+        let mut plan = PdoConfigPlan::new();
+        let mut processed_sync_managers = [false; MAX_PRODUCT_SYNC_MANAGERS];
+        let mut entries = [PdoEntrySpec::new(0, 0, 1); MAX_PRODUCT_PDO_ENTRIES_PER_DOMAIN];
+        let mut mapping_indexes = [0u16; MAX_PRODUCT_PDO_ENTRIES_PER_DOMAIN];
+
+        for sync_manager in 0..MAX_PRODUCT_SYNC_MANAGERS {
+            if groups[..group_count]
+                .iter()
+                .filter(|group| usize::from(group.sync_manager) == sync_manager)
+                .count()
+                > u8::MAX as usize
+            {
+                return Err(ProductPdoPlanError::Plan(
+                    PdoConfigPlanError::CountOutOfBounds,
+                ));
+            }
+        }
+
+        for group in &groups[..group_count] {
+            let sync_manager = usize::from(group.sync_manager);
+            if processed_sync_managers[sync_manager] {
+                continue;
+            }
+            processed_sync_managers[sync_manager] = true;
+            let assignment_index = 0x1C10u16 + u16::from(group.sync_manager);
+            plan.push(
+                PdoSdoWrite::new(assignment_index, 0, &[0]).map_err(ProductPdoPlanError::Plan)?,
+            )
+            .map_err(ProductPdoPlanError::Plan)?;
+
+            let mut mapping_count = 0;
+            for mapping in groups[..group_count]
+                .iter()
+                .filter(|mapping| mapping.sync_manager == group.sync_manager)
+            {
+                let mut entry_count = 0;
+                for pdo in self.pdos.iter().copied().filter(|pdo| {
+                    pdo.request.slave_position == slave_position
+                        && pdo.assignment_index == mapping.mapping_index
+                }) {
+                    if entry_count == entries.len() {
+                        return Err(ProductPdoPlanError::PdoCapacityExceeded {
+                            position: slave_position,
+                        });
+                    }
+                    entries[entry_count] = PdoEntrySpec::new(
+                        pdo.request.index,
+                        pdo.request.subindex,
+                        pdo.request.bit_length,
+                    );
+                    entry_count += 1;
+                }
+                plan.append_mapping(mapping.mapping_index, &entries[..entry_count])
+                    .map_err(ProductPdoPlanError::Plan)?;
+                mapping_indexes[mapping_count] = mapping.mapping_index;
+                mapping_count += 1;
+            }
+
+            for (offset, mapping_index) in mapping_indexes[..mapping_count].iter().enumerate() {
+                let subindex = u8::try_from(offset + 1)
+                    .map_err(|_| ProductPdoPlanError::Plan(PdoConfigPlanError::CountOutOfBounds))?;
+                plan.push(
+                    PdoSdoWrite::new(assignment_index, subindex, &mapping_index.to_le_bytes())
+                        .map_err(ProductPdoPlanError::Plan)?,
+                )
+                .map_err(ProductPdoPlanError::Plan)?;
+            }
+            let assignment_count = u8::try_from(mapping_count)
+                .map_err(|_| ProductPdoPlanError::Plan(PdoConfigPlanError::CountOutOfBounds))?;
+            plan.push(
+                PdoSdoWrite::new(assignment_index, 0, &[assignment_count])
+                    .map_err(ProductPdoPlanError::Plan)?,
+            )
+            .map_err(ProductPdoPlanError::Plan)?;
+        }
+
+        Ok(ProductPdoStartupPlan {
+            station_address: slave.station_address,
+            plan,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn activate<
         const IO: usize,
@@ -763,6 +969,134 @@ mod tests {
         assert!(matches!(
             activate(&wrong_policy, &[observed()], &procbuf),
             Err(ProductActivationError::AxisPolicy { axis: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn product_pdo_plan_disables_assignments_before_mapping_and_republishes_them() {
+        let startup = config().build_pdo_startup_plan::<18>(0).unwrap();
+        assert_eq!(startup.station_address(), 0x1000);
+        let writes = startup.plan().writes();
+        assert_eq!(writes.len(), 18);
+
+        assert_eq!(writes[0], PdoSdoWrite::new(0x1C12, 0, &[0]).unwrap());
+        assert_eq!(writes[1], PdoSdoWrite::new(0x1600, 0, &[0]).unwrap());
+        assert_eq!(
+            writes[2],
+            PdoSdoWrite::new(0x1600, 1, &0x1000_6040u32.to_le_bytes()).unwrap()
+        );
+        assert_eq!(writes[5], PdoSdoWrite::new(0x1600, 0, &[3]).unwrap());
+        assert_eq!(
+            writes[6],
+            PdoSdoWrite::new(0x1C12, 1, &0x1600u16.to_le_bytes()).unwrap()
+        );
+        assert_eq!(writes[7], PdoSdoWrite::new(0x1C12, 0, &[1]).unwrap());
+
+        assert_eq!(writes[8], PdoSdoWrite::new(0x1C13, 0, &[0]).unwrap());
+        assert_eq!(writes[9], PdoSdoWrite::new(0x1A00, 0, &[0]).unwrap());
+        assert_eq!(
+            writes[10],
+            PdoSdoWrite::new(0x1A00, 1, &0x1000_6041u32.to_le_bytes()).unwrap()
+        );
+        assert_eq!(writes[15], PdoSdoWrite::new(0x1A00, 0, &[5]).unwrap());
+        assert_eq!(
+            writes[16],
+            PdoSdoWrite::new(0x1C13, 1, &0x1A00u16.to_le_bytes()).unwrap()
+        );
+        assert_eq!(writes[17], PdoSdoWrite::new(0x1C13, 0, &[1]).unwrap());
+    }
+
+    #[test]
+    fn product_pdo_plan_rejects_invalid_generated_metadata() {
+        assert!(matches!(
+            config().build_pdo_startup_plan::<18>(99),
+            Err(ProductPdoPlanError::UnknownSlave { position: 99 })
+        ));
+        assert!(matches!(
+            config().build_pdo_startup_plan::<17>(0),
+            Err(ProductPdoPlanError::Plan(
+                PdoConfigPlanError::CapacityExceeded
+            ))
+        ));
+
+        let mut wrong_domain_entries = PDOS;
+        wrong_domain_entries[0].domain_id = 1;
+        let mut wrong_domain = config();
+        wrong_domain.pdos = &wrong_domain_entries;
+        assert!(matches!(
+            wrong_domain.build_pdo_startup_plan::<18>(0),
+            Err(ProductPdoPlanError::PdoDomainMismatch { pdo_index: 0 })
+        ));
+
+        let mut wrong_sync_entries = PDOS;
+        wrong_sync_entries[0].sync_manager = 16;
+        let mut wrong_sync = config();
+        wrong_sync.pdos = &wrong_sync_entries;
+        assert!(matches!(
+            wrong_sync.build_pdo_startup_plan::<18>(0),
+            Err(ProductPdoPlanError::InvalidSyncManager {
+                pdo_index: 0,
+                sync_manager: 16,
+            })
+        ));
+
+        let mut inconsistent_sync_entries = PDOS;
+        inconsistent_sync_entries[1].sync_manager = 3;
+        let mut inconsistent_sync = config();
+        inconsistent_sync.pdos = &inconsistent_sync_entries;
+        assert!(matches!(
+            inconsistent_sync.build_pdo_startup_plan::<18>(0),
+            Err(ProductPdoPlanError::MappingSyncManagerMismatch {
+                mapping_index: 0x1600,
+                expected: 2,
+                actual: 3,
+            })
+        ));
+
+        let mut inconsistent_direction_entries = PDOS;
+        inconsistent_direction_entries[1].request.direction = PdoDirection::Tx;
+        let mut inconsistent_direction = config();
+        inconsistent_direction.pdos = &inconsistent_direction_entries;
+        assert!(matches!(
+            inconsistent_direction.build_pdo_startup_plan::<18>(0),
+            Err(ProductPdoPlanError::MappingDirectionMismatch {
+                mapping_index: 0x1600,
+                expected: PdoDirection::Rx,
+                actual: PdoDirection::Tx,
+            })
+        ));
+    }
+
+    #[test]
+    fn product_pdo_plan_enforces_shared_fixed_scratch_capacity() {
+        let mut entries =
+            [pdo(0x6040, PdoDirection::Rx, 0, 16, false); MAX_PRODUCT_PDO_ENTRIES_PER_DOMAIN + 1];
+        for (index, entry) in entries.iter_mut().enumerate() {
+            entry.assignment_index = 0x1600 + index as u16;
+        }
+        let mut product = config();
+        product.pdos = &entries;
+
+        assert!(matches!(
+            product.build_pdo_startup_plan::<1024>(0),
+            Err(ProductPdoPlanError::PdoCapacityExceeded { position: 0 })
+        ));
+    }
+
+    #[test]
+    fn product_pdo_plan_rejects_more_than_255_mappings_per_sync_manager() {
+        let mut entries = [pdo(0x6040, PdoDirection::Rx, 0, 16, false); u8::MAX as usize + 1];
+        for (index, entry) in entries.iter_mut().enumerate() {
+            entry.assignment_index = 0x1600 + index as u16;
+        }
+        let mut product = config();
+        product.pdos = &entries;
+
+        assert!(matches!(
+            product.build_pdo_startup_plan::<2048>(0),
+            Err(ProductPdoPlanError::Plan(
+                PdoConfigPlanError::CountOutOfBounds
+            ))
         ));
     }
 }
