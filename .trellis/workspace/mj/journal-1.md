@@ -1259,3 +1259,37 @@ Added shared mailbox range validation, strict SII mailbox parsing, complete ESI 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 38: Startup SII mailbox verification
+
+**Date**: 2026-09-27
+**Task**: Startup SII mailbox verification
+**Branch**: `main`
+
+### Summary
+
+Integrated generated-vs-live SII standard mailbox verification into Startup between identity and AL, retained per-slave evidence, added typed failures and product propagation, expanded tests/docs, and passed local CI, HIL, Zenoh, BPF, and matching GitHub Actions qualification.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2203e8e` | (see git log) |
+| `ff8a60c` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
