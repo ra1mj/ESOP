@@ -99,7 +99,7 @@ position-keyed verified evidence. Runtime poll, timeout, retry and status-bit
 policy are not SII layout fields. Profiles without an expected mailbox and the
 legacy `start` API retain the identity-to-AL path.
 
-The core also provides a separate fixed-capacity SII category stream contract.
+The core also provides a fixed-capacity SII category stream contract.
 `SiiCategoryStreamReader<WORDS>` starts at standard word `0x0040` by default,
 reuses `SiiBlockReader` register transactions, and reads two-word headers plus
 their declared payloads until `SII_CATEGORY_END`. Internal continuations keep
@@ -109,14 +109,21 @@ END is accepted. Capacity, missing-END, address, WKC, generation, payload and
 timeout failures are typed and latch the first terminal error. The companion
 `SiiStreamDiscoveryController` publishes `SiiConfigurationCandidate` only
 after caller-owned scratch conversion and complete transactional SM/RxPDO/
-TxPDO projection; explicit PDO signedness is preserved. This contract is not
-yet owned by Startup and does not compare the candidate with generated product
-configuration.
+TxPDO projection; explicit PDO signedness is preserved. A versioned SHA-256
+structural signature covers exact SM count/enabled/OpOnly masks and ordered
+Rx-then-Tx PDO index/SM/object/subindex/bit-length records; signedness is
+intentionally excluded from live comparison.
 
 `startup_profiles` validates timeout values, exact slave positions, generated
-mailbox ranges, OpOnly flags, and exclusive selected RxPDO ownership before
-returning fixed-array profiles. `start_startup` supplies those profiles to
-Startup. A nonzero legacy
+mailbox ranges, generated SM count/enabled mask, OpOnly flags, exclusive
+selected RxPDO ownership, and contiguous PDO groups before rebuilding the
+expected SII signature from the static fields used by runtime configuration.
+`start_startup` supplies those profiles to Startup. After identity and optional
+mailbox verification, profiles with this expectation enter a distinct bounded
+configuration stream phase. Startup publishes position-keyed signature
+evidence and emits the first AL action only after exact comparison; stream,
+projection, capacity, timeout, ownership, or signature mismatch faults publish
+no evidence. A nonzero legacy
 `StartupConfig.transition_timeout_ns` is an explicit uniform override;
 otherwise each AL step selects its generated/default timeout. OpOnly and AL
 work for one step share one absolute deadline. Non-OP and leaving-OP paths
@@ -183,6 +190,7 @@ datagrams, FCS, and inter-packet gap respectively.
 | Invalid/misaligned startup profile or OpOnly without exclusive RxPDO | Reject before Startup mutation or control emission. |
 | Invalid expected mailbox, live SII parse/CoE/layout mismatch, or SII request fault | Latch typed Startup fault before AL and publish no mailbox evidence. |
 | SII category image exceeds capacity, lacks END, overflows EEPROM addressing, or fails a response check | Latch the first stream fault and publish neither image nor configuration candidate. |
+| Invalid generated SII SM mask/PDO grouping, empty per-slave PDO mapping, or live structural signature mismatch | Reject before Startup mutation or latch Startup before AL; publish no SII verification evidence. |
 | Runtime Domain/axis evidence or capacity mismatch | Reject with typed owning-contract evidence and return no partial configuration. |
 | PDO plan owner/SM/group/capacity mismatch | Reject before returning any startup plan. |
 | Invalid generated mailbox or invalid/missing/duplicate/unknown override binding | Reject before returning any batch. |
@@ -235,7 +243,10 @@ datagrams, FCS, and inter-packet gap respectively.
 - Cover bounded SII category-stream acquisition through END, unknown and
   zero-length categories, capacity/missing-END/address failures, non-reset
   action cursors, one absolute deadline, request-pool ownership, stale
-  responses, signed projection and candidate atomicity.
+  responses, signed projection and candidate atomicity. Cover every structural
+  signature field, generated profile construction, exact match/mismatch,
+  configuration-action ownership, timeout, multi-slave reuse, restart clearing,
+  and legacy opt-out before AL.
 - Route a generated-style PDO action through `ScheduledPdoConfiguration`, the
   existing mailbox/DC/shared-RX path, exact upload readback, request rebuild,
   cross-generation waiting, timeout, lifecycle gating, fault blocking and

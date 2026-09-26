@@ -17,20 +17,23 @@
     {
       "id": "ethercat_sii_category_stream",
       "status": "implemented",
-      "scope": "Allocation-free bounded SII category acquisition from standard word 0x0040 through END with non-reset action ownership, one absolute deadline, typed fail-closed errors and atomic signedness-aware SyncManager/RxPDO/TxPDO candidate projection",
+      "scope": "Allocation-free bounded SII category acquisition from standard word 0x0040 through END, atomic SyncManager/RxPDO/TxPDO projection, versioned structural signatures, and Startup-owned generated-versus-live verification before the first AL action",
       "evidence": [
         "crates/esop-ethercat-core/src/sii.rs",
         "crates/esop-ethercat-core/src/sii_stream.rs",
         "crates/esop-ethercat-core/src/sii_config.rs",
         "crates/esop-ethercat-core/src/sii_discovery.rs",
+        "crates/esop-ethercat-core/src/startup.rs",
+        "crates/esop-product-config/src/lib.rs",
+        "crates/esop-cfggen/src/generator.rs",
         ".trellis/spec/backend/product-configuration.md"
       ],
-      "limitation": "Software tests cover caller-delivered EEPROM responses only; Startup ownership, generated-product comparison, FMMU/DC category semantics, physical response authenticity, target timing, interoperability and hardware HIL remain open"
+      "limitation": "Software tests cover caller-delivered EEPROM responses and exact structural comparison only; FMMU/DC category semantics, physical response authenticity, target timing, interoperability and hardware HIL remain open"
     },
     {
       "id": "product_config_generator",
       "status": "implemented",
-      "scope": "Deterministic host-only esop.product.v1 and bounded ESI-subset compilation into static C/Rust, normalized Domain/PDO/Frame Plan, per-slave CoE mailbox, ESM timeout and OpOnly profiles, device inventory, exact ProcBuf v6 layout and fail-closed build input",
+      "scope": "Deterministic host-only esop.product.v1 and bounded ESI-subset compilation into static C/Rust, normalized Domain/PDO/Frame Plan, per-slave CoE mailbox, structural SII SM evidence, ESM timeout and OpOnly profiles, device inventory, exact ProcBuf v6 layout and fail-closed build input",
       "evidence": [
         "crates/esop-cfggen/src/lib.rs",
         "crates/esop-cfggen/src/generator.rs",
@@ -62,7 +65,7 @@
     {
       "id": "product_runtime_attachment",
       "status": "implemented",
-      "scope": "Allocation-free no_std activation of generated Rust product configuration with exact hash, ProcBuf v6, observed topology, Domain/PDO/datagram/WKC, schedule/frame-plan, per-slave ESM timeout, OpOnly and expected-mailbox startup profiles, CiA 402 map and axis-policy validation plus deterministic all-slave PDO batch construction",
+      "scope": "Allocation-free no_std activation of generated Rust product configuration with exact hash, ProcBuf v6, observed topology, Domain/PDO/datagram/WKC, schedule/frame-plan, per-slave ESM timeout, OpOnly, mailbox and structural SII startup profiles, CiA 402 map and axis-policy validation plus deterministic all-slave PDO batch construction",
       "evidence": [
         "crates/esop-product-config/src/lib.rs",
         "crates/esop-product-config/tests/generated_product.rs",
@@ -71,7 +74,7 @@
         "Makefile",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Activation validates static expectations, attaches generated mailbox layouts to Startup and builds a bounded ordered PDO batch; software SII comparison does not authenticate the physical response, and mapping/DC descriptor discovery, artifact signing/deployment policy, interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
+      "limitation": "Activation validates static expectations, attaches generated mailbox and structural SII expectations to Startup and builds a bounded ordered PDO batch; comparison does not authenticate the physical response, and mapping/DC descriptor discovery, artifact signing/deployment policy, interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
     },
     {
       "id": "pdo_configuration_readback",

@@ -79,8 +79,9 @@ index/subindex/bit length/DataType。未提供 timeout 时使用版本化的 ETG
 | `robot_build_input.json` | 设备数、PDO/frame/wire/WKC/copy、周期和资源输入。 |
 
 生成的 inventory、JSON、C 和 Rust product slave 均携带精确主站发送/接收邮箱
-地址与容量；ESI inventory 还保留两侧 control byte。它们与 timeout profile、
-`OpOnly` mask 及 activation template 一起参与 ESI semantic hash 和配置
+地址与容量；规范化 JSON、C 和 Rust 还携带 SII SyncManager 数量与 enabled mask，
+ESI inventory 保留两侧 control byte。它们与 timeout profile、`OpOnly` mask 及
+activation template 一起参与 ESI semantic hash 和配置
 SHA-256。配置 SHA-256 只依赖规范化产品语义和排序后的 ESI 语义内容，不依赖 JSON
 键顺序、XML 排版、输入/输出路径、主机或当前时间。同一语义输入必须生成
 逐字节相同的六个文件。
@@ -103,13 +104,20 @@ ProcBuf。激活按以下顺序 fail-closed：
 6. 逐轴校验连续索引、驱动归属、冻结策略和选定模式的 `Cia402PdoMap`。
 
 `PRODUCT_CONFIG.startup_profiles()` 会在任何 Startup 动作发出前校验每个从站的
-timeout 非零、position 一一对应、生成邮箱范围有效、`OpOnly` mask/flag 有效，并要求
-每个 `OpOnly` SyncManager 只关联所选 RxPDO。`start_startup()` 将这些 profile 与精确
+timeout 非零、position 一一对应、生成邮箱范围有效、SII SyncManager count/enabled
+mask 有界、`OpOnly` mask/flag 有效，并要求每个 `OpOnly` SyncManager 只关联所选
+RxPDO、每个 PDO 分组连续。运行时从这些静态字段重新构建版本化 SII 结构签名，而不是
+信任预生成摘要。`start_startup()` 将这些 profile 与精确
 从站拓扑一起交给 `StartupController`。身份验证后、首个 AL 动作前，Startup 对携带
 邮箱期望的 profile 精确读取 SII `0x001C..0x0020`，要求 CoE，并只比较 SII 可表示的
 send/receive 地址和容量；轮询、超时、重试和 Status Bit 仍是运行期策略，不参与布局
 相等判定。匹配后才按 position 发布验证证据，任一读取、协议、范围或布局错误均闭锁
-Startup。未携带邮箱期望的 profile 和旧 `start()` API 保持原身份到 AL 路径。
+Startup。随后，携带 SII 期望的 profile 进入独立 `ReadingConfiguration` 阶段：从标准
+`0x0040` 有界读取到 END，原子投影 SM/RxPDO/TxPDO candidate，并比较 SM 数量、
+enabled/OpOnly mask 以及按 Rx 后 Tx 冻结顺序排列的 PDO index、SM、object、subindex 和
+bit length。只有完全匹配才按 position 发布签名证据并开始 AL；任何 stream、容量、
+投影、动作所有权、deadline 或结构差异均闭锁且不发布证据。未携带对应期望的 profile
+和旧 `start()` API 保持原有兼容路径。
 每个 ESM step 只建立一个绝对 deadline；相关 `OpOnly`
 准备和 AL 请求/读回共享该 deadline。`StartupConfig.transition_timeout_ns != 0` 是
 显式 legacy uniform override，并优先于生成 profile；零值选择逐转换 profile。
@@ -152,9 +160,10 @@ send/receive `MailboxConfig`。Startup 已将该读取和生成 ESI 布局交叉
 AL 之间的有界控制请求路径。独立 `SiiCategoryStreamReader` 现可从标准 `0x0040`
 开始，在一个绝对 deadline 内沿用同一 token/datagram 游标读取两字 header 和变长
 payload，直到 END 才公开完整镜像；`SiiStreamDiscoveryController` 使用调用方 scratch
-原子投影 SyncManager/RxPDO/TxPDO candidate，并保留显式 signedness。该 candidate
-尚未由 Startup 消费或与生成产品配置比对；FMMU/DC 描述语义、物理响应真实性和 HIL
-仍待完成。
+原子投影 SyncManager/RxPDO/TxPDO candidate，并保留显式 signedness。Startup 已复用
+同一流控制器和控制请求所有权，在首个 AL 动作前与生成产品重建的固定大小结构签名
+精确比较；signedness 暂不属于在线签名，因为 SII flags 的数据类型语义尚未单独冻结。
+FMMU/DC category 语义、物理响应真实性和 HIL 仍待完成。
 
 ## 6. 构建报告接入
 
@@ -178,8 +187,8 @@ make build-report \
 跨周期请求所有权、重试/超时、精确回读、故障阻断和生命周期门控，但该软件
 证据还覆盖全从站 PREOP 屏障、真实服务 phase 释放、保留拓扑、合法 SAFEOP/OP
 顺序、逐转换 deadline 选择、`OpOnly` 写入读回顺序，以及调用方交付 SII 响应的邮箱
-布局比对和完整 category stream/candidate 投影；它不证明该响应来自真实目标从站，
-也不等于 Startup 已使用该 candidate，更不等于真实从站 PDO
+布局比对、完整 category stream/candidate 投影和生成结构签名的 AL 前精确比较；它不证明
+该响应来自真实目标从站，也不等于真实从站 PDO
 assignment/mapping、ESM timeout 或 SyncManager 响应证据，更不证明驱动
 接受映射、完整周期 WKC、实际线缆时间、WCET、DMA/cache 正确性、制动/机械适配、
 STO/FSoE 或功能安全。生成示例和构建报告必须保持

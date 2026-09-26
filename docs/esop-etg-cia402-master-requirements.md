@@ -27,7 +27,7 @@
 
 SII 增量现已包含从标准 `0x0040` 到 END 的固定容量 category stream acquisition，
 内部续读保持动作游标和绝对 deadline，并在完整读取后原子投影 signedness-aware
-SM/RxPDO/TxPDO candidate。该 candidate 尚未接入 Startup 或生成配置比对，FMMU/DC
+SM/RxPDO/TxPDO candidate，并由 Startup 在首个 AL 动作前与生成配置重建的结构签名比对。FMMU/DC
 语义、物理响应真实性和实物资格不在此软件证据内。
 
 ProcBuf 的固定 ABI、双页 Command/State 快照、Quality/Lifecycle/Runtime observation 和事件环已在 `esop-procbuf` crate 落地；它尚未替代 shared-memory/RPMsg/UDS IPC 或真实 MCU 端口。
