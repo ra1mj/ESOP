@@ -118,7 +118,7 @@ capability mismatch must fail closed before identity/SII/AL progression.
       JSON/XML formatting changes.
 - [x] The generated simulator module starts with two DC-required drives and a
       selected left reference while the IO slave remains optional/non-DC.
-- [ ] Focused core, cfggen, product-config, scheduler/simulator and no-std tests
+- [x] Focused core, cfggen, product-config, scheduler/simulator and no-std tests
       pass, followed by the repository `make ci` quality gate and GitHub
       Actions on the exact pushed commit.
 

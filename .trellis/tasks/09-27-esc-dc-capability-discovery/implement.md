@@ -65,7 +65,7 @@ git diff --exit-code -- config/examples/sim-dual-axis/expected
 - [x] Preserve explicit propagation-delay, synchronization, authenticity,
       timing, HIL, conformance, and safety limitations.
 - [x] Run focused checks, no-std, generated-artifact gates, and complete CI.
-- [ ] Commit, push `main`, and wait for the exact GitHub Actions run.
+- [x] Commit, push `main`, and wait for the exact GitHub Actions run.
 
 Validation:
 
