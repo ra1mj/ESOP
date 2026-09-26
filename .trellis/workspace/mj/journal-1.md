@@ -1192,3 +1192,36 @@ Implemented exact Device Emulation discovery, bounded normal-ESC AL Error Indica
 ### Next Steps
 
 - None - task complete
+
+
+## Session 36: ESM timeouts and OpOnly safety
+
+**Date**: 2026-09-27
+**Task**: ESM timeouts and OpOnly safety
+**Branch**: `main`
+
+### Summary
+
+Implemented versioned per-transition ESM timeouts, ESI/SII OpOnly output validation and readback gating, generated product startup profiles, software evidence, and requirement/capability documentation; all CI, no_std, BPF, simulated HIL, and Zenoh gates passed.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `48d3e6c` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
