@@ -6,7 +6,7 @@
 
 use crate::control::{ControlError, ControlRequestPool, RegisterOperation, RequestHandle};
 use crate::registers::{AL_STATUS_WITH_CODE_LEN, ESC_AL_CONTROL, ESC_AL_STATUS, fixed_address};
-use crate::slave::{AlStatus, EthercatState, next_state};
+use crate::slave::{AL_ERROR_FLAG, AlStatus, EthercatState, next_state};
 
 const ACTION_PAYLOAD_LEN: usize = 2;
 
@@ -15,6 +15,8 @@ pub enum AlPhase {
     Idle,
     WritingControl,
     ReadingStatus,
+    WritingErrorAcknowledge,
+    ReadingErrorAcknowledge,
     Complete,
     Faulted,
 }
@@ -39,6 +41,26 @@ pub enum AlProgress {
     ControlWritten,
     Polling,
     Reached(EthercatState),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AlErrorAcknowledgePolicy {
+    Disabled,
+    Enabled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AlErrorAcknowledgeStatus {
+    NotAttempted,
+    InProgress,
+    Complete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AlFaultRecord {
+    pub status: AlStatus,
+    pub requested_state: EthercatState,
+    pub acknowledgement: AlErrorAcknowledgeStatus,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -94,6 +116,8 @@ pub struct AlTransitionController {
     scan_deadline_ns: u64,
     request_timeout_ns: u64,
     pending: Option<AlAction>,
+    error_acknowledge_policy: AlErrorAcknowledgePolicy,
+    fault_record: Option<AlFaultRecord>,
     next_token: u8,
     next_datagram_index: u8,
     last_error: Option<AlError>,
@@ -117,6 +141,8 @@ impl AlTransitionController {
             scan_deadline_ns: 0,
             request_timeout_ns: 0,
             pending: None,
+            error_acknowledge_policy: AlErrorAcknowledgePolicy::Disabled,
+            fault_record: None,
             next_token: 1,
             next_datagram_index: 1,
             last_error: None,
@@ -143,7 +169,21 @@ impl AlTransitionController {
         self.last_error
     }
 
+    pub const fn fault_record(&self) -> Option<AlFaultRecord> {
+        self.fault_record
+    }
+
     pub fn start(&mut self, request: AlTransitionRequest) -> Result<(), AlError> {
+        let status = AlStatus::new(request.current_state as u16, 0);
+        self.start_with_status(request, status, AlErrorAcknowledgePolicy::Disabled)
+    }
+
+    pub fn start_with_status(
+        &mut self,
+        request: AlTransitionRequest,
+        observed_status: AlStatus,
+        error_acknowledge_policy: AlErrorAcknowledgePolicy,
+    ) -> Result<(), AlError> {
         if !matches!(
             self.phase,
             AlPhase::Idle | AlPhase::Complete | AlPhase::Faulted
@@ -152,6 +192,8 @@ impl AlTransitionController {
         }
         if matches!(request.current_state, EthercatState::Unknown)
             || matches!(request.requested_state, EthercatState::Unknown)
+            || matches!(observed_status.state, EthercatState::Unknown)
+            || observed_status.state != request.current_state
         {
             return Err(AlError::InvalidTransition);
         }
@@ -161,23 +203,28 @@ impl AlTransitionController {
             next_state(request.current_state, request.requested_state)
                 .ok_or(AlError::InvalidTransition)?
         };
-        self.phase = if request.current_state == request.requested_state {
-            AlPhase::Complete
-        } else {
-            AlPhase::WritingControl
-        };
         self.generation = request.generation;
         self.station_address = request.station_address;
         self.current_state = request.current_state;
         self.requested_state = request.requested_state;
         self.expected_state = expected_state;
-        self.observed_status = AlStatus::new(request.current_state as u16, 0);
+        self.observed_status = observed_status;
         self.scan_deadline_ns = request.now_ns.saturating_add(request.timeout_ns);
         self.request_timeout_ns = request.request_timeout_ns;
         self.pending = None;
+        self.error_acknowledge_policy = error_acknowledge_policy;
+        self.fault_record = None;
         self.next_token = 1;
         self.next_datagram_index = 1;
         self.last_error = None;
+        if observed_status.error {
+            return self.begin_error_acknowledgement(observed_status);
+        }
+        self.phase = if request.current_state == request.requested_state {
+            AlPhase::Complete
+        } else {
+            AlPhase::WritingControl
+        };
         Ok(())
     }
 
@@ -204,7 +251,17 @@ impl AlTransitionController {
                 (self.expected_state as u16).to_le_bytes(),
                 2,
             ),
-            AlPhase::ReadingStatus => (
+            AlPhase::WritingErrorAcknowledge => {
+                let fault = self.fault_record.ok_or(AlError::InvalidResponse)?;
+                (
+                    RegisterOperation::Write,
+                    fixed_address(self.station_address, ESC_AL_CONTROL),
+                    0,
+                    ((fault.status.state as u16) | AL_ERROR_FLAG).to_le_bytes(),
+                    2,
+                )
+            }
+            AlPhase::ReadingStatus | AlPhase::ReadingErrorAcknowledge => (
                 RegisterOperation::Read,
                 fixed_address(self.station_address, ESC_AL_STATUS),
                 AL_STATUS_WITH_CODE_LEN,
@@ -285,21 +342,41 @@ impl AlTransitionController {
                 self.phase = AlPhase::ReadingStatus;
                 AlProgress::ControlWritten
             }
+            AlPhase::WritingErrorAcknowledge => {
+                self.phase = AlPhase::ReadingErrorAcknowledge;
+                AlProgress::ControlWritten
+            }
             AlPhase::ReadingStatus => {
-                let raw = u16::from_le_bytes([payload[0], payload[1]]);
-                let code = u16::from_le_bytes([payload[4], payload[5]]);
-                let status = AlStatus::new(raw, code);
+                let status = decode_status(payload);
                 self.observed_status = status;
                 if status.error {
-                    let error = AlError::AlErrorCode(status.code);
-                    self.fail(error);
-                    return Err(error);
+                    self.pending = None;
+                    self.begin_error_acknowledgement(status)?;
+                    return Ok(AlProgress::Polling);
                 }
                 if status.state == self.expected_state {
                     self.phase = AlPhase::Complete;
                     AlProgress::Reached(status.state)
                 } else {
                     AlProgress::Polling
+                }
+            }
+            AlPhase::ReadingErrorAcknowledge => {
+                let status = decode_status(payload);
+                self.observed_status = status;
+                if status.error {
+                    AlProgress::Polling
+                } else {
+                    let mut fault = self.fault_record.ok_or(AlError::InvalidResponse)?;
+                    if status.state != fault.status.state {
+                        self.fail(AlError::InvalidResponse);
+                        return Err(AlError::InvalidResponse);
+                    }
+                    fault.acknowledgement = AlErrorAcknowledgeStatus::Complete;
+                    self.fault_record = Some(fault);
+                    let error = AlError::AlErrorCode(fault.status.code);
+                    self.fail(error);
+                    return Err(error);
                 }
             }
             AlPhase::Idle | AlPhase::Complete | AlPhase::Faulted => {
@@ -327,6 +404,32 @@ impl AlTransitionController {
         self.pending = None;
         self.phase = AlPhase::Faulted;
     }
+
+    fn begin_error_acknowledgement(&mut self, status: AlStatus) -> Result<(), AlError> {
+        if self.fault_record.is_none() {
+            self.fault_record = Some(AlFaultRecord {
+                status,
+                requested_state: self.requested_state,
+                acknowledgement: AlErrorAcknowledgeStatus::NotAttempted,
+            });
+        }
+        if self.error_acknowledge_policy == AlErrorAcknowledgePolicy::Disabled {
+            let error = AlError::AlErrorCode(status.code);
+            self.fail(error);
+            return Err(error);
+        }
+        let mut fault = self.fault_record.ok_or(AlError::InvalidResponse)?;
+        fault.acknowledgement = AlErrorAcknowledgeStatus::InProgress;
+        self.fault_record = Some(fault);
+        self.phase = AlPhase::WritingErrorAcknowledge;
+        Ok(())
+    }
+}
+
+fn decode_status(payload: &[u8]) -> AlStatus {
+    let raw = u16::from_le_bytes([payload[0], payload[1]]);
+    let code = u16::from_le_bytes([payload[4], payload[5]]);
+    AlStatus::new(raw, code)
 }
 
 impl Default for AlTransitionController {
@@ -407,6 +510,139 @@ mod tests {
         );
         assert_eq!(controller.phase(), AlPhase::Faulted);
         assert_eq!(controller.next_action(5), Ok(None));
+        assert_eq!(
+            controller.fault_record(),
+            Some(AlFaultRecord {
+                status: AlStatus::new(0x14, 0x001B),
+                requested_state: EthercatState::Op,
+                acknowledgement: AlErrorAcknowledgeStatus::NotAttempted,
+            })
+        );
+    }
+
+    #[test]
+    fn enabled_policy_acknowledges_error_but_does_not_retry_transition() {
+        let mut controller = AlTransitionController::new();
+        controller
+            .start_with_status(
+                AlTransitionRequest {
+                    station_address: 0x1000,
+                    current_state: EthercatState::SafeOp,
+                    requested_state: EthercatState::Op,
+                    generation: 2,
+                    now_ns: 0,
+                    timeout_ns: 1_000,
+                    request_timeout_ns: 100,
+                },
+                AlStatus::new(EthercatState::SafeOp as u16, 0),
+                AlErrorAcknowledgePolicy::Enabled,
+            )
+            .unwrap();
+
+        let transition = controller.next_action(1).unwrap().unwrap();
+        assert_eq!(transition.payload(), &[EthercatState::Op as u8, 0]);
+        controller.accept(transition.token, 2, &[], 1, 2).unwrap();
+        let status_read = controller.next_action(3).unwrap().unwrap();
+        let mut error_status = status(EthercatState::SafeOp, 0x001B);
+        error_status[0] |= AL_ERROR_FLAG as u8;
+        assert_eq!(
+            controller.accept(status_read.token, 2, &error_status, 1, 4),
+            Ok(AlProgress::Polling)
+        );
+
+        let acknowledge = controller.next_action(5).unwrap().unwrap();
+        assert_eq!(controller.phase(), AlPhase::WritingErrorAcknowledge);
+        assert_eq!(acknowledge.payload(), &[0x14, 0x00]);
+        controller.accept(acknowledge.token, 2, &[], 1, 6).unwrap();
+        let verify = controller.next_action(7).unwrap().unwrap();
+        assert_eq!(
+            controller.accept(verify.token, 2, &status(EthercatState::SafeOp, 0), 1, 8,),
+            Err(AlError::AlErrorCode(0x001B))
+        );
+        assert_eq!(controller.phase(), AlPhase::Faulted);
+        assert_eq!(
+            controller.fault_record().unwrap().acknowledgement,
+            AlErrorAcknowledgeStatus::Complete
+        );
+        assert_eq!(controller.next_action(9), Ok(None));
+    }
+
+    #[test]
+    fn acknowledgement_timeout_preserves_first_al_fault() {
+        let mut controller = AlTransitionController::new();
+        let mut initial_status = status(EthercatState::PreOp, 0x0011);
+        initial_status[0] |= AL_ERROR_FLAG as u8;
+        controller
+            .start_with_status(
+                AlTransitionRequest {
+                    station_address: 0x1000,
+                    current_state: EthercatState::PreOp,
+                    requested_state: EthercatState::SafeOp,
+                    generation: 5,
+                    now_ns: 0,
+                    timeout_ns: 1_000,
+                    request_timeout_ns: 10,
+                },
+                AlStatus::new(
+                    u16::from_le_bytes([initial_status[0], initial_status[1]]),
+                    0x0011,
+                ),
+                AlErrorAcknowledgePolicy::Enabled,
+            )
+            .unwrap();
+
+        let acknowledge = controller.next_action(1).unwrap().unwrap();
+        assert_eq!(acknowledge.payload(), &[0x12, 0x00]);
+        assert_eq!(
+            controller.timeout(acknowledge.token, acknowledge.deadline_ns),
+            Err(AlError::Timeout)
+        );
+        assert_eq!(controller.last_error(), Some(AlError::Timeout));
+        assert_eq!(
+            controller.fault_record(),
+            Some(AlFaultRecord {
+                status: AlStatus::new(0x12, 0x0011),
+                requested_state: EthercatState::SafeOp,
+                acknowledgement: AlErrorAcknowledgeStatus::InProgress,
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_acknowledgement_response_preserves_first_al_fault() {
+        let mut controller = AlTransitionController::new();
+        controller
+            .start_with_status(
+                AlTransitionRequest {
+                    station_address: 0x1000,
+                    current_state: EthercatState::PreOp,
+                    requested_state: EthercatState::SafeOp,
+                    generation: 6,
+                    now_ns: 0,
+                    timeout_ns: 1_000,
+                    request_timeout_ns: 100,
+                },
+                AlStatus::new(0x12, 0x0011),
+                AlErrorAcknowledgePolicy::Enabled,
+            )
+            .unwrap();
+
+        let acknowledge = controller.next_action(1).unwrap().unwrap();
+        controller.accept(acknowledge.token, 6, &[], 1, 2).unwrap();
+        let verify = controller.next_action(3).unwrap().unwrap();
+        assert_eq!(
+            controller.accept(verify.token, 6, &status(EthercatState::SafeOp, 0), 1, 4),
+            Err(AlError::InvalidResponse)
+        );
+        assert_eq!(controller.last_error(), Some(AlError::InvalidResponse));
+        assert_eq!(
+            controller.fault_record(),
+            Some(AlFaultRecord {
+                status: AlStatus::new(0x12, 0x0011),
+                requested_state: EthercatState::SafeOp,
+                acknowledgement: AlErrorAcknowledgeStatus::InProgress,
+            })
+        );
     }
 
     #[test]

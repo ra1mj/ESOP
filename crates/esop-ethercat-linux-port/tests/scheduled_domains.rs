@@ -5,22 +5,22 @@ use esop_ethercat_core::wire::{
 use esop_ethercat_core::{
     CoeHeader, CoeService, ControlError, ControlRequestPool, CycleError, DatagramPlan,
     DcCyclicConfig, DcCyclicError, DcCyclicSync, DcMonitor, Domain, DomainSegment, ESC_AL_STATUS,
-    EthercatMaster, EthercatPort, EthercatState, ExpectedSlave, FramePlan, FramePlanSet, LinkState,
-    MAX_MAILBOX_BYTES, MailboxConfig, MailboxController, MailboxError, MailboxHeader, MailboxPhase,
-    MailboxProgress, MailboxProtocol, MailboxRetryPolicy, MappingConfigController,
-    MappingConfigPhase, MappingConfigProgress, MappingTable, MasterConfig, PdoConfigAction,
-    PdoConfigBatch, PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigController, PdoConfigError,
-    PdoConfigJob, PdoConfigPhase, PdoConfigPlan, PdoConfigProgress, PdoConfigStep, PdoSdoWrite,
-    PortError, RegisterOperation, RequestHandle, RequestState, RxPoll, RxSlotState, ScheduleDomain,
-    ScheduleTable, ScheduledControlCycleError, ScheduledDomainBank, ScheduledDomainEntry,
-    ScheduledPdoConfiguration, ScheduledPdoConfigurationProgress, ScheduledProcessInputEntry,
-    ScheduledProcessInputs, ScheduledProductionServiceCycleError, ScheduledProductionServiceFault,
-    ScheduledProductionServiceKind, ScheduledProductionServiceProgress,
-    ScheduledProductionServiceRecovery, ScheduledProductionServiceScheduler,
-    ScheduledProductionServices, ScheduledReceiveError, ScheduledServiceFrameError,
-    ScheduledServiceTxError, ScheduledServiceTxFailure, SlaveIdentity, StartupAction,
-    StartupConfig, StartupConfigurationServices, StartupController, StartupPhase, StartupProgress,
-    SyncManagerConfig, fixed_address,
+    ESC_CONFIGURATION, EthercatMaster, EthercatPort, EthercatState, ExpectedSlave, FramePlan,
+    FramePlanSet, LinkState, MAX_MAILBOX_BYTES, MailboxConfig, MailboxController, MailboxError,
+    MailboxHeader, MailboxPhase, MailboxProgress, MailboxProtocol, MailboxRetryPolicy,
+    MappingConfigController, MappingConfigPhase, MappingConfigProgress, MappingTable, MasterConfig,
+    PdoConfigAction, PdoConfigBatch, PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigController,
+    PdoConfigError, PdoConfigJob, PdoConfigPhase, PdoConfigPlan, PdoConfigProgress, PdoConfigStep,
+    PdoSdoWrite, PortError, RegisterOperation, RequestHandle, RequestState, RxPoll, RxSlotState,
+    ScheduleDomain, ScheduleTable, ScheduledControlCycleError, ScheduledDomainBank,
+    ScheduledDomainEntry, ScheduledPdoConfiguration, ScheduledPdoConfigurationProgress,
+    ScheduledProcessInputEntry, ScheduledProcessInputs, ScheduledProductionServiceCycleError,
+    ScheduledProductionServiceFault, ScheduledProductionServiceKind,
+    ScheduledProductionServiceProgress, ScheduledProductionServiceRecovery,
+    ScheduledProductionServiceScheduler, ScheduledProductionServices, ScheduledReceiveError,
+    ScheduledServiceFrameError, ScheduledServiceTxError, ScheduledServiceTxFailure, SlaveIdentity,
+    StartupAction, StartupConfig, StartupConfigurationServices, StartupController, StartupPhase,
+    StartupProgress, SyncManagerConfig, fixed_address,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::ethercat::{
@@ -1603,14 +1603,20 @@ fn drive_startup_to_pdo_barrier(startup: &mut StartupController<2>, expected: &[
     accept_startup_action(startup, basic, &[0x88, 0x02, 3, 4, 1, 2, 0x00, 0x20, 1], 4);
     let assign = startup.next_action(5).unwrap().unwrap();
     accept_startup_action(startup, assign, &[], 6);
-    let status = startup.next_action(7).unwrap().unwrap();
-    accept_startup_action(startup, status, &startup_status(EthercatState::Init), 8);
-    let end_probe = startup.next_action(9).unwrap().unwrap();
+    let configuration = startup.next_action(7).unwrap().unwrap();
+    assert_eq!(
+        configuration.address(),
+        fixed_address(0x1000, ESC_CONFIGURATION)
+    );
+    accept_startup_action(startup, configuration, &[0], 8);
+    let status = startup.next_action(9).unwrap().unwrap();
+    accept_startup_action(startup, status, &startup_status(EthercatState::Init), 10);
+    let end_probe = startup.next_action(11).unwrap().unwrap();
     assert!(matches!(end_probe, StartupAction::Scan(_)));
     startup.timeout(end_probe, end_probe.deadline_ns()).unwrap();
     assert_eq!(startup.phase(), StartupPhase::ReadingIdentity);
 
-    let mut now_ns = 10;
+    let mut now_ns = 12;
     for word in [
         0x3344u16, 0x1122, 0x7788, 0x5566, 0xBBCC, 0x99AA, 0xFF00, 0xDDEE,
     ] {

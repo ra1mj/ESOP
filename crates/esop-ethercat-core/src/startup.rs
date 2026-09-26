@@ -5,7 +5,8 @@
 //! scheduler can submit through the existing control request pool.
 
 use crate::al::{
-    AlAction, AlError, AlPhase, AlProgress, AlTransitionController, AlTransitionRequest,
+    AlAction, AlError, AlErrorAcknowledgePolicy, AlErrorAcknowledgeStatus, AlPhase, AlProgress,
+    AlTransitionController, AlTransitionRequest,
 };
 use crate::control::{
     ControlError, ControlRequestPool, MAX_CONTROL_PAYLOAD, RegisterOperation, RequestHandle,
@@ -247,6 +248,17 @@ pub enum StartupError {
     Table(SlaveTableError),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StartupAlFault {
+    pub position: u16,
+    pub station_address: u16,
+    pub requested_state: EthercatState,
+    pub actual_state: EthercatState,
+    pub status_code: u16,
+    pub device_emulation: bool,
+    pub acknowledgement: AlErrorAcknowledgeStatus,
+}
+
 pub struct StartupController<const MAX_SLAVES: usize> {
     phase: StartupPhase,
     config: StartupConfig,
@@ -258,10 +270,12 @@ pub struct StartupController<const MAX_SLAVES: usize> {
     sii: SiiIdentityReader,
     al: AlTransitionController,
     table: SlaveTable<MAX_SLAVES>,
+    device_emulation: [bool; MAX_SLAVES],
     current_index: usize,
     stage_target: EthercatState,
     configuration_released: bool,
     last_error: Option<StartupError>,
+    last_al_fault: Option<StartupAlFault>,
 }
 
 impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
@@ -277,10 +291,12 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             sii: SiiIdentityReader::new(),
             al: AlTransitionController::new(),
             table: SlaveTable::new(),
+            device_emulation: [false; MAX_SLAVES],
             current_index: 0,
             stage_target: EthercatState::Op,
             configuration_released: false,
             last_error: None,
+            last_al_fault: None,
         }
     }
 
@@ -294,6 +310,18 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
 
     pub const fn last_error(&self) -> Option<StartupError> {
         self.last_error
+    }
+
+    pub const fn last_al_fault(&self) -> Option<StartupAlFault> {
+        self.last_al_fault
+    }
+
+    pub fn device_emulation(&self, position: u16) -> Option<bool> {
+        self.table
+            .records()
+            .iter()
+            .position(|record| record.position == position)
+            .map(|index| self.device_emulation[index])
     }
 
     pub const fn expected_count(&self) -> usize {
@@ -374,6 +402,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.sii = SiiIdentityReader::new();
         self.al = AlTransitionController::new();
         self.table = SlaveTable::new();
+        self.device_emulation = [false; MAX_SLAVES];
         self.current_index = 0;
         self.stage_target = if config.configuration_services.is_empty() {
             config.target_state
@@ -382,6 +411,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         };
         self.configuration_released = false;
         self.last_error = None;
+        self.last_al_fault = None;
         match self.scan.start(
             generation,
             now_ns,
@@ -415,7 +445,10 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                 StartupPhase::TransitioningAl => match self.al.next_action(now_ns) {
                     Ok(Some(action)) => return Ok(Some(StartupAction::Al(action))),
                     Ok(None) => return Ok(None),
-                    Err(error) => return self.fail(StartupError::Al(error)),
+                    Err(error) => {
+                        self.capture_al_fault();
+                        return self.fail(StartupError::Al(error));
+                    }
                 },
                 StartupPhase::AwaitingConfiguration
                 | StartupPhase::Ready
@@ -508,7 +541,10 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                         .accept(action.token, generation, payload, working_counter, now_ns)
                     {
                         Ok(progress) => progress,
-                        Err(error) => return self.fail(StartupError::Al(error)),
+                        Err(error) => {
+                            self.capture_al_fault();
+                            return self.fail(StartupError::Al(error));
+                        }
                     };
                 match progress {
                     AlProgress::Reached(_) => self.finish_al_step(now_ns),
@@ -639,6 +675,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                 Ok(()) => self.fail(StartupError::Al(AlError::Timeout)),
                 Err(error) => {
                     if self.al.phase() == AlPhase::Faulted {
+                        self.capture_al_fault();
                         self.fail(StartupError::Al(error))
                     } else {
                         Err(StartupError::Al(error))
@@ -691,6 +728,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.sii = SiiIdentityReader::new();
         self.al = AlTransitionController::new();
         self.table = SlaveTable::new();
+        self.device_emulation = [false; MAX_SLAVES];
         for item in expected.iter().copied() {
             self.table
                 .add(item.position, item.station_address, item.identity)
@@ -710,6 +748,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.stage_target = EthercatState::PreOp;
         self.configuration_released = false;
         self.last_error = None;
+        self.last_al_fault = None;
         Ok(())
     }
 
@@ -778,6 +817,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         {
             return self.fail(StartupError::Table(error));
         }
+        self.device_emulation[self.current_index] = scan_record.device_emulation;
         if let Err(error) =
             self.table
                 .observe_status(scan_record.position, scan_record.al_status, 0)
@@ -801,18 +841,25 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             .get(self.current_index)
             .copied()
             .ok_or(StartupError::ExpectedCountMismatch)?;
-        if record.al_status.error {
-            return self.fail(StartupError::AlErrorCode(record.al_status.code));
-        }
-        if let Err(error) = self.al.start(AlTransitionRequest {
-            station_address: record.station_address,
-            current_state: record.al_status.state,
-            requested_state: self.stage_target,
-            generation: self.generation,
-            now_ns,
-            timeout_ns: self.config.transition_timeout_ns,
-            request_timeout_ns: self.config.request_timeout_ns,
-        }) {
+        let policy = if self.device_emulation[self.current_index] {
+            AlErrorAcknowledgePolicy::Disabled
+        } else {
+            AlErrorAcknowledgePolicy::Enabled
+        };
+        if let Err(error) = self.al.start_with_status(
+            AlTransitionRequest {
+                station_address: record.station_address,
+                current_state: record.al_status.state,
+                requested_state: self.stage_target,
+                generation: self.generation,
+                now_ns,
+                timeout_ns: self.config.transition_timeout_ns,
+                request_timeout_ns: self.config.request_timeout_ns,
+            },
+            record.al_status,
+            policy,
+        ) {
+            self.capture_al_fault();
             return self.fail(StartupError::Al(error));
         }
         if self.al.phase() == AlPhase::Complete {
@@ -868,6 +915,27 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.phase = StartupPhase::Faulted;
         Err(error)
     }
+
+    fn capture_al_fault(&mut self) {
+        if self.last_al_fault.is_some() {
+            return;
+        }
+        let Some(fault) = self.al.fault_record() else {
+            return;
+        };
+        let Some(record) = self.table.records().get(self.current_index).copied() else {
+            return;
+        };
+        self.last_al_fault = Some(StartupAlFault {
+            position: record.position,
+            station_address: record.station_address,
+            requested_state: fault.requested_state,
+            actual_state: fault.status.state,
+            status_code: fault.status.code,
+            device_emulation: self.device_emulation[self.current_index],
+            acknowledgement: fault.acknowledgement,
+        });
+    }
 }
 
 impl<const MAX_SLAVES: usize> Default for StartupController<MAX_SLAVES> {
@@ -879,7 +947,10 @@ impl<const MAX_SLAVES: usize> Default for StartupController<MAX_SLAVES> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registers::{ESC_AL_STATUS, ESC_TYPE, auto_increment_address, fixed_address};
+    use crate::registers::{
+        ESC_AL_STATUS, ESC_CONFIGURATION, ESC_TYPE, auto_increment_address, fixed_address,
+    };
+    use crate::slave::AL_ERROR_FLAG;
 
     fn status(state: EthercatState) -> [u8; 6] {
         let mut bytes = [0; 6];
@@ -982,15 +1053,21 @@ mod tests {
         let assign = startup.next_action(5).unwrap().unwrap();
         accept_action(&mut startup, assign, &[], 1, 6);
         let scan_status = startup.next_action(7).unwrap().unwrap();
+        assert_eq!(
+            scan_status.address(),
+            fixed_address(0x1000, ESC_CONFIGURATION)
+        );
+        accept_action(&mut startup, scan_status, &[0], 1, 8);
+        let scan_status = startup.next_action(9).unwrap().unwrap();
         assert_eq!(scan_status.address(), fixed_address(0x1000, ESC_AL_STATUS));
         accept_action(
             &mut startup,
             scan_status,
             &status(EthercatState::SafeOp),
             1,
-            8,
+            10,
         );
-        let end_probe = startup.next_action(9).unwrap().unwrap();
+        let end_probe = startup.next_action(11).unwrap().unwrap();
         assert_eq!(
             startup
                 .timeout(end_probe, end_probe_deadline(end_probe))
@@ -1023,6 +1100,7 @@ mod tests {
         );
         assert_eq!(startup.phase(), StartupPhase::Ready);
         assert_eq!(startup.records().len(), 1);
+        assert_eq!(startup.device_emulation(0), Some(false));
         assert_eq!(startup.records()[0].identity, identity);
         assert_eq!(startup.records()[0].al_status.state, EthercatState::Op);
     }
@@ -1064,14 +1142,16 @@ mod tests {
         let assign = startup.next_action(5).unwrap().unwrap();
         accept_action(&mut startup, assign, &[], 1, 6);
         let scan_status = startup.next_action(7).unwrap().unwrap();
+        accept_action(&mut startup, scan_status, &[0], 1, 8);
+        let scan_status = startup.next_action(9).unwrap().unwrap();
         accept_action(
             &mut startup,
             scan_status,
             &status(EthercatState::Init),
             1,
-            8,
+            10,
         );
-        let end_probe = startup.next_action(9).unwrap().unwrap();
+        let end_probe = startup.next_action(11).unwrap().unwrap();
         startup
             .timeout(end_probe, end_probe_deadline(end_probe))
             .unwrap();
@@ -1167,14 +1247,16 @@ mod tests {
             let assign = startup.next_action(now_ns + 4).unwrap().unwrap();
             accept_action(&mut startup, assign, &[], 1, now_ns + 5);
             let scan_status = startup.next_action(now_ns + 6).unwrap().unwrap();
+            accept_action(&mut startup, scan_status, &[0], 1, now_ns + 7);
+            let scan_status = startup.next_action(now_ns + 8).unwrap().unwrap();
             accept_action(
                 &mut startup,
                 scan_status,
                 &status(EthercatState::Init),
                 1,
-                now_ns + 7,
+                now_ns + 9,
             );
-            now_ns += 8;
+            now_ns += 10;
         }
         let end_probe = startup.next_action(now_ns).unwrap().unwrap();
         startup
@@ -1356,9 +1438,61 @@ mod tests {
                 1,
                 4,
             ),
+            Ok(StartupProgress::Advanced)
+        );
+        let acknowledge = al_error.next_action(5).unwrap().unwrap();
+        assert_eq!(acknowledge.payload(), &[0x12, 0x00]);
+        accept_action(&mut al_error, acknowledge, &[], 1, 6);
+        let verify = al_error.next_action(7).unwrap().unwrap();
+        assert_eq!(
+            al_error.accept(
+                verify,
+                verify.generation(),
+                &status(EthercatState::PreOp),
+                1,
+                8,
+            ),
             Err(StartupError::Al(AlError::AlErrorCode(0x001B)))
         );
         assert_eq!(al_error.phase(), StartupPhase::Faulted);
+        assert_eq!(
+            al_error.last_al_fault(),
+            Some(StartupAlFault {
+                position: 0,
+                station_address: 0x1000,
+                requested_state: EthercatState::Op,
+                actual_state: EthercatState::PreOp,
+                status_code: 0x001B,
+                device_emulation: false,
+                acknowledgement: AlErrorAcknowledgeStatus::Complete,
+            })
+        );
+
+        let mut emulated = StartupController::<1>::new(0x1000);
+        emulated
+            .enter_configuration_barrier_for_test(5, config, &expected)
+            .unwrap();
+        emulated.device_emulation[0] = true;
+        emulated.release_configuration(0).unwrap();
+        let write = emulated.next_action(1).unwrap().unwrap();
+        assert_eq!(write.payload()[0] & AL_ERROR_FLAG as u8, 0);
+        accept_action(&mut emulated, write, &[], 1, 2);
+        let read = emulated.next_action(3).unwrap().unwrap();
+        assert_eq!(
+            emulated.accept(
+                read,
+                read.generation(),
+                &status_with_code(EthercatState::PreOp, true, 0x001B),
+                1,
+                4,
+            ),
+            Err(StartupError::Al(AlError::AlErrorCode(0x001B)))
+        );
+        assert_eq!(emulated.next_action(5), Ok(None));
+        assert_eq!(
+            emulated.last_al_fault().unwrap().acknowledgement,
+            AlErrorAcknowledgeStatus::NotAttempted
+        );
 
         let mut timeout = StartupController::<1>::new(0x1000);
         timeout
@@ -1371,6 +1505,92 @@ mod tests {
             Err(StartupError::Al(AlError::Timeout))
         );
         assert_eq!(timeout.phase(), StartupPhase::Faulted);
+    }
+
+    #[test]
+    fn scanned_device_emulation_suppresses_initial_error_acknowledgement() {
+        let expected = [ExpectedSlave {
+            position: 0,
+            station_address: 0x1000,
+            identity: SlaveIdentity::EMPTY,
+        }];
+        let mut startup = StartupController::<2>::new(0x1000);
+        startup
+            .start(8, 0, StartupConfig::new(EthercatState::Op), &expected)
+            .unwrap();
+
+        let probe = startup.next_action(1).unwrap().unwrap();
+        accept_action(&mut startup, probe, &[0x88, 0x02], 1, 2);
+        let basic = startup.next_action(3).unwrap().unwrap();
+        accept_action(&mut startup, basic, &[0; 9], 1, 4);
+        let assign = startup.next_action(5).unwrap().unwrap();
+        accept_action(&mut startup, assign, &[], 1, 6);
+        let configuration = startup.next_action(7).unwrap().unwrap();
+        assert_eq!(
+            configuration.address(),
+            fixed_address(0x1000, ESC_CONFIGURATION)
+        );
+        accept_action(
+            &mut startup,
+            configuration,
+            &[crate::registers::ESC_DEVICE_EMULATION],
+            1,
+            8,
+        );
+        let status_action = startup.next_action(9).unwrap().unwrap();
+        accept_action(
+            &mut startup,
+            status_action,
+            &status_with_code(EthercatState::Init, true, 0x0011),
+            1,
+            10,
+        );
+        let end_probe = startup.next_action(11).unwrap().unwrap();
+        startup
+            .timeout(end_probe, end_probe_deadline(end_probe))
+            .unwrap();
+
+        let mut now_ns = 12;
+        for word_index in 0..8 {
+            let address = startup.next_action(now_ns).unwrap().unwrap();
+            accept_action(&mut startup, address, &[], 1, now_ns + 1);
+            let issue = startup.next_action(now_ns + 2).unwrap().unwrap();
+            accept_action(&mut startup, issue, &[], 1, now_ns + 3);
+            let poll = startup.next_action(now_ns + 4).unwrap().unwrap();
+            accept_action(&mut startup, poll, &[0, 0], 1, now_ns + 5);
+            let data = startup.next_action(now_ns + 6).unwrap().unwrap();
+            if word_index == 7 {
+                assert_eq!(
+                    startup.accept(data, data.generation(), &[0, 0], 1, now_ns + 7),
+                    Err(StartupError::Al(AlError::AlErrorCode(0x0011)))
+                );
+            } else {
+                accept_action(&mut startup, data, &[0, 0], 1, now_ns + 7);
+            }
+            now_ns += 8;
+        }
+
+        assert_eq!(startup.phase(), StartupPhase::Faulted);
+        assert_eq!(startup.device_emulation(0), Some(true));
+        assert_eq!(startup.next_action(now_ns), Ok(None));
+        assert_eq!(
+            startup.last_al_fault(),
+            Some(StartupAlFault {
+                position: 0,
+                station_address: 0x1000,
+                requested_state: EthercatState::Op,
+                actual_state: EthercatState::Init,
+                status_code: 0x0011,
+                device_emulation: true,
+                acknowledgement: AlErrorAcknowledgeStatus::NotAttempted,
+            })
+        );
+
+        startup
+            .start(9, now_ns, StartupConfig::new(EthercatState::Op), &expected)
+            .unwrap();
+        assert_eq!(startup.last_al_fault(), None);
+        assert_eq!(startup.device_emulation(0), None);
     }
 
     fn end_probe_deadline(action: StartupAction) -> u64 {
@@ -1403,14 +1623,16 @@ mod tests {
         let assign = startup.next_action(5).unwrap().unwrap();
         accept_action(&mut startup, assign, &[], 1, 6);
         let scan_status_action = startup.next_action(7).unwrap().unwrap();
+        accept_action(&mut startup, scan_status_action, &[0], 1, 8);
+        let scan_status_action = startup.next_action(9).unwrap().unwrap();
         accept_action(
             &mut startup,
             scan_status_action,
             &status(EthercatState::SafeOp),
             1,
-            8,
+            10,
         );
-        let end_probe = startup.next_action(9).unwrap().unwrap();
+        let end_probe = startup.next_action(11).unwrap().unwrap();
         startup
             .timeout(end_probe, end_probe_deadline(end_probe))
             .unwrap();

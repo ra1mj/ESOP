@@ -36,7 +36,10 @@ mod slave_copy;
 mod startup;
 pub mod wire;
 
-pub use al::{AlAction, AlError, AlPhase, AlProgress, AlTransitionController, AlTransitionRequest};
+pub use al::{
+    AlAction, AlError, AlErrorAcknowledgePolicy, AlErrorAcknowledgeStatus, AlFaultRecord, AlPhase,
+    AlProgress, AlTransitionController, AlTransitionRequest,
+};
 pub use arena::{Arena, ArenaError};
 pub use coe::{
     COE_EMERGENCY_LEN, COE_HEADER_LEN, CoeEmergency, CoeHeader, CoeService, MAX_SDO_DATA,
@@ -103,12 +106,13 @@ pub use production_service::{
 };
 pub use registers::{
     AL_STATUS_WITH_CODE_LEN, BASIC_ESC_INFO_LEN, ESC_AL_CONTROL, ESC_AL_STATUS, ESC_AL_STATUS_CODE,
-    ESC_BUILD, ESC_DC_CUC, ESC_DC_CYCLE0, ESC_DC_CYCLE1, ESC_DC_START0, ESC_DC_SYNC_ACTIVATION,
-    ESC_DC_SYSTEM_DELAY, ESC_DC_SYSTEM_DIFF, ESC_DC_SYSTEM_OFFSET, ESC_DC_SYSTEM_TIME,
-    ESC_DC_TIME0, ESC_DC_TIME1, ESC_DC_TIME2, ESC_DC_TIME3, ESC_DL_STATUS, ESC_EEPROM_ADDRESS,
-    ESC_EEPROM_CONTROL, ESC_EEPROM_DATA, ESC_FMMU_COUNT, ESC_PORT_DESCRIPTOR, ESC_RAM_SIZE,
-    ESC_REVISION, ESC_STATION_ADDRESS, ESC_SYNC_MANAGER_COUNT, ESC_TYPE, auto_increment_address,
-    fixed_address, register_from_address, station_from_address,
+    ESC_BUILD, ESC_CONFIGURATION, ESC_DC_CUC, ESC_DC_CYCLE0, ESC_DC_CYCLE1, ESC_DC_START0,
+    ESC_DC_SYNC_ACTIVATION, ESC_DC_SYSTEM_DELAY, ESC_DC_SYSTEM_DIFF, ESC_DC_SYSTEM_OFFSET,
+    ESC_DC_SYSTEM_TIME, ESC_DC_TIME0, ESC_DC_TIME1, ESC_DC_TIME2, ESC_DC_TIME3,
+    ESC_DEVICE_EMULATION, ESC_DL_STATUS, ESC_EEPROM_ADDRESS, ESC_EEPROM_CONTROL, ESC_EEPROM_DATA,
+    ESC_FMMU_COUNT, ESC_PORT_DESCRIPTOR, ESC_RAM_SIZE, ESC_REVISION, ESC_STATION_ADDRESS,
+    ESC_SYNC_MANAGER_COUNT, ESC_TYPE, auto_increment_address, fixed_address, register_from_address,
+    station_from_address,
 };
 pub use ring::{RingError, SpscConsumer, SpscProducer, SpscRing};
 pub use rx_index::{
@@ -147,6 +151,6 @@ pub use slave::{
 };
 pub use slave_copy::{SlaveCopyError, SlaveCopyOutcome, SlaveCopyPlan, SlaveCopyStatus};
 pub use startup::{
-    ExpectedSlave, StartupAction, StartupConfig, StartupConfigurationServices, StartupController,
-    StartupError, StartupPhase, StartupProgress,
+    ExpectedSlave, StartupAction, StartupAlFault, StartupConfig, StartupConfigurationServices,
+    StartupController, StartupError, StartupPhase, StartupProgress,
 };

@@ -6,8 +6,8 @@
 
 use crate::control::{ControlError, ControlRequestPool, RegisterOperation, RequestHandle};
 use crate::registers::{
-    AL_STATUS_WITH_CODE_LEN, BASIC_ESC_INFO_LEN, ESC_AL_STATUS, ESC_STATION_ADDRESS, ESC_TYPE,
-    auto_increment_address, fixed_address,
+    AL_STATUS_WITH_CODE_LEN, BASIC_ESC_INFO_LEN, ESC_AL_STATUS, ESC_CONFIGURATION,
+    ESC_DEVICE_EMULATION, ESC_STATION_ADDRESS, ESC_TYPE, auto_increment_address, fixed_address,
 };
 use crate::slave::{AlStatus, EthercatState};
 
@@ -19,6 +19,7 @@ pub enum ScanPhase {
     Probing,
     ReadingBasicInfo,
     AssigningStationAddress,
+    ReadingEscConfiguration,
     ReadingAlStatus,
     Complete,
     Faulted,
@@ -88,6 +89,7 @@ pub struct ScanRecord {
     pub sync_manager_count: u8,
     pub ram_size: u16,
     pub port_descriptor: u8,
+    pub device_emulation: bool,
     pub al_status: AlStatus,
     pub online: bool,
 }
@@ -103,6 +105,7 @@ impl ScanRecord {
         sync_manager_count: 0,
         ram_size: 0,
         port_descriptor: 0,
+        device_emulation: false,
         al_status: AlStatus {
             state: EthercatState::Unknown,
             error: false,
@@ -252,6 +255,15 @@ impl<const MAX_SLAVES: usize> ScanController<MAX_SLAVES> {
                     self.current.position,
                     self.current.station_address,
                 ),
+                ScanPhase::ReadingEscConfiguration => (
+                    RegisterOperation::Read,
+                    fixed_address(self.current.station_address, ESC_CONFIGURATION),
+                    1,
+                    [0; ACTION_PAYLOAD_LEN],
+                    0,
+                    self.current.position,
+                    self.current.station_address,
+                ),
                 ScanPhase::ReadingAlStatus => (
                     RegisterOperation::Read,
                     fixed_address(self.current.station_address, ESC_AL_STATUS),
@@ -361,6 +373,11 @@ impl<const MAX_SLAVES: usize> ScanController<MAX_SLAVES> {
                 ScanProgress::Advanced
             }
             ScanPhase::AssigningStationAddress => {
+                self.phase = ScanPhase::ReadingEscConfiguration;
+                ScanProgress::Advanced
+            }
+            ScanPhase::ReadingEscConfiguration => {
+                self.current.device_emulation = payload[0] & ESC_DEVICE_EMULATION != 0;
                 self.phase = ScanPhase::ReadingAlStatus;
                 ScanProgress::Advanced
             }
@@ -417,7 +434,9 @@ impl<const MAX_SLAVES: usize> Default for ScanController<MAX_SLAVES> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registers::{ESC_AL_STATUS, ESC_TYPE, auto_increment_address, fixed_address};
+    use crate::registers::{
+        ESC_AL_STATUS, ESC_CONFIGURATION, ESC_TYPE, auto_increment_address, fixed_address,
+    };
 
     fn basic_info() -> [u8; 9] {
         [0x88, 0x02, 3, 4, 5, 6, 0x00, 0x20, 0x01]
@@ -442,18 +461,67 @@ mod tests {
         assert_eq!(assign.payload(), &[0x00, 0x10]);
         scan.accept(assign.token, 7, &[], 1, 6).unwrap();
 
-        let status = scan.next_action(7).unwrap().unwrap();
-        assert_eq!(status.address, fixed_address(0x1000, ESC_AL_STATUS));
-        scan.accept(status.token, 7, &[0x04, 0x00, 0, 0, 0, 0], 1, 8)
+        let configuration = scan.next_action(7).unwrap().unwrap();
+        assert_eq!(
+            configuration.address,
+            fixed_address(0x1000, ESC_CONFIGURATION)
+        );
+        assert_eq!(configuration.read_len, 1);
+        scan.accept(configuration.token, 7, &[ESC_DEVICE_EMULATION], 1, 8)
             .unwrap();
 
-        let next_probe = scan.next_action(9).unwrap().unwrap();
+        let status = scan.next_action(9).unwrap().unwrap();
+        assert_eq!(status.address, fixed_address(0x1000, ESC_AL_STATUS));
+        scan.accept(status.token, 7, &[0x04, 0x00, 0, 0, 0, 0], 1, 10)
+            .unwrap();
+
+        let next_probe = scan.next_action(11).unwrap().unwrap();
         assert_eq!(next_probe.position, 1);
         scan.timeout(next_probe.token, next_probe.deadline_ns)
             .unwrap();
         assert_eq!(scan.phase(), ScanPhase::Complete);
         assert_eq!(scan.len(), 1);
+        assert!(scan.records()[0].device_emulation);
         assert_eq!(scan.records()[0].al_status.state, EthercatState::SafeOp);
+    }
+
+    #[test]
+    fn esc_configuration_requires_an_exact_response() {
+        let mut scan = ScanController::<1>::new(0x1000);
+        scan.start(3, 0, 1_000, 100).unwrap();
+        let probe = scan.next_action(1).unwrap().unwrap();
+        scan.accept(probe.token, 3, &[1, 0], 1, 2).unwrap();
+        let basic = scan.next_action(3).unwrap().unwrap();
+        scan.accept(basic.token, 3, &basic_info(), 1, 4).unwrap();
+        let assign = scan.next_action(5).unwrap().unwrap();
+        scan.accept(assign.token, 3, &[], 1, 6).unwrap();
+
+        let configuration = scan.next_action(7).unwrap().unwrap();
+        assert_eq!(
+            scan.accept(configuration.token, 3, &[], 1, 8),
+            Err(ScanError::PayloadLengthMismatch)
+        );
+        assert_eq!(scan.phase(), ScanPhase::Faulted);
+    }
+
+    #[test]
+    fn esc_configuration_timeout_faults_instead_of_assuming_a_policy() {
+        let mut scan = ScanController::<1>::new(0x1000);
+        scan.start(4, 0, 1_000, 10).unwrap();
+        let probe = scan.next_action(1).unwrap().unwrap();
+        scan.accept(probe.token, 4, &[1, 0], 1, 2).unwrap();
+        let basic = scan.next_action(3).unwrap().unwrap();
+        scan.accept(basic.token, 4, &basic_info(), 1, 4).unwrap();
+        let assign = scan.next_action(5).unwrap().unwrap();
+        scan.accept(assign.token, 4, &[], 1, 6).unwrap();
+
+        let configuration = scan.next_action(7).unwrap().unwrap();
+        assert_eq!(
+            scan.timeout(configuration.token, configuration.deadline_ns),
+            Err(ScanError::Timeout)
+        );
+        assert_eq!(scan.phase(), ScanPhase::Faulted);
+        assert!(scan.records().is_empty());
     }
 
     #[test]

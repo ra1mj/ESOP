@@ -43,3 +43,17 @@ directly; Linux examples may print it at the process boundary.
   `no_std` code.
 - Using `unwrap` in production paths; existing `unwrap` calls are test/example
   setup and assertions.
+
+## EtherCAT AL Faults
+
+Read Device Emulation only from the exact ESC Configuration `0x0141[0]`
+response. A short, stale, timed-out, or bad-WKC capability read is a scan
+failure; never choose a permissive acknowledgement policy by default.
+
+Freeze the first AL Error Indication before attempting acknowledgement. Normal
+ESCs may receive the observed AL state plus bit 4 through the bounded control
+request path, but clearing the indication does not retry or complete the failed
+transition. Device Emulation slaves must never receive bit 4 because AL Control
+is mirrored into AL Status. A later acknowledgement timeout or malformed
+response may become the terminal error, but it must not replace the original
+slave position, requested/actual state, status code, or acknowledgement stage.

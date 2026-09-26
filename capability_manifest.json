@@ -69,7 +69,20 @@
         "docs/ethercat-master-requirements.md",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Software simulation proves state ordering, bounded request ownership, actual-controller Complete gating and lifecycle projection only; automatic per-slave configuration batches, AL error acknowledge and Device Emulation handling, full-period process-data WKC, physical response authenticity, interoperability, target WCET and HIL remain open"
+      "limitation": "Software simulation proves state ordering, bounded request ownership, actual-controller Complete gating and lifecycle projection only; mapping/DC per-slave batches, full-period process-data WKC, physical response authenticity, interoperability, target WCET and HIL remain open"
+    },
+    {
+      "id": "ethercat_al_error_acknowledgement",
+      "status": "implemented",
+      "scope": "Allocation-free ESC 0x0141 Device Emulation discovery, bounded normal-ESC AL Error Indication acknowledgement, Device Emulation ACK suppression, first-fault retention and fail-closed Startup diagnostics",
+      "evidence": [
+        "crates/esop-ethercat-core/src/scan.rs",
+        "crates/esop-ethercat-core/src/al.rs",
+        "crates/esop-ethercat-core/src/startup.rs",
+        "crates/esop-ethercat-linux-port/tests/scheduled_domains.rs",
+        "docs/ethercat-master-requirements.md"
+      ],
+      "limitation": "Software tests prove exact register sequencing, timeout/error retention and policy separation only; ESI/SII ESM timeout discovery, OpOnly handling, physical ESC response authenticity, interoperability, target WCET and HIL remain open"
     },
     {
       "id": "linux_raw_port",
