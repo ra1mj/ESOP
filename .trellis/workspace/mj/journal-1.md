@@ -1060,3 +1060,36 @@ Added deterministic per-slave PDO assignment/mapping startup plans and an alloca
 ### Next Steps
 
 - None - task complete
+
+
+## Session 32: Production-scheduled PDO configuration
+
+**Date**: 2026-09-26
+**Task**: Production-scheduled PDO configuration
+**Branch**: `main`
+
+### Summary
+
+Integrated generated PDO configuration into the fixed-priority production scheduler through the existing CoE mailbox/DC/shared-RX path, added typed transport faults and lifecycle gating, covered rebuild/retry/cross-generation/timeout/readback mismatch/restart behavior, and synchronized product documentation and capability evidence.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `bca22c9` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
