@@ -1126,3 +1126,36 @@ Added an opt-in PREOP configuration barrier, scheduler-owned release from real P
 ### Next Steps
 
 - None - task complete
+
+
+## Session 34: Product PDO batch automation
+
+**Date**: 2026-09-26
+**Task**: Product PDO batch automation
+**Branch**: `main`
+
+### Summary
+
+Added fixed-capacity all-slave PDO batch planning and execution, scheduler-owned PREOP advancement and status reporting, product mailbox binding validation, Linux integration coverage, and synchronized capability/documentation contracts. Full CI, BPF, HIL, no_std, and Zenoh gates passed.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `412b849` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
