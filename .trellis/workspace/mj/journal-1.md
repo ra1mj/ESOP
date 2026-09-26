@@ -1093,3 +1093,36 @@ Integrated generated PDO configuration into the fixed-priority production schedu
 ### Next Steps
 
 - None - task complete
+
+
+## Session 33: Gate EtherCAT AL activation on configuration
+
+**Date**: 2026-09-26
+**Task**: Gate EtherCAT AL activation on configuration
+**Branch**: `main`
+
+### Summary
+
+Added an opt-in PREOP configuration barrier, scheduler-owned release from real PDO/mapping/DC completion, retained SAFEOP/OP progression, lifecycle topology projection, cross-crate simulation coverage, and synchronized product capability documentation.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `744cff0` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
