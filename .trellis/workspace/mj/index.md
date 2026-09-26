@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 39
+- **Total Sessions**: 40
 - **Last Active**: 2026-09-27
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1330 | Active |
+| `journal-1.md` | ~1364 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 40 | 2026-09-27 | Startup-owned SII stream verification | `aed42d7`, `8892cd9` | `main` |
 | 39 | 2026-09-27 | Bounded SII category stream discovery | `2c82fa4`, `56def33`, `47697e5` | `main` |
 | 38 | 2026-09-27 | Startup SII mailbox verification | `2203e8e`, `ff8a60c` | `main` |
 | 37 | 2026-09-27 | Generated product mailbox configuration | `c74dce3`, `7c042fa` | `main` |

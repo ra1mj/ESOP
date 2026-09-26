@@ -1328,3 +1328,37 @@ Implemented allocation-free bounded SII category-stream discovery with preserved
 ### Next Steps
 
 - None - task complete
+
+
+## Session 40: Startup-owned SII stream verification
+
+**Date**: 2026-09-27
+**Task**: Startup-owned SII stream verification
+**Branch**: `main`
+
+### Summary
+
+Integrated bounded SII SM/PDO stream discovery into Startup before the first AL action, rebuilt exact versioned topology signatures from generated product data, added fail-closed evidence and ownership tests, synchronized product artifacts/specs/docs, and passed the complete local make ci gate.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `aed42d7` | (see git log) |
+| `8892cd9` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
