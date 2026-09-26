@@ -147,6 +147,7 @@ pub struct ScheduledProductionServiceCycleReport<E, const DOMAINS: usize> {
     recovery: ScheduledProductionServiceRecovery,
     request: Option<RequestHandle>,
     service_ready: bool,
+    startup_phase: Option<StartupPhase>,
     transport: ScheduledProductionServiceTransport<E, DOMAINS>,
 }
 
@@ -173,6 +174,10 @@ impl<E, const DOMAINS: usize> ScheduledProductionServiceCycleReport<E, DOMAINS> 
 
     pub const fn service_ready(&self) -> bool {
         self.service_ready
+    }
+
+    pub const fn startup_phase(&self) -> Option<StartupPhase> {
+        self.startup_phase
     }
 
     pub const fn received(&self) -> &ScheduledReceiveReport<E, DOMAINS> {
@@ -224,9 +229,16 @@ impl<E, const DOMAINS: usize> ScheduledProductionServiceCycleReport<E, DOMAINS> 
 pub enum ScheduledProductionServiceCycleError<E, const DOMAINS: usize> {
     MissingController(ScheduledProductionServiceKind),
     RequestMismatch(ScheduledProductionServiceKind),
+    Startup(StartupError),
     Control(ControlError),
     ControlCycle(ScheduledControlCycleError<E, DOMAINS>),
     MailboxCycle(ScheduledMailboxCycleError<E>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartupBarrierReleaseError {
+    MissingController(ScheduledProductionServiceKind),
+    Startup(StartupError),
 }
 
 pub struct ScheduledProductionServiceScheduler {
@@ -310,6 +322,15 @@ impl ScheduledProductionServiceScheduler {
         ScheduledProductionServiceCycleReport<P::Error, DOMAINS>,
         ScheduledProductionServiceCycleError<P::Error, DOMAINS>,
     > {
+        self.release_startup_configuration(port.now_ns(), services)
+            .map_err(|error| match error {
+                StartupBarrierReleaseError::MissingController(kind) => {
+                    ScheduledProductionServiceCycleError::MissingController(kind)
+                }
+                StartupBarrierReleaseError::Startup(error) => {
+                    ScheduledProductionServiceCycleError::Startup(error)
+                }
+            })?;
         self.refresh_selection(services);
         let selected = self.active;
         if selected == ScheduledProductionServiceKind::PdoConfiguration
@@ -469,6 +490,7 @@ impl ScheduledProductionServiceScheduler {
                 let service_ready = cycle.tx.service.failure.is_none()
                     && fault.is_none()
                     && binding.controller.phase() == PdoConfigPhase::Complete;
+                let startup_phase = services.startup.as_deref().map(StartupController::phase);
                 return Ok(ScheduledProductionServiceCycleReport {
                     selected,
                     progress,
@@ -476,6 +498,7 @@ impl ScheduledProductionServiceScheduler {
                     recovery,
                     request: self.request,
                     service_ready,
+                    startup_phase,
                     transport: ScheduledProductionServiceTransport::Mailbox(cycle),
                 });
             }
@@ -505,6 +528,7 @@ impl ScheduledProductionServiceScheduler {
                     ScheduledProductionServiceProgress::Mailbox(MailboxProgress::RetryScheduled)
                 )
                 && cycle.tx.service.failure.is_none();
+            let startup_phase = services.startup.as_deref().map(StartupController::phase);
             return Ok(ScheduledProductionServiceCycleReport {
                 selected,
                 progress,
@@ -512,6 +536,7 @@ impl ScheduledProductionServiceScheduler {
                 recovery,
                 request: self.request,
                 service_ready,
+                startup_phase,
                 transport: ScheduledProductionServiceTransport::Mailbox(cycle),
             });
         }
@@ -568,6 +593,7 @@ impl ScheduledProductionServiceScheduler {
         let recovery = self.recovery(controls, progress, fault);
         let service_ready =
             cycle.service().failure.is_none() && fault.is_none() && self.controller_ready(services);
+        let startup_phase = services.startup.as_deref().map(StartupController::phase);
         Ok(ScheduledProductionServiceCycleReport {
             selected,
             progress,
@@ -575,8 +601,75 @@ impl ScheduledProductionServiceScheduler {
             recovery,
             request: self.request,
             service_ready,
+            startup_phase,
             transport: ScheduledProductionServiceTransport::Control(cycle),
         })
+    }
+
+    fn release_startup_configuration<
+        const MAX_SLAVES: usize,
+        const SMS: usize,
+        const FMMUS: usize,
+        const PDO_OPS: usize,
+    >(
+        &mut self,
+        now_ns: u64,
+        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
+    ) -> Result<(), StartupBarrierReleaseError> {
+        let requirements = match services.startup.as_deref() {
+            Some(startup) if startup.phase() == StartupPhase::AwaitingConfiguration => {
+                startup.configuration_services()
+            }
+            _ => return Ok(()),
+        };
+
+        if requirements.requires_pdo_configuration() && services.pdo_configuration.is_none() {
+            return Err(StartupBarrierReleaseError::MissingController(
+                ScheduledProductionServiceKind::PdoConfiguration,
+            ));
+        }
+        if requirements.requires_mapping() && services.mapping.is_none() {
+            return Err(StartupBarrierReleaseError::MissingController(
+                ScheduledProductionServiceKind::Mapping,
+            ));
+        }
+        if requirements.requires_dc_configuration() && services.dc_configuration.is_none() {
+            return Err(StartupBarrierReleaseError::MissingController(
+                ScheduledProductionServiceKind::DcConfiguration,
+            ));
+        }
+
+        if self.request.is_some() || self.pdo_action.is_some() {
+            return Ok(());
+        }
+        let pdo_complete = !requirements.requires_pdo_configuration()
+            || services
+                .pdo_configuration
+                .as_ref()
+                .is_some_and(|binding| binding.controller.phase() == PdoConfigPhase::Complete);
+        let mapping_complete = !requirements.requires_mapping()
+            || services
+                .mapping
+                .as_deref()
+                .is_some_and(|controller| controller.phase() == MappingConfigPhase::Complete);
+        let dc_complete = !requirements.requires_dc_configuration()
+            || services
+                .dc_configuration
+                .as_deref()
+                .is_some_and(|controller| controller.phase() == DcPhase::Complete);
+        if !(pdo_complete && mapping_complete && dc_complete) {
+            return Ok(());
+        }
+
+        services
+            .startup
+            .as_deref_mut()
+            .ok_or(StartupBarrierReleaseError::MissingController(
+                ScheduledProductionServiceKind::Startup,
+            ))?
+            .release_configuration(now_ns)
+            .map_err(StartupBarrierReleaseError::Startup)?;
+        Ok(())
     }
 
     fn refresh_selection<
@@ -592,6 +685,37 @@ impl ScheduledProductionServiceScheduler {
             || self.pdo_action.is_some()
             || self.service_active(services, self.active)
         {
+            return;
+        }
+        if let Some(startup) = services
+            .startup
+            .as_deref()
+            .filter(|controller| controller.phase() == StartupPhase::AwaitingConfiguration)
+        {
+            let requirements = startup.configuration_services();
+            self.active =
+                if requirements.requires_pdo_configuration()
+                    && !services.pdo_configuration.as_ref().is_some_and(|binding| {
+                        binding.controller.phase() == PdoConfigPhase::Complete
+                    })
+                {
+                    ScheduledProductionServiceKind::PdoConfiguration
+                } else if requirements.requires_mapping()
+                    && !services.mapping.as_deref().is_some_and(|controller| {
+                        controller.phase() == MappingConfigPhase::Complete
+                    })
+                {
+                    ScheduledProductionServiceKind::Mapping
+                } else if requirements.requires_dc_configuration()
+                    && !services
+                        .dc_configuration
+                        .as_deref()
+                        .is_some_and(|controller| controller.phase() == DcPhase::Complete)
+                {
+                    ScheduledProductionServiceKind::DcConfiguration
+                } else {
+                    ScheduledProductionServiceKind::Startup
+                };
             return;
         }
         self.active = [
@@ -620,7 +744,12 @@ impl ScheduledProductionServiceScheduler {
             ScheduledProductionServiceKind::Idle => false,
             ScheduledProductionServiceKind::Startup => {
                 services.startup.as_deref().is_some_and(|controller| {
-                    !matches!(controller.phase(), StartupPhase::Idle | StartupPhase::Ready)
+                    !matches!(
+                        controller.phase(),
+                        StartupPhase::Idle
+                            | StartupPhase::AwaitingConfiguration
+                            | StartupPhase::Ready
+                    )
                 })
             }
             ScheduledProductionServiceKind::PdoConfiguration => {
@@ -799,6 +928,14 @@ impl ScheduledProductionServiceScheduler {
                     }
                 };
                 let Some(action) = action else {
+                    if controller.phase() == StartupPhase::AwaitingConfiguration {
+                        return Ok(ScheduledProductionEnqueueOutcome {
+                            progress: Some(ScheduledProductionServiceProgress::Startup(
+                                StartupProgress::AwaitingConfiguration,
+                            )),
+                            ..ScheduledProductionEnqueueOutcome::EMPTY
+                        });
+                    }
                     return Ok(ScheduledProductionEnqueueOutcome::EMPTY);
                 };
                 if action.deadline_ns() <= now_ns {
@@ -1216,7 +1353,35 @@ impl Default for ScheduledProductionServiceScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mapping::MappingTable;
     use crate::pdo_config::{PdoConfigPlan, PdoSdoWrite};
+    use crate::slave::{EthercatState, SlaveIdentity};
+    use crate::startup::{
+        ExpectedSlave, StartupAction, StartupConfig, StartupConfigurationServices,
+    };
+
+    const EXPECTED: [ExpectedSlave; 1] = [ExpectedSlave {
+        position: 0,
+        station_address: 0x1000,
+        identity: SlaveIdentity {
+            vendor_id: 1,
+            product_code: 2,
+            revision: 3,
+            serial: 4,
+        },
+    }];
+
+    fn startup_at_barrier(requirements: StartupConfigurationServices) -> StartupController<1> {
+        let mut startup = StartupController::new(0x1000);
+        startup
+            .enter_configuration_barrier_for_test(
+                7,
+                StartupConfig::new(EthercatState::Op).with_configuration_services(requirements),
+                &EXPECTED,
+            )
+            .unwrap();
+        startup
+    }
 
     #[test]
     fn pdo_binding_rejects_a_substituted_mailbox_without_a_pool_request() {
@@ -1280,5 +1445,201 @@ mod tests {
         );
         assert_eq!(controller.pending(), Some(action));
         assert_eq!(scheduler.pdo_action, Some(action));
+    }
+
+    #[test]
+    fn startup_barrier_reports_missing_required_binding() {
+        let mut startup = startup_at_barrier(StartupConfigurationServices::new().with_mapping());
+        let mut services =
+            ScheduledProductionServices::<1, 0, 0, 0>::new(Some(&mut startup), None, None, None);
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+
+        assert_eq!(
+            scheduler.release_startup_configuration(1, &mut services),
+            Err(StartupBarrierReleaseError::MissingController(
+                ScheduledProductionServiceKind::Mapping
+            ))
+        );
+        assert_eq!(startup.phase(), StartupPhase::AwaitingConfiguration);
+    }
+
+    #[test]
+    fn startup_barrier_selects_idle_required_services_in_fixed_order() {
+        let requirements = StartupConfigurationServices::new()
+            .with_pdo_configuration()
+            .with_mapping()
+            .with_dc_configuration();
+        let mailbox_config = MailboxConfig::new(0x1000, 32, 0x1100, 32);
+
+        let mut startup = startup_at_barrier(requirements);
+        let mut pdo = PdoConfigController::<0>::new();
+        let mut pdo_mailbox = MailboxController::new();
+        let mut mapping = MappingConfigController::<0, 0>::new();
+        let mut dc = DcController::new();
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+        {
+            let services = ScheduledProductionServices::new(
+                Some(&mut startup),
+                Some(&mut mapping),
+                Some(&mut dc),
+                None,
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            ));
+            scheduler.refresh_selection(&services);
+            assert_eq!(
+                scheduler.active(),
+                ScheduledProductionServiceKind::PdoConfiguration
+            );
+        }
+        {
+            let mut services = ScheduledProductionServices::new(
+                Some(&mut startup),
+                Some(&mut mapping),
+                Some(&mut dc),
+                None,
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            ));
+            let mut controls = ControlRequestPool::<1>::new();
+            let outcome = scheduler
+                .enqueue_due(1, &mut controls, &mut services)
+                .unwrap();
+            assert_eq!(
+                outcome.fault,
+                Some(ScheduledProductionServiceFault::PdoConfiguration(
+                    PdoConfigError::NotStarted
+                ))
+            );
+            assert_eq!(outcome.request, None);
+        }
+
+        pdo.start(PdoConfigPlan::new(), 0x1000, 7, 0, 100, 10)
+            .unwrap();
+        {
+            let services = ScheduledProductionServices::new(
+                Some(&mut startup),
+                Some(&mut mapping),
+                Some(&mut dc),
+                None,
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            ));
+            scheduler.refresh_selection(&services);
+            assert_eq!(scheduler.active(), ScheduledProductionServiceKind::Mapping);
+        }
+
+        mapping
+            .start(0x1000, 7, 0, 100, 10, &MappingTable::new())
+            .unwrap();
+        {
+            let services = ScheduledProductionServices::new(
+                Some(&mut startup),
+                Some(&mut mapping),
+                Some(&mut dc),
+                None,
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            ));
+            scheduler.refresh_selection(&services);
+            assert_eq!(
+                scheduler.active(),
+                ScheduledProductionServiceKind::DcConfiguration
+            );
+        }
+        assert_eq!(startup.phase(), StartupPhase::AwaitingConfiguration);
+    }
+
+    #[test]
+    fn startup_barrier_releases_only_after_all_required_controllers_complete() {
+        let requirements = StartupConfigurationServices::new()
+            .with_pdo_configuration()
+            .with_mapping();
+        let mut startup = startup_at_barrier(requirements);
+        let mut pdo = PdoConfigController::<0>::new();
+        pdo.start(PdoConfigPlan::new(), 0x1000, 7, 0, 100, 10)
+            .unwrap();
+        let mut pdo_mailbox = MailboxController::new();
+        let mut mapping = MappingConfigController::<0, 0>::new();
+        mapping
+            .start(0x1000, 7, 0, 100, 10, &MappingTable::new())
+            .unwrap();
+        let mailbox_config = MailboxConfig::new(0x1000, 32, 0x1100, 32);
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+        {
+            let mut services = ScheduledProductionServices::new(
+                Some(&mut startup),
+                Some(&mut mapping),
+                None,
+                None,
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            ));
+            assert_eq!(
+                scheduler.release_startup_configuration(1, &mut services),
+                Ok(())
+            );
+            scheduler.refresh_selection(&services);
+            assert_eq!(scheduler.active(), ScheduledProductionServiceKind::Startup);
+        }
+        assert_eq!(startup.phase(), StartupPhase::TransitioningAl);
+        assert!(matches!(
+            startup.next_action(2),
+            Ok(Some(StartupAction::Al(_)))
+        ));
+    }
+
+    #[test]
+    fn faulted_required_service_keeps_the_startup_barrier_closed() {
+        let requirements = StartupConfigurationServices::new().with_pdo_configuration();
+        let mut startup = startup_at_barrier(requirements);
+        let mut plan = PdoConfigPlan::<1>::new();
+        plan.push(PdoSdoWrite::new(0x1C12, 0, &[0]).unwrap())
+            .unwrap();
+        let mut pdo = PdoConfigController::<1>::new();
+        pdo.start(plan, 0x1000, 7, 0, 10, 5).unwrap();
+        assert_eq!(pdo.next_action(10), Err(PdoConfigError::Timeout));
+        let mut pdo_mailbox = MailboxController::new();
+        let mailbox_config = MailboxConfig::new(0x1000, 32, 0x1100, 32);
+        let mut services =
+            ScheduledProductionServices::<1, 0, 0, 1>::new(Some(&mut startup), None, None, None)
+                .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                    &mut pdo,
+                    &mut pdo_mailbox,
+                    mailbox_config,
+                ));
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+
+        assert_eq!(
+            scheduler.release_startup_configuration(11, &mut services),
+            Ok(())
+        );
+        scheduler.refresh_selection(&services);
+        assert_eq!(
+            scheduler.active(),
+            ScheduledProductionServiceKind::PdoConfiguration
+        );
+        assert_eq!(
+            scheduler.controller_fault(&services),
+            Some(ScheduledProductionServiceFault::PdoConfiguration(
+                PdoConfigError::Timeout
+            ))
+        );
+        assert_eq!(startup.phase(), StartupPhase::AwaitingConfiguration);
     }
 }

@@ -72,7 +72,12 @@ subindex zero, writes each mapping object, then publishes the ordered mapping
 indexes and final assignment count. `PdoConfigController` executes each plan
 write as download plus exact upload readback; operation progress is published
 only after length and bytes match. The caller still owns production scheduling,
-mailbox transport, retry policy, and CONFIGURING lifecycle admission.
+mailbox transport, retry policy, and CONFIGURING lifecycle admission. The
+caller may opt `StartupConfig` into a PREOP barrier for PDO Configuration,
+Mapping, and/or DC Configuration. The production scheduler then releases
+Startup only from the required controllers' real Complete phases and resumes
+the retained topology through SAFEOP/OP. Product-generated multi-slave job
+iteration and MailboxConfig/mapping/DC descriptor discovery remain caller work.
 
 The configuration SHA-256 covers normalized product semantics and a sorted
 label-to-semantic-ESI-hash map. It excludes timestamps, host paths, compiler,
@@ -142,8 +147,10 @@ datagrams, FCS, and inter-packet gap respectively.
 - Route a generated-style PDO action through `ScheduledPdoConfiguration`, the
   existing mailbox/DC/shared-RX path, exact upload readback, request rebuild,
   cross-generation waiting, timeout, lifecycle gating, fault blocking and
-  explicit restart. Keep PREOP orchestration and physical HIL outside this
-  software claim.
+  explicit restart. Cover the opt-in PREOP Startup barrier, automatic release
+  from actual Complete phases, retained topology and legal SAFEOP/OP
+  progression. Keep automatic multi-slave batch iteration and physical HIL
+  outside this software claim.
 - Validate both default and product-input build reports, including forged pass
   rejection and exact wire metric projection.
 - Run `make ci`, `make bpf`, and `make test-zenoh` before delivery.

@@ -31,12 +31,65 @@ impl ExpectedSlave {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StartupConfigurationServices(u8);
+
+impl StartupConfigurationServices {
+    const PDO_CONFIGURATION: u8 = 1 << 0;
+    const MAPPING: u8 = 1 << 1;
+    const DC_CONFIGURATION: u8 = 1 << 2;
+
+    pub const NONE: Self = Self(0);
+
+    pub const fn new() -> Self {
+        Self::NONE
+    }
+
+    pub const fn with_pdo_configuration(mut self) -> Self {
+        self.0 |= Self::PDO_CONFIGURATION;
+        self
+    }
+
+    pub const fn with_mapping(mut self) -> Self {
+        self.0 |= Self::MAPPING;
+        self
+    }
+
+    pub const fn with_dc_configuration(mut self) -> Self {
+        self.0 |= Self::DC_CONFIGURATION;
+        self
+    }
+
+    pub const fn requires_pdo_configuration(self) -> bool {
+        self.0 & Self::PDO_CONFIGURATION != 0
+    }
+
+    pub const fn requires_mapping(self) -> bool {
+        self.0 & Self::MAPPING != 0
+    }
+
+    pub const fn requires_dc_configuration(self) -> bool {
+        self.0 & Self::DC_CONFIGURATION != 0
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl Default for StartupConfigurationServices {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StartupConfig {
     pub scan_timeout_ns: u64,
     pub identity_timeout_ns: u64,
     pub transition_timeout_ns: u64,
     pub request_timeout_ns: u64,
     pub target_state: EthercatState,
+    pub configuration_services: StartupConfigurationServices,
 }
 
 impl StartupConfig {
@@ -47,7 +100,16 @@ impl StartupConfig {
             transition_timeout_ns: 1_000_000_000,
             request_timeout_ns: 1_000_000,
             target_state,
+            configuration_services: StartupConfigurationServices::NONE,
         }
+    }
+
+    pub const fn with_configuration_services(
+        mut self,
+        configuration_services: StartupConfigurationServices,
+    ) -> Self {
+        self.configuration_services = configuration_services;
+        self
     }
 }
 
@@ -57,6 +119,7 @@ pub enum StartupPhase {
     Scanning,
     ReadingIdentity,
     TransitioningAl,
+    AwaitingConfiguration,
     Ready,
     Faulted,
 }
@@ -156,6 +219,8 @@ pub enum StartupProgress {
     SlaveDiscovered(usize),
     IdentityVerified(usize),
     SlaveReady(usize),
+    AwaitingConfiguration,
+    ConfigurationReleased,
     Ready,
 }
 
@@ -172,6 +237,8 @@ pub enum StartupError {
     IdentityMismatch,
     ActionMismatch,
     UnknownState,
+    InvalidConfigurationBarrier,
+    ConfigurationNotPending,
     AlErrorCode(u16),
     Control(ControlError),
     Scan(ScanError),
@@ -192,6 +259,8 @@ pub struct StartupController<const MAX_SLAVES: usize> {
     al: AlTransitionController,
     table: SlaveTable<MAX_SLAVES>,
     current_index: usize,
+    stage_target: EthercatState,
+    configuration_released: bool,
     last_error: Option<StartupError>,
 }
 
@@ -209,6 +278,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             al: AlTransitionController::new(),
             table: SlaveTable::new(),
             current_index: 0,
+            stage_target: EthercatState::Op,
+            configuration_released: false,
             last_error: None,
         }
     }
@@ -229,6 +300,10 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.expected_count
     }
 
+    pub const fn configuration_services(&self) -> StartupConfigurationServices {
+        self.config.configuration_services
+    }
+
     pub fn records(&self) -> &[SlaveRecord] {
         self.table.records()
     }
@@ -242,7 +317,10 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             StartupPhase::Scanning => self.scan.pending().map(StartupAction::Scan),
             StartupPhase::ReadingIdentity => self.sii.pending().map(StartupAction::Sii),
             StartupPhase::TransitioningAl => self.al.pending().map(StartupAction::Al),
-            StartupPhase::Idle | StartupPhase::Ready | StartupPhase::Faulted => None,
+            StartupPhase::Idle
+            | StartupPhase::AwaitingConfiguration
+            | StartupPhase::Ready
+            | StartupPhase::Faulted => None,
         }
     }
 
@@ -255,7 +333,10 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
     ) -> Result<(), StartupError> {
         if !matches!(
             self.phase,
-            StartupPhase::Idle | StartupPhase::Ready | StartupPhase::Faulted
+            StartupPhase::Idle
+                | StartupPhase::AwaitingConfiguration
+                | StartupPhase::Ready
+                | StartupPhase::Faulted
         ) {
             return Err(StartupError::Busy);
         }
@@ -264,6 +345,15 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         }
         if matches!(config.target_state, EthercatState::Unknown) {
             return Err(StartupError::UnknownState);
+        }
+        if !config.configuration_services.is_empty()
+            && (expected.is_empty()
+                || !matches!(
+                    config.target_state,
+                    EthercatState::SafeOp | EthercatState::Op
+                ))
+        {
+            return Err(StartupError::InvalidConfigurationBarrier);
         }
         for (index, item) in expected.iter().copied().enumerate() {
             if expected[..index]
@@ -285,6 +375,12 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.al = AlTransitionController::new();
         self.table = SlaveTable::new();
         self.current_index = 0;
+        self.stage_target = if config.configuration_services.is_empty() {
+            config.target_state
+        } else {
+            EthercatState::PreOp
+        };
+        self.configuration_released = false;
         self.last_error = None;
         match self.scan.start(
             generation,
@@ -321,7 +417,10 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                     Ok(None) => return Ok(None),
                     Err(error) => return self.fail(StartupError::Al(error)),
                 },
-                StartupPhase::Ready | StartupPhase::Faulted | StartupPhase::Idle => {
+                StartupPhase::AwaitingConfiguration
+                | StartupPhase::Ready
+                | StartupPhase::Faulted
+                | StartupPhase::Idle => {
                     return Ok(None);
                 }
             }
@@ -549,6 +648,71 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         }
     }
 
+    pub(crate) fn release_configuration(
+        &mut self,
+        now_ns: u64,
+    ) -> Result<StartupProgress, StartupError> {
+        if self.phase != StartupPhase::AwaitingConfiguration {
+            return self.fail(StartupError::ConfigurationNotPending);
+        }
+        self.configuration_released = true;
+        self.stage_target = self.config.target_state;
+        self.current_index = 0;
+        self.al = AlTransitionController::new();
+        self.phase = StartupPhase::TransitioningAl;
+        self.start_al_for_current(now_ns)?;
+        Ok(StartupProgress::ConfigurationReleased)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enter_configuration_barrier_for_test(
+        &mut self,
+        generation: u16,
+        config: StartupConfig,
+        expected: &[ExpectedSlave],
+    ) -> Result<(), StartupError> {
+        if expected.is_empty()
+            || expected.len() > MAX_SLAVES
+            || config.configuration_services.is_empty()
+            || !matches!(
+                config.target_state,
+                EthercatState::SafeOp | EthercatState::Op
+            )
+        {
+            return Err(StartupError::InvalidConfigurationBarrier);
+        }
+        self.phase = StartupPhase::AwaitingConfiguration;
+        self.config = config;
+        self.expected = [ExpectedSlave::EMPTY; MAX_SLAVES];
+        self.expected[..expected.len()].copy_from_slice(expected);
+        self.expected_count = expected.len();
+        self.generation = generation;
+        self.scan = ScanController::new(self.station_address_base);
+        self.sii = SiiIdentityReader::new();
+        self.al = AlTransitionController::new();
+        self.table = SlaveTable::new();
+        for item in expected.iter().copied() {
+            self.table
+                .add(item.position, item.station_address, item.identity)
+                .map_err(StartupError::Table)?;
+            self.table
+                .observe_status(
+                    item.position,
+                    crate::slave::AlStatus::new(EthercatState::PreOp as u16, 0),
+                    0,
+                )
+                .map_err(StartupError::Table)?;
+            self.table
+                .verify_identity(item.position, item.identity)
+                .map_err(StartupError::Table)?;
+        }
+        self.current_index = expected.len();
+        self.stage_target = EthercatState::PreOp;
+        self.configuration_released = false;
+        self.last_error = None;
+        Ok(())
+    }
+
     fn enter_identity_phase(&mut self) -> Result<(), StartupError> {
         if self.scan.len() != self.expected_count {
             return self.fail(StartupError::ExpectedCountMismatch);
@@ -643,7 +807,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         if let Err(error) = self.al.start(AlTransitionRequest {
             station_address: record.station_address,
             current_state: record.al_status.state,
-            requested_state: self.config.target_state,
+            requested_state: self.stage_target,
             generation: self.generation,
             now_ns,
             timeout_ns: self.config.transition_timeout_ns,
@@ -676,15 +840,23 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         if status.error {
             return self.fail(StartupError::AlErrorCode(status.code));
         }
-        if status.state != self.config.target_state {
+        if status.state != self.stage_target {
             return self.start_al_for_current(now_ns);
         }
 
         let ready_index = self.current_index;
         self.current_index += 1;
         if self.current_index >= self.expected_count {
-            self.phase = StartupPhase::Ready;
-            Ok(StartupProgress::Ready)
+            if !self.config.configuration_services.is_empty() && !self.configuration_released {
+                self.phase = StartupPhase::AwaitingConfiguration;
+                Ok(StartupProgress::AwaitingConfiguration)
+            } else {
+                self.phase = StartupPhase::Ready;
+                Ok(StartupProgress::Ready)
+            }
+        } else if self.configuration_released {
+            self.phase = StartupPhase::TransitioningAl;
+            self.start_al_for_current(now_ns)
         } else {
             self.phase = StartupPhase::ReadingIdentity;
             Ok(StartupProgress::SlaveReady(ready_index))
@@ -715,6 +887,15 @@ mod tests {
         bytes
     }
 
+    fn status_with_code(state: EthercatState, error: bool, code: u16) -> [u8; 6] {
+        let mut bytes = status(state);
+        if error {
+            bytes[0] |= 0x10;
+        }
+        bytes[4..6].copy_from_slice(&code.to_le_bytes());
+        bytes
+    }
+
     fn accept_action<const MAX_SLAVES: usize>(
         startup: &mut StartupController<MAX_SLAVES>,
         action: StartupAction,
@@ -725,6 +906,46 @@ mod tests {
         startup
             .accept(action, action.generation(), payload, wkc, now_ns)
             .unwrap()
+    }
+
+    fn accept_al_state<const MAX_SLAVES: usize>(
+        startup: &mut StartupController<MAX_SLAVES>,
+        state: EthercatState,
+        now_ns: u64,
+    ) -> StartupProgress {
+        let write = startup.next_action(now_ns).unwrap().unwrap();
+        assert!(matches!(write, StartupAction::Al(_)));
+        accept_action(startup, write, &[], 1, now_ns + 1);
+        let read = startup.next_action(now_ns + 2).unwrap().unwrap();
+        assert!(matches!(read, StartupAction::Al(_)));
+        accept_action(startup, read, &status(state), 1, now_ns + 3)
+    }
+
+    fn accept_identity<const MAX_SLAVES: usize>(
+        startup: &mut StartupController<MAX_SLAVES>,
+        identity: SlaveIdentity,
+        now_ns: &mut u64,
+    ) {
+        for word in [
+            identity.vendor_id as u16,
+            (identity.vendor_id >> 16) as u16,
+            identity.product_code as u16,
+            (identity.product_code >> 16) as u16,
+            identity.revision as u16,
+            (identity.revision >> 16) as u16,
+            identity.serial as u16,
+            (identity.serial >> 16) as u16,
+        ] {
+            let address = startup.next_action(*now_ns).unwrap().unwrap();
+            accept_action(startup, address, &[], 1, *now_ns + 1);
+            let issue = startup.next_action(*now_ns + 2).unwrap().unwrap();
+            accept_action(startup, issue, &[], 1, *now_ns + 3);
+            let poll = startup.next_action(*now_ns + 4).unwrap().unwrap();
+            accept_action(startup, poll, &[0, 0], 1, *now_ns + 5);
+            let data = startup.next_action(*now_ns + 6).unwrap().unwrap();
+            accept_action(startup, data, &word.to_le_bytes(), 1, *now_ns + 7);
+            *now_ns += 8;
+        }
     }
 
     #[test]
@@ -804,6 +1025,352 @@ mod tests {
         assert_eq!(startup.records().len(), 1);
         assert_eq!(startup.records()[0].identity, identity);
         assert_eq!(startup.records()[0].al_status.state, EthercatState::Op);
+    }
+
+    #[test]
+    fn startup_enters_preop_barrier_and_resumes_without_rediscovery() {
+        let identity = SlaveIdentity {
+            vendor_id: 0x1122_3344,
+            product_code: 0x5566_7788,
+            revision: 0x99AA_BBCC,
+            serial: 0xDDEE_FF00,
+        };
+        let expected = [ExpectedSlave {
+            position: 0,
+            station_address: 0x1000,
+            identity,
+        }];
+        let requirements = StartupConfigurationServices::new().with_pdo_configuration();
+        let mut startup = StartupController::<2>::new(0x1000);
+        startup
+            .start(
+                7,
+                0,
+                StartupConfig::new(EthercatState::Op).with_configuration_services(requirements),
+                &expected,
+            )
+            .unwrap();
+
+        let probe = startup.next_action(1).unwrap().unwrap();
+        accept_action(&mut startup, probe, &[0x88, 0x02], 1, 2);
+        let basic = startup.next_action(3).unwrap().unwrap();
+        accept_action(
+            &mut startup,
+            basic,
+            &[0x88, 0x02, 3, 4, 1, 2, 0x00, 0x20, 1],
+            1,
+            4,
+        );
+        let assign = startup.next_action(5).unwrap().unwrap();
+        accept_action(&mut startup, assign, &[], 1, 6);
+        let scan_status = startup.next_action(7).unwrap().unwrap();
+        accept_action(
+            &mut startup,
+            scan_status,
+            &status(EthercatState::Init),
+            1,
+            8,
+        );
+        let end_probe = startup.next_action(9).unwrap().unwrap();
+        startup
+            .timeout(end_probe, end_probe_deadline(end_probe))
+            .unwrap();
+
+        for word in [
+            0x3344u16, 0x1122, 0x7788, 0x5566, 0xBBCC, 0x99AA, 0xFF00, 0xDDEE,
+        ] {
+            let address = startup.next_action(10).unwrap().unwrap();
+            accept_action(&mut startup, address, &[], 1, 11);
+            let issue = startup.next_action(12).unwrap().unwrap();
+            accept_action(&mut startup, issue, &[], 1, 13);
+            let poll = startup.next_action(14).unwrap().unwrap();
+            accept_action(&mut startup, poll, &[0, 0], 1, 15);
+            let data = startup.next_action(16).unwrap().unwrap();
+            accept_action(&mut startup, data, &word.to_le_bytes(), 1, 17);
+        }
+
+        assert_eq!(startup.al.expected_state(), EthercatState::PreOp);
+        assert_eq!(
+            accept_al_state(&mut startup, EthercatState::PreOp, 20),
+            StartupProgress::AwaitingConfiguration
+        );
+        assert_eq!(startup.phase(), StartupPhase::AwaitingConfiguration);
+        assert_eq!(startup.next_action(24), Ok(None));
+        assert_eq!(startup.records().len(), 1);
+        assert_eq!(startup.records()[0].identity, identity);
+        assert_eq!(startup.records()[0].al_status.state, EthercatState::PreOp);
+
+        assert_eq!(
+            startup.release_configuration(25),
+            Ok(StartupProgress::ConfigurationReleased)
+        );
+        assert_eq!(startup.al.expected_state(), EthercatState::SafeOp);
+        accept_al_state(&mut startup, EthercatState::SafeOp, 26);
+        assert_eq!(startup.al.expected_state(), EthercatState::Op);
+        assert_eq!(
+            accept_al_state(&mut startup, EthercatState::Op, 30),
+            StartupProgress::Ready
+        );
+        assert_eq!(startup.phase(), StartupPhase::Ready);
+        assert_eq!(startup.records()[0].identity, identity);
+        assert_eq!(startup.records()[0].al_status.state, EthercatState::Op);
+    }
+
+    #[test]
+    fn every_expected_slave_reaches_preop_before_configuration_barrier() {
+        let expected = [
+            ExpectedSlave {
+                position: 0,
+                station_address: 0x1000,
+                identity: SlaveIdentity {
+                    vendor_id: 0x1122_3344,
+                    product_code: 0x5566_7788,
+                    revision: 0x99AA_BBCC,
+                    serial: 0xDDEE_FF00,
+                },
+            },
+            ExpectedSlave {
+                position: 1,
+                station_address: 0x1001,
+                identity: SlaveIdentity {
+                    vendor_id: 0x0102_0304,
+                    product_code: 0x0506_0708,
+                    revision: 0x090A_0B0C,
+                    serial: 0x0D0E_0F10,
+                },
+            },
+        ];
+        let mut startup = StartupController::<3>::new(0x1000);
+        startup
+            .start(
+                9,
+                0,
+                StartupConfig::new(EthercatState::Op).with_configuration_services(
+                    StartupConfigurationServices::new().with_mapping(),
+                ),
+                &expected,
+            )
+            .unwrap();
+
+        let mut now_ns = 1;
+        for _ in expected {
+            let probe = startup.next_action(now_ns).unwrap().unwrap();
+            accept_action(&mut startup, probe, &[0x88, 0x02], 1, now_ns + 1);
+            let basic = startup.next_action(now_ns + 2).unwrap().unwrap();
+            accept_action(
+                &mut startup,
+                basic,
+                &[0x88, 0x02, 3, 4, 1, 2, 0x00, 0x20, 1],
+                1,
+                now_ns + 3,
+            );
+            let assign = startup.next_action(now_ns + 4).unwrap().unwrap();
+            accept_action(&mut startup, assign, &[], 1, now_ns + 5);
+            let scan_status = startup.next_action(now_ns + 6).unwrap().unwrap();
+            accept_action(
+                &mut startup,
+                scan_status,
+                &status(EthercatState::Init),
+                1,
+                now_ns + 7,
+            );
+            now_ns += 8;
+        }
+        let end_probe = startup.next_action(now_ns).unwrap().unwrap();
+        startup
+            .timeout(end_probe, end_probe_deadline(end_probe))
+            .unwrap();
+
+        accept_identity(&mut startup, expected[0].identity, &mut now_ns);
+        assert_eq!(startup.al.expected_state(), EthercatState::PreOp);
+        assert_eq!(
+            accept_al_state(&mut startup, EthercatState::PreOp, now_ns),
+            StartupProgress::SlaveReady(0)
+        );
+        now_ns += 4;
+        assert_eq!(startup.phase(), StartupPhase::ReadingIdentity);
+        assert_eq!(startup.records().len(), 1);
+        assert_eq!(startup.records()[0].al_status.state, EthercatState::PreOp);
+
+        accept_identity(&mut startup, expected[1].identity, &mut now_ns);
+        assert_eq!(startup.al.expected_state(), EthercatState::PreOp);
+        assert_eq!(
+            accept_al_state(&mut startup, EthercatState::PreOp, now_ns),
+            StartupProgress::AwaitingConfiguration
+        );
+        assert_eq!(startup.phase(), StartupPhase::AwaitingConfiguration);
+        assert_eq!(startup.records().len(), expected.len());
+        assert!(
+            startup
+                .records()
+                .iter()
+                .all(|record| record.al_status.state == EthercatState::PreOp)
+        );
+    }
+
+    #[test]
+    fn configuration_release_transitions_every_retained_slave_through_safeop() {
+        let expected = [
+            ExpectedSlave {
+                position: 0,
+                station_address: 0x1000,
+                identity: SlaveIdentity {
+                    vendor_id: 1,
+                    product_code: 2,
+                    revision: 3,
+                    serial: 4,
+                },
+            },
+            ExpectedSlave {
+                position: 1,
+                station_address: 0x1001,
+                identity: SlaveIdentity {
+                    vendor_id: 5,
+                    product_code: 6,
+                    revision: 7,
+                    serial: 8,
+                },
+            },
+        ];
+        let requirements = StartupConfigurationServices::new()
+            .with_pdo_configuration()
+            .with_mapping()
+            .with_dc_configuration();
+        let mut startup = StartupController::<2>::new(0x1000);
+        startup
+            .enter_configuration_barrier_for_test(
+                21,
+                StartupConfig::new(EthercatState::Op).with_configuration_services(requirements),
+                &expected,
+            )
+            .unwrap();
+
+        startup.release_configuration(0).unwrap();
+        assert_eq!(startup.al.expected_state(), EthercatState::SafeOp);
+        accept_al_state(&mut startup, EthercatState::SafeOp, 1);
+        assert_eq!(startup.al.expected_state(), EthercatState::Op);
+        accept_al_state(&mut startup, EthercatState::Op, 5);
+        assert_eq!(startup.al.expected_state(), EthercatState::SafeOp);
+        accept_al_state(&mut startup, EthercatState::SafeOp, 9);
+        assert_eq!(startup.al.expected_state(), EthercatState::Op);
+        assert_eq!(
+            accept_al_state(&mut startup, EthercatState::Op, 13),
+            StartupProgress::Ready
+        );
+
+        assert_eq!(startup.phase(), StartupPhase::Ready);
+        assert_eq!(startup.records().len(), 2);
+        for (record, item) in startup.records().iter().zip(expected) {
+            assert_eq!(record.position, item.position);
+            assert_eq!(record.station_address, item.station_address);
+            assert_eq!(record.identity, item.identity);
+            assert_eq!(record.al_status.state, EthercatState::Op);
+        }
+    }
+
+    #[test]
+    fn invalid_configuration_barrier_fails_before_startup_mutates() {
+        let expected = [ExpectedSlave {
+            position: 0,
+            station_address: 0x1000,
+            identity: SlaveIdentity::EMPTY,
+        }];
+        let requirements = StartupConfigurationServices::new().with_mapping();
+        let mut invalid_target = StartupController::<1>::new(0x1000);
+        assert_eq!(
+            invalid_target.start(
+                1,
+                0,
+                StartupConfig::new(EthercatState::PreOp).with_configuration_services(requirements),
+                &expected,
+            ),
+            Err(StartupError::InvalidConfigurationBarrier)
+        );
+        assert_eq!(invalid_target.phase(), StartupPhase::Idle);
+        assert!(invalid_target.records().is_empty());
+
+        let mut missing_slaves = StartupController::<1>::new(0x1000);
+        assert_eq!(
+            missing_slaves.start(
+                1,
+                0,
+                StartupConfig::new(EthercatState::Op).with_configuration_services(requirements),
+                &[],
+            ),
+            Err(StartupError::InvalidConfigurationBarrier)
+        );
+        assert_eq!(missing_slaves.phase(), StartupPhase::Idle);
+    }
+
+    #[test]
+    fn restart_from_configuration_barrier_discards_retained_state() {
+        let expected = [ExpectedSlave {
+            position: 0,
+            station_address: 0x1000,
+            identity: SlaveIdentity::EMPTY,
+        }];
+        let mut startup = StartupController::<1>::new(0x1000);
+        startup
+            .enter_configuration_barrier_for_test(
+                1,
+                StartupConfig::new(EthercatState::Op).with_configuration_services(
+                    StartupConfigurationServices::new().with_mapping(),
+                ),
+                &expected,
+            )
+            .unwrap();
+        assert_eq!(startup.records().len(), 1);
+
+        startup
+            .start(2, 10, StartupConfig::new(EthercatState::SafeOp), &expected)
+            .unwrap();
+        assert_eq!(startup.phase(), StartupPhase::Scanning);
+        assert!(startup.records().is_empty());
+        assert!(startup.configuration_services().is_empty());
+        assert_eq!(startup.last_error(), None);
+    }
+
+    #[test]
+    fn post_configuration_al_error_and_timeout_fail_closed() {
+        let expected = [ExpectedSlave {
+            position: 0,
+            station_address: 0x1000,
+            identity: SlaveIdentity::EMPTY,
+        }];
+        let config = StartupConfig::new(EthercatState::Op).with_configuration_services(
+            StartupConfigurationServices::new().with_dc_configuration(),
+        );
+        let mut al_error = StartupController::<1>::new(0x1000);
+        al_error
+            .enter_configuration_barrier_for_test(3, config, &expected)
+            .unwrap();
+        al_error.release_configuration(0).unwrap();
+        let write = al_error.next_action(1).unwrap().unwrap();
+        accept_action(&mut al_error, write, &[], 1, 2);
+        let read = al_error.next_action(3).unwrap().unwrap();
+        assert_eq!(
+            al_error.accept(
+                read,
+                read.generation(),
+                &status_with_code(EthercatState::PreOp, true, 0x001B),
+                1,
+                4,
+            ),
+            Err(StartupError::Al(AlError::AlErrorCode(0x001B)))
+        );
+        assert_eq!(al_error.phase(), StartupPhase::Faulted);
+
+        let mut timeout = StartupController::<1>::new(0x1000);
+        timeout
+            .enter_configuration_barrier_for_test(4, config, &expected)
+            .unwrap();
+        timeout.release_configuration(0).unwrap();
+        let action = timeout.next_action(1).unwrap().unwrap();
+        assert_eq!(
+            timeout.timeout(action, action.deadline_ns()),
+            Err(StartupError::Al(AlError::Timeout))
+        );
+        assert_eq!(timeout.phase(), StartupPhase::Faulted);
     }
 
     fn end_probe_deadline(action: StartupAction) -> u64 {

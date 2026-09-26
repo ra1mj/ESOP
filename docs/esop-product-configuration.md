@@ -107,8 +107,13 @@ count，并返回固定站地址。核心 `PdoConfigController` 对每个写值�
 `MailboxConfig` 绑定到 `ScheduledProductionServiceScheduler`；调度器按
 Startup、PDO Configuration、Mapping、DC Configuration、Mailbox 的固定顺序，
 把每笔 CoE 请求交给现有邮箱/DC/共享 RX 路径，并在精确 upload 回读完成后才
-放行 Configuration/CoE 生命周期门。该接入要求调用方先把从站置于支持邮箱配置
-的状态（通常为 PREOP），不自动编排完整 AL 状态序列。
+放行 Configuration/CoE 生命周期门。调用方可在 `StartupConfig` 中冻结所需的
+PDO Configuration、Mapping 和 DC Configuration 集合：所有期望从站先确认
+PREOP，Startup 进入 `AwaitingConfiguration` 后只向这些服务让出优先级；调度器
+仅在所有必需控制器真实进入 `Complete` 后释放屏障，并复用已验证从站表逐站经过
+SAFEOP 到最终 SAFEOP/OP，不重新扫描或读取 SII。调用方仍须按产品/从站启动每个
+配置控制器，并提供 `MailboxConfig`、SM/FMMU 与 DC 描述；当前不自动迭代多从站
+配置批次。
 
 ## 6. 构建报告接入
 
@@ -130,6 +135,8 @@ make build-report \
 真实从站固件一致。运行时可生成 PDO 配置计划并对调用方交付的 SDO 响应做
 逐字节 read-back 校验；生产调度器已通过确定性模拟端口覆盖邮箱发送、轮询、
 跨周期请求所有权、重试/超时、精确回读、故障阻断和生命周期门控，但该软件
-证据不等于真实从站 PDO assignment/mapping 证据，也不证明驱动接受映射、
-实际线缆时间、WCET、DMA/cache 正确性、制动/机械适配、STO/FSoE 或功能安全。生成示例和构建报告必须保持
+证据还覆盖全从站 PREOP 屏障、真实服务 phase 释放、保留拓扑及合法 SAFEOP/OP
+顺序；它不等于真实从站 PDO assignment/mapping 或 AL 响应证据，也不证明驱动
+接受映射、完整周期 WKC、实际线缆时间、WCET、DMA/cache 正确性、制动/机械适配、
+STO/FSoE 或功能安全。生成示例和构建报告必须保持
 `passed: false`，直到独立的目标构建、HIL、周期测量和发布审核提供证据。

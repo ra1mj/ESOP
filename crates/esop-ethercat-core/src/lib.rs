@@ -145,6 +145,6 @@ pub use slave::{
 };
 pub use slave_copy::{SlaveCopyError, SlaveCopyOutcome, SlaveCopyPlan, SlaveCopyStatus};
 pub use startup::{
-    ExpectedSlave, StartupAction, StartupConfig, StartupController, StartupError, StartupPhase,
-    StartupProgress,
+    ExpectedSlave, StartupAction, StartupConfig, StartupConfigurationServices, StartupController,
+    StartupError, StartupPhase, StartupProgress,
 };

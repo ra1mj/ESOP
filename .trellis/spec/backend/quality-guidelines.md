@@ -588,6 +588,16 @@ submit_prepared_active_frame(
 
 - Selection priority is fixed: Startup, PDO Configuration, Mapping, DC
   Configuration, Mailbox.
+- `StartupConfig` may freeze a required PDO Configuration/Mapping/DC set. In
+  that mode every expected slave must first confirm PREOP, then Startup enters
+  `AwaitingConfiguration` and yields only to the required services in the same
+  fixed order. The scheduler releases Startup only when every required bound
+  controller reports its real `Complete` phase; missing bindings are typed
+  errors, while Idle, active, retrying, or faulted controllers keep the barrier
+  closed.
+- Barrier release resets only the Startup AL cursor/subcontroller. Preserve the
+  verified `SlaveTable` and continue each slave through legal SAFEOP/OP steps;
+  do not rescan, reread SII, skip SAFEOP, or accept a caller readiness boolean.
 - A PDO service binding owns one `PdoConfigController`, one
   `MailboxController`, and one runtime `MailboxConfig`. The scheduler stores
   the immutable PDO action while the mailbox FSM owns framing, counters,
@@ -610,9 +620,12 @@ submit_prepared_active_frame(
   Only `ControlRxConsumer::accepts_prior_generation` may authorize this, and
   only for the same InFlight pool slot/index/generation. Domain and DC
   consumers keep the default current-generation-only rule.
-- Startup readiness owns the Topology gate. PDO configuration, Mapping, DC
-  configuration, and Mailbox readiness own the Configuration gate. Callers do
-  not override this mapping or supply a replacement readiness boolean.
+- Every production report carries the actual optional Startup phase even while
+  a configuration service is selected. Startup readiness owns the Topology
+  gate, so `AwaitingConfiguration` keeps Topology false while PDO
+  configuration, Mapping, DC configuration, and Mailbox readiness separately
+  own the Configuration gate. Callers do not override either mapping or supply
+  a replacement readiness boolean.
 - PDO readiness means the complete plan passed exact upload readback; one
   successful mailbox transaction is not sufficient. Terminal mailbox errors
   become typed PDO transport faults without advancing the operation index.
@@ -633,6 +646,10 @@ submit_prepared_active_frame(
   timeout rather than replacing it with `InvalidState`.
 - Faulted selected controller -> `service_ready = false`, recovery `Faulted`,
   and no lower-priority service selection until explicit controller restart.
+- Required service absent at a Startup barrier ->
+  `MissingController(required_service)` before Startup can resume.
+- Barrier release outside `AwaitingConfiguration` -> typed Startup error; do
+  not mutate a scan/identity/AL run into a synthetic ready state.
 
 ### 5. Good/Base/Bad Cases
 
@@ -671,12 +688,19 @@ submit_prepared_active_frame(
   Prepared handle while retaining the FSM pending action.
 - Public integration: dropped response remains InFlight with no control
   retransmit, then expires once and reaches the controller as exact Timeout.
+- Core integration: one and multiple retained slaves all reach PREOP before the
+  barrier, then each observes SAFEOP before OP with no scan/SII action after
+  release; invalid targets, restart, AL status code, and timeout fail closed.
+- Public integration: a real PDO download/upload readback runs while Startup is
+  at the barrier, the report keeps Topology false even when Configuration is
+  complete, and the next cycle automatically resumes SAFEOP/OP to final Ready.
 - Lifecycle integration: the unified report clears Topology or Configuration
   according to selected service and is accepted by the stable cycle owner only
   when `ScheduledDomainBank` confirms its underlying RX evidence.
-- Qualification boundary: the caller must open the mailbox-capable AL-state
-  window, normally PREOP. Simulation does not prove physical response
-  authenticity, device interoperability, WCET, or HIL.
+- Qualification boundary: callers still start each per-slave configuration
+  job and supply MailboxConfig/mapping/DC descriptors. Simulation does not
+  prove physical response authenticity, full-period WKC, device
+  interoperability, WCET, or HIL.
 
 ### 7. Wrong vs Correct
 

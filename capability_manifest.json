@@ -26,7 +26,7 @@
         "scripts/tests/test_robot_build_report.py",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "The supported ESI subset is byte-aligned and explicit; modular devices, bit-packed PDOs, vendor scaling/quirks, artifact signing/distribution, complete AL-state activation orchestration, physical slave interoperability, measured wire timing, target resource/WCET and safety qualification remain open"
+      "limitation": "The supported ESI subset is byte-aligned and explicit; modular devices, bit-packed PDOs, vendor scaling/quirks, artifact signing/distribution, automatic multi-slave activation batch generation, physical slave interoperability, measured wire timing, target resource/WCET and safety qualification remain open"
     },
     {
       "id": "product_runtime_attachment",
@@ -40,7 +40,7 @@
         "Makefile",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Activation validates static expectations and builds bounded PDO plans that can run through the production scheduler; the caller must still provide the PREOP configuration window and MailboxConfig, while authentic physical readback, artifact signing/deployment policy, interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
+      "limitation": "Activation validates static expectations and builds bounded per-slave PDO plans that can run inside the scheduler-owned PREOP barrier; the caller must still start each product/slave configuration job and provide MailboxConfig plus mapping/DC descriptors, while authentic physical readback, artifact signing/deployment policy, interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
     },
     {
       "id": "pdo_configuration_readback",
@@ -55,7 +55,21 @@
         "crates/esop-product-config/tests/generated_product.rs",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Deterministic simulation proves scheduler/mailbox ownership and response routing only; full INIT/PREOP/configuration/SAFEOP/OP orchestration, automatic MailboxConfig discovery, physical response authenticity, device interoperability, target timing and HIL remain open"
+      "limitation": "Deterministic simulation proves scheduler/mailbox ownership, exact response routing and PREOP-barrier release only; automatic multi-slave job iteration, MailboxConfig discovery, physical response authenticity, full-period WKC, device interoperability, target timing and HIL remain open"
+    },
+    {
+      "id": "ethercat_al_activation_barrier",
+      "status": "implemented",
+      "scope": "Allocation-free optional all-slave PREOP barrier with scheduler-owned PDO/Mapping/DC completion checks, retained verified topology, legal SAFEOP/OP continuation and fail-closed Topology projection",
+      "evidence": [
+        "crates/esop-ethercat-core/src/startup.rs",
+        "crates/esop-ethercat-core/src/production_service.rs",
+        "crates/esop-ethercat-linux-port/tests/scheduled_domains.rs",
+        "crates/esop-lifecycle-guard/src/ethercat.rs",
+        "docs/ethercat-master-requirements.md",
+        "docs/esop-product-configuration.md"
+      ],
+      "limitation": "Software simulation proves state ordering, bounded request ownership, actual-controller Complete gating and lifecycle projection only; automatic per-slave configuration batches, AL error acknowledge and Device Emulation handling, full-period process-data WKC, physical response authenticity, interoperability, target WCET and HIL remain open"
     },
     {
       "id": "linux_raw_port",

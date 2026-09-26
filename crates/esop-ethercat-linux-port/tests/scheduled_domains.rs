@@ -4,20 +4,22 @@ use esop_ethercat_core::wire::{
 };
 use esop_ethercat_core::{
     CoeHeader, CoeService, ControlError, ControlRequestPool, CycleError, DatagramPlan,
-    DcCyclicConfig, DcCyclicError, DcCyclicSync, DcMonitor, Domain, DomainSegment, EthercatMaster,
-    EthercatPort, FramePlan, FramePlanSet, LinkState, MAX_MAILBOX_BYTES, MailboxConfig,
-    MailboxController, MailboxError, MailboxHeader, MailboxPhase, MailboxProgress, MailboxProtocol,
-    MailboxRetryPolicy, MappingConfigController, MappingConfigPhase, MappingConfigProgress,
-    MappingTable, MasterConfig, PdoConfigAction, PdoConfigController, PdoConfigError,
-    PdoConfigPhase, PdoConfigPlan, PdoConfigProgress, PdoConfigStep, PdoSdoWrite, PortError,
-    RegisterOperation, RequestHandle, RequestState, RxPoll, RxSlotState, ScheduleDomain,
-    ScheduleTable, ScheduledControlCycleError, ScheduledDomainBank, ScheduledDomainEntry,
-    ScheduledPdoConfiguration, ScheduledPdoConfigurationProgress, ScheduledProcessInputEntry,
-    ScheduledProcessInputs, ScheduledProductionServiceCycleError, ScheduledProductionServiceFault,
-    ScheduledProductionServiceKind, ScheduledProductionServiceProgress,
-    ScheduledProductionServiceRecovery, ScheduledProductionServiceScheduler,
-    ScheduledProductionServices, ScheduledReceiveError, ScheduledServiceFrameError,
-    ScheduledServiceTxError, ScheduledServiceTxFailure, SyncManagerConfig, fixed_address,
+    DcCyclicConfig, DcCyclicError, DcCyclicSync, DcMonitor, Domain, DomainSegment, ESC_AL_STATUS,
+    EthercatMaster, EthercatPort, EthercatState, ExpectedSlave, FramePlan, FramePlanSet, LinkState,
+    MAX_MAILBOX_BYTES, MailboxConfig, MailboxController, MailboxError, MailboxHeader, MailboxPhase,
+    MailboxProgress, MailboxProtocol, MailboxRetryPolicy, MappingConfigController,
+    MappingConfigPhase, MappingConfigProgress, MappingTable, MasterConfig, PdoConfigAction,
+    PdoConfigController, PdoConfigError, PdoConfigPhase, PdoConfigPlan, PdoConfigProgress,
+    PdoConfigStep, PdoSdoWrite, PortError, RegisterOperation, RequestHandle, RequestState, RxPoll,
+    RxSlotState, ScheduleDomain, ScheduleTable, ScheduledControlCycleError, ScheduledDomainBank,
+    ScheduledDomainEntry, ScheduledPdoConfiguration, ScheduledPdoConfigurationProgress,
+    ScheduledProcessInputEntry, ScheduledProcessInputs, ScheduledProductionServiceCycleError,
+    ScheduledProductionServiceFault, ScheduledProductionServiceKind,
+    ScheduledProductionServiceProgress, ScheduledProductionServiceRecovery,
+    ScheduledProductionServiceScheduler, ScheduledProductionServices, ScheduledReceiveError,
+    ScheduledServiceFrameError, ScheduledServiceTxError, ScheduledServiceTxFailure, SlaveIdentity,
+    StartupAction, StartupConfig, StartupConfigurationServices, StartupController, StartupPhase,
+    StartupProgress, SyncManagerConfig, fixed_address,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::ethercat::{
@@ -1566,6 +1568,265 @@ fn ready_other_cycle_facts() -> OtherCycleFacts {
     }
 }
 
+fn startup_status(state: EthercatState) -> [u8; 6] {
+    let mut payload = [0; 6];
+    payload[..2].copy_from_slice(&(state as u16).to_le_bytes());
+    payload
+}
+
+fn accept_startup_action(
+    startup: &mut StartupController<2>,
+    action: StartupAction,
+    payload: &[u8],
+    now_ns: u64,
+) -> StartupProgress {
+    startup
+        .accept(action, action.generation(), payload, 1, now_ns)
+        .unwrap()
+}
+
+fn drive_startup_to_pdo_barrier(startup: &mut StartupController<2>, expected: &[ExpectedSlave; 1]) {
+    startup
+        .start(
+            7,
+            0,
+            StartupConfig::new(EthercatState::Op).with_configuration_services(
+                StartupConfigurationServices::new().with_pdo_configuration(),
+            ),
+            expected,
+        )
+        .unwrap();
+    let probe = startup.next_action(1).unwrap().unwrap();
+    accept_startup_action(startup, probe, &[0x88, 0x02], 2);
+    let basic = startup.next_action(3).unwrap().unwrap();
+    accept_startup_action(startup, basic, &[0x88, 0x02, 3, 4, 1, 2, 0x00, 0x20, 1], 4);
+    let assign = startup.next_action(5).unwrap().unwrap();
+    accept_startup_action(startup, assign, &[], 6);
+    let status = startup.next_action(7).unwrap().unwrap();
+    accept_startup_action(startup, status, &startup_status(EthercatState::Init), 8);
+    let end_probe = startup.next_action(9).unwrap().unwrap();
+    assert!(matches!(end_probe, StartupAction::Scan(_)));
+    startup.timeout(end_probe, end_probe.deadline_ns()).unwrap();
+    assert_eq!(startup.phase(), StartupPhase::ReadingIdentity);
+
+    let mut now_ns = 10;
+    for word in [
+        0x3344u16, 0x1122, 0x7788, 0x5566, 0xBBCC, 0x99AA, 0xFF00, 0xDDEE,
+    ] {
+        let address = startup.next_action(now_ns).unwrap().unwrap();
+        accept_startup_action(startup, address, &[], now_ns + 1);
+        let issue = startup.next_action(now_ns + 2).unwrap().unwrap();
+        accept_startup_action(startup, issue, &[], now_ns + 3);
+        let poll = startup.next_action(now_ns + 4).unwrap().unwrap();
+        accept_startup_action(startup, poll, &[0, 0], now_ns + 5);
+        let data = startup.next_action(now_ns + 6).unwrap().unwrap();
+        accept_startup_action(startup, data, &word.to_le_bytes(), now_ns + 7);
+        now_ns += 8;
+    }
+
+    let write = startup.next_action(now_ns).unwrap().unwrap();
+    assert!(matches!(write, StartupAction::Al(_)));
+    accept_startup_action(startup, write, &[], now_ns + 1);
+    let read = startup.next_action(now_ns + 2).unwrap().unwrap();
+    assert_eq!(
+        accept_startup_action(
+            startup,
+            read,
+            &startup_status(EthercatState::PreOp),
+            now_ns + 3,
+        ),
+        StartupProgress::AwaitingConfiguration
+    );
+    assert_eq!(startup.phase(), StartupPhase::AwaitingConfiguration);
+}
+
+#[test]
+fn production_scheduler_runs_pdo_then_releases_startup_through_safeop_to_op() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<2, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let identity = SlaveIdentity {
+        vendor_id: 0x1122_3344,
+        product_code: 0x5566_7788,
+        revision: 0x99AA_BBCC,
+        serial: 0xDDEE_FF00,
+    };
+    let expected = [ExpectedSlave {
+        position: 0,
+        station_address: 0x1000,
+        identity,
+    }];
+    let mut startup = StartupController::<2>::new(0x1000);
+    drive_startup_to_pdo_barrier(&mut startup, &expected);
+    let mut plan = PdoConfigPlan::<1>::new();
+    plan.push(PdoSdoWrite::new(0x1C12, 0, &[0]).unwrap())
+        .unwrap();
+    let mut pdo = PdoConfigController::<1>::new();
+    pdo.start(plan, 0x1000, 41, 90_000, 1_000_000, 100_000)
+        .unwrap();
+    let mailbox_config = MailboxConfig::new(0x1000, 32, 0x1100, 32);
+    let mut pdo_mailbox = MailboxController::new();
+    let mut scheduler = ScheduledProductionServiceScheduler::new();
+    let mut controls = ControlRequestPool::<2>::new();
+    let mut port = TwoFrameSimPort::new();
+    port.configure_mailbox(0x1000, mailbox_config);
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut dc_image = [0; 8];
+
+    macro_rules! run_cycle {
+        ($now_ns:expr, $generation:expr) => {{
+            port.set_now_ns($now_ns);
+            scheduler
+                .run_cycle(
+                    &mut bank,
+                    &mut master,
+                    &mut port,
+                    &mut scratch,
+                    &mut dc,
+                    &mut dc_image,
+                    $now_ns,
+                    &mut controls,
+                    &mut ScheduledProductionServices::<2, 0, 0, 1>::new(
+                        Some(&mut startup),
+                        None,
+                        None,
+                        None,
+                    )
+                    .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                        &mut pdo,
+                        &mut pdo_mailbox,
+                        mailbox_config,
+                    )),
+                    $generation,
+                    $now_ns + 50_000,
+                    $now_ns + 50_000,
+                )
+                .unwrap()
+        }};
+    }
+
+    let first = run_cycle!(100_000, 1);
+    assert_eq!(
+        first.selected(),
+        ScheduledProductionServiceKind::PdoConfiguration
+    );
+    assert_eq!(
+        first.startup_phase(),
+        Some(StartupPhase::AwaitingConfiguration)
+    );
+    let first_facts =
+        other_cycle_facts_from_production_service_cycle(&first, ready_other_cycle_facts());
+    assert!(!first_facts.coe_ready);
+    assert!(!first_facts.topology_valid);
+    let download = pdo.pending().unwrap();
+
+    port.set_next_mailbox_response(&pdo_download_response(download));
+    let second = run_cycle!(110_000, 2);
+    assert_eq!(
+        second.progress(),
+        ScheduledProductionServiceProgress::PdoConfiguration(
+            ScheduledPdoConfigurationProgress::Configuration(PdoConfigProgress::Advanced)
+        )
+    );
+    let third = run_cycle!(120_000, 3);
+    assert_eq!(
+        third.selected(),
+        ScheduledProductionServiceKind::PdoConfiguration
+    );
+    let upload = pdo.pending().unwrap();
+    assert_eq!(upload.step, PdoConfigStep::VerifyUpload);
+
+    port.set_next_mailbox_response(&pdo_upload_response(upload, &[0]));
+    let configured = run_cycle!(130_000, 4);
+    assert_eq!(pdo.phase(), PdoConfigPhase::Complete);
+    assert!(configured.service_ready());
+    assert_eq!(
+        configured.startup_phase(),
+        Some(StartupPhase::AwaitingConfiguration)
+    );
+    let configured_facts =
+        other_cycle_facts_from_production_service_cycle(&configured, ready_other_cycle_facts());
+    assert!(configured_facts.coe_ready);
+    assert!(!configured_facts.topology_valid);
+
+    let safeop_write = run_cycle!(140_000, 5);
+    assert_eq!(
+        safeop_write.selected(),
+        ScheduledProductionServiceKind::Startup
+    );
+    assert_eq!(
+        safeop_write.progress(),
+        ScheduledProductionServiceProgress::Startup(StartupProgress::Advanced)
+    );
+    assert_eq!(startup.phase(), StartupPhase::TransitioningAl);
+    assert_eq!(startup.records()[0].identity, identity);
+
+    port.set_next_control_response(
+        fixed_address(0x1000, ESC_AL_STATUS),
+        &startup_status(EthercatState::SafeOp),
+    );
+    let safeop_read = run_cycle!(150_000, 6);
+    assert_eq!(
+        safeop_read.startup_phase(),
+        Some(StartupPhase::TransitioningAl)
+    );
+    assert_eq!(startup.records()[0].al_status.state, EthercatState::SafeOp);
+
+    let op_write = run_cycle!(160_000, 7);
+    assert_eq!(op_write.selected(), ScheduledProductionServiceKind::Startup);
+    port.set_next_control_response(
+        fixed_address(0x1000, ESC_AL_STATUS),
+        &startup_status(EthercatState::Op),
+    );
+    let ready = run_cycle!(170_000, 8);
+    assert_eq!(
+        ready.progress(),
+        ScheduledProductionServiceProgress::Startup(StartupProgress::Ready)
+    );
+    assert!(ready.service_ready());
+    assert_eq!(ready.startup_phase(), Some(StartupPhase::Ready));
+    let ready_facts =
+        other_cycle_facts_from_production_service_cycle(&ready, ready_other_cycle_facts());
+    assert!(ready_facts.coe_ready);
+    assert!(ready_facts.topology_valid);
+    assert_eq!(startup.phase(), StartupPhase::Ready);
+    assert_eq!(startup.records().len(), 1);
+    assert_eq!(startup.records()[0].identity, identity);
+    assert_eq!(startup.records()[0].al_status.state, EthercatState::Op);
+    assert_eq!(controls.in_use(), 0);
+}
+
 #[test]
 fn scheduled_rx_dispatches_dc_and_retires_missing_sync_without_reusing_old_lock() {
     let schedule = ScheduleTable::<2, 2>::build(
@@ -2781,6 +3042,9 @@ struct TwoFrameSimPort {
     mailbox_counter: u8,
     mailbox_response: [u8; MAX_MAILBOX_BYTES],
     mailbox_response_len: usize,
+    control_response_address: Option<u32>,
+    control_response: [u8; MAX_MAILBOX_BYTES],
+    control_response_len: usize,
 }
 
 impl TwoFrameSimPort {
@@ -2800,6 +3064,9 @@ impl TwoFrameSimPort {
             mailbox_counter: 0,
             mailbox_response: [0; MAX_MAILBOX_BYTES],
             mailbox_response_len: 0,
+            control_response_address: None,
+            control_response: [0; MAX_MAILBOX_BYTES],
+            control_response_len: 0,
         }
     }
 
@@ -2826,6 +3093,14 @@ impl TwoFrameSimPort {
         .unwrap();
         self.mailbox_response[6..6 + payload.len()].copy_from_slice(payload);
         self.mailbox_response_len = 6 + payload.len();
+    }
+
+    fn set_next_control_response(&mut self, address: u32, payload: &[u8]) {
+        assert!(payload.len() <= self.control_response.len());
+        self.control_response.fill(0);
+        self.control_response[..payload.len()].copy_from_slice(payload);
+        self.control_response_address = Some(address);
+        self.control_response_len = payload.len();
     }
 
     fn set_now_ns(&mut self, now_ns: u64) {
@@ -2903,6 +3178,16 @@ impl EthercatPort for TwoFrameSimPort {
                     self.frames[self.count][header_end..header_end + response_len]
                         .copy_from_slice(&self.mailbox_response[..response_len]);
                     self.mailbox_response_len = 0;
+                } else if self.control_response_address == Some(header.address)
+                    && header.command == Command::Fprd
+                    && self.control_response_len != 0
+                {
+                    let response_len = self.control_response_len.min(header.length as usize);
+                    self.frames[self.count][header_end..payload_end].fill(0);
+                    self.frames[self.count][header_end..header_end + response_len]
+                        .copy_from_slice(&self.control_response[..response_len]);
+                    self.control_response_address = None;
+                    self.control_response_len = 0;
                 }
                 offset = payload_end + WORKING_COUNTER_LEN;
                 if header.last {

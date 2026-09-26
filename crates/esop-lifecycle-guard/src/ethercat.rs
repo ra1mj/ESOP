@@ -935,10 +935,15 @@ pub fn other_cycle_facts_from_production_service_cycle<E, const DOMAINS: usize>(
     cycle: &ScheduledProductionServiceCycleReport<E, DOMAINS>,
     mut other: OtherCycleFacts,
 ) -> OtherCycleFacts {
+    if let Some(startup_phase) = cycle.startup_phase() {
+        other.topology_valid &= startup_phase == esop_ethercat_core::StartupPhase::Ready;
+    }
     match cycle.selected() {
         ScheduledProductionServiceKind::Idle => {}
         ScheduledProductionServiceKind::Startup => {
-            other.topology_valid &= cycle.service_ready();
+            if cycle.startup_phase().is_none() {
+                other.topology_valid &= cycle.service_ready();
+            }
         }
         ScheduledProductionServiceKind::PdoConfiguration
         | ScheduledProductionServiceKind::Mapping
