@@ -1362,3 +1362,37 @@ Integrated bounded SII SM/PDO stream discovery into Startup before the first AL 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 41: ESC DC capability discovery
+
+**Date**: 2026-09-27
+**Task**: ESC DC capability discovery
+**Branch**: `main`
+
+### Summary
+
+Corrected ESC base decoding, added DC System Time capability and reference selection, generated product policy, tests, docs and qualification evidence.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `215e18c` | (see git log) |
+| `713f668` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
