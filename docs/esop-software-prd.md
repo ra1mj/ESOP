@@ -142,9 +142,11 @@ Configuration 生命周期门，并以模拟端口覆盖请求重建、跨周期
 `PdoConfigBatch` 为每个 job 分配独立 generation，并由生产
 调度器在 PREOP 屏障内自动推进。第一项完成不会放行 Startup，空 job 仅作有界跳过，
 故障保留原 index/station 并要求显式重启；生产报告公开批 phase/index/count/current
-station。当前已具备严格的 SII 标准邮箱固定头解析，但尚未接入 Startup 在线 EEPROM
-读取及生成 ESI 与实时 SII 的自动交叉验证；完整 SM-FMMU/DC 自动发现、真实响应
-来源、物理从站互操作和 HIL 仍未完成，因此 FR-004 的完整产品验收仍保持开放。
+station。Startup 现已在身份验证后、首个 AL 动作前，通过独立动作所有权精确读取
+SII `0x001C..0x0020`，要求 CoE，并把四个物理地址/容量字段与生成 ESI
+`MailboxConfig` 交叉验证；策略字段差异不会造成布局错配，任一读取、协议或布局错误
+均在 AL 前闭锁且不发布验证证据。完整 SM-FMMU/DC 自动发现、真实响应来源、物理
+从站互操作和 HIL 仍未完成，因此 FR-004 的完整产品验收仍保持开放。
 
 FR-006 当前增量由宿主机 `esop-cfggen` 与 `no_std` 的 `esop-product-config` 共同实现：前者严格解析 `esop.product.v1` 和 byte-aligned ESI 子集，通过既有 Domain/Frame Plan/CiA 402/ProcBuf 校验路径，原子输出静态 C/Rust 配置、规范化产品、设备清单、ProcBuf ABI v6 布局和 build input；后者在固件激活时重新校验配置 hash、ProcBuf header/layout、精确从站拓扑、Domain/PDO/datagram/WKC、schedule/frame plan、轴策略和 CiA 402 PDO map，并仅在全部成功后返回冻结配置。同一语义的 JSON/ESI 排版变化不改变 SHA-256 或输出字节。模块化设备、bit-packed PDO、厂商 scaling/quirk、完整 ENI/ESI 和真实 SII/PDO read-back 仍明确拒绝或留待硬件集成，不能被解释为完整 ESI 兼容或 HIL 资格。
 
@@ -484,7 +486,7 @@ R2 非邮箱控制服务周期增量：`ScheduledDomainBank::run_dc_and_control_
 
 R2 统一生产服务调度增量：`ScheduledProductionServiceScheduler` 在固定容量周期路径中统一接管 Startup、PDO Configuration、Mapping、DC Configuration 和 Mailbox 的选择与单请求所有权，固定优先级依次为上述顺序。PDO 绑定既支持原有单 `PdoConfigController`/`MailboxController`/`MailboxConfig`，也支持拥有这些控制器的 `PdoConfigBatch`；批模式只选择当前冻结 job，不复制 CoE 或邮箱逻辑。每笔不可变 PDO 动作先核对控制器 pending，再核对邮箱事务的站地址、generation、CoE 协议和原始负载，随后只经既有邮箱/DC/共享 RX 路径发送、轮询和消费，邮箱完成后才把响应交回 PDO 精确 upload 回读。当前 job Complete 后，调度器在释放屏障或选择低优先级服务前自动启动下一 job；只有整批 Complete 才报告 PDO ready。调度器只允许当前最高优先级服务持有请求；请求池条目必须与该 FSM 的不可变 pending action 在 index、generation、地址、操作、长度、期限和待发负载上完全匹配。控制请求允许以自身已武装 generation 跨后续生产周期等待，但只有 `ControlRxConsumer` 能在同一 InFlight 槽位和数据报索引仍匹配时授权该旧 generation；Domain/DC 仍严格使用当前周期 generation。DC/期限失败留下的 Prepared 请求会被释放并标记 `RebuildRequest`；若原动作在重建前已过期，则不再申请池槽而直接由所属 FSM 消费 Timeout，提交预检拒绝也只释放尚未上线的 Prepared 句柄。丢响应的 InFlight 请求保持 `AwaitingResponse` 且后续周期不重发，终态邮箱错误被保留为类型化 PDO transport fault，job/操作索引不推进；故障服务阻止低优先级服务直到外部重启。`ScheduledProductionServiceCycleReport` 由 Bank 校验底层控制或邮箱周期，并额外携带可选批 phase/index/count/current station；`StopCycleContext` 的统一入口直接把 Startup 映射到 Topology，PDO Configuration、Mapping、DC 和 Mailbox 映射到 Configuration。软件模拟覆盖两 job 自动切换、精确 download/upload 回读、跨 generation 完成、事务替换拒绝、固定优先级、故障阻塞/显式重启、Prepared 重建及过期回交、提交拒绝清理、InFlight 无重发和严格超时释放；可选受控停车现可由同一统一生产报告入口执行并把成功/回退证据交给周期所有者。
 
-R2 PREOP 激活屏障增量：`StartupConfig` 可冻结 PDO Configuration、Mapping、DC Configuration 的必需集合。启用后，扫描和精确身份核对保持不变，所有期望从站必须先确认 PREOP，随后 Startup 进入无控制动作的 `AwaitingConfiguration`。生产调度器在该阶段按原固定顺序选择第一个未 Complete 的必需服务；缺失绑定返回 `MissingController`，Idle、执行中、重试和 Faulted 均保持屏障关闭，且故障服务仍要求显式重启。对于 PDO 批模式，当前控制器 Complete 只会启动下一 job，不能提前释放屏障；仅当整个批次及其他必需控制器的真实 phase 为 Complete 时，调度器才重置 Startup 的 AL 游标并保留已验证 `SlaveTable`，逐站经过观测到的 SAFEOP 再到最终 SAFEOP/OP，不重新扫描、读取 SII 或接受调用方 readiness boolean。每个生产报告额外携带实际 Startup phase 和可选 PDO 批状态，即使正在运行配置服务，生命周期投影也会让 PREOP 屏障持续清除 Topology；只有最终 Startup Ready 才放行。核心与 Linux 仿真覆盖两 job 自动推进、单/多从站 Startup、PDO 精确回读、缺失/Idle/Faulted 服务、AL code/timeout、显式重启、无重扫和 SAFEOP/OP 顺序。产品静态 MailboxConfig 现由经校验的 ESI CoE 邮箱对生成，显式绑定仅作为覆盖；实时 SII/ESC 交叉验证和完整 SM-FMMU/DC 描述自动发现、完整周期 WKC、真实响应、逐产品资格、目标 WCET 与实物 HIL 仍是 R2 发布阻塞项。
+R2 PREOP 激活屏障增量：`StartupConfig` 可冻结 PDO Configuration、Mapping、DC Configuration 的必需集合。启用后，扫描和精确身份核对保持不变，所有期望从站必须先确认 PREOP，随后 Startup 进入无控制动作的 `AwaitingConfiguration`。生产调度器在该阶段按原固定顺序选择第一个未 Complete 的必需服务；缺失绑定返回 `MissingController`，Idle、执行中、重试和 Faulted 均保持屏障关闭，且故障服务仍要求显式重启。对于 PDO 批模式，当前控制器 Complete 只会启动下一 job，不能提前释放屏障；仅当整个批次及其他必需控制器的真实 phase 为 Complete 时，调度器才重置 Startup 的 AL 游标并保留已验证 `SlaveTable`，逐站经过观测到的 SAFEOP 再到最终 SAFEOP/OP，不重新扫描、读取 SII 或接受调用方 readiness boolean。每个生产报告额外携带实际 Startup phase 和可选 PDO 批状态，即使正在运行配置服务，生命周期投影也会让 PREOP 屏障持续清除 Topology；只有最终 Startup Ready 才放行。核心与 Linux 仿真覆盖两 job 自动推进、单/多从站 Startup、PDO 精确回读、缺失/Idle/Faulted 服务、AL code/timeout、显式重启、无重扫和 SAFEOP/OP 顺序。产品静态 MailboxConfig 由经校验的 ESI CoE 邮箱对生成，并在身份后、AL 前与实时 SII 标准邮箱布局交叉验证；显式绑定仍只作为 PDO 批次覆盖。完整 SM-FMMU/DC 描述自动发现、完整周期 WKC、真实响应来源、逐产品资格、目标 WCET 与实物 HIL 仍是 R2 发布阻塞项。
 
 R2 AL 错误确认与 Device Emulation 增量：在线扫描在分配固定站地址后对每个从站读取 ESC Configuration `0x0141`，精确响应的 bit 0 决定 AL 错误策略；短响应、WKC、世代或超时错误不得回退到默认策略。普通 ESC 在初始或转换期间报告 Error Indication 时，`AlTransitionController` 冻结首个 AL 状态、最终请求状态和 status code，写入“实际状态 + bit 4”并在原转换截止时间内轮询。错误位清除只把 ACK 结果标记为完成，Startup 仍进入 Faulted，不自动重试状态转换。Device Emulation 从站从策略层禁止 ACK 写入，错误直接闭锁。`StartupAlFault` 保留 position、固定站地址、请求/实际状态、status code、能力和 ACK 阶段；后续 ACK 超时或畸形响应不能覆盖首个 AL 证据，显式 Startup restart 才清除并重新扫描。核心和 Linux 仿真证明有界请求序列、控制池/调度兼容及 fail-closed 结果；真实 ESC 响应、互操作、目标 WCET 和实物 HIL 仍是发布阻塞项。
 
@@ -495,8 +497,12 @@ R2 产品邮箱配置增量：ESI 解析器要求每个 PDO 配置从站声明�
 并用共享校验拒绝零地址、容量不足/超限、地址溢出和范围重叠。邮箱数据进入
 inventory、规范化 JSON、C/Rust 静态配置、ESI semantic hash 和最终配置 hash；
 运行时默认无参数批构建器直接使用生成值，显式 position 绑定继续作为维护覆盖。
-核心 SII 解析器可从精确五字固定头或已完成分块读取转换同一 `MailboxConfig`，但尚未
-接入 Startup 在线读取/比对，物理响应真实性、Status Bit 发现和 HIL 仍未完成。
+核心 SII 解析器可从精确五字固定头或已完成分块读取转换同一 `MailboxConfig`。
+`StartupSlaveProfile` 可携带生成邮箱期望；Startup 在身份验证后、AL 前读取精确
+`0x001C..0x0020`，要求 CoE，只比较 SII 可表示的 send/receive 地址与容量，并在匹配后
+按 position 保留验证证据。独立 `SiiMailbox` 动作避免身份读与邮箱读串线；generation、
+token、WKC、长度、deadline 和控制请求池所有权继续沿用原有闭环。旧 `start()` 和无
+邮箱 profile 保持兼容。物理响应真实性、Status Bit 发现和 HIL 仍未完成。
 
 R2 受控停车生产接线增量：固定状态 `ControlledStopPlanner` 与 `submit_controlled_stopping_frame` 不改变默认 `step_axis_bank` 将 Hold/Ramp 降级为 Disable 的生产行为。Hold 仅在 CSP 下锁定停车序列第一份已验证实际位置；RampToZero 仅在 CSV/CST 下按冻结的原始单位每周期步长，从当前已验证速度/转矩反馈向零收敛。动作、模式、限幅和 MLG 转换序号在序列中不可变化；输入必须来自同周期完整 Domain，下一代 Domain 只能在成功发送后武装。所有规划先在副本预演，只有端口接受完整帧才提交规划器和 `stop_issued_cycle`。新增调用方持有的 `ControlledStopCycleState` 冻结逐轴限幅，并通过 `run_with_controlled_stop`、共享 RX、控制服务及 `run_service_cycle_with_controlled_stop_until` 接入现有固定容量周期路径；首次映射缺失、模式不符、输入不可验证、周期/序列重放、跨轴别名、构帧或 TX 失败会重置规划器，把当前 MLG 转换序列锁定到默认 QuickStop/Disable，防止后续周期重新启用已失败的受控目标，新的转换序列才允许重新规划。`controlled_axis_stops_to_procbuf` 区分受控 Hold/Ramp 目标与终端 Disable，`StopCycleOutcome` 保留原始受控错误与回退帧结果，`ScheduledProductionRelease` 保留成功使用/回退证据；任务释放仍以 handoff、deadline 和发布完整性为准，要求受控策略成功的产品必须额外检查该证据。软件模拟覆盖成功 Hold、输入失败后同序列不重试、默认回退、后续新鲜反馈确认及 owner 结算；逐产品缩放/限幅、两种驱动与 IO 实物 HIL、制动器/安全链验证和目标硬件 WCET 仍是 R2 发布阻塞项。
 

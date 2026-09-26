@@ -103,9 +103,14 @@ ProcBuf。激活按以下顺序 fail-closed：
 6. 逐轴校验连续索引、驱动归属、冻结策略和选定模式的 `Cia402PdoMap`。
 
 `PRODUCT_CONFIG.startup_profiles()` 会在任何 Startup 动作发出前校验每个从站的
-timeout 非零、position 一一对应、`OpOnly` mask/flag 有效，并要求每个 `OpOnly`
-SyncManager 只关联所选 RxPDO。`start_startup()` 将这些 profile 与精确从站拓扑一起
-交给 `StartupController`。每个 ESM step 只建立一个绝对 deadline；相关 `OpOnly`
+timeout 非零、position 一一对应、生成邮箱范围有效、`OpOnly` mask/flag 有效，并要求
+每个 `OpOnly` SyncManager 只关联所选 RxPDO。`start_startup()` 将这些 profile 与精确
+从站拓扑一起交给 `StartupController`。身份验证后、首个 AL 动作前，Startup 对携带
+邮箱期望的 profile 精确读取 SII `0x001C..0x0020`，要求 CoE，并只比较 SII 可表示的
+send/receive 地址和容量；轮询、超时、重试和 Status Bit 仍是运行期策略，不参与布局
+相等判定。匹配后才按 position 发布验证证据，任一读取、协议、范围或布局错误均闭锁
+Startup。未携带邮箱期望的 profile 和旧 `start()` API 保持原身份到 AL 路径。
+每个 ESM step 只建立一个绝对 deadline；相关 `OpOnly`
 准备和 AL 请求/读回共享该 deadline。`StartupConfig.transition_timeout_ns != 0` 是
 显式 legacy uniform override，并优先于生成 profile；零值选择逐转换 profile。
 非 OP 及离开 OP 前必须禁用并读回所有 `OpOnly` 输出，进入 OP 时仅在 AL OP 已观测
@@ -143,8 +148,8 @@ SAFEOP 到最终 SAFEOP/OP，不重新扫描或读取 SII。
 
 核心另提供严格的 SII 标准邮箱五字固定头解析：只接受精确 word 起点/长度和已完成
 `SiiBlockReader`，检查 CoE 协议位，并把从站 receive/send 字段转换为主站
-send/receive `MailboxConfig`。当前尚未把该解析器接入 Startup 的在线 EEPROM 读取，
-也未把实时 SII 与生成 ESI 自动交叉验证；完整 SM/FMMU/DC 描述仍待发现和接入。
+send/receive `MailboxConfig`。Startup 已将该读取和生成 ESI 布局交叉验证接入身份与
+AL 之间的有界控制请求路径；完整 SM/FMMU/DC 描述仍待发现和接入。
 
 ## 6. 构建报告接入
 
@@ -167,8 +172,9 @@ make build-report \
 逐字节 read-back 校验；生产调度器已通过确定性模拟端口覆盖邮箱发送、轮询、
 跨周期请求所有权、重试/超时、精确回读、故障阻断和生命周期门控，但该软件
 证据还覆盖全从站 PREOP 屏障、真实服务 phase 释放、保留拓扑、合法 SAFEOP/OP
-顺序、逐转换 deadline 选择和 `OpOnly` 写入读回顺序；它不等于真实从站 PDO
-assignment/mapping、ESM timeout、SII 邮箱头或 SyncManager 响应证据，也不证明驱动
+顺序、逐转换 deadline 选择、`OpOnly` 写入读回顺序，以及调用方交付 SII 响应的邮箱
+布局比对；它不证明该响应来自真实目标从站，也不等于真实从站 PDO
+assignment/mapping、ESM timeout 或 SyncManager 响应证据，更不证明驱动
 接受映射、完整周期 WKC、实际线缆时间、WCET、DMA/cache 正确性、制动/机械适配、
 STO/FSoE 或功能安全。生成示例和构建报告必须保持
 `passed: false`，直到独立的目标构建、HIL、周期测量和发布审核提供证据。

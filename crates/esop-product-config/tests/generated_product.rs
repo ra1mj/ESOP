@@ -70,6 +70,12 @@ fn checked_in_product_activates_exact_generated_evidence() {
         ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1
     );
     assert!(startup_profiles[2].op_only_outputs.is_empty());
+    for (profile, slave) in startup_profiles
+        .iter()
+        .zip(generated::PRODUCT_CONFIG.slaves)
+    {
+        assert_eq!(profile.expected_mailbox, Some(slave.mailbox_config));
+    }
 
     assert_eq!(active.registry().domain_count(), 2);
     assert_eq!(active.registry().domain(0).unwrap().pdo_count, 14);

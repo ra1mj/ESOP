@@ -13,8 +13,13 @@ use crate::control::{
     ControlError, ControlRequestPool, MAX_CONTROL_PAYLOAD, RegisterOperation, RequestHandle,
     RequestState,
 };
+use crate::mailbox::{MailboxConfig, MailboxConfigError};
 use crate::scan::{ScanAction, ScanController, ScanError, ScanPhase, ScanProgress};
-use crate::sii::{SiiAction, SiiError, SiiIdentityReader, SiiPhase, SiiProgress};
+use crate::sii::{
+    SII_STANDARD_MAILBOX_WORD_COUNT, SII_STANDARD_RECEIVE_MAILBOX_OFFSET_WORD, SiiAction,
+    SiiBlockReader, SiiBlockRequest, SiiError, SiiIdentityReader, SiiMailboxError, SiiPhase,
+    SiiProgress, SiiStandardMailbox,
+};
 use crate::slave::{
     EthercatState, SlaveIdentity, SlaveRecord, SlaveTable, SlaveTableError, next_state,
 };
@@ -44,6 +49,7 @@ pub struct StartupSlaveProfile {
     pub position: u16,
     pub transition_timeouts: AlTransitionTimeouts,
     pub op_only_outputs: OpOnlySyncManagerProfile,
+    pub expected_mailbox: Option<MailboxConfig>,
 }
 
 impl StartupSlaveProfile {
@@ -51,6 +57,7 @@ impl StartupSlaveProfile {
         position: 0,
         transition_timeouts: ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
         op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
+        expected_mailbox: None,
     };
 
     pub const fn new(position: u16) -> Self {
@@ -70,6 +77,11 @@ impl StartupSlaveProfile {
 
     pub const fn with_op_only_outputs(mut self, op_only_outputs: OpOnlySyncManagerProfile) -> Self {
         self.op_only_outputs = op_only_outputs;
+        self
+    }
+
+    pub const fn with_expected_mailbox(mut self, expected_mailbox: MailboxConfig) -> Self {
+        self.expected_mailbox = Some(expected_mailbox);
         self
     }
 }
@@ -162,6 +174,7 @@ pub enum StartupPhase {
     Idle,
     Scanning,
     ReadingIdentity,
+    ReadingMailbox,
     TransitioningAl,
     AwaitingConfiguration,
     Ready,
@@ -172,6 +185,7 @@ pub enum StartupPhase {
 pub enum StartupAction {
     Scan(ScanAction),
     Sii(SiiAction),
+    SiiMailbox(SiiAction),
     Al(AlAction),
     OpOnly(OpOnlySyncManagerAction),
 }
@@ -181,6 +195,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.token,
             Self::Sii(action) => action.token,
+            Self::SiiMailbox(action) => action.token,
             Self::Al(action) => action.token,
             Self::OpOnly(action) => action.token,
         }
@@ -190,6 +205,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.datagram_index,
             Self::Sii(action) => action.datagram_index,
+            Self::SiiMailbox(action) => action.datagram_index,
             Self::Al(action) => action.datagram_index,
             Self::OpOnly(action) => action.datagram_index,
         }
@@ -199,6 +215,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.generation,
             Self::Sii(action) => action.generation,
+            Self::SiiMailbox(action) => action.generation,
             Self::Al(action) => action.generation,
             Self::OpOnly(action) => action.generation,
         }
@@ -208,6 +225,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.address,
             Self::Sii(action) => action.address,
+            Self::SiiMailbox(action) => action.address,
             Self::Al(action) => action.address,
             Self::OpOnly(action) => action.address,
         }
@@ -217,6 +235,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.operation,
             Self::Sii(action) => action.operation,
+            Self::SiiMailbox(action) => action.operation,
             Self::Al(action) => action.operation,
             Self::OpOnly(action) => action.operation,
         }
@@ -226,6 +245,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.payload(),
             Self::Sii(action) => action.payload(),
+            Self::SiiMailbox(action) => action.payload(),
             Self::Al(action) => action.payload(),
             Self::OpOnly(action) => action.payload(),
         }
@@ -235,6 +255,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.deadline_ns,
             Self::Sii(action) => action.deadline_ns,
+            Self::SiiMailbox(action) => action.deadline_ns,
             Self::Al(action) => action.deadline_ns,
             Self::OpOnly(action) => action.deadline_ns,
         }
@@ -244,6 +265,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.expected_wkc,
             Self::Sii(action) => action.expected_wkc,
+            Self::SiiMailbox(action) => action.expected_wkc,
             Self::Al(action) => action.expected_wkc,
             Self::OpOnly(action) => action.expected_wkc,
         }
@@ -253,6 +275,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.datagram_len(),
             Self::Sii(action) => action.datagram_len(),
+            Self::SiiMailbox(action) => action.datagram_len(),
             Self::Al(action) => action.datagram_len(),
             Self::OpOnly(action) => action.datagram_len(),
         }
@@ -262,6 +285,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.read_len as usize,
             Self::Sii(action) => action.read_len as usize,
+            Self::SiiMailbox(action) => action.read_len as usize,
             Self::Al(action) => action.read_len as usize,
             Self::OpOnly(action) => action.response_len(),
         }
@@ -273,6 +297,7 @@ pub enum StartupProgress {
     Advanced,
     SlaveDiscovered(usize),
     IdentityVerified(usize),
+    MailboxVerified(usize),
     SlaveReady(usize),
     AwaitingConfiguration,
     ConfigurationReleased,
@@ -292,6 +317,10 @@ pub enum StartupError {
     DuplicateProfilePosition(u16),
     MissingProfilePosition(u16),
     InvalidTransitionTimeoutProfile(u16),
+    InvalidMailboxProfile {
+        position: u16,
+        error: MailboxConfigError,
+    },
     OpOnlyProfile {
         position: u16,
         error: OpOnlyProfileError,
@@ -306,6 +335,12 @@ pub enum StartupError {
     Control(ControlError),
     Scan(ScanError),
     Sii(SiiError),
+    SiiMailbox(SiiMailboxError),
+    MailboxMismatch {
+        position: u16,
+        expected: MailboxConfig,
+        observed: MailboxConfig,
+    },
     Al(AlError),
     OpOnly(OpOnlySyncManagerError),
     Table(SlaveTableError),
@@ -347,10 +382,12 @@ pub struct StartupController<const MAX_SLAVES: usize> {
     expected_count: usize,
     scan: ScanController<MAX_SLAVES>,
     sii: SiiIdentityReader,
+    sii_mailbox: SiiBlockReader<SII_STANDARD_MAILBOX_WORD_COUNT>,
     al: AlTransitionController,
     op_only: OpOnlySyncManagerController,
     table: SlaveTable<MAX_SLAVES>,
     device_emulation: [bool; MAX_SLAVES],
+    verified_mailboxes: [Option<MailboxConfig>; MAX_SLAVES],
     op_only_gate: [OpOnlyGateState; MAX_SLAVES],
     current_index: usize,
     stage_target: EthercatState,
@@ -373,10 +410,12 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             expected_count: 0,
             scan: ScanController::new(station_address_base),
             sii: SiiIdentityReader::new(),
+            sii_mailbox: SiiBlockReader::new(),
             al: AlTransitionController::new(),
             op_only: OpOnlySyncManagerController::new(),
             table: SlaveTable::new(),
             device_emulation: [false; MAX_SLAVES],
+            verified_mailboxes: [None; MAX_SLAVES],
             op_only_gate: [OpOnlyGateState::Unknown; MAX_SLAVES],
             current_index: 0,
             stage_target: EthercatState::Op,
@@ -412,6 +451,14 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             .map(|index| self.device_emulation[index])
     }
 
+    pub fn verified_mailbox(&self, position: u16) -> Option<MailboxConfig> {
+        self.table
+            .records()
+            .iter()
+            .position(|record| record.position == position)
+            .and_then(|index| self.verified_mailboxes[index])
+    }
+
     pub const fn expected_count(&self) -> usize {
         self.expected_count
     }
@@ -432,6 +479,9 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         match self.phase {
             StartupPhase::Scanning => self.scan.pending().map(StartupAction::Scan),
             StartupPhase::ReadingIdentity => self.sii.pending().map(StartupAction::Sii),
+            StartupPhase::ReadingMailbox => {
+                self.sii_mailbox.pending().map(StartupAction::SiiMailbox)
+            }
             StartupPhase::TransitioningAl => match self.transition_stage {
                 StartupTransitionStage::Al => self.al.pending().map(StartupAction::Al),
                 StartupTransitionStage::OpOnlyBeforeAl | StartupTransitionStage::OpOnlyAfterAl => {
@@ -535,6 +585,14 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                         error,
                     });
                 }
+                if let Some(mailbox) = profile.expected_mailbox {
+                    if let Err(error) = mailbox.validate() {
+                        return Err(StartupError::InvalidMailboxProfile {
+                            position: profile.position,
+                            error,
+                        });
+                    }
+                }
             }
             for item in expected {
                 if !profiles
@@ -563,10 +621,12 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.expected_count = expected.len();
         self.scan = ScanController::new(self.station_address_base);
         self.sii = SiiIdentityReader::new();
+        self.sii_mailbox = SiiBlockReader::new();
         self.al = AlTransitionController::new();
         self.op_only = OpOnlySyncManagerController::new();
         self.table = SlaveTable::new();
         self.device_emulation = [false; MAX_SLAVES];
+        self.verified_mailboxes = [None; MAX_SLAVES];
         self.op_only_gate = [OpOnlyGateState::Unknown; MAX_SLAVES];
         self.current_index = 0;
         self.stage_target = if config.configuration_services.is_empty() {
@@ -607,6 +667,17 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                         Ok(Some(action)) => return Ok(Some(StartupAction::Sii(action))),
                         Ok(None) => return Ok(None),
                         Err(error) => return self.fail(StartupError::Sii(error)),
+                    }
+                }
+                StartupPhase::ReadingMailbox => {
+                    self.start_mailbox_reader(now_ns)?;
+                    match self.sii_mailbox.next_action(now_ns) {
+                        Ok(Some(action)) => return Ok(Some(StartupAction::SiiMailbox(action))),
+                        Ok(None) => return Ok(None),
+                        Err(error) => {
+                            return self
+                                .fail(StartupError::SiiMailbox(SiiMailboxError::Block(error)));
+                        }
                     }
                 }
                 StartupPhase::TransitioningAl => match self.transition_stage {
@@ -706,6 +777,27 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                 };
                 if progress == SiiProgress::Complete {
                     return self.finish_identity(now_ns);
+                }
+                Ok(StartupProgress::Advanced)
+            }
+            StartupAction::SiiMailbox(action) => {
+                if self.phase != StartupPhase::ReadingMailbox {
+                    return self.fail(StartupError::NoPendingAction);
+                }
+                let progress = match self.sii_mailbox.accept(
+                    action.token,
+                    generation,
+                    payload,
+                    working_counter,
+                    now_ns,
+                ) {
+                    Ok(progress) => progress,
+                    Err(error) => {
+                        return self.fail(StartupError::SiiMailbox(SiiMailboxError::Block(error)));
+                    }
+                };
+                if progress == SiiProgress::Complete {
+                    return self.finish_mailbox(now_ns);
                 }
                 Ok(StartupProgress::Advanced)
             }
@@ -872,6 +964,21 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                     }
                 }
             },
+            StartupAction::SiiMailbox(action) => {
+                match self.sii_mailbox.timeout(action.token, now_ns) {
+                    Ok(()) => self.fail(StartupError::SiiMailbox(SiiMailboxError::Block(
+                        crate::sii::SiiBlockError::Timeout,
+                    ))),
+                    Err(error) => {
+                        let error = StartupError::SiiMailbox(SiiMailboxError::Block(error));
+                        if self.sii_mailbox.phase() == SiiPhase::Faulted {
+                            self.fail(error)
+                        } else {
+                            Err(error)
+                        }
+                    }
+                }
+            }
             StartupAction::Al(action) => match self.al.timeout(action.token, now_ns) {
                 Ok(()) => self.fail(StartupError::Al(AlError::Timeout)),
                 Err(error) => {
@@ -944,10 +1051,12 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.generation = generation;
         self.scan = ScanController::new(self.station_address_base);
         self.sii = SiiIdentityReader::new();
+        self.sii_mailbox = SiiBlockReader::new();
         self.al = AlTransitionController::new();
         self.op_only = OpOnlySyncManagerController::new();
         self.table = SlaveTable::new();
         self.device_emulation = [false; MAX_SLAVES];
+        self.verified_mailboxes = [None; MAX_SLAVES];
         self.op_only_gate = [OpOnlyGateState::Unknown; MAX_SLAVES];
         for item in expected.iter().copied() {
             self.table
@@ -1012,6 +1121,34 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         }
     }
 
+    fn start_mailbox_reader(&mut self, now_ns: u64) -> Result<(), StartupError> {
+        if !matches!(
+            self.sii_mailbox.phase(),
+            SiiPhase::Idle | SiiPhase::Complete | SiiPhase::Faulted
+        ) {
+            return Ok(());
+        }
+        let record = self
+            .table
+            .records()
+            .get(self.current_index)
+            .copied()
+            .ok_or(StartupError::ExpectedCountMismatch)?;
+        let request = SiiBlockRequest {
+            station_address: record.station_address,
+            start_word: SII_STANDARD_RECEIVE_MAILBOX_OFFSET_WORD,
+            word_count: SII_STANDARD_MAILBOX_WORD_COUNT,
+            generation: self.generation,
+            now_ns,
+            timeout_ns: self.config.identity_timeout_ns,
+            request_timeout_ns: self.config.request_timeout_ns,
+        };
+        match self.sii_mailbox.start(request) {
+            Ok(()) => Ok(()),
+            Err(error) => self.fail(StartupError::SiiMailbox(SiiMailboxError::Block(error))),
+        }
+    }
+
     fn finish_identity(&mut self, now_ns: u64) -> Result<StartupProgress, StartupError> {
         let scan_record = self
             .scan
@@ -1052,8 +1189,47 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         {
             return self.fail(StartupError::Table(error));
         }
+        let profile = self.profile_for_position(scan_record.position)?;
+        if profile.expected_mailbox.is_some() {
+            self.phase = StartupPhase::ReadingMailbox;
+            return Ok(StartupProgress::IdentityVerified(self.current_index));
+        }
         self.phase = StartupPhase::TransitioningAl;
         self.start_al_for_current(now_ns)
+    }
+
+    fn finish_mailbox(&mut self, now_ns: u64) -> Result<StartupProgress, StartupError> {
+        let record = self
+            .table
+            .records()
+            .get(self.current_index)
+            .copied()
+            .ok_or(StartupError::ExpectedCountMismatch)?;
+        let expected = self
+            .profile_for_position(record.position)?
+            .expected_mailbox
+            .ok_or(StartupError::NoPendingAction)?;
+        let descriptor = match SiiStandardMailbox::from_completed_block(&self.sii_mailbox) {
+            Ok(descriptor) => descriptor,
+            Err(error) => return self.fail(StartupError::SiiMailbox(error)),
+        };
+        let observed = match descriptor.coe_mailbox_config() {
+            Ok(config) => config,
+            Err(error) => return self.fail(StartupError::SiiMailbox(error)),
+        };
+        if !expected.has_same_layout(observed) {
+            return self.fail(StartupError::MailboxMismatch {
+                position: record.position,
+                expected,
+                observed,
+            });
+        }
+        self.verified_mailboxes[self.current_index] = Some(observed);
+        self.phase = StartupPhase::TransitioningAl;
+        match self.start_al_for_current(now_ns)? {
+            StartupProgress::IdentityVerified(index) => Ok(StartupProgress::MailboxVerified(index)),
+            progress => Ok(progress),
+        }
     }
 
     fn start_al_for_current(&mut self, now_ns: u64) -> Result<StartupProgress, StartupError> {
@@ -1440,6 +1616,77 @@ mod tests {
         }
     }
 
+    fn accept_mailbox_words<const MAX_SLAVES: usize>(
+        startup: &mut StartupController<MAX_SLAVES>,
+        words: [u16; SII_STANDARD_MAILBOX_WORD_COUNT],
+        now_ns: &mut u64,
+    ) -> Result<StartupProgress, StartupError> {
+        let mut progress = StartupProgress::Advanced;
+        for (index, word) in words.into_iter().enumerate() {
+            let address = startup.next_action(*now_ns)?.unwrap();
+            let StartupAction::SiiMailbox(address_action) = address else {
+                panic!("expected SII mailbox address action");
+            };
+            assert_eq!(
+                address_action.word_address,
+                SII_STANDARD_RECEIVE_MAILBOX_OFFSET_WORD + index as u16
+            );
+            startup.accept(address, address.generation(), &[], 1, *now_ns + 1)?;
+
+            let issue = startup.next_action(*now_ns + 2)?.unwrap();
+            assert!(matches!(issue, StartupAction::SiiMailbox(_)));
+            startup.accept(issue, issue.generation(), &[], 1, *now_ns + 3)?;
+
+            let poll = startup.next_action(*now_ns + 4)?.unwrap();
+            assert!(matches!(poll, StartupAction::SiiMailbox(_)));
+            startup.accept(poll, poll.generation(), &[0, 0], 1, *now_ns + 5)?;
+
+            let data = startup.next_action(*now_ns + 6)?.unwrap();
+            assert!(matches!(data, StartupAction::SiiMailbox(_)));
+            progress =
+                startup.accept(data, data.generation(), &word.to_le_bytes(), 1, *now_ns + 7)?;
+            *now_ns += 8;
+        }
+        Ok(progress)
+    }
+
+    fn prepared_mailbox_verification(expected_mailbox: MailboxConfig) -> StartupController<1> {
+        let identity = SlaveIdentity {
+            vendor_id: 1,
+            product_code: 2,
+            revision: 3,
+            serial: 4,
+        };
+        let mut config = StartupConfig::new(EthercatState::Op);
+        config.identity_timeout_ns = 10_000;
+        config.request_timeout_ns = 1_000;
+        let mut startup = StartupController::<1>::new(0x1000);
+        startup.phase = StartupPhase::ReadingMailbox;
+        startup.config = config;
+        startup.generation = 7;
+        startup.expected[0] = ExpectedSlave {
+            position: 0,
+            station_address: 0x1000,
+            identity,
+        };
+        startup.profiles[0] = StartupSlaveProfile::new(0).with_expected_mailbox(expected_mailbox);
+        startup.expected_count = 1;
+        startup
+            .table
+            .add(0, 0x1000, identity)
+            .and_then(|_| {
+                startup.table.observe_status(
+                    0,
+                    crate::slave::AlStatus::new(EthercatState::SafeOp as u16, 0),
+                    0,
+                )
+            })
+            .and_then(|_| startup.table.verify_identity(0, identity))
+            .unwrap();
+        startup.stage_target = EthercatState::Op;
+        startup
+    }
+
     #[test]
     fn startup_uses_profile_deadline_and_uniform_override_precedence() {
         let timeouts = AlTransitionTimeouts::new(300, 700, 500, 200);
@@ -1585,6 +1832,23 @@ mod tests {
             Err(StartupError::InvalidTransitionTimeoutProfile(2))
         );
         assert_eq!(startup.phase(), StartupPhase::Idle);
+
+        let invalid_mailbox = [StartupSlaveProfile::new(2)
+            .with_expected_mailbox(MailboxConfig::new(0, 32, 0x1100, 32))];
+        assert_eq!(
+            startup.start_with_profiles(
+                1,
+                0,
+                StartupConfig::new(EthercatState::PreOp),
+                &expected,
+                &invalid_mailbox,
+            ),
+            Err(StartupError::InvalidMailboxProfile {
+                position: 2,
+                error: MailboxConfigError::AddressZero(crate::mailbox::MailboxDirection::Send),
+            })
+        );
+        assert_eq!(startup.phase(), StartupPhase::Idle);
     }
 
     #[test]
@@ -1600,9 +1864,17 @@ mod tests {
             station_address: 0x1000,
             identity,
         }];
+        let mailbox = MailboxConfig::new(0x1000, 64, 0x1100, 64);
+        let profiles = [StartupSlaveProfile::new(0).with_expected_mailbox(mailbox)];
         let mut startup = StartupController::<2>::new(0x1000);
         startup
-            .start(7, 0, StartupConfig::new(EthercatState::Op), &expected)
+            .start_with_profiles(
+                7,
+                0,
+                StartupConfig::new(EthercatState::Op),
+                &expected,
+                &profiles,
+            )
             .unwrap();
 
         let probe = startup.next_action(1).unwrap().unwrap();
@@ -1657,13 +1929,31 @@ mod tests {
             accept_action(&mut startup, data, &word.to_le_bytes(), 1, 17);
         }
 
+        assert_eq!(startup.phase(), StartupPhase::ReadingMailbox);
+        let mut mailbox_now = 18;
+        assert_eq!(
+            accept_mailbox_words(
+                &mut startup,
+                [0x1000, 64, 0x1100, 64, crate::sii::SII_MAILBOX_PROTOCOL_COE],
+                &mut mailbox_now,
+            ),
+            Ok(StartupProgress::MailboxVerified(0))
+        );
+        assert_eq!(startup.verified_mailbox(0), Some(mailbox));
         assert_eq!(startup.phase(), StartupPhase::TransitioningAl);
-        let write = startup.next_action(18).unwrap().unwrap();
-        accept_action(&mut startup, write, &[], 1, 19);
-        let read = startup.next_action(20).unwrap().unwrap();
+        let write = startup.next_action(mailbox_now).unwrap().unwrap();
+        assert!(matches!(write, StartupAction::Al(_)));
+        accept_action(&mut startup, write, &[], 1, mailbox_now + 1);
+        let read = startup.next_action(mailbox_now + 2).unwrap().unwrap();
         assert_eq!(read.address(), fixed_address(0x1000, ESC_AL_STATUS));
         assert_eq!(
-            accept_action(&mut startup, read, &status(EthercatState::Op), 1, 21),
+            accept_action(
+                &mut startup,
+                read,
+                &status(EthercatState::Op),
+                1,
+                mailbox_now + 3,
+            ),
             StartupProgress::Ready
         );
         assert_eq!(startup.phase(), StartupPhase::Ready);
@@ -1671,6 +1961,172 @@ mod tests {
         assert_eq!(startup.device_emulation(0), Some(false));
         assert_eq!(startup.records()[0].identity, identity);
         assert_eq!(startup.records()[0].al_status.state, EthercatState::Op);
+    }
+
+    #[test]
+    fn mailbox_verification_ignores_policy_and_fails_closed_on_layout_or_protocol() {
+        let mut policy_expected = MailboxConfig::new(0x1000, 64, 0x1100, 64)
+            .with_retry_policy(crate::mailbox::MailboxRetryPolicy::new(2, 10))
+            .with_status_bit(crate::mailbox::MailboxStatusBit::new(0x1200, 0x08, true));
+        policy_expected.timeout_ns = 123;
+        let mut startup = prepared_mailbox_verification(policy_expected);
+        let mut now_ns = 1;
+        assert_eq!(
+            accept_mailbox_words(
+                &mut startup,
+                [0x1000, 64, 0x1100, 64, crate::sii::SII_MAILBOX_PROTOCOL_COE],
+                &mut now_ns,
+            ),
+            Ok(StartupProgress::MailboxVerified(0))
+        );
+        assert_eq!(
+            startup.verified_mailbox(0),
+            Some(MailboxConfig::new(0x1000, 64, 0x1100, 64))
+        );
+        assert!(matches!(
+            startup.next_action(now_ns),
+            Ok(Some(StartupAction::Al(_)))
+        ));
+
+        let expected = MailboxConfig::new(0x1000, 64, 0x1100, 64);
+        let mut mismatch = prepared_mailbox_verification(expected);
+        let mut now_ns = 1;
+        let observed = MailboxConfig::new(0x1000, 32, 0x1100, 64);
+        assert_eq!(
+            accept_mailbox_words(
+                &mut mismatch,
+                [0x1000, 32, 0x1100, 64, crate::sii::SII_MAILBOX_PROTOCOL_COE],
+                &mut now_ns,
+            ),
+            Err(StartupError::MailboxMismatch {
+                position: 0,
+                expected,
+                observed,
+            })
+        );
+        assert_eq!(mismatch.phase(), StartupPhase::Faulted);
+        assert_eq!(mismatch.verified_mailbox(0), None);
+        assert_eq!(mismatch.next_action(now_ns), Ok(None));
+
+        let mut no_coe = prepared_mailbox_verification(expected);
+        let mut now_ns = 1;
+        assert_eq!(
+            accept_mailbox_words(&mut no_coe, [0x1000, 64, 0x1100, 64, 0], &mut now_ns,),
+            Err(StartupError::SiiMailbox(SiiMailboxError::CoeUnsupported))
+        );
+        assert_eq!(no_coe.phase(), StartupPhase::Faulted);
+        assert_eq!(no_coe.verified_mailbox(0), None);
+    }
+
+    #[test]
+    fn mailbox_actions_are_separate_and_timeout_fail_closed() {
+        let mailbox = MailboxConfig::new(0x1000, 64, 0x1100, 64);
+        let mut crossed = prepared_mailbox_verification(mailbox);
+        let pending = crossed.next_action(1).unwrap().unwrap();
+        let StartupAction::SiiMailbox(inner) = pending else {
+            panic!("expected SII mailbox action");
+        };
+        assert_eq!(
+            crossed.accept(StartupAction::Sii(inner), inner.generation, &[], 1, 2),
+            Err(StartupError::ActionMismatch)
+        );
+        assert_eq!(crossed.phase(), StartupPhase::Faulted);
+
+        let mut timed_out = prepared_mailbox_verification(mailbox);
+        let pending = timed_out.next_action(1).unwrap().unwrap();
+        assert_eq!(
+            timed_out.timeout(pending, pending.deadline_ns()),
+            Err(StartupError::SiiMailbox(SiiMailboxError::Block(
+                crate::sii::SiiBlockError::Timeout,
+            )))
+        );
+        assert_eq!(timed_out.phase(), StartupPhase::Faulted);
+        assert_eq!(timed_out.verified_mailbox(0), None);
+    }
+
+    #[test]
+    fn mailbox_verification_retains_evidence_in_slave_order() {
+        let mailboxes = [
+            MailboxConfig::new(0x1000, 64, 0x1100, 64),
+            MailboxConfig::new(0x1200, 32, 0x1300, 32),
+        ];
+        let identities = [
+            SlaveIdentity {
+                vendor_id: 1,
+                product_code: 2,
+                revision: 3,
+                serial: 4,
+            },
+            SlaveIdentity {
+                vendor_id: 5,
+                product_code: 6,
+                revision: 7,
+                serial: 8,
+            },
+        ];
+        let mut startup = StartupController::<2>::new(0x1000);
+        startup.phase = StartupPhase::ReadingMailbox;
+        startup.config = StartupConfig::new(EthercatState::Op);
+        startup.generation = 9;
+        startup.expected_count = 2;
+        startup.stage_target = EthercatState::Op;
+        for index in 0..2 {
+            startup.expected[index] = ExpectedSlave {
+                position: index as u16,
+                station_address: 0x1000 + index as u16,
+                identity: identities[index],
+            };
+            startup.profiles[index] =
+                StartupSlaveProfile::new(index as u16).with_expected_mailbox(mailboxes[index]);
+            startup
+                .table
+                .add(index as u16, 0x1000 + index as u16, identities[index])
+                .and_then(|_| {
+                    startup.table.observe_status(
+                        index as u16,
+                        crate::slave::AlStatus::new(EthercatState::SafeOp as u16, 0),
+                        0,
+                    )
+                })
+                .and_then(|_| {
+                    startup
+                        .table
+                        .verify_identity(index as u16, identities[index])
+                })
+                .unwrap();
+        }
+
+        let mut now_ns = 1;
+        assert_eq!(
+            accept_mailbox_words(
+                &mut startup,
+                [0x1000, 64, 0x1100, 64, crate::sii::SII_MAILBOX_PROTOCOL_COE],
+                &mut now_ns,
+            ),
+            Ok(StartupProgress::MailboxVerified(0))
+        );
+        assert_eq!(startup.verified_mailbox(0), Some(mailboxes[0]));
+        assert_eq!(startup.verified_mailbox(1), None);
+        assert_eq!(
+            accept_al_state(&mut startup, EthercatState::Op, now_ns),
+            StartupProgress::SlaveReady(0)
+        );
+        assert_eq!(startup.phase(), StartupPhase::ReadingIdentity);
+
+        // The second mailbox gate is entered only after that slave's identity
+        // phase has completed; the retained table state models that boundary.
+        startup.phase = StartupPhase::ReadingMailbox;
+        now_ns += 4;
+        assert_eq!(
+            accept_mailbox_words(
+                &mut startup,
+                [0x1200, 32, 0x1300, 32, crate::sii::SII_MAILBOX_PROTOCOL_COE],
+                &mut now_ns,
+            ),
+            Ok(StartupProgress::MailboxVerified(1))
+        );
+        assert_eq!(startup.verified_mailbox(0), Some(mailboxes[0]));
+        assert_eq!(startup.verified_mailbox(1), Some(mailboxes[1]));
     }
 
     #[test]
@@ -2164,7 +2620,10 @@ mod tests {
     fn end_probe_deadline(action: StartupAction) -> u64 {
         match action {
             StartupAction::Scan(action) => action.deadline_ns,
-            StartupAction::Sii(_) | StartupAction::Al(_) | StartupAction::OpOnly(_) => 0,
+            StartupAction::Sii(_)
+            | StartupAction::SiiMailbox(_)
+            | StartupAction::Al(_)
+            | StartupAction::OpOnly(_) => 0,
         }
     }
 
@@ -2289,6 +2748,41 @@ mod tests {
         );
         assert_eq!(pool.in_use(), 0);
         assert_eq!(startup.phase(), StartupPhase::Scanning);
+    }
+
+    #[test]
+    fn completed_mailbox_control_request_preserves_action_ownership() {
+        let mut startup = prepared_mailbox_verification(MailboxConfig::new(0x1000, 64, 0x1100, 64));
+        let action = startup.next_action(1).unwrap().unwrap();
+        assert!(matches!(action, StartupAction::SiiMailbox(_)));
+
+        let mut pool = ControlRequestPool::<1>::new();
+        let handle = startup.enqueue_pending(&mut pool).unwrap();
+        let request = pool.get(handle).unwrap();
+        assert_eq!(request.length, 4);
+        assert_eq!(request.response_length, 4);
+        assert_eq!(action.response_len(), 0);
+        let mut frame = [0; crate::wire::MAX_ETHERNET_FRAME_LEN];
+        pool.build_into_buffer(handle, &mut frame, [0xFF; 6], [1, 2, 3, 4, 5, 6])
+            .unwrap();
+        pool.complete(
+            handle,
+            action.generation(),
+            action.address(),
+            action.payload(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            startup.accept_completed(&mut pool, handle, 2),
+            Ok(StartupProgress::Advanced)
+        );
+        assert_eq!(pool.in_use(), 0);
+        assert_eq!(startup.phase(), StartupPhase::ReadingMailbox);
+        assert!(matches!(
+            startup.next_action(3),
+            Ok(Some(StartupAction::SiiMailbox(_)))
+        ));
     }
 
     #[test]

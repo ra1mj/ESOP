@@ -65,6 +65,10 @@ pub enum ProductStartupError {
     InvalidTransitionTimeoutProfile {
         position: u16,
     },
+    InvalidMailboxConfig {
+        position: u16,
+        error: MailboxConfigError,
+    },
     OpOnlyProfile {
         position: u16,
         error: OpOnlyProfileError,
@@ -401,6 +405,12 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                     error,
                 });
             }
+            if let Err(error) = slave.mailbox_config.validate() {
+                return Err(ProductStartupError::InvalidMailboxConfig {
+                    position: slave.position,
+                    error,
+                });
+            }
             for sync_manager in 0..MAX_PRODUCT_SYNC_MANAGERS as u8 {
                 if !slave.op_only_outputs.contains(sync_manager) {
                     continue;
@@ -430,7 +440,8 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
             }
             profiles[index] = StartupSlaveProfile::new(slave.position)
                 .with_transition_timeouts(slave.transition_timeouts)
-                .with_op_only_outputs(slave.op_only_outputs);
+                .with_op_only_outputs(slave.op_only_outputs)
+                .with_expected_mailbox(slave.mailbox_config);
         }
         Ok(profiles)
     }
@@ -1156,6 +1167,10 @@ mod tests {
         assert_eq!(profiles[0].position, 0);
         assert_eq!(profiles[0].transition_timeouts, timeouts);
         assert_eq!(profiles[0].op_only_outputs, op_only);
+        assert_eq!(
+            profiles[0].expected_mailbox,
+            Some(config.slaves[0].mailbox_config)
+        );
 
         let mut startup = StartupController::<1>::new(0x1000);
         config
@@ -1188,6 +1203,34 @@ mod tests {
                 sync_manager: 4,
             })
         );
+    }
+
+    #[test]
+    fn product_rejects_invalid_startup_mailbox_before_startup_mutation() {
+        let mut config = config();
+        config.slaves[0].mailbox_config = MailboxConfig::new(0, 32, 0x1100, 32);
+        assert_eq!(
+            config.startup_profiles(),
+            Err(ProductStartupError::InvalidMailboxConfig {
+                position: 0,
+                error: MailboxConfigError::AddressZero(MailboxDirection::Send),
+            })
+        );
+
+        let mut startup = StartupController::<1>::new(0x1000);
+        assert_eq!(
+            config.start_startup(
+                &mut startup,
+                7,
+                0,
+                StartupConfig::new(esop_ethercat_core::EthercatState::Op),
+            ),
+            Err(ProductStartupError::InvalidMailboxConfig {
+                position: 0,
+                error: MailboxConfigError::AddressZero(MailboxDirection::Send),
+            })
+        );
+        assert_eq!(startup.phase(), esop_ethercat_core::StartupPhase::Idle);
     }
 
     #[test]

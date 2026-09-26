@@ -208,6 +208,16 @@ impl MailboxConfig {
         self
     }
 
+    /// Compare the physical mailbox layout that the standard SII header can
+    /// represent. Runtime polling, timeout, retry and status-bit policy are
+    /// intentionally excluded.
+    pub const fn has_same_layout(self, other: Self) -> bool {
+        self.send_address == other.send_address
+            && self.send_capacity == other.send_capacity
+            && self.receive_address == other.receive_address
+            && self.receive_capacity == other.receive_capacity
+    }
+
     pub fn validate(self) -> Result<(), MailboxConfigError> {
         let send = mailbox_range(
             self.send_address,
@@ -879,6 +889,20 @@ mod tests {
                 .validate(),
             Err(MailboxConfigError::InvalidStatusBit)
         );
+    }
+
+    #[test]
+    fn mailbox_layout_comparison_ignores_runtime_policy() {
+        let expected = MailboxConfig::new(0x1000, 32, 0x1100, 64);
+        let mut policy_variant = expected
+            .with_retry_policy(MailboxRetryPolicy::new(3, 5_000))
+            .with_status_bit(MailboxStatusBit::new(0x1200, 0x08, false));
+        policy_variant.poll_interval_ns = 99;
+        policy_variant.timeout_ns = 100;
+        policy_variant.request_timeout_ns = 101;
+
+        assert!(expected.has_same_layout(policy_variant));
+        assert!(!expected.has_same_layout(MailboxConfig::new(0x1000, 31, 0x1100, 64)));
     }
 
     #[test]

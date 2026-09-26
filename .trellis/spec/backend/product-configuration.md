@@ -91,12 +91,18 @@ activation templates participate in ESI semantic and configuration hashes.
 The core SII parser accepts only the exact five-word standard mailbox header,
 checks CoE support and the same address/capacity rules, and performs the same
 slave-to-master direction conversion. It parses caller-owned words or a
-completed exact-range `SiiBlockReader`; live EEPROM acquisition and comparison
-with generated ESI data are separate activation work.
+completed exact-range `SiiBlockReader`. A Startup profile may carry the
+generated expected mailbox; after identity verification and before any AL
+transition, Startup reads exactly SII words `0x001C..0x0020`, requires CoE,
+compares only the four physical address/capacity fields, and publishes
+position-keyed verified evidence. Runtime poll, timeout, retry and status-bit
+policy are not SII layout fields. Profiles without an expected mailbox and the
+legacy `start` API retain the identity-to-AL path.
 
-`startup_profiles` validates timeout values, exact slave positions, OpOnly
-flags, and exclusive selected RxPDO ownership before returning fixed-array
-profiles. `start_startup` supplies those profiles to Startup. A nonzero legacy
+`startup_profiles` validates timeout values, exact slave positions, generated
+mailbox ranges, OpOnly flags, and exclusive selected RxPDO ownership before
+returning fixed-array profiles. `start_startup` supplies those profiles to
+Startup. A nonzero legacy
 `StartupConfig.transition_timeout_ns` is an explicit uniform override;
 otherwise each AL step selects its generated/default timeout. OpOnly and AL
 work for one step share one absolute deadline. Non-OP and leaving-OP paths
@@ -124,8 +130,8 @@ advancement, and CONFIGURING lifecycle admission. The caller may opt
 `StartupConfig` into a PREOP barrier for PDO Configuration, Mapping, and/or DC
 Configuration. The scheduler releases Startup only after the whole PDO batch
 and other required controllers reach real Complete phases, then resumes the
-retained topology through SAFEOP/OP. Live SII/ESC cross-check and full
-mapping/DC descriptor discovery remain caller work.
+retained topology through SAFEOP/OP. Full mapping/DC descriptor discovery,
+physical response authenticity and hardware qualification remain caller work.
 
 The configuration SHA-256 covers normalized product semantics and a sorted
 label-to-semantic-ESI-hash map. It excludes timestamps, host paths, compiler,
@@ -161,6 +167,7 @@ datagrams, FCS, and inter-packet gap respectively.
 | Successful regeneration | Replace the directory and remove stale schema files. |
 | Runtime schema/hash/ProcBuf/topology mismatch | Reject before registry activation. |
 | Invalid/misaligned startup profile or OpOnly without exclusive RxPDO | Reject before Startup mutation or control emission. |
+| Invalid expected mailbox, live SII parse/CoE/layout mismatch, or SII request fault | Latch typed Startup fault before AL and publish no mailbox evidence. |
 | Runtime Domain/axis evidence or capacity mismatch | Reject with typed owning-contract evidence and return no partial configuration. |
 | PDO plan owner/SM/group/capacity mismatch | Reject before returning any startup plan. |
 | Invalid generated mailbox or invalid/missing/duplicate/unknown override binding | Reject before returning any batch. |
@@ -207,14 +214,16 @@ datagrams, FCS, and inter-packet gap respectively.
   duplicate, unknown, station-duplicate and capacity failures.
 - Prove mailbox address/capacity changes alter ESI semantic and configuration
   hashes while XML formatting-only changes remain byte-identical. Cover exact
-  SII fixed-header direction conversion and all shape/protocol/range failures.
+  SII fixed-header direction conversion, Startup exact-range acquisition,
+  generated-versus-live layout comparison, action ownership, timeout,
+  multi-slave order, legacy opt-out and all shape/protocol/range failures.
 - Route a generated-style PDO action through `ScheduledPdoConfiguration`, the
   existing mailbox/DC/shared-RX path, exact upload readback, request rebuild,
   cross-generation waiting, timeout, lifecycle gating, fault blocking and
   explicit restart. Cover the opt-in PREOP Startup barrier, automatic release
   from actual Complete phases, retained topology and legal SAFEOP/OP
   progression. Cover two-job automatic advancement and whole-batch release;
-  keep live SII/ESC cross-check and physical HIL outside this software claim.
+  keep physical response authenticity and HIL outside this software claim.
 - Validate both default and product-input build reports, including forged pass
   rejection and exact wire metric projection.
 - Run `make ci`, `make bpf`, and `make test-zenoh` before delivery.
