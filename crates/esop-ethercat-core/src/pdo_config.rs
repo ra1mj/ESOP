@@ -7,7 +7,7 @@
 //! touching the cyclic PDO path.
 
 use crate::coe::{SdoError, SdoTransfer};
-use crate::mailbox::MAX_MAILBOX_BYTES;
+use crate::mailbox::{MAX_MAILBOX_BYTES, MailboxError};
 
 pub const MAX_PDO_SDO_DATA: usize = 4;
 
@@ -237,6 +237,7 @@ pub enum PdoConfigError {
         expected: u8,
         actual: u8,
     },
+    Mailbox(MailboxError),
     Plan(PdoConfigPlanError),
     Sdo(SdoError),
 }
@@ -447,6 +448,17 @@ impl<const OPS: usize> PdoConfigController<OPS> {
             return Err(PdoConfigError::Timeout);
         }
         self.fail(PdoConfigError::Timeout)
+    }
+
+    pub fn mailbox_failed(
+        &mut self,
+        action: PdoConfigAction,
+        error: MailboxError,
+    ) -> Result<PdoConfigProgress, PdoConfigError> {
+        if self.pending != Some(action) {
+            return self.fail(PdoConfigError::ActionMismatch);
+        }
+        self.fail(PdoConfigError::Mailbox(error))
     }
 
     fn start_current_transfer(&mut self) -> Result<(), PdoConfigError> {
@@ -828,5 +840,57 @@ mod tests {
             Err(PdoConfigError::Sdo(SdoError::InvalidState))
         );
         assert_eq!(controller.phase(), PdoConfigPhase::Faulted);
+    }
+
+    #[test]
+    fn controller_latches_matching_mailbox_failure_without_advancing() {
+        let mut plan = PdoConfigPlan::<1>::new();
+        plan.push(PdoSdoWrite::new(0x1C12, 0, &[0]).unwrap())
+            .unwrap();
+        let mut controller = PdoConfigController::new();
+        controller.start(plan, 0x1000, 7, 0, 100, 20).unwrap();
+        let action = controller.next_action(1).unwrap().unwrap();
+
+        assert_eq!(
+            controller.mailbox_failed(action, MailboxError::Timeout),
+            Err(PdoConfigError::Mailbox(MailboxError::Timeout))
+        );
+        assert_eq!(controller.phase(), PdoConfigPhase::Faulted);
+        assert_eq!(controller.operation_index(), 0);
+        assert_eq!(controller.pending(), None);
+        assert_eq!(
+            controller.last_error(),
+            Some(PdoConfigError::Mailbox(MailboxError::Timeout))
+        );
+
+        let mut restart_plan = PdoConfigPlan::<1>::new();
+        restart_plan
+            .push(PdoSdoWrite::new(0x1C12, 0, &[0]).unwrap())
+            .unwrap();
+        controller
+            .start(restart_plan, 0x1000, 8, 2, 100, 20)
+            .unwrap();
+        assert_eq!(controller.phase(), PdoConfigPhase::Sending);
+        assert_eq!(controller.last_error(), None);
+    }
+
+    #[test]
+    fn controller_rejects_mailbox_failure_for_modified_action() {
+        let mut plan = PdoConfigPlan::<1>::new();
+        plan.push(PdoSdoWrite::new(0x1C12, 0, &[0]).unwrap())
+            .unwrap();
+        let mut controller = PdoConfigController::new();
+        controller.start(plan, 0x1000, 7, 0, 100, 20).unwrap();
+        let action = controller.next_action(1).unwrap().unwrap();
+        let mut modified = action;
+        modified.token = modified.token.wrapping_add(1);
+
+        assert_eq!(
+            controller.mailbox_failed(modified, MailboxError::Timeout),
+            Err(PdoConfigError::ActionMismatch)
+        );
+        assert_eq!(controller.phase(), PdoConfigPhase::Faulted);
+        assert_eq!(controller.operation_index(), 0);
+        assert_eq!(controller.pending(), None);
     }
 }

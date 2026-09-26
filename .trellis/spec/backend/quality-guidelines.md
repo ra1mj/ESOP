@@ -569,13 +569,16 @@ submit_prepared_active_frame(
 
 ### 1. Scope / Trigger
 
-- Trigger: adding or changing the cyclic selection of startup, mapping, DC
-  configuration, or mailbox state machines and their lifecycle projection.
+- Trigger: adding or changing the cyclic selection of startup, PDO
+  configuration, mapping, DC configuration, or mailbox state machines and
+  their lifecycle projection.
 
 ### 2. Signatures
 
 - Core entry: `ScheduledProductionServiceScheduler::run_cycle(...)`.
-- Service set: `ScheduledProductionServices<MAX_SLAVES, SMS, FMMUS>`.
+- Service set:
+  `ScheduledProductionServices<MAX_SLAVES, SMS, FMMUS, PDO_OPS>`; the final
+  capacity defaults to zero for existing callers.
 - Evidence: `ScheduledProductionServiceCycleReport<E, DOMAINS>`.
 - Lifecycle entries: `run_service_cycle_with_outputs_until`,
   `run_process_service_cycle_with_outputs_until`, and
@@ -583,7 +586,15 @@ submit_prepared_active_frame(
 
 ### 3. Contracts
 
-- Selection priority is fixed: Startup, Mapping, DC Configuration, Mailbox.
+- Selection priority is fixed: Startup, PDO Configuration, Mapping, DC
+  Configuration, Mailbox.
+- A PDO service binding owns one `PdoConfigController`, one
+  `MailboxController`, and one runtime `MailboxConfig`. The scheduler stores
+  the immutable PDO action while the mailbox FSM owns framing, counters,
+  polling, retries, and response extraction.
+- While PDO is bound, verify the PDO controller pending action and the mailbox
+  transaction's station, generation, CoE protocol, and raw payload even when
+  no pool request exists. A substituted mailbox controller must fail before TX.
 - The scheduler owns at most one `RequestHandle`; a live request pins the
   selected service until terminal consumption.
 - A carried request must match the selected FSM's pending action in index,
@@ -599,13 +610,18 @@ submit_prepared_active_frame(
   Only `ControlRxConsumer::accepts_prior_generation` may authorize this, and
   only for the same InFlight pool slot/index/generation. Domain and DC
   consumers keep the default current-generation-only rule.
-- Startup readiness owns the Topology gate. Mapping, DC configuration, and
-  Mailbox readiness own the Configuration gate. Callers do not override this
-  mapping or supply a replacement readiness boolean.
+- Startup readiness owns the Topology gate. PDO configuration, Mapping, DC
+  configuration, and Mailbox readiness own the Configuration gate. Callers do
+  not override this mapping or supply a replacement readiness boolean.
+- PDO readiness means the complete plan passed exact upload readback; one
+  successful mailbox transaction is not sufficient. Terminal mailbox errors
+  become typed PDO transport faults without advancing the operation index.
 
 ### 4. Validation & Error Matrix
 
 - Missing/foreign carried handle -> `RequestMismatch(service)` before TX/RX.
+- Missing/substituted PDO controller or mailbox transaction ->
+  `MissingController` or `RequestMismatch(PdoConfiguration)` before TX/RX.
 - Pool allocation/release failure -> `Control(ControlError)`.
 - Low-level control/mailbox submit or receive invariant -> wrapped typed cycle
   error; do not manufacture partial service evidence. If submit rejects before
@@ -622,6 +638,9 @@ submit_prepared_active_frame(
 
 - Good: Mapping request generation 41 completes during cyclic generation 2;
   the control consumer authorizes it, the FSM advances, and the handle frees.
+- Good: a generated PDO download and upload verification traverse the mailbox
+  scheduler under the PDO action's generation, then qualify Configuration only
+  after exact readback.
 - Base: no service is active; DC/Domain shared RX still runs with `Idle`
   evidence and no service gate is changed.
 - Bad: a dropped control response leaves the request InFlight; sending it
@@ -633,6 +652,16 @@ submit_prepared_active_frame(
 
 - Public integration: Mapping outranks Mailbox, and explicit Mapping restart
   is required before Mailbox can run after a Mapping fault.
+- Public integration: PDO Configuration outranks Mapping and Mailbox, executes
+  download plus upload readback, and yields a Bank-confirmed mailbox report.
+- Public integration: PDO Prepared rebuild, cross-generation InFlight
+  retention, no retransmit, typed timeout, fault blocking, and explicit restart.
+- Public integration: a retryable PDO mailbox response error reports
+  `RetryScheduled`, keeps the PDO operation unchanged, and holds no control
+  slot during the retry delay; an exact upload mismatch latches the typed PDO
+  readback fault and still blocks lower-priority services.
+- Core integration: replacing the bound mailbox controller while the PDO
+  action is pending fails closed even without a pool request.
 - Public integration: a request generation different from the current cyclic
   generation completes only through the matching control consumer.
 - Public integration: DC failure yields `RebuildRequest` and zero pool usage.
@@ -645,6 +674,9 @@ submit_prepared_active_frame(
 - Lifecycle integration: the unified report clears Topology or Configuration
   according to selected service and is accepted by the stable cycle owner only
   when `ScheduledDomainBank` confirms its underlying RX evidence.
+- Qualification boundary: the caller must open the mailbox-capable AL-state
+  window, normally PREOP. Simulation does not prove physical response
+  authenticity, device interoperability, WCET, or HIL.
 
 ### 7. Wrong vs Correct
 

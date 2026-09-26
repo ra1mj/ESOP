@@ -108,6 +108,8 @@ datagrams, FCS, and inter-packet gap respectively.
 | Runtime Domain/axis evidence or capacity mismatch | Reject with typed owning-contract evidence and return no partial configuration. |
 | PDO plan owner/SM/group/capacity mismatch | Reject before returning any startup plan. |
 | PDO upload readback length or byte mismatch | Latch controller fault and keep the current operation index. |
+| PDO mailbox terminal failure | Latch the exact typed transport fault and keep the current operation index. |
+| Substituted PDO mailbox/controller binding | Reject before TX without consuming or advancing the PDO action. |
 | Product build input with unknown fields, invalid hash/budget, or `passed=true` | Reject before report write. |
 | Missing target/HIL/WCET/resource evidence | Keep report unqualified. |
 
@@ -137,6 +139,11 @@ datagrams, FCS, and inter-packet gap respectively.
 - Build exact per-slave drive/IO PDO plans from the checked-in generated module;
   cover assignment-disable ordering, mapping grouping, all typed rejection
   paths, exact/segmented readback, mismatches, stale actions and restart.
+- Route a generated-style PDO action through `ScheduledPdoConfiguration`, the
+  existing mailbox/DC/shared-RX path, exact upload readback, request rebuild,
+  cross-generation waiting, timeout, lifecycle gating, fault blocking and
+  explicit restart. Keep PREOP orchestration and physical HIL outside this
+  software claim.
 - Validate both default and product-input build reports, including forged pass
   rejection and exact wire metric projection.
 - Run `make ci`, `make bpf`, and `make test-zenoh` before delivery.

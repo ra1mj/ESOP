@@ -1,17 +1,23 @@
-use esop_ethercat_core::wire::{Command, MAX_ETHERNET_FRAME_LEN};
+use esop_ethercat_core::wire::{
+    Command, DATAGRAM_HEADER_LEN, DatagramHeader, ETHERCAT_FRAME_HEADER_LEN, ETHERNET_HEADER_LEN,
+    MAX_ETHERNET_FRAME_LEN, WORKING_COUNTER_LEN,
+};
 use esop_ethercat_core::{
-    ControlError, ControlRequestPool, CycleError, DatagramPlan, DcCyclicConfig, DcCyclicError,
-    DcCyclicSync, DcMonitor, Domain, DomainSegment, EthercatMaster, EthercatPort, FramePlan,
-    FramePlanSet, LinkState, MailboxConfig, MailboxController, MailboxPhase, MailboxProgress,
-    MailboxProtocol, MailboxRetryPolicy, MappingConfigController, MappingConfigPhase,
-    MappingConfigProgress, MappingTable, MasterConfig, PortError, RegisterOperation, RequestHandle,
-    RequestState, RxPoll, RxSlotState, ScheduleDomain, ScheduleTable, ScheduledControlCycleError,
-    ScheduledDomainBank, ScheduledDomainEntry, ScheduledProcessInputEntry, ScheduledProcessInputs,
-    ScheduledProductionServiceCycleError, ScheduledProductionServiceFault,
+    CoeHeader, CoeService, ControlError, ControlRequestPool, CycleError, DatagramPlan,
+    DcCyclicConfig, DcCyclicError, DcCyclicSync, DcMonitor, Domain, DomainSegment, EthercatMaster,
+    EthercatPort, FramePlan, FramePlanSet, LinkState, MAX_MAILBOX_BYTES, MailboxConfig,
+    MailboxController, MailboxError, MailboxHeader, MailboxPhase, MailboxProgress, MailboxProtocol,
+    MailboxRetryPolicy, MappingConfigController, MappingConfigPhase, MappingConfigProgress,
+    MappingTable, MasterConfig, PdoConfigAction, PdoConfigController, PdoConfigError,
+    PdoConfigPhase, PdoConfigPlan, PdoConfigProgress, PdoConfigStep, PdoSdoWrite, PortError,
+    RegisterOperation, RequestHandle, RequestState, RxPoll, RxSlotState, ScheduleDomain,
+    ScheduleTable, ScheduledControlCycleError, ScheduledDomainBank, ScheduledDomainEntry,
+    ScheduledPdoConfiguration, ScheduledPdoConfigurationProgress, ScheduledProcessInputEntry,
+    ScheduledProcessInputs, ScheduledProductionServiceCycleError, ScheduledProductionServiceFault,
     ScheduledProductionServiceKind, ScheduledProductionServiceProgress,
     ScheduledProductionServiceRecovery, ScheduledProductionServiceScheduler,
     ScheduledProductionServices, ScheduledReceiveError, ScheduledServiceFrameError,
-    ScheduledServiceTxError, ScheduledServiceTxFailure, SyncManagerConfig,
+    ScheduledServiceTxError, ScheduledServiceTxFailure, SyncManagerConfig, fixed_address,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::ethercat::{
@@ -612,6 +618,938 @@ fn production_service_scheduler_rebuilds_prepared_and_never_retransmits_inflight
         ScheduledProductionServiceRecovery::Faulted
     );
     assert_eq!(mapping.phase(), MappingConfigPhase::Faulted);
+    assert_eq!(controls.in_use(), 0);
+}
+
+fn pdo_download_response(action: PdoConfigAction) -> [u8; 6] {
+    let mut response = [0; 6];
+    CoeHeader {
+        number: 0,
+        service: CoeService::SdoResponse,
+    }
+    .encode(&mut response)
+    .unwrap();
+    response[2] = 0x60;
+    response[3..5].copy_from_slice(&action.sdo_index.to_le_bytes());
+    response[5] = action.sdo_subindex;
+    response
+}
+
+fn pdo_upload_response(action: PdoConfigAction, data: &[u8]) -> [u8; 10] {
+    assert!((1..=4).contains(&data.len()));
+    let mut response = [0; 10];
+    CoeHeader {
+        number: 0,
+        service: CoeService::SdoResponse,
+    }
+    .encode(&mut response)
+    .unwrap();
+    response[2] = 0x43 | (((4 - data.len()) as u8) << 2);
+    response[3..5].copy_from_slice(&action.sdo_index.to_le_bytes());
+    response[5] = action.sdo_subindex;
+    response[6..6 + data.len()].copy_from_slice(data);
+    response
+}
+
+#[test]
+fn production_scheduler_runs_pdo_mailbox_readback_before_lower_priority_services() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<2, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let mut mapping_table = MappingTable::<1, 0>::new();
+    mapping_table
+        .add_sync_manager(SyncManagerConfig {
+            index: 2,
+            physical_start: 0x1000,
+            length: 2,
+            control: 0x24,
+            status: 0,
+            enable: true,
+        })
+        .unwrap();
+    let mut mapping = MappingConfigController::<1, 0>::new();
+    mapping
+        .start(1, 51, 100_000, 1_000_000, 100_000, &mapping_table)
+        .unwrap();
+    let mut plan = PdoConfigPlan::<1>::new();
+    plan.push(PdoSdoWrite::new(0x1C12, 0, &[0]).unwrap())
+        .unwrap();
+    let mut pdo = PdoConfigController::<1>::new();
+    pdo.start(plan, 1, 41, 100_000, 1_000_000, 100_000).unwrap();
+    let mailbox_config = MailboxConfig::new(0x1000, 32, 0x1100, 32)
+        .with_retry_policy(MailboxRetryPolicy::new(1, 10_000));
+    let mut pdo_mailbox = MailboxController::new();
+    let mut normal_mailbox = MailboxController::new();
+    normal_mailbox
+        .start(mailbox_config, 1, 61, 100_000, MailboxProtocol::CoE, &[1])
+        .unwrap();
+    let mut scheduler = ScheduledProductionServiceScheduler::new();
+    let mut controls = ControlRequestPool::<2>::new();
+    let mut port = TwoFrameSimPort::new();
+    port.configure_mailbox(1, mailbox_config);
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut dc_image = [0; 8];
+
+    port.set_now_ns(100_000);
+    let rejected = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            100_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                Some(&mut normal_mailbox),
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            )),
+            1,
+            100_000,
+            150_000,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        rejected,
+        ScheduledProductionServiceCycleError::MailboxCycle(
+            esop_ethercat_core::ScheduledMailboxCycleError::Submit(
+                esop_ethercat_core::ScheduledMailboxTxError::Service(
+                    ScheduledServiceTxError::InvalidDeadline
+                )
+            )
+        )
+    ));
+    let bound_action = pdo.pending().unwrap();
+    let bound_mailbox_action = pdo_mailbox.pending().unwrap();
+    assert_eq!(scheduler.request(), None);
+    assert_eq!(controls.in_use(), 0);
+
+    let first = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            100_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                Some(&mut normal_mailbox),
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            )),
+            1,
+            150_000,
+            150_000,
+        )
+        .unwrap();
+    assert_eq!(
+        first.selected(),
+        ScheduledProductionServiceKind::PdoConfiguration
+    );
+    assert_eq!(pdo.pending(), Some(bound_action));
+    assert_eq!(pdo_mailbox.phase(), MailboxPhase::Polling);
+    assert_eq!(bound_mailbox_action.token, 1);
+    assert_eq!(
+        first.progress(),
+        ScheduledProductionServiceProgress::PdoConfiguration(
+            ScheduledPdoConfigurationProgress::Mailbox(MailboxProgress::Advanced)
+        )
+    );
+    assert!(!first.service_ready());
+    assert!(first.mailbox_cycle().is_some());
+    assert!(bank.confirms_production_service_cycle(&first));
+    assert!(
+        !other_cycle_facts_from_production_service_cycle(&first, ready_other_cycle_facts())
+            .coe_ready
+    );
+    assert_eq!(controls.in_use(), 0);
+    assert_eq!(normal_mailbox.phase(), MailboxPhase::Sending);
+
+    port.set_now_ns(110_000);
+    let wrong_counter = port.mailbox_counter.wrapping_add(1);
+    port.set_next_mailbox_response_with_counter(
+        &pdo_download_response(bound_action),
+        wrong_counter,
+    );
+    let retry = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            110_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                Some(&mut normal_mailbox),
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            )),
+            2,
+            160_000,
+            160_000,
+        )
+        .unwrap();
+    assert_eq!(
+        retry.progress(),
+        ScheduledProductionServiceProgress::PdoConfiguration(
+            ScheduledPdoConfigurationProgress::Mailbox(MailboxProgress::RetryScheduled)
+        )
+    );
+    assert_eq!(retry.request(), None);
+    assert_eq!(pdo.pending(), Some(bound_action));
+    assert_eq!(pdo.operation_index(), 0);
+    assert_eq!(pdo_mailbox.retry_count(), 1);
+    assert_eq!(
+        pdo_mailbox.last_retry_error(),
+        Some(MailboxError::CounterMismatch)
+    );
+    assert_eq!(controls.in_use(), 0);
+
+    port.set_now_ns(115_000);
+    let retry_wait = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            115_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                Some(&mut normal_mailbox),
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            )),
+            3,
+            165_000,
+            165_000,
+        )
+        .unwrap();
+    assert_eq!(
+        retry_wait.progress(),
+        ScheduledProductionServiceProgress::Waiting
+    );
+    assert_eq!(retry_wait.request(), None);
+    assert_eq!(pdo.pending(), Some(bound_action));
+    assert_eq!(controls.in_use(), 0);
+
+    port.set_now_ns(120_000);
+    port.set_next_mailbox_response(&pdo_download_response(bound_action));
+    let second = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            120_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                Some(&mut normal_mailbox),
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            )),
+            4,
+            170_000,
+            170_000,
+        )
+        .unwrap();
+    assert_eq!(
+        second.progress(),
+        ScheduledProductionServiceProgress::PdoConfiguration(
+            ScheduledPdoConfigurationProgress::Configuration(PdoConfigProgress::Advanced)
+        )
+    );
+    assert_eq!(pdo.phase(), PdoConfigPhase::Sending);
+    assert_eq!(pdo.step(), PdoConfigStep::VerifyUpload);
+
+    port.set_now_ns(130_000);
+    let third = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            130_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                Some(&mut normal_mailbox),
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            )),
+            5,
+            180_000,
+            180_000,
+        )
+        .unwrap();
+    let verify_action = pdo.pending().unwrap();
+    assert_eq!(verify_action.step, PdoConfigStep::VerifyUpload);
+    assert_eq!(
+        third.selected(),
+        ScheduledProductionServiceKind::PdoConfiguration
+    );
+    assert_eq!(normal_mailbox.phase(), MailboxPhase::Sending);
+
+    port.set_now_ns(140_000);
+    port.set_next_mailbox_response(&pdo_upload_response(verify_action, &[0]));
+    let fourth = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            140_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                Some(&mut normal_mailbox),
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            )),
+            6,
+            190_000,
+            190_000,
+        )
+        .unwrap();
+    assert_eq!(
+        fourth.progress(),
+        ScheduledProductionServiceProgress::PdoConfiguration(
+            ScheduledPdoConfigurationProgress::Configuration(PdoConfigProgress::Complete)
+        )
+    );
+    assert_eq!(pdo.phase(), PdoConfigPhase::Complete);
+    assert_eq!(pdo.operation_index(), 1);
+    assert!(fourth.service_ready());
+    assert!(bank.confirms_production_service_cycle(&fourth));
+    assert!(
+        other_cycle_facts_from_production_service_cycle(&fourth, ready_other_cycle_facts())
+            .coe_ready
+    );
+    assert_eq!(controls.in_use(), 0);
+
+    port.set_now_ns(150_000);
+    let lower_priority = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            150_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                Some(&mut normal_mailbox),
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            )),
+            7,
+            200_000,
+            200_000,
+        )
+        .unwrap();
+    assert_eq!(
+        lower_priority.selected(),
+        ScheduledProductionServiceKind::Mapping
+    );
+}
+
+#[test]
+fn pdo_transport_fault_blocks_lower_priority_until_explicit_restart() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<2, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let mut mapping_table = MappingTable::<1, 0>::new();
+    mapping_table
+        .add_sync_manager(SyncManagerConfig {
+            index: 2,
+            physical_start: 0x1000,
+            length: 2,
+            control: 0x24,
+            status: 0,
+            enable: true,
+        })
+        .unwrap();
+    let mut mapping = MappingConfigController::<1, 0>::new();
+    mapping
+        .start(1, 51, 100_000, 1_000_000, 100_000, &mapping_table)
+        .unwrap();
+    let mut plan = PdoConfigPlan::<1>::new();
+    plan.push(PdoSdoWrite::new(0x1C12, 0, &[0]).unwrap())
+        .unwrap();
+    let mut pdo = PdoConfigController::<1>::new();
+    pdo.start(plan, 1, 41, 100_000, 1_000_000, 100_000).unwrap();
+    let invalid_mailbox_config = MailboxConfig::new(0x1000, 6, 0x1100, 32);
+    let mailbox_config = MailboxConfig::new(0x1000, 32, 0x1100, 32);
+    let mut pdo_mailbox = MailboxController::new();
+    let mut scheduler = ScheduledProductionServiceScheduler::new();
+    let mut controls = ControlRequestPool::<1>::new();
+    let mut port = TwoFrameSimPort::new();
+    port.configure_mailbox(1, mailbox_config);
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut dc_image = [0; 8];
+
+    port.set_now_ns(100_000);
+    let faulted = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            100_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                None,
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                invalid_mailbox_config,
+            )),
+            1,
+            150_000,
+            150_000,
+        )
+        .unwrap();
+    assert_eq!(
+        faulted.selected(),
+        ScheduledProductionServiceKind::PdoConfiguration
+    );
+    assert_eq!(
+        faulted.fault(),
+        Some(ScheduledProductionServiceFault::PdoConfiguration(
+            PdoConfigError::Mailbox(MailboxError::InvalidConfiguration)
+        ))
+    );
+    assert_eq!(
+        faulted.recovery(),
+        ScheduledProductionServiceRecovery::Faulted
+    );
+    assert_eq!(pdo.phase(), PdoConfigPhase::Faulted);
+    assert_eq!(pdo.operation_index(), 0);
+    assert_eq!(controls.in_use(), 0);
+    assert!(
+        !other_cycle_facts_from_production_service_cycle(&faulted, ready_other_cycle_facts())
+            .coe_ready
+    );
+
+    port.set_now_ns(110_000);
+    let blocked = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            110_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                None,
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                invalid_mailbox_config,
+            )),
+            2,
+            160_000,
+            160_000,
+        )
+        .unwrap();
+    assert_eq!(
+        blocked.selected(),
+        ScheduledProductionServiceKind::PdoConfiguration
+    );
+    assert!(blocked.fault().is_some());
+
+    let mut mismatch_plan = PdoConfigPlan::<1>::new();
+    mismatch_plan
+        .push(PdoSdoWrite::new(0x1C12, 0, &[0]).unwrap())
+        .unwrap();
+    pdo.start(mismatch_plan, 1, 42, 120_000, 1_000_000, 100_000)
+        .unwrap();
+    port.set_now_ns(120_000);
+    let download_sent = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            120_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                None,
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            )),
+            3,
+            170_000,
+            170_000,
+        )
+        .unwrap();
+    assert_eq!(
+        download_sent.selected(),
+        ScheduledProductionServiceKind::PdoConfiguration
+    );
+    let download_action = pdo.pending().unwrap();
+
+    port.set_now_ns(130_000);
+    port.set_next_mailbox_response(&pdo_download_response(download_action));
+    let download_complete = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            130_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                None,
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            )),
+            4,
+            180_000,
+            180_000,
+        )
+        .unwrap();
+    assert_eq!(
+        download_complete.progress(),
+        ScheduledProductionServiceProgress::PdoConfiguration(
+            ScheduledPdoConfigurationProgress::Configuration(PdoConfigProgress::Advanced)
+        )
+    );
+
+    port.set_now_ns(140_000);
+    let upload_sent = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            140_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                None,
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            )),
+            5,
+            190_000,
+            190_000,
+        )
+        .unwrap();
+    assert_eq!(
+        upload_sent.selected(),
+        ScheduledProductionServiceKind::PdoConfiguration
+    );
+    let upload_action = pdo.pending().unwrap();
+    assert_eq!(upload_action.step, PdoConfigStep::VerifyUpload);
+
+    port.set_now_ns(150_000);
+    port.set_next_mailbox_response(&pdo_upload_response(upload_action, &[1]));
+    let mismatch = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            150_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                None,
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            )),
+            6,
+            200_000,
+            200_000,
+        )
+        .unwrap();
+    assert_eq!(
+        mismatch.fault(),
+        Some(ScheduledProductionServiceFault::PdoConfiguration(
+            PdoConfigError::ReadbackValueMismatch {
+                byte_index: 0,
+                expected: 0,
+                actual: 1,
+            }
+        ))
+    );
+    assert_eq!(pdo.phase(), PdoConfigPhase::Faulted);
+    assert_eq!(pdo.operation_index(), 0);
+    assert_eq!(controls.in_use(), 0);
+    assert!(
+        !other_cycle_facts_from_production_service_cycle(&mismatch, ready_other_cycle_facts())
+            .coe_ready
+    );
+
+    port.set_now_ns(160_000);
+    let mismatch_blocked = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            160_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                None,
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            )),
+            7,
+            210_000,
+            210_000,
+        )
+        .unwrap();
+    assert_eq!(
+        mismatch_blocked.selected(),
+        ScheduledProductionServiceKind::PdoConfiguration
+    );
+
+    pdo.start(PdoConfigPlan::new(), 1, 43, 170_000, 1_000_000, 100_000)
+        .unwrap();
+    port.set_now_ns(170_000);
+    let resumed = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            170_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                None,
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            )),
+            8,
+            220_000,
+            220_000,
+        )
+        .unwrap();
+    assert_eq!(resumed.selected(), ScheduledProductionServiceKind::Mapping);
+}
+
+#[test]
+fn pdo_inflight_mailbox_request_crosses_production_generation_without_retransmit() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<2, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let mut plan = PdoConfigPlan::<1>::new();
+    plan.push(PdoSdoWrite::new(0x1C12, 0, &[0]).unwrap())
+        .unwrap();
+    let mut pdo = PdoConfigController::<1>::new();
+    pdo.start(plan, 1, 41, 100_000, 500_000, 50_000).unwrap();
+    let mailbox_config = MailboxConfig::new(0x1000, 32, 0x1100, 32);
+    let mut pdo_mailbox = MailboxController::new();
+    let mut scheduler = ScheduledProductionServiceScheduler::new();
+    let mut controls = ControlRequestPool::<1>::new();
+    let mut port = TwoFrameSimPort::new();
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut dc_image = [0; 8];
+
+    port.set_now_ns(100_000);
+    port.drop_nth_next_response(2);
+    let waiting = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            100_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 0, 0, 1>::new(None, None, None, None)
+                .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                    &mut pdo,
+                    &mut pdo_mailbox,
+                    mailbox_config,
+                )),
+            1,
+            150_000,
+            150_000,
+        )
+        .unwrap();
+    let request = waiting.request().unwrap();
+    let pdo_action = pdo.pending().unwrap();
+    assert_eq!(controls.get(request).unwrap().generation, 41);
+    assert_eq!(controls.get(request).unwrap().state, RequestState::InFlight);
+    assert_eq!(
+        waiting.recovery(),
+        ScheduledProductionServiceRecovery::AwaitingResponse
+    );
+    let attempts_after_first_send = port.tx_attempts;
+
+    port.set_now_ns(110_000);
+    let retained = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            110_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 0, 0, 1>::new(None, None, None, None)
+                .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                    &mut pdo,
+                    &mut pdo_mailbox,
+                    mailbox_config,
+                )),
+            2,
+            160_000,
+            160_000,
+        )
+        .unwrap();
+    assert_eq!(retained.request(), Some(request));
+    assert_eq!(pdo.pending(), Some(pdo_action));
+    assert_eq!(port.tx_attempts, attempts_after_first_send + 1);
+    assert_eq!(controls.get(request).unwrap().state, RequestState::InFlight);
+
+    port.set_now_ns(150_001);
+    let timed_out = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            150_001,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 0, 0, 1>::new(None, None, None, None)
+                .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                    &mut pdo,
+                    &mut pdo_mailbox,
+                    mailbox_config,
+                )),
+            3,
+            200_000,
+            200_000,
+        )
+        .unwrap();
+    assert_eq!(timed_out.request(), None);
+    assert_eq!(
+        timed_out.fault(),
+        Some(ScheduledProductionServiceFault::PdoConfiguration(
+            PdoConfigError::Mailbox(MailboxError::Timeout)
+        ))
+    );
+    assert_eq!(pdo.phase(), PdoConfigPhase::Faulted);
+    assert_eq!(pdo.operation_index(), 0);
     assert_eq!(controls.in_use(), 0);
 }
 
@@ -1838,6 +2776,11 @@ struct TwoFrameSimPort {
     fail_on_attempt: Option<usize>,
     rx_polls: usize,
     reported_now_after_rx_polls: Option<(usize, u64)>,
+    mailbox_send_address: Option<u32>,
+    mailbox_receive_address: Option<u32>,
+    mailbox_counter: u8,
+    mailbox_response: [u8; MAX_MAILBOX_BYTES],
+    mailbox_response_len: usize,
 }
 
 impl TwoFrameSimPort {
@@ -1852,7 +2795,37 @@ impl TwoFrameSimPort {
             fail_on_attempt: None,
             rx_polls: 0,
             reported_now_after_rx_polls: None,
+            mailbox_send_address: None,
+            mailbox_receive_address: None,
+            mailbox_counter: 0,
+            mailbox_response: [0; MAX_MAILBOX_BYTES],
+            mailbox_response_len: 0,
         }
+    }
+
+    fn configure_mailbox(&mut self, station_address: u16, config: MailboxConfig) {
+        self.mailbox_send_address = Some(fixed_address(station_address, config.send_address));
+        self.mailbox_receive_address = Some(fixed_address(station_address, config.receive_address));
+    }
+
+    fn set_next_mailbox_response(&mut self, payload: &[u8]) {
+        self.set_next_mailbox_response_with_counter(payload, self.mailbox_counter);
+    }
+
+    fn set_next_mailbox_response_with_counter(&mut self, payload: &[u8], counter: u8) {
+        assert!(payload.len() + 6 <= self.mailbox_response.len());
+        self.mailbox_response.fill(0);
+        MailboxHeader {
+            length: payload.len() as u16,
+            address: 0,
+            priority: 0,
+            protocol: MailboxProtocol::CoE,
+            counter,
+        }
+        .encode(&mut self.mailbox_response)
+        .unwrap();
+        self.mailbox_response[6..6 + payload.len()].copy_from_slice(payload);
+        self.mailbox_response_len = 6 + payload.len();
     }
 
     fn set_now_ns(&mut self, now_ns: u64) {
@@ -1908,6 +2881,34 @@ impl EthercatPort for TwoFrameSimPort {
         }
         self.inner.tx_submit(frame)?;
         if let RxPoll::Frame(len) = self.inner.rx_poll(&mut self.frames[self.count])? {
+            let mut offset = ETHERNET_HEADER_LEN + ETHERCAT_FRAME_HEADER_LEN;
+            loop {
+                let header_end = offset + DATAGRAM_HEADER_LEN;
+                let header =
+                    DatagramHeader::decode(&self.frames[self.count][offset..header_end]).unwrap();
+                let payload_end = header_end + header.length as usize;
+                if Some(header.address) == self.mailbox_send_address
+                    && header.command == Command::Fpwr
+                {
+                    self.mailbox_counter =
+                        MailboxHeader::decode(&self.frames[self.count][header_end..payload_end])
+                            .unwrap()
+                            .counter;
+                } else if Some(header.address) == self.mailbox_receive_address
+                    && header.command == Command::Fprd
+                    && self.mailbox_response_len != 0
+                {
+                    let response_len = self.mailbox_response_len.min(header.length as usize);
+                    self.frames[self.count][header_end..payload_end].fill(0);
+                    self.frames[self.count][header_end..header_end + response_len]
+                        .copy_from_slice(&self.mailbox_response[..response_len]);
+                    self.mailbox_response_len = 0;
+                }
+                offset = payload_end + WORKING_COUNTER_LEN;
+                if header.last {
+                    break;
+                }
+            }
             self.lengths[self.count] = len;
             self.count += 1;
         }

@@ -341,6 +341,21 @@ impl MailboxController {
         self.discarded_frames
     }
 
+    pub(crate) fn transaction_matches(
+        &self,
+        station_address: u16,
+        generation: u16,
+        protocol: MailboxProtocol,
+        payload: &[u8],
+    ) -> bool {
+        self.phase != MailboxPhase::Idle
+            && self.station_address == station_address
+            && self.generation == generation
+            && self.protocol == protocol
+            && self.send_len == MAILBOX_HEADER_LEN + payload.len()
+            && self.send_frame[MAILBOX_HEADER_LEN..self.send_len] == *payload
+    }
+
     pub fn response(&self) -> Option<(&MailboxHeader, &[u8])> {
         if self.phase != MailboxPhase::Complete {
             return None;

@@ -26,7 +26,7 @@
         "scripts/tests/test_robot_build_report.py",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "The supported ESI subset is byte-aligned and explicit; modular devices, bit-packed PDOs, vendor scaling/quirks, artifact signing/distribution, production-scheduled live PDO readback, physical slave interoperability, measured wire timing, target resource/WCET and safety qualification remain open"
+      "limitation": "The supported ESI subset is byte-aligned and explicit; modular devices, bit-packed PDOs, vendor scaling/quirks, artifact signing/distribution, complete AL-state activation orchestration, physical slave interoperability, measured wire timing, target resource/WCET and safety qualification remain open"
     },
     {
       "id": "product_runtime_attachment",
@@ -40,19 +40,22 @@
         "Makefile",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Activation validates static expectations and builds bounded PDO plans; production service/mailbox execution, authentic physical readback, artifact signing/deployment policy, interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
+      "limitation": "Activation validates static expectations and builds bounded PDO plans that can run through the production scheduler; the caller must still provide the PREOP configuration window and MailboxConfig, while authentic physical readback, artifact signing/deployment policy, interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
     },
     {
       "id": "pdo_configuration_readback",
       "status": "implemented",
-      "scope": "Allocation-free CoE PDO assignment/mapping controller that downloads every planned value, uploads the same object, and advances only after exact length and byte verification",
+      "scope": "Allocation-free CoE PDO assignment/mapping controller integrated with fixed-priority production scheduling, bounded mailbox/DC/shared-RX ownership, typed retry/timeout faults, exact upload readback and Configuration lifecycle gating",
       "evidence": [
         "crates/esop-ethercat-core/src/pdo_config.rs",
+        "crates/esop-ethercat-core/src/production_service.rs",
+        "crates/esop-ethercat-linux-port/tests/scheduled_domains.rs",
+        "crates/esop-lifecycle-guard/src/ethercat.rs",
         "crates/esop-product-config/src/lib.rs",
         "crates/esop-product-config/tests/generated_product.rs",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "The controller and generated plans are software contracts; ScheduledProductionServiceScheduler integration, mailbox transport ownership, physical response authenticity, device interoperability and HIL remain open"
+      "limitation": "Deterministic simulation proves scheduler/mailbox ownership and response routing only; full INIT/PREOP/configuration/SAFEOP/OP orchestration, automatic MailboxConfig discovery, physical response authenticity, device interoperability, target timing and HIL remain open"
     },
     {
       "id": "linux_raw_port",

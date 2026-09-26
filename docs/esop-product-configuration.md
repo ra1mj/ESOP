@@ -102,8 +102,13 @@ schedule、frame plan、轴模式、策略和 PDO map。每轴 PDO 临时映射�
 assignment count，再写该 SM 的 mapping 对象，最后发布 mapping index 列表和
 count，并返回固定站地址。核心 `PdoConfigController` 对每个写值执行 download
 和同对象 upload 回读，只有长度与字节完全一致才推进；分段 upload、代际、
-动作、超时和 mismatch 均沿类型化故障路径 fail-closed。该控制器尚未接入
-`ScheduledProductionServiceScheduler` 的生产邮箱预算。
+动作、超时和 mismatch 均沿类型化故障路径 fail-closed。调用方可通过
+`ScheduledPdoConfiguration` 把该控制器、`MailboxController` 和运行期
+`MailboxConfig` 绑定到 `ScheduledProductionServiceScheduler`；调度器按
+Startup、PDO Configuration、Mapping、DC Configuration、Mailbox 的固定顺序，
+把每笔 CoE 请求交给现有邮箱/DC/共享 RX 路径，并在精确 upload 回读完成后才
+放行 Configuration/CoE 生命周期门。该接入要求调用方先把从站置于支持邮箱配置
+的状态（通常为 PREOP），不自动编排完整 AL 状态序列。
 
 ## 6. 构建报告接入
 
@@ -123,7 +128,8 @@ make build-report \
 
 配置生成证明的是输入合同、静态布局和软件规划的一致性，不证明 ESI 与
 真实从站固件一致。运行时可生成 PDO 配置计划并对调用方交付的 SDO 响应做
-逐字节 read-back 校验，但在生产调度/邮箱传输接入和真实设备 HIL 前，不等于
-真实从站 PDO assignment/mapping 证据，也不证明驱动接受映射、
+逐字节 read-back 校验；生产调度器已通过确定性模拟端口覆盖邮箱发送、轮询、
+跨周期请求所有权、重试/超时、精确回读、故障阻断和生命周期门控，但该软件
+证据不等于真实从站 PDO assignment/mapping 证据，也不证明驱动接受映射、
 实际线缆时间、WCET、DMA/cache 正确性、制动/机械适配、STO/FSoE 或功能安全。生成示例和构建报告必须保持
 `passed: false`，直到独立的目标构建、HIL、周期测量和发布审核提供证据。

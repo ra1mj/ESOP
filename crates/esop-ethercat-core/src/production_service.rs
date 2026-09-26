@@ -1,17 +1,23 @@
 //! Fixed-priority production service scheduling over the shared cyclic RX.
 //!
-//! Startup, mapping, DC configuration, and mailbox controllers retain their
-//! own state machines. This scheduler owns the single request handle admitted
-//! to the production service slot, keeps it across cycles while it is in
-//! flight, and consumes or rebuilds it without allowing a lower-priority
-//! service to overtake the active transaction.
+//! Startup, PDO configuration, mapping, DC configuration, and mailbox
+//! controllers retain their own state machines. This scheduler owns the single
+//! request handle admitted to the production service slot, keeps it across
+//! cycles while it is in flight, and consumes or rebuilds it without allowing
+//! a lower-priority service to overtake the active transaction.
 
 use crate::control::{ControlError, ControlRequestPool, RequestHandle, RequestState};
 use crate::dc::{DcController, DcCyclicSync, DcError, DcPhase, DcProgress};
 use crate::engine::EthercatMaster;
-use crate::mailbox::{MailboxController, MailboxError, MailboxPhase, MailboxProgress};
+use crate::mailbox::{
+    MAX_MAILBOX_BYTES, MailboxConfig, MailboxController, MailboxError, MailboxPhase,
+    MailboxProgress, MailboxProtocol,
+};
 use crate::mapping_config::{
     MappingConfigController, MappingConfigError, MappingConfigPhase, MappingConfigProgress,
+};
+use crate::pdo_config::{
+    PdoConfigAction, PdoConfigController, PdoConfigError, PdoConfigPhase, PdoConfigProgress,
 };
 use crate::port::EthercatPort;
 use crate::scheduled_domains::{
@@ -25,9 +31,16 @@ use crate::wire::MAX_ETHERNET_FRAME_LEN;
 pub enum ScheduledProductionServiceKind {
     Idle,
     Startup,
+    PdoConfiguration,
     Mapping,
     DcConfiguration,
     Mailbox,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScheduledPdoConfigurationProgress {
+    Mailbox(MailboxProgress),
+    Configuration(PdoConfigProgress),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,6 +48,7 @@ pub enum ScheduledProductionServiceProgress {
     Idle,
     Waiting,
     Startup(StartupProgress),
+    PdoConfiguration(ScheduledPdoConfigurationProgress),
     Mapping(MappingConfigProgress),
     DcConfiguration(DcProgress),
     Mailbox(MailboxProgress),
@@ -44,6 +58,7 @@ pub enum ScheduledProductionServiceProgress {
 pub enum ScheduledProductionServiceFault {
     Control(ControlError),
     Startup(StartupError),
+    PdoConfiguration(PdoConfigError),
     Mapping(MappingConfigError),
     DcConfiguration(DcError),
     Mailbox(MailboxError),
@@ -57,20 +72,42 @@ pub enum ScheduledProductionServiceRecovery {
     Faulted,
 }
 
+pub struct ScheduledPdoConfiguration<'a, const OPS: usize> {
+    controller: &'a mut PdoConfigController<OPS>,
+    mailbox: &'a mut MailboxController,
+    mailbox_config: MailboxConfig,
+}
+
+impl<'a, const OPS: usize> ScheduledPdoConfiguration<'a, OPS> {
+    pub const fn new(
+        controller: &'a mut PdoConfigController<OPS>,
+        mailbox: &'a mut MailboxController,
+        mailbox_config: MailboxConfig,
+    ) -> Self {
+        Self {
+            controller,
+            mailbox,
+            mailbox_config,
+        }
+    }
+}
+
 pub struct ScheduledProductionServices<
     'a,
     const MAX_SLAVES: usize,
     const SMS: usize,
     const FMMUS: usize,
+    const PDO_OPS: usize = 0,
 > {
     pub startup: Option<&'a mut StartupController<MAX_SLAVES>>,
+    pdo_configuration: Option<ScheduledPdoConfiguration<'a, PDO_OPS>>,
     pub mapping: Option<&'a mut MappingConfigController<SMS, FMMUS>>,
     pub dc_configuration: Option<&'a mut DcController>,
     pub mailbox: Option<&'a mut MailboxController>,
 }
 
-impl<'a, const MAX_SLAVES: usize, const SMS: usize, const FMMUS: usize>
-    ScheduledProductionServices<'a, MAX_SLAVES, SMS, FMMUS>
+impl<'a, const MAX_SLAVES: usize, const SMS: usize, const FMMUS: usize, const PDO_OPS: usize>
+    ScheduledProductionServices<'a, MAX_SLAVES, SMS, FMMUS, PDO_OPS>
 {
     pub const fn new(
         startup: Option<&'a mut StartupController<MAX_SLAVES>>,
@@ -80,10 +117,19 @@ impl<'a, const MAX_SLAVES: usize, const SMS: usize, const FMMUS: usize>
     ) -> Self {
         Self {
             startup,
+            pdo_configuration: None,
             mapping,
             dc_configuration,
             mailbox,
         }
+    }
+
+    pub fn with_pdo_configuration(
+        mut self,
+        pdo_configuration: ScheduledPdoConfiguration<'a, PDO_OPS>,
+    ) -> Self {
+        self.pdo_configuration = Some(pdo_configuration);
+        self
     }
 }
 
@@ -186,12 +232,27 @@ pub enum ScheduledProductionServiceCycleError<E, const DOMAINS: usize> {
 pub struct ScheduledProductionServiceScheduler {
     active: ScheduledProductionServiceKind,
     request: Option<RequestHandle>,
+    pdo_action: Option<PdoConfigAction>,
 }
 
 struct ScheduledProductionEnqueueOutcome {
     request: Option<RequestHandle>,
     progress: Option<ScheduledProductionServiceProgress>,
     fault: Option<ScheduledProductionServiceFault>,
+}
+
+struct ScheduledMailboxEnqueueOutcome {
+    request: Option<RequestHandle>,
+    progress: Option<MailboxProgress>,
+    fault: Option<MailboxError>,
+}
+
+impl ScheduledMailboxEnqueueOutcome {
+    const EMPTY: Self = Self {
+        request: None,
+        progress: None,
+        fault: None,
+    };
 }
 
 impl ScheduledProductionEnqueueOutcome {
@@ -207,6 +268,7 @@ impl ScheduledProductionServiceScheduler {
         Self {
             active: ScheduledProductionServiceKind::Idle,
             request: None,
+            pdo_action: None,
         }
     }
 
@@ -229,6 +291,7 @@ impl ScheduledProductionServiceScheduler {
         const MAX_SLAVES: usize,
         const SMS: usize,
         const FMMUS: usize,
+        const PDO_OPS: usize,
     >(
         &mut self,
         bank: &mut ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
@@ -239,7 +302,7 @@ impl ScheduledProductionServiceScheduler {
         dc_image: &mut [u8],
         application_time_ns: u64,
         controls: &mut ControlRequestPool<REQUESTS>,
-        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS>,
+        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
         generation: u16,
         rx_deadline_ns: u64,
         cycle_deadline_ns: u64,
@@ -249,6 +312,13 @@ impl ScheduledProductionServiceScheduler {
     > {
         self.refresh_selection(services);
         let selected = self.active;
+        if selected == ScheduledProductionServiceKind::PdoConfiguration
+            && services.pdo_configuration.is_none()
+        {
+            return Err(ScheduledProductionServiceCycleError::MissingController(
+                selected,
+            ));
+        }
         self.ensure_request_matches(controls, services)
             .map_err(ScheduledProductionServiceCycleError::RequestMismatch)?;
         let mut pre_progress = None;
@@ -262,10 +332,21 @@ impl ScheduledProductionServiceScheduler {
             pre_fault = outcome.fault;
         }
 
-        if selected == ScheduledProductionServiceKind::Mailbox {
-            let mailbox = services.mailbox.as_deref_mut().ok_or(
-                ScheduledProductionServiceCycleError::MissingController(selected),
-            )?;
+        if selected == ScheduledProductionServiceKind::Mailbox
+            || (selected == ScheduledProductionServiceKind::PdoConfiguration
+                && self.pdo_action.is_some())
+        {
+            let mailbox = match selected {
+                ScheduledProductionServiceKind::PdoConfiguration => services
+                    .pdo_configuration
+                    .as_mut()
+                    .map(|binding| &mut *binding.mailbox),
+                ScheduledProductionServiceKind::Mailbox => services.mailbox.as_deref_mut(),
+                _ => None,
+            }
+            .ok_or(ScheduledProductionServiceCycleError::MissingController(
+                selected,
+            ))?;
             let cycle = match bank.run_dc_and_mailbox_cycle(
                 master,
                 port,
@@ -288,6 +369,116 @@ impl ScheduledProductionServiceScheduler {
                 }
             };
             self.request = cycle.request;
+            if selected == ScheduledProductionServiceKind::PdoConfiguration {
+                let binding = services.pdo_configuration.as_mut().ok_or(
+                    ScheduledProductionServiceCycleError::MissingController(selected),
+                )?;
+                let mailbox_progress = cycle.receive.mailbox_progress;
+                let mut progress =
+                    pre_progress.unwrap_or(ScheduledProductionServiceProgress::Waiting);
+                let mut fault = pre_fault;
+
+                match mailbox_progress {
+                    Some(Ok(MailboxProgress::Complete)) => {
+                        let action = self.pdo_action.ok_or(
+                            ScheduledProductionServiceCycleError::RequestMismatch(selected),
+                        )?;
+                        let mut response = [0; MAX_MAILBOX_BYTES];
+                        let response_len = match binding.mailbox.response() {
+                            Some((_, payload)) => {
+                                response[..payload.len()].copy_from_slice(payload);
+                                payload.len()
+                            }
+                            None => {
+                                self.pdo_action = None;
+                                match binding
+                                    .controller
+                                    .mailbox_failed(action, MailboxError::NoPendingAction)
+                                {
+                                    Ok(value) => {
+                                        progress =
+                                            ScheduledProductionServiceProgress::PdoConfiguration(
+                                                ScheduledPdoConfigurationProgress::Configuration(
+                                                    value,
+                                                ),
+                                            );
+                                    }
+                                    Err(error) => {
+                                        fault = Some(
+                                            ScheduledProductionServiceFault::PdoConfiguration(
+                                                error,
+                                            ),
+                                        );
+                                    }
+                                }
+                                0
+                            }
+                        };
+                        if response_len != 0 {
+                            self.pdo_action = None;
+                            match binding.controller.accept(
+                                action,
+                                action.generation,
+                                &response[..response_len],
+                                port.now_ns(),
+                            ) {
+                                Ok(value) => {
+                                    progress = ScheduledProductionServiceProgress::PdoConfiguration(
+                                        ScheduledPdoConfigurationProgress::Configuration(value),
+                                    );
+                                }
+                                Err(error) => {
+                                    fault = Some(
+                                        ScheduledProductionServiceFault::PdoConfiguration(error),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Some(Ok(value)) => {
+                        progress = ScheduledProductionServiceProgress::PdoConfiguration(
+                            ScheduledPdoConfigurationProgress::Mailbox(value),
+                        );
+                    }
+                    Some(Err(error)) => {
+                        let action = self.pdo_action.ok_or(
+                            ScheduledProductionServiceCycleError::RequestMismatch(selected),
+                        )?;
+                        self.pdo_action = None;
+                        match binding.controller.mailbox_failed(action, error) {
+                            Ok(value) => {
+                                progress = ScheduledProductionServiceProgress::PdoConfiguration(
+                                    ScheduledPdoConfigurationProgress::Configuration(value),
+                                );
+                            }
+                            Err(error) => {
+                                fault =
+                                    Some(ScheduledProductionServiceFault::PdoConfiguration(error));
+                            }
+                        }
+                    }
+                    None => {}
+                }
+                fault = fault.or_else(|| {
+                    binding
+                        .controller
+                        .last_error()
+                        .map(ScheduledProductionServiceFault::PdoConfiguration)
+                });
+                let recovery = self.recovery(controls, progress, fault);
+                let service_ready = cycle.tx.service.failure.is_none()
+                    && fault.is_none()
+                    && binding.controller.phase() == PdoConfigPhase::Complete;
+                return Ok(ScheduledProductionServiceCycleReport {
+                    selected,
+                    progress,
+                    fault,
+                    recovery,
+                    request: self.request,
+                    service_ready,
+                    transport: ScheduledProductionServiceTransport::Mailbox(cycle),
+                });
+            }
             let progress = cycle
                 .receive
                 .mailbox_progress
@@ -388,15 +579,24 @@ impl ScheduledProductionServiceScheduler {
         })
     }
 
-    fn refresh_selection<const MAX_SLAVES: usize, const SMS: usize, const FMMUS: usize>(
+    fn refresh_selection<
+        const MAX_SLAVES: usize,
+        const SMS: usize,
+        const FMMUS: usize,
+        const PDO_OPS: usize,
+    >(
         &mut self,
-        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS>,
+        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
     ) {
-        if self.request.is_some() || self.service_active(services, self.active) {
+        if self.request.is_some()
+            || self.pdo_action.is_some()
+            || self.service_active(services, self.active)
+        {
             return;
         }
         self.active = [
             ScheduledProductionServiceKind::Startup,
+            ScheduledProductionServiceKind::PdoConfiguration,
             ScheduledProductionServiceKind::Mapping,
             ScheduledProductionServiceKind::DcConfiguration,
             ScheduledProductionServiceKind::Mailbox,
@@ -406,9 +606,14 @@ impl ScheduledProductionServiceScheduler {
         .unwrap_or(ScheduledProductionServiceKind::Idle);
     }
 
-    fn service_active<const MAX_SLAVES: usize, const SMS: usize, const FMMUS: usize>(
+    fn service_active<
+        const MAX_SLAVES: usize,
+        const SMS: usize,
+        const FMMUS: usize,
+        const PDO_OPS: usize,
+    >(
         &self,
-        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS>,
+        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
         kind: ScheduledProductionServiceKind,
     ) -> bool {
         match kind {
@@ -416,6 +621,14 @@ impl ScheduledProductionServiceScheduler {
             ScheduledProductionServiceKind::Startup => {
                 services.startup.as_deref().is_some_and(|controller| {
                     !matches!(controller.phase(), StartupPhase::Idle | StartupPhase::Ready)
+                })
+            }
+            ScheduledProductionServiceKind::PdoConfiguration => {
+                services.pdo_configuration.as_ref().is_some_and(|binding| {
+                    !matches!(
+                        binding.controller.phase(),
+                        PdoConfigPhase::Idle | PdoConfigPhase::Complete
+                    )
                 })
             }
             ScheduledProductionServiceKind::Mapping => {
@@ -448,11 +661,30 @@ impl ScheduledProductionServiceScheduler {
         const MAX_SLAVES: usize,
         const SMS: usize,
         const FMMUS: usize,
+        const PDO_OPS: usize,
     >(
         &self,
         controls: &ControlRequestPool<REQUESTS>,
-        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS>,
+        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
     ) -> Result<(), ScheduledProductionServiceKind> {
+        if self.active == ScheduledProductionServiceKind::PdoConfiguration {
+            let binding = services.pdo_configuration.as_ref().ok_or(self.active)?;
+            let action_matches = match self.pdo_action {
+                Some(action) => {
+                    binding.controller.pending() == Some(action)
+                        && binding.mailbox.transaction_matches(
+                            action.station_address,
+                            action.generation,
+                            MailboxProtocol::CoE,
+                            action.payload(),
+                        )
+                }
+                None => binding.controller.pending().is_none(),
+            };
+            if !action_matches {
+                return Err(self.active);
+            }
+        }
         let Some(handle) = self.request else {
             return Ok(());
         };
@@ -471,6 +703,21 @@ impl ScheduledProductionServiceScheduler {
                         action.payload(),
                         action.datagram_len(),
                         action.deadline_ns(),
+                    )
+                }),
+            ScheduledProductionServiceKind::PdoConfiguration => services
+                .pdo_configuration
+                .as_ref()
+                .and_then(|binding| binding.mailbox.pending())
+                .is_some_and(|action| {
+                    request.matches_action(
+                        action.datagram_index,
+                        action.generation,
+                        action.address,
+                        action.operation,
+                        action.payload(),
+                        action.datagram_len(),
+                        action.deadline_ns,
                     )
                 }),
             ScheduledProductionServiceKind::Mapping => services
@@ -528,11 +775,12 @@ impl ScheduledProductionServiceScheduler {
         const MAX_SLAVES: usize,
         const SMS: usize,
         const FMMUS: usize,
+        const PDO_OPS: usize,
     >(
         &mut self,
         now_ns: u64,
         controls: &mut ControlRequestPool<REQUESTS>,
-        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS>,
+        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
     ) -> Result<ScheduledProductionEnqueueOutcome, ControlError> {
         match self.active {
             ScheduledProductionServiceKind::Idle => Ok(ScheduledProductionEnqueueOutcome::EMPTY),
@@ -568,6 +816,108 @@ impl ScheduledProductionServiceScheduler {
                 Ok(ScheduledProductionEnqueueOutcome {
                     request: Some(controller.enqueue_pending(controls)?),
                     ..ScheduledProductionEnqueueOutcome::EMPTY
+                })
+            }
+            ScheduledProductionServiceKind::PdoConfiguration => {
+                let binding = services
+                    .pdo_configuration
+                    .as_mut()
+                    .ok_or(ControlError::InvalidState)?;
+                if self.pdo_action.is_none() {
+                    let action = match binding.controller.next_action(now_ns) {
+                        Ok(action) => action,
+                        Err(error) => {
+                            return Ok(ScheduledProductionEnqueueOutcome {
+                                fault: Some(ScheduledProductionServiceFault::PdoConfiguration(
+                                    error,
+                                )),
+                                ..ScheduledProductionEnqueueOutcome::EMPTY
+                            });
+                        }
+                    };
+                    let Some(action) = action else {
+                        return Ok(ScheduledProductionEnqueueOutcome::EMPTY);
+                    };
+                    if action.deadline_ns <= now_ns {
+                        return Ok(match binding.controller.timeout(action, now_ns) {
+                            Ok(progress) => ScheduledProductionEnqueueOutcome {
+                                progress: Some(
+                                    ScheduledProductionServiceProgress::PdoConfiguration(
+                                        ScheduledPdoConfigurationProgress::Configuration(progress),
+                                    ),
+                                ),
+                                ..ScheduledProductionEnqueueOutcome::EMPTY
+                            },
+                            Err(error) => ScheduledProductionEnqueueOutcome {
+                                fault: Some(ScheduledProductionServiceFault::PdoConfiguration(
+                                    error,
+                                )),
+                                ..ScheduledProductionEnqueueOutcome::EMPTY
+                            },
+                        });
+                    }
+                    let remaining_ns = action.deadline_ns.saturating_sub(now_ns);
+                    let mut mailbox_config = binding.mailbox_config;
+                    mailbox_config.timeout_ns = mailbox_config.timeout_ns.min(remaining_ns);
+                    mailbox_config.request_timeout_ns =
+                        mailbox_config.request_timeout_ns.min(remaining_ns);
+                    if let Err(error) = binding.mailbox.start(
+                        mailbox_config,
+                        action.station_address,
+                        action.generation,
+                        now_ns,
+                        MailboxProtocol::CoE,
+                        action.payload(),
+                    ) {
+                        return Ok(match binding.controller.mailbox_failed(action, error) {
+                            Ok(progress) => ScheduledProductionEnqueueOutcome {
+                                progress: Some(
+                                    ScheduledProductionServiceProgress::PdoConfiguration(
+                                        ScheduledPdoConfigurationProgress::Configuration(progress),
+                                    ),
+                                ),
+                                ..ScheduledProductionEnqueueOutcome::EMPTY
+                            },
+                            Err(error) => ScheduledProductionEnqueueOutcome {
+                                fault: Some(ScheduledProductionServiceFault::PdoConfiguration(
+                                    error,
+                                )),
+                                ..ScheduledProductionEnqueueOutcome::EMPTY
+                            },
+                        });
+                    }
+                    self.pdo_action = Some(action);
+                }
+
+                let outcome = enqueue_mailbox(now_ns, controls, binding.mailbox)?;
+                if let Some(error) = outcome.fault.or_else(|| {
+                    (binding.mailbox.phase() == MailboxPhase::Faulted)
+                        .then(|| binding.mailbox.last_error())
+                        .flatten()
+                }) {
+                    let action = self.pdo_action.ok_or(ControlError::InvalidState)?;
+                    self.pdo_action = None;
+                    return Ok(match binding.controller.mailbox_failed(action, error) {
+                        Ok(progress) => ScheduledProductionEnqueueOutcome {
+                            progress: Some(ScheduledProductionServiceProgress::PdoConfiguration(
+                                ScheduledPdoConfigurationProgress::Configuration(progress),
+                            )),
+                            ..ScheduledProductionEnqueueOutcome::EMPTY
+                        },
+                        Err(error) => ScheduledProductionEnqueueOutcome {
+                            fault: Some(ScheduledProductionServiceFault::PdoConfiguration(error)),
+                            ..ScheduledProductionEnqueueOutcome::EMPTY
+                        },
+                    });
+                }
+                Ok(ScheduledProductionEnqueueOutcome {
+                    request: outcome.request,
+                    progress: outcome.progress.map(|progress| {
+                        ScheduledProductionServiceProgress::PdoConfiguration(
+                            ScheduledPdoConfigurationProgress::Mailbox(progress),
+                        )
+                    }),
+                    fault: None,
                 })
             }
             ScheduledProductionServiceKind::Mapping => {
@@ -645,33 +995,13 @@ impl ScheduledProductionServiceScheduler {
                     .mailbox
                     .as_deref_mut()
                     .ok_or(ControlError::InvalidState)?;
-                let action = match controller.next_action(now_ns) {
-                    Ok(action) => action,
-                    Err(error) => {
-                        return Ok(ScheduledProductionEnqueueOutcome {
-                            fault: Some(ScheduledProductionServiceFault::Mailbox(error)),
-                            ..ScheduledProductionEnqueueOutcome::EMPTY
-                        });
-                    }
-                };
-                let Some(action) = action else {
-                    return Ok(ScheduledProductionEnqueueOutcome::EMPTY);
-                };
-                if action.deadline_ns <= now_ns {
-                    return Ok(match controller.timeout(action, now_ns) {
-                        Ok(progress) => ScheduledProductionEnqueueOutcome {
-                            progress: Some(ScheduledProductionServiceProgress::Mailbox(progress)),
-                            ..ScheduledProductionEnqueueOutcome::EMPTY
-                        },
-                        Err(error) => ScheduledProductionEnqueueOutcome {
-                            fault: Some(ScheduledProductionServiceFault::Mailbox(error)),
-                            ..ScheduledProductionEnqueueOutcome::EMPTY
-                        },
-                    });
-                }
+                let outcome = enqueue_mailbox(now_ns, controls, controller)?;
                 Ok(ScheduledProductionEnqueueOutcome {
-                    request: Some(controller.enqueue_pending(controls)?),
-                    ..ScheduledProductionEnqueueOutcome::EMPTY
+                    request: outcome.request,
+                    progress: outcome
+                        .progress
+                        .map(ScheduledProductionServiceProgress::Mailbox),
+                    fault: outcome.fault.map(ScheduledProductionServiceFault::Mailbox),
                 })
             }
         }
@@ -699,10 +1029,11 @@ impl ScheduledProductionServiceScheduler {
         const MAX_SLAVES: usize,
         const SMS: usize,
         const FMMUS: usize,
+        const PDO_OPS: usize,
     >(
         &mut self,
         controls: &mut ControlRequestPool<REQUESTS>,
-        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS>,
+        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
         handle: RequestHandle,
         now_ns: u64,
     ) -> Result<ScheduledProductionServiceProgress, ScheduledProductionServiceFault> {
@@ -734,15 +1065,22 @@ impl ScheduledProductionServiceScheduler {
                 .accept_completed(controls, handle, now_ns)
                 .map(ScheduledProductionServiceProgress::DcConfiguration)
                 .map_err(ScheduledProductionServiceFault::DcConfiguration),
-            ScheduledProductionServiceKind::Idle | ScheduledProductionServiceKind::Mailbox => Err(
+            ScheduledProductionServiceKind::Idle
+            | ScheduledProductionServiceKind::PdoConfiguration
+            | ScheduledProductionServiceKind::Mailbox => Err(
                 ScheduledProductionServiceFault::Control(ControlError::InvalidState),
             ),
         }
     }
 
-    fn controller_fault<const MAX_SLAVES: usize, const SMS: usize, const FMMUS: usize>(
+    fn controller_fault<
+        const MAX_SLAVES: usize,
+        const SMS: usize,
+        const FMMUS: usize,
+        const PDO_OPS: usize,
+    >(
         &self,
-        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS>,
+        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
     ) -> Option<ScheduledProductionServiceFault> {
         match self.active {
             ScheduledProductionServiceKind::Idle => None,
@@ -751,6 +1089,11 @@ impl ScheduledProductionServiceScheduler {
                 .as_deref()
                 .and_then(StartupController::last_error)
                 .map(ScheduledProductionServiceFault::Startup),
+            ScheduledProductionServiceKind::PdoConfiguration => services
+                .pdo_configuration
+                .as_ref()
+                .and_then(|binding| binding.controller.last_error())
+                .map(ScheduledProductionServiceFault::PdoConfiguration),
             ScheduledProductionServiceKind::Mapping => services
                 .mapping
                 .as_deref()
@@ -769,9 +1112,14 @@ impl ScheduledProductionServiceScheduler {
         }
     }
 
-    fn controller_ready<const MAX_SLAVES: usize, const SMS: usize, const FMMUS: usize>(
+    fn controller_ready<
+        const MAX_SLAVES: usize,
+        const SMS: usize,
+        const FMMUS: usize,
+        const PDO_OPS: usize,
+    >(
         &self,
-        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS>,
+        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
     ) -> bool {
         match self.active {
             ScheduledProductionServiceKind::Idle => true,
@@ -779,6 +1127,10 @@ impl ScheduledProductionServiceScheduler {
                 .startup
                 .as_deref()
                 .is_some_and(|controller| controller.phase() == StartupPhase::Ready),
+            ScheduledProductionServiceKind::PdoConfiguration => services
+                .pdo_configuration
+                .as_ref()
+                .is_some_and(|binding| binding.controller.phase() == PdoConfigPhase::Complete),
             ScheduledProductionServiceKind::Mapping => services
                 .mapping
                 .as_deref()
@@ -820,8 +1172,113 @@ impl ScheduledProductionServiceScheduler {
     }
 }
 
+fn enqueue_mailbox<const REQUESTS: usize>(
+    now_ns: u64,
+    controls: &mut ControlRequestPool<REQUESTS>,
+    controller: &mut MailboxController,
+) -> Result<ScheduledMailboxEnqueueOutcome, ControlError> {
+    let action = match controller.next_action(now_ns) {
+        Ok(action) => action,
+        Err(error) => {
+            return Ok(ScheduledMailboxEnqueueOutcome {
+                fault: Some(error),
+                ..ScheduledMailboxEnqueueOutcome::EMPTY
+            });
+        }
+    };
+    let Some(action) = action else {
+        return Ok(ScheduledMailboxEnqueueOutcome::EMPTY);
+    };
+    if action.deadline_ns <= now_ns {
+        return Ok(match controller.timeout(action, now_ns) {
+            Ok(progress) => ScheduledMailboxEnqueueOutcome {
+                progress: Some(progress),
+                ..ScheduledMailboxEnqueueOutcome::EMPTY
+            },
+            Err(error) => ScheduledMailboxEnqueueOutcome {
+                fault: Some(error),
+                ..ScheduledMailboxEnqueueOutcome::EMPTY
+            },
+        });
+    }
+    Ok(ScheduledMailboxEnqueueOutcome {
+        request: Some(controller.enqueue_pending(controls)?),
+        ..ScheduledMailboxEnqueueOutcome::EMPTY
+    })
+}
+
 impl Default for ScheduledProductionServiceScheduler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pdo_config::{PdoConfigPlan, PdoSdoWrite};
+
+    #[test]
+    fn pdo_binding_rejects_a_substituted_mailbox_without_a_pool_request() {
+        let mut plan = PdoConfigPlan::<1>::new();
+        plan.push(PdoSdoWrite::new(0x1C12, 0, &[0]).unwrap())
+            .unwrap();
+        let mut controller = PdoConfigController::<1>::new();
+        controller.start(plan, 1, 41, 0, 1_000, 100).unwrap();
+        let action = controller.next_action(1).unwrap().unwrap();
+        let config = MailboxConfig::new(0x1000, 32, 0x1100, 32);
+        let mut matching_mailbox = MailboxController::new();
+        matching_mailbox
+            .start(
+                config,
+                action.station_address,
+                action.generation,
+                1,
+                MailboxProtocol::CoE,
+                action.payload(),
+            )
+            .unwrap();
+        let controls = ControlRequestPool::<1>::new();
+        let scheduler = ScheduledProductionServiceScheduler {
+            active: ScheduledProductionServiceKind::PdoConfiguration,
+            request: None,
+            pdo_action: Some(action),
+        };
+        {
+            let services = ScheduledProductionServices::<0, 0, 0, 1>::new(None, None, None, None)
+                .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                    &mut controller,
+                    &mut matching_mailbox,
+                    config,
+                ));
+            assert_eq!(
+                scheduler.ensure_request_matches(&controls, &services),
+                Ok(())
+            );
+        }
+
+        let mut substituted_mailbox = MailboxController::new();
+        substituted_mailbox
+            .start(
+                config,
+                action.station_address,
+                action.generation.wrapping_add(1),
+                1,
+                MailboxProtocol::CoE,
+                action.payload(),
+            )
+            .unwrap();
+        let services = ScheduledProductionServices::<0, 0, 0, 1>::new(None, None, None, None)
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut controller,
+                &mut substituted_mailbox,
+                config,
+            ));
+        assert_eq!(
+            scheduler.ensure_request_matches(&controls, &services),
+            Err(ScheduledProductionServiceKind::PdoConfiguration)
+        );
+        assert_eq!(controller.pending(), Some(action));
+        assert_eq!(scheduler.pdo_action, Some(action));
     }
 }

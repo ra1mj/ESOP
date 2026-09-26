@@ -93,6 +93,7 @@ pub use pdo_config::{
 pub use plan::{DatagramPlan, FramePlan, FramePlanSet, FramePlanSetError, PlanError};
 pub use port::{EthercatDmaTxPort, EthercatPort, LinkState, PortError, RxPoll};
 pub use production_service::{
+    ScheduledPdoConfiguration, ScheduledPdoConfigurationProgress,
     ScheduledProductionServiceCycleError, ScheduledProductionServiceCycleReport,
     ScheduledProductionServiceFault, ScheduledProductionServiceKind,
     ScheduledProductionServiceProgress, ScheduledProductionServiceRecovery,

@@ -135,7 +135,7 @@ Platform layer
 
 当前 `crates/esop-ethercat-core/src/domain_registry.rs` 已提供固定容量的多 Domain/PDO/datagram 注册层：它在激活前分配稳定 bit offset、校验过程映像和逻辑地址范围、生成多速率调度表，并在激活后锁定配置。`SiiConfigurationCandidate` 可冻结为 `SiiDomainProjection`，将方向局部 PDO 布局与已核验的 FMMU/SyncManager 映射事务式登记到统一 Domain；字节对齐的 segment 可自动绑定 `LWR`/`LRD`，`FramePlanSet` 可按 MTU 拆分并在激活时原子发布。它不替代真实 SII/ESI 自动发现或 FMMU/SM 硬件回读。
 
-当前 `crates/esop-cfggen/` 已把上述注册层用于宿主机产品编译：显式 ESI identity/PDO 选择、稳定 Rx-then-Tx offset、每 Domain 的 LWR/LRD、expected WKC、多速率 schedule、CiA 402 对象/缩放/限幅和 ProcBuf ABI v6 布局会在发布前统一验证。`crates/esop-product-config/` 消费生成的 Rust 静态数据，在激活期通过相同注册/校验 API 重建并冻结计划；配置 hash、ProcBuf、精确从站记录、Domain 证据或轴映射任一不一致均拒绝。它还能按从站生成 assignment-clear/mapping/assignment-publish 启动计划；核心控制器对每个写值追加精确 SDO upload 回读，长度或内容不一致即故障。生产调度/邮箱接入、真实响应真实性、从站互操作或 HIL 仍未完成，该软件证据不能替代产品资格。
+当前 `crates/esop-cfggen/` 已把上述注册层用于宿主机产品编译：显式 ESI identity/PDO 选择、稳定 Rx-then-Tx offset、每 Domain 的 LWR/LRD、expected WKC、多速率 schedule、CiA 402 对象/缩放/限幅和 ProcBuf ABI v6 布局会在发布前统一验证。`crates/esop-product-config/` 消费生成的 Rust 静态数据，在激活期通过相同注册/校验 API 重建并冻结计划；配置 hash、ProcBuf、精确从站记录、Domain 证据或轴映射任一不一致均拒绝。它还能按从站生成 assignment-clear/mapping/assignment-publish 启动计划；核心控制器对每个写值追加精确 SDO upload 回读，长度或内容不一致即故障。`ScheduledPdoConfiguration` 已把计划执行接入统一生产调度、邮箱/DC/共享 RX、请求重建/超时和 Configuration 生命周期门。调用方仍须提供正确的 PREOP 配置窗口与 MailboxConfig；真实响应真实性、从站互操作、完整 AL 激活编排或 HIL 仍未完成，该软件证据不能替代产品资格。
 
 ## 5. ProcBuf：机器人实时数据载体
 
