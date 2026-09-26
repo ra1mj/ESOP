@@ -981,3 +981,49 @@ Added deterministic esop-cfggen product/ESI generation, runtime ProcBuf layout a
 ### Next Steps
 
 - None - task complete
+
+
+## Session 30: Attach generated product configuration to runtime
+
+**Date**: 2026-09-26
+**Task**: Attach generated product configuration to runtime
+**Branch**: `main`
+
+### Summary
+
+Added deterministic generated Rust product configuration and a fail-closed no_std runtime attachment that validates metadata/hash, ProcBuf v6, exact configured topology, Domain/PDO/datagram/WKC plans, schedules/frame plans, CiA 402 maps and axis policies. Local CI, BPF, Zenoh, and GitHub Actions quality run 36219467569 all passed.
+
+### Main Changes
+
+### Verification
+
+- `make ci` passed after the final runtime topology check.
+- `make bpf CLANG="$HOME/.local/opt/clang14/usr/bin/clang-14"` passed.
+- `make test-zenoh` passed both live router integration tests.
+- Generated `esop_product_config.rs` reproduced the checked-in golden file byte-for-byte.
+- `cargo check -p esop-product-config --target aarch64-unknown-none` passed.
+- GitHub Actions quality run `36219467569` passed all Rust, BPF/eBPF privileged runtime, and Zenoh jobs.
+
+### Remaining Qualification Scope
+
+- Live SII/PDO assignment read-back and artifact signing/deployment policy remain open.
+- Physical EtherCAT interoperability, target WCET/resources, HIL, mechanics/braking, STO/FSoE, and functional-safety qualification remain open.
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c99573c0a1ccb3e74d93696318bfa59cb2e78095` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
