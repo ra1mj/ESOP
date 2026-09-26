@@ -72,19 +72,19 @@ physically authentic.
 
 ## Acceptance Criteria
 
-- [ ] A fixed-capacity stream reader discovers a complete category image from
+- [x] A fixed-capacity stream reader discovers a complete category image from
       the standard category start through `SII_CATEGORY_END` without heap
       allocation or blocking.
-- [ ] Every emitted action keeps bounded, non-reset token/datagram ownership
+- [x] Every emitted action keeps bounded, non-reset token/datagram ownership
       across internal block boundaries and uses one absolute scan deadline.
-- [ ] Capacity, missing-end, address, WKC, generation, token, payload and
+- [x] Capacity, missing-end, address, WKC, generation, token, payload and
       timeout failures are typed and do not publish partial evidence.
-- [ ] A streaming discovery controller atomically publishes the existing
+- [x] A streaming discovery controller atomically publishes the existing
       SyncManager/PDO candidate and leaves it unavailable on projection error.
-- [ ] Existing fixed-range SII and Startup mailbox behavior remains compatible.
-- [ ] Focused tests, formatting, diff checks, workspace CI, BPF build and Linux
+- [x] Existing fixed-range SII and Startup mailbox behavior remains compatible.
+- [x] Focused tests, formatting, diff checks, workspace CI, BPF build and Linux
       simulator/HIL suites pass.
-- [ ] Changes are committed, pushed to `ra1mj/ESOP`, and the exact final
+- [x] Changes are committed, pushed to `ra1mj/ESOP`, and the exact final
       GitHub Actions run succeeds.
 
 ## Out Of Scope

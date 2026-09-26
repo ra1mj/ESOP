@@ -34,8 +34,17 @@
 
 - [x] Update backend contract, README, PRD/requirements docs and capability
       manifest with the new evidence and remaining Startup/physical boundary.
-- [ ] Commit and push `main`, verify the matching GitHub Actions run, archive
+- [x] Commit and push `main`, verify the matching GitHub Actions run, archive
       the task and record the Trellis journal.
+
+## Verification record
+
+- Local: focused core tests, full `esop-ethercat-core` tests, Clippy, no-std,
+  `make ci`, `make bpf`, `make test-hil` and live `make test-zenoh` passed.
+- Delivery commits: `2c82fa4` and `56def33` on `main`.
+- Remote: GitHub Actions run `36267748560` for exact head
+  `56def3327cb99541bbbf5db015cf23aac999f9eb` completed successfully, including
+  Rust, Zenoh and every privileged eBPF runtime qualification job.
 
 ## Risk and rollback points
 
