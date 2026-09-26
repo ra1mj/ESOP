@@ -70,7 +70,7 @@ make capability-manifest
 - [x] Commit and push the implementation to `ra1mj/ESOP`.
 - [x] Verify GitHub Actions against the exact pushed SHA; repair and repush on
       any failure.
-- [ ] Mark acceptance criteria, archive the task, update the developer journal,
+- [x] Mark acceptance criteria, archive the task, update the developer journal,
       and push the completion metadata.
 
 Validation:
@@ -97,6 +97,8 @@ Validated locally on 2026-09-27:
 - `make bpf`
 - GitHub Actions `quality` run `36279028999` passed for exact commit
   `559ca25697cdb3f64326479f9ecb2e4870838288`.
+- GitHub Actions `quality` run `36279358839` passed for exact acceptance commit
+  `096e46a0434fbf0136700153eeb991009eef40bb`.
 
 ## Review Gates
 
