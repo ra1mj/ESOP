@@ -32,6 +32,7 @@ mod scheduled_domains;
 mod sii;
 mod sii_config;
 mod sii_discovery;
+mod sii_stream;
 mod slave;
 mod slave_copy;
 mod startup;
@@ -159,6 +160,11 @@ pub use sii_config::{
 };
 pub use sii_discovery::{
     SiiDiscoveryController, SiiDiscoveryError, SiiDiscoveryPhase, SiiDiscoveryRequest,
+    SiiStreamDiscoveryController, SiiStreamDiscoveryRequest,
+};
+pub use sii_stream::{
+    SII_CATEGORY_START_WORD, SiiCategoryStreamError, SiiCategoryStreamPhase,
+    SiiCategoryStreamProgress, SiiCategoryStreamReader, SiiCategoryStreamRequest,
 };
 pub use slave::{
     AlStatus, EthercatState, SlaveIdentity, SlaveRecord, SlaveTable, SlaveTableError, next_state,

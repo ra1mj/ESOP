@@ -8,6 +8,10 @@
 use crate::control::{ControlError, ControlRequestPool, RequestHandle};
 use crate::sii::{SiiAction, SiiBlockError, SiiBlockReader, SiiBlockRequest, SiiProgress};
 use crate::sii_config::{SiiConfigurationCandidate, SiiConfigurationError};
+use crate::sii_stream::{
+    SiiCategoryStreamError, SiiCategoryStreamPhase, SiiCategoryStreamProgress,
+    SiiCategoryStreamReader, SiiCategoryStreamRequest,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SiiDiscoveryPhase {
@@ -24,6 +28,7 @@ pub enum SiiDiscoveryError {
     NotStarted,
     NotReady,
     Block(SiiBlockError),
+    Stream(SiiCategoryStreamError),
     Configuration(SiiConfigurationError),
     Control(ControlError),
 }
@@ -31,6 +36,12 @@ pub enum SiiDiscoveryError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SiiDiscoveryRequest {
     pub block: SiiBlockRequest,
+    pub signed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SiiStreamDiscoveryRequest {
+    pub stream: SiiCategoryStreamRequest,
     pub signed: bool,
 }
 
@@ -192,7 +203,7 @@ impl<
         }
         let mut next = self.candidate;
         let applied = next
-            .apply_completed_block(&self.reader, scratch)
+            .apply_completed_block_with_signed(&self.reader, scratch, self.signed)
             .map_err(|error| self.fail(SiiDiscoveryError::Configuration(error)))?;
         self.candidate = next;
         self.phase = SiiDiscoveryPhase::Ready;
@@ -203,6 +214,197 @@ impl<
         self.last_error = Some(error);
         self.phase = SiiDiscoveryPhase::Faulted;
         error
+    }
+}
+
+/// Fixed-capacity automatic SII category discovery and PDO projection.
+pub struct SiiStreamDiscoveryController<
+    const WORDS: usize,
+    const SMS: usize,
+    const FMMUS: usize,
+    const RX_ENTRIES: usize,
+    const TX_ENTRIES: usize,
+> {
+    stream: SiiCategoryStreamReader<WORDS>,
+    candidate: SiiConfigurationCandidate<SMS, FMMUS, RX_ENTRIES, TX_ENTRIES>,
+    phase: SiiDiscoveryPhase,
+    signed: bool,
+    last_error: Option<SiiDiscoveryError>,
+}
+
+impl<
+    const WORDS: usize,
+    const SMS: usize,
+    const FMMUS: usize,
+    const RX_ENTRIES: usize,
+    const TX_ENTRIES: usize,
+> SiiStreamDiscoveryController<WORDS, SMS, FMMUS, RX_ENTRIES, TX_ENTRIES>
+{
+    pub const fn new() -> Self {
+        Self {
+            stream: SiiCategoryStreamReader::new(),
+            candidate: SiiConfigurationCandidate::new(),
+            phase: SiiDiscoveryPhase::Idle,
+            signed: false,
+            last_error: None,
+        }
+    }
+
+    pub const fn phase(&self) -> SiiDiscoveryPhase {
+        self.phase
+    }
+
+    pub const fn signed(&self) -> bool {
+        self.signed
+    }
+
+    pub const fn last_error(&self) -> Option<SiiDiscoveryError> {
+        self.last_error
+    }
+
+    pub const fn pending(&self) -> Option<SiiAction> {
+        self.stream.pending()
+    }
+
+    pub const fn stream(&self) -> &SiiCategoryStreamReader<WORDS> {
+        &self.stream
+    }
+
+    pub fn candidate(
+        &self,
+    ) -> Option<&SiiConfigurationCandidate<SMS, FMMUS, RX_ENTRIES, TX_ENTRIES>> {
+        if self.phase == SiiDiscoveryPhase::Ready {
+            Some(&self.candidate)
+        } else {
+            None
+        }
+    }
+
+    pub fn start(&mut self, request: SiiStreamDiscoveryRequest) -> Result<(), SiiDiscoveryError> {
+        if !matches!(
+            self.phase,
+            SiiDiscoveryPhase::Idle | SiiDiscoveryPhase::Ready | SiiDiscoveryPhase::Faulted
+        ) {
+            return Err(SiiDiscoveryError::Busy);
+        }
+        self.last_error = None;
+        if let Err(error) = self.stream.start(request.stream) {
+            return Err(self.fail(SiiDiscoveryError::Stream(error)));
+        }
+        self.candidate = SiiConfigurationCandidate::new();
+        self.phase = SiiDiscoveryPhase::Reading;
+        self.signed = request.signed;
+        Ok(())
+    }
+
+    pub fn next_action(&mut self, now_ns: u64) -> Result<Option<SiiAction>, SiiDiscoveryError> {
+        match self.phase {
+            SiiDiscoveryPhase::Idle => return Err(SiiDiscoveryError::NotStarted),
+            SiiDiscoveryPhase::Projecting | SiiDiscoveryPhase::Ready => return Ok(None),
+            SiiDiscoveryPhase::Faulted => {
+                return Err(self.last_error.unwrap_or(SiiDiscoveryError::NotReady));
+            }
+            SiiDiscoveryPhase::Reading => {}
+        }
+
+        match self.stream.next_action(now_ns) {
+            Ok(action) => Ok(action),
+            Err(error) if self.stream.phase() == SiiCategoryStreamPhase::Faulted => {
+                Err(self.fail(SiiDiscoveryError::Stream(error)))
+            }
+            Err(error) => Err(SiiDiscoveryError::Stream(error)),
+        }
+    }
+
+    pub fn enqueue_pending<const REQUESTS: usize>(
+        &self,
+        pool: &mut ControlRequestPool<REQUESTS>,
+    ) -> Result<RequestHandle, SiiDiscoveryError> {
+        self.stream
+            .enqueue_pending(pool)
+            .map_err(SiiDiscoveryError::Stream)
+    }
+
+    pub fn accept(
+        &mut self,
+        token: u8,
+        generation: u16,
+        payload: &[u8],
+        working_counter: u16,
+        now_ns: u64,
+    ) -> Result<SiiCategoryStreamProgress, SiiDiscoveryError> {
+        if self.phase != SiiDiscoveryPhase::Reading {
+            return Err(self.unavailable_error());
+        }
+        match self
+            .stream
+            .accept(token, generation, payload, working_counter, now_ns)
+        {
+            Ok(progress) => {
+                if matches!(progress, SiiCategoryStreamProgress::Complete { .. }) {
+                    self.phase = SiiDiscoveryPhase::Projecting;
+                }
+                Ok(progress)
+            }
+            Err(error) if self.stream.phase() == SiiCategoryStreamPhase::Faulted => {
+                Err(self.fail(SiiDiscoveryError::Stream(error)))
+            }
+            Err(error) => Err(SiiDiscoveryError::Stream(error)),
+        }
+    }
+
+    pub fn timeout(&mut self, token: u8, now_ns: u64) -> Result<(), SiiDiscoveryError> {
+        if self.phase != SiiDiscoveryPhase::Reading {
+            return Err(self.unavailable_error());
+        }
+        match self.stream.timeout(token, now_ns) {
+            Ok(()) => Ok(()),
+            Err(error) if self.stream.phase() == SiiCategoryStreamPhase::Faulted => {
+                Err(self.fail(SiiDiscoveryError::Stream(error)))
+            }
+            Err(error) => Err(SiiDiscoveryError::Stream(error)),
+        }
+    }
+
+    pub fn finalize(&mut self, scratch: &mut [u8]) -> Result<usize, SiiDiscoveryError> {
+        if self.phase != SiiDiscoveryPhase::Projecting {
+            return Err(self.unavailable_error());
+        }
+        let mut next = self.candidate;
+        let applied = next
+            .apply_completed_stream_with_signed(&self.stream, scratch, self.signed)
+            .map_err(|error| self.fail(SiiDiscoveryError::Configuration(error)))?;
+        self.candidate = next;
+        self.phase = SiiDiscoveryPhase::Ready;
+        Ok(applied)
+    }
+
+    fn fail(&mut self, error: SiiDiscoveryError) -> SiiDiscoveryError {
+        let terminal = self.last_error.unwrap_or(error);
+        self.last_error = Some(terminal);
+        self.phase = SiiDiscoveryPhase::Faulted;
+        terminal
+    }
+
+    fn unavailable_error(&self) -> SiiDiscoveryError {
+        if self.phase == SiiDiscoveryPhase::Faulted {
+            self.last_error.unwrap_or(SiiDiscoveryError::NotReady)
+        } else {
+            SiiDiscoveryError::NotReady
+        }
+    }
+}
+
+impl<
+    const WORDS: usize,
+    const SMS: usize,
+    const FMMUS: usize,
+    const RX_ENTRIES: usize,
+    const TX_ENTRIES: usize,
+> Default for SiiStreamDiscoveryController<WORDS, SMS, FMMUS, RX_ENTRIES, TX_ENTRIES>
+{
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -222,7 +424,12 @@ impl<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sii::{SII_CATEGORY_END, SII_CATEGORY_RX_PDO, SII_CATEGORY_SYNC_MANAGER, SiiPhase};
+    use crate::registers::{ESC_EEPROM_CONTROL, ESC_EEPROM_DATA, register_from_address};
+    use crate::sii::{
+        SII_CATEGORY_END, SII_CATEGORY_RX_PDO, SII_CATEGORY_SYNC_MANAGER, SII_CATEGORY_TX_PDO,
+        SiiPhase,
+    };
+    use crate::sii_stream::SII_CATEGORY_START_WORD;
     use std::vec;
 
     fn append_category(bytes: &mut std::vec::Vec<u8>, kind: u16, payload: &[u8]) {
@@ -274,6 +481,46 @@ mod tests {
         }
     }
 
+    fn drive_stream<
+        const WORDS: usize,
+        const SMS: usize,
+        const FMMUS: usize,
+        const RX: usize,
+        const TX: usize,
+    >(
+        controller: &mut SiiStreamDiscoveryController<WORDS, SMS, FMMUS, RX, TX>,
+        image_start_word: u16,
+        image: &[u8],
+    ) {
+        let mut now_ns = 1;
+        while controller.phase() == SiiDiscoveryPhase::Reading {
+            let action = controller.next_action(now_ns).unwrap().unwrap();
+            let payload = if action.read_len == 0 {
+                std::vec::Vec::new()
+            } else {
+                match register_from_address(action.address) {
+                    ESC_EEPROM_CONTROL => std::vec::Vec::from([0, 0]),
+                    ESC_EEPROM_DATA => {
+                        let offset = usize::from(action.word_address - image_start_word) * 2;
+                        image[offset..offset + action.read_len as usize].to_vec()
+                    }
+                    register => panic!("unexpected EEPROM register {register:#06x}"),
+                }
+            };
+            controller
+                .accept(
+                    action.token,
+                    action.generation,
+                    &payload,
+                    action.expected_wkc,
+                    now_ns,
+                )
+                .unwrap();
+            now_ns += 1;
+        }
+        assert_eq!(controller.phase(), SiiDiscoveryPhase::Projecting);
+    }
+
     #[test]
     fn reads_complete_image_then_projects_candidate_atomically() {
         let mut image = std::vec::Vec::new();
@@ -302,7 +549,7 @@ mod tests {
                     timeout_ns: 10_000,
                     request_timeout_ns: 100,
                 },
-                signed: false,
+                signed: true,
             })
             .unwrap();
         drive(&mut controller, start_word, &image);
@@ -314,6 +561,74 @@ mod tests {
         assert_eq!(candidate.mapping().sync_manager_count(), 1);
         assert_eq!(candidate.rx_pdo_count(), 1);
         assert_eq!(candidate.rx_layout().total_bits(), 16);
+        assert!(candidate.rx_layout().entry(0).unwrap().signed);
+    }
+
+    #[test]
+    fn stream_discovers_sm_and_bidirectional_pdos_then_publishes_atomically() {
+        let mut image = std::vec::Vec::new();
+        append_category(
+            &mut image,
+            SII_CATEGORY_SYNC_MANAGER,
+            &[
+                0x00, 0x10, 0x08, 0x00, 0x26, 0x00, 0x01, 0x00, 0x10, 0x10, 0x08, 0x00, 0x22, 0x00,
+                0x01, 0x00,
+            ],
+        );
+        append_category(&mut image, 0x1234, &[0xAA, 0xBB]);
+        let mut rx_pdo = vec![0x00, 0x16, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00];
+        rx_pdo.extend_from_slice(&[0x40, 0x60, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00]);
+        append_category(&mut image, SII_CATEGORY_RX_PDO, &rx_pdo);
+        let mut tx_pdo = vec![0x00, 0x1A, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00];
+        tx_pdo.extend_from_slice(&[0x41, 0x60, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00]);
+        append_category(&mut image, SII_CATEGORY_TX_PDO, &tx_pdo);
+        image.extend_from_slice(&SII_CATEGORY_END.to_le_bytes());
+        image.extend_from_slice(&0u16.to_le_bytes());
+
+        let mut controller = SiiStreamDiscoveryController::<40, 4, 4, 8, 8>::new();
+        controller
+            .start(SiiStreamDiscoveryRequest {
+                stream: SiiCategoryStreamRequest::standard(1, 7, 0, 10_000, 100),
+                signed: true,
+            })
+            .unwrap();
+        assert!(controller.candidate().is_none());
+        drive_stream(&mut controller, SII_CATEGORY_START_WORD, &image);
+        assert!(controller.candidate().is_none());
+
+        let mut scratch = [0; 80];
+        assert_eq!(controller.finalize(&mut scratch), Ok(3));
+        assert_eq!(controller.phase(), SiiDiscoveryPhase::Ready);
+        assert!(controller.signed());
+        let candidate = controller.candidate().unwrap();
+        assert_eq!(candidate.mapping().sync_manager_count(), 2);
+        assert_eq!(candidate.rx_pdo_count(), 1);
+        assert_eq!(candidate.tx_pdo_count(), 1);
+        assert!(candidate.rx_layout().entry(0).unwrap().signed);
+        assert!(candidate.tx_layout().entry(0).unwrap().signed);
+    }
+
+    #[test]
+    fn stream_projection_failure_never_publishes_candidate_and_preserves_error() {
+        let image = [SII_CATEGORY_END as u8, (SII_CATEGORY_END >> 8) as u8, 0, 0];
+        let mut controller = SiiStreamDiscoveryController::<4, 1, 1, 1, 1>::new();
+        controller
+            .start(SiiStreamDiscoveryRequest {
+                stream: SiiCategoryStreamRequest::standard(1, 1, 0, 100, 10),
+                signed: false,
+            })
+            .unwrap();
+        drive_stream(&mut controller, SII_CATEGORY_START_WORD, &image);
+
+        let expected = SiiDiscoveryError::Configuration(SiiConfigurationError::Stream(
+            SiiCategoryStreamError::BufferTooSmall,
+        ));
+        let mut scratch = [0; 1];
+        assert_eq!(controller.finalize(&mut scratch), Err(expected));
+        assert_eq!(controller.phase(), SiiDiscoveryPhase::Faulted);
+        assert_eq!(controller.last_error(), Some(expected));
+        assert!(controller.candidate().is_none());
+        assert_eq!(controller.finalize(&mut scratch), Err(expected));
     }
 
     #[test]

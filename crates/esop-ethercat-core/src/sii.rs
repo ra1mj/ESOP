@@ -568,6 +568,21 @@ impl<const WORDS: usize> SiiBlockReader<WORDS> {
     }
 
     pub fn start(&mut self, request: SiiBlockRequest) -> Result<(), SiiBlockError> {
+        self.start_inner(request, true)
+    }
+
+    pub(crate) fn continue_with(&mut self, request: SiiBlockRequest) -> Result<(), SiiBlockError> {
+        if self.phase != SiiPhase::Complete {
+            return Err(SiiBlockError::Busy);
+        }
+        self.start_inner(request, false)
+    }
+
+    fn start_inner(
+        &mut self,
+        request: SiiBlockRequest,
+        reset_action_cursors: bool,
+    ) -> Result<(), SiiBlockError> {
         if !matches!(
             self.phase,
             SiiPhase::Idle | SiiPhase::Complete | SiiPhase::Faulted
@@ -594,8 +609,10 @@ impl<const WORDS: usize> SiiBlockReader<WORDS> {
         self.word_index = 0;
         self.words = [0; WORDS];
         self.pending = None;
-        self.next_token = 1;
-        self.next_datagram_index = 1;
+        if reset_action_cursors {
+            self.next_token = 1;
+            self.next_datagram_index = 1;
+        }
         self.last_error = None;
         Ok(())
     }

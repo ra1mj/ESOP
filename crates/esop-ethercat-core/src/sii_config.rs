@@ -12,10 +12,12 @@ use crate::sii::{
     SII_CATEGORY_RX_PDO, SII_CATEGORY_SYNC_MANAGER, SII_CATEGORY_TX_PDO, SiiBlockError,
     SiiBlockReader, SiiCategory, SiiCategoryError, SiiCategoryReader,
 };
+use crate::sii_stream::{SiiCategoryStreamError, SiiCategoryStreamReader};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SiiConfigurationError {
     Block(SiiBlockError),
+    Stream(SiiCategoryStreamError),
     Category(SiiCategoryError),
     Mapping(MappingError),
     Pdo(PdoError),
@@ -305,13 +307,25 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
     /// the process-data layout. Other valid SII categories remain available
     /// to their own consumers and are intentionally ignored here.
     pub fn apply_bytes(&mut self, bytes: &[u8]) -> Result<usize, SiiConfigurationError> {
+        self.apply_bytes_with_signed(bytes, false)
+    }
+
+    pub fn apply_bytes_with_signed(
+        &mut self,
+        bytes: &[u8],
+        signed: bool,
+    ) -> Result<usize, SiiConfigurationError> {
         let mut next = *self;
-        let applied = next.apply_bytes_in_place(bytes)?;
+        let applied = next.apply_bytes_in_place(bytes, signed)?;
         *self = next;
         Ok(applied)
     }
 
-    fn apply_bytes_in_place(&mut self, bytes: &[u8]) -> Result<usize, SiiConfigurationError> {
+    fn apply_bytes_in_place(
+        &mut self,
+        bytes: &[u8],
+        signed: bool,
+    ) -> Result<usize, SiiConfigurationError> {
         let mut reader = SiiCategoryReader::new(bytes);
         let mut applied = 0;
         while let Some(category) = reader
@@ -322,7 +336,7 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
                 category.kind,
                 SII_CATEGORY_SYNC_MANAGER | SII_CATEGORY_RX_PDO | SII_CATEGORY_TX_PDO
             ) {
-                self.apply_category(category)?;
+                self.apply_category_with_signed(category, signed)?;
                 applied += 1;
             }
         }
@@ -337,10 +351,39 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
         reader: &SiiBlockReader<WORDS>,
         scratch: &mut [u8],
     ) -> Result<usize, SiiConfigurationError> {
+        self.apply_completed_block_with_signed(reader, scratch, false)
+    }
+
+    pub fn apply_completed_block_with_signed<const WORDS: usize>(
+        &mut self,
+        reader: &SiiBlockReader<WORDS>,
+        scratch: &mut [u8],
+        signed: bool,
+    ) -> Result<usize, SiiConfigurationError> {
         let length = reader
             .copy_bytes(scratch)
             .map_err(SiiConfigurationError::Block)?;
-        self.apply_bytes(&scratch[..length])
+        self.apply_bytes_with_signed(&scratch[..length], signed)
+    }
+
+    pub fn apply_completed_stream<const WORDS: usize>(
+        &mut self,
+        reader: &SiiCategoryStreamReader<WORDS>,
+        scratch: &mut [u8],
+    ) -> Result<usize, SiiConfigurationError> {
+        self.apply_completed_stream_with_signed(reader, scratch, false)
+    }
+
+    pub fn apply_completed_stream_with_signed<const WORDS: usize>(
+        &mut self,
+        reader: &SiiCategoryStreamReader<WORDS>,
+        scratch: &mut [u8],
+        signed: bool,
+    ) -> Result<usize, SiiConfigurationError> {
+        let length = reader
+            .copy_bytes(scratch)
+            .map_err(SiiConfigurationError::Stream)?;
+        self.apply_bytes_with_signed(&scratch[..length], signed)
     }
 
     /// Allocate one FMMU per non-empty PDO category segment.
