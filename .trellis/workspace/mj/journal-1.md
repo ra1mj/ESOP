@@ -1225,3 +1225,37 @@ Implemented versioned per-transition ESM timeouts, ESI/SII OpOnly output validat
 ### Next Steps
 
 - None - task complete
+
+
+## Session 37: Generated product mailbox configuration
+
+**Date**: 2026-09-27
+**Task**: Generated product mailbox configuration
+**Branch**: `main`
+
+### Summary
+
+Added shared mailbox range validation, strict SII mailbox parsing, complete ESI CoE mailbox discovery, deterministic generator propagation, and a generated no-binding product PDO batch path; verified local CI/BPF/HIL/Zenoh gates and GitHub Actions quality run 36263833006.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c74dce3` | (see git log) |
+| `7c042fa` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
