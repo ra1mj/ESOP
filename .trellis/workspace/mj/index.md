@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 42
+- **Total Sessions**: 43
 - **Last Active**: 2026-09-27
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1432 | Active |
+| `journal-1.md` | ~1466 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 43 | 2026-09-27 | DC offset and propagation delay programming | `559ca25`, `096e46a` | `main` |
 | 42 | 2026-09-27 | DC receive-time topology and propagation delay | `f86bbd17fb8cf00e159fe277ee0cdb2156fb49d0`, `e9a86fe` | `main` |
 | 41 | 2026-09-27 | ESC DC capability discovery | `215e18c`, `713f668` | `main` |
 | 40 | 2026-09-27 | Startup-owned SII stream verification | `aed42d7`, `8892cd9` | `main` |

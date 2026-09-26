@@ -1430,3 +1430,37 @@ Implemented exact EtherCAT DC receive-time and Data Link Status scanning, fixed-
 ### Next Steps
 
 - None - task complete
+
+
+## Session 43: DC offset and propagation delay programming
+
+**Date**: 2026-09-27
+**Task**: DC offset and propagation delay programming
+**Branch**: `main`
+
+### Summary
+
+Implemented bounded topology-wide EtherCAT DC clock initialization with exact 0x0910/24 reads and coherent 0x0920/12 offset-delay writes, integrated scheduler and Startup/lifecycle gates, added cross-crate request/RX coverage, synchronized capability and requirements docs, and verified local plus exact-SHA GitHub quality gates.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `559ca25` | (see git log) |
+| `096e46a` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
