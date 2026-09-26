@@ -17,12 +17,13 @@
     {
       "id": "ethercat_dc_capability_discovery",
       "status": "implemented",
-      "scope": "Allocation-free exact 12-byte ESC base-register decoding, Features Supported projection, 32/64-bit DC System Time probing with explicit WKC 0/1 policy, generated per-slave DC requirements, and deterministic pre-SII/AL reference-clock evidence selection",
+      "scope": "Allocation-free exact 12-byte ESC base-register decoding, Features Supported projection, 32/64-bit DC System Time probing with explicit WKC 0/1 policy, exact four-port DC receive-time and Data Link Status acquisition, fixed-capacity physical topology projection, checked reference-relative propagation-delay evidence, generated per-slave DC requirements, and transactional pre-SII/AL reference/topology selection",
       "evidence": [
         "crates/esop-ethercat-core/src/registers.rs",
         "crates/esop-ethercat-core/src/rx_index.rs",
         "crates/esop-ethercat-core/src/control.rs",
         "crates/esop-ethercat-core/src/scan.rs",
+        "crates/esop-ethercat-core/src/dc.rs",
         "crates/esop-ethercat-core/src/startup.rs",
         "crates/esop-ethercat-core/tests/cycle.rs",
         "crates/esop-cfggen/src/generator.rs",
@@ -33,7 +34,7 @@
         "docs/ethercat-master-requirements.md",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Software tests cover caller-delivered register responses and capability/selection policy only; DC port receive times, propagation delay, offset/delay writes, application-time/start-time setup, SYNC0/SYNC1 configuration, all-slave synchronization, clock-quality qualification, SII/ESI DC category parsing, physical response authenticity, interoperability, target WCET, HIL and functional safety remain open"
+      "limitation": "Software tests cover caller-delivered register responses, bounded physical-tree reconstruction and deterministic propagation-delay projection only; offset/delay writes, application-time/start-time setup, SYNC0/SYNC1 configuration, all-slave synchronization, complete clock-quality qualification, SII/ESI DC category parsing, physical response authenticity and timing precision, interoperability, target WCET, HIL and functional safety remain open"
     },
     {
       "id": "ethercat_sii_category_stream",
@@ -63,7 +64,7 @@
         "scripts/tests/test_robot_build_report.py",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "The supported ESI subset is byte-aligned and explicit; modular devices, bit-packed PDOs, vendor scaling/quirks, artifact signing/distribution, complete mapping and DC topology/configuration generation, physical slave interoperability and response authenticity, measured wire timing, target resource/WCET and safety qualification remain open"
+      "limitation": "The supported ESI subset is byte-aligned and explicit; modular devices, bit-packed PDOs, vendor scaling/quirks, artifact signing/distribution, complete mapping and DC category/configuration generation, physical slave interoperability and response authenticity, measured wire timing, target resource/WCET and safety qualification remain open"
     },
     {
       "id": "ethercat_product_mailbox_config",
@@ -95,7 +96,7 @@
         "Makefile",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Activation validates static expectations, attaches generated mailbox, structural SII and DC requirement/reference expectations to Startup and builds a bounded ordered PDO batch; comparison does not authenticate physical responses, and complete mapping/DC topology and clock configuration, artifact signing/deployment policy, interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
+      "limitation": "Activation validates static expectations, attaches generated mailbox, structural SII and DC requirement/reference expectations to Startup, requires measurable propagation evidence for required DC slaves, and builds a bounded ordered PDO batch; comparison does not authenticate physical responses, and complete mapping/DC register programming and clock configuration, artifact signing/deployment policy, interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
     },
     {
       "id": "pdo_configuration_readback",

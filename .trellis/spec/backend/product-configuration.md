@@ -48,6 +48,12 @@ pub fn StartupController::selected_reference_clock(...) ->
     Option<StartupReferenceClock>;
 pub fn StartupController::dc_capabilities(position: u16) ->
     Option<ScanDcCapabilities>;
+pub fn StartupController::dc_topology(...) ->
+    Option<&DcTopology<MAX_SLAVES>>;
+pub fn DcTopology::<MAX_SLAVES>::build(
+    records: &[ScanRecord],
+    reference_position: Option<u16>,
+) -> Result<DcTopology<MAX_SLAVES>, DcTopologyError>;
 ```
 
 ## 3. Contracts
@@ -150,10 +156,24 @@ base range from `0x0000`, decodes type/revision/build/FMMU/SM/RAM/port/features
 at protocol widths, and probes fixed-address System Time `0x0910` with four or
 eight bytes according to Features Supported. WKC 1 publishes a sample; WKC 0
 is capability-negative and means delay-only; every other WKC or response fault
-latches scan. Startup stages an explicit reference or first capable fallback
-locally and publishes it only after all profiles validate. Restart clears both
-scan evidence and selected reference. This contract does not perform receive-
-time topology, propagation-delay, offset/delay or SYNC configuration.
+latches scan. Every base-DC slave, including delay-only WKC-0 devices, then
+reads exactly 16 bytes at `0x0900`; every slave reads exactly two Data Link
+Status bytes at `0x0110`. Both reads require exact WKC 1 and exact payload
+length before a `ScanRecord` is published. The record retains four little-
+endian receive times plus raw and decoded link-up, loop-closed and signal flags.
+
+Startup stages an explicit reference or first capable fallback locally, builds
+one `DcTopology<MAX_SLAVES>` from complete records, and publishes both only
+after all policy and delay checks pass. The physical tree consumes scan order
+with port 0 upstream and downstream order `[3, 1, 2]`. Delay construction uses
+32-bit wrapping timestamp subtraction, checked aggregate arithmetic and
+symmetric measurable DC-to-DC edges; an iterative graph walk publishes checked
+cumulative delay from the selected reference. Optional unmeasurable DC remains
+`None`, while `SystemTime` or `ReferenceClock` requirements without cumulative
+delay latch Startup before identity. Restart or any Startup fault clears both
+selected reference and topology. This contract does not write `0x0920` or
+`0x0928`, inject application time, choose start time, configure SYNC0/SYNC1, or
+prove physical response origin or timing precision.
 
 Per-slave PDO startup-plan construction uses the same generated order and the
 shared 256-entry cfggen bound. For each SyncManager it clears assignment
@@ -218,6 +238,9 @@ datagrams, FCS, and inter-packet gap respectively.
 | DC reference without required, or multiple generated references | Reject before Startup mutation or generated output publication. |
 | Required System Time absent, delay-only WKC 0, or explicit reference not capable | Latch Startup before identity/SII/AL and publish no selected reference. |
 | System Time WKC greater than one, malformed payload, stale generation, ownership mismatch, or timeout | Latch the first typed scan fault; publish no partial slave record. |
+| Receive-time/Data Link Status WKC other than one, malformed payload, stale generation, ownership mismatch, or timeout | Latch the first typed scan fault; publish no partial slave record. |
+| Duplicate/unreachable/overrun topology, missing DC receive times, invalid reference, delay underflow, or aggregate overflow | Latch typed topology failure before identity and publish neither reference nor topology. |
+| Product-required DC slave has no measurable reference-relative delay | Latch `DcPropagationDelayRequired` before identity and publish neither reference nor topology. |
 | Runtime Domain/axis evidence or capacity mismatch | Reject with typed owning-contract evidence and return no partial configuration. |
 | PDO plan owner/SM/group/capacity mismatch | Reject before returning any startup plan. |
 | Invalid generated mailbox or invalid/missing/duplicate/unknown override binding | Reject before returning any batch. |
@@ -233,13 +256,15 @@ datagrams, FCS, and inter-packet gap respectively.
 - Good: the checked-in dual-drive plus IO example generates six artifacts, a
   C11-clean header, a byte-identical compiled Rust module, 36 PDO bytes, 2
   frames, WKC 6, 20 copy bytes, 180 wire bytes, a 4144-byte ProcBuf region,
-  two DC-required drives, and one explicit left-drive reference.
+  two DC-required drives, one explicit left-drive reference, and Startup-owned
+  measurable propagation-delay evidence for both required drives.
 - Base: no `PRODUCT_INPUT` produces the existing unqualified host build
-  report; an omitted slave `dc` object produces no Startup DC requirement.
+  report; an omitted slave `dc` object produces no Startup DC requirement, and
+  optional unmeasurable DC evidence remains explicitly `None`.
 - Bad: a selected RxPDO moved to TxPDO, a malformed Controlword width, a
   duplicate object, a path escape, zero product limit, reference-without-
-  required, duplicate reference, or forged qualification fails without partial
-  publication.
+  required, duplicate reference, malformed port tree, required unmeasurable DC,
+  or forged qualification fails without partial publication.
 
 ## 6. Tests Required
 
@@ -257,8 +282,13 @@ datagrams, FCS, and inter-packet gap respectively.
   configuration-hash changes, generated C/Rust/JSON/inventory fields, runtime
   profile propagation, 32/64-bit System Time reads, WKC 0/1/>1, malformed and
   timed-out responses, explicit/fallback selection, pre-identity mismatch and
-  restart clearing. Include one public master/control integration test proving
-  that WKC 0 reaches the scanner without an RX-index mismatch.
+  restart clearing. Cover exact four-port receive-time and Data Link Status
+  reads, delay-only continuation, 3/1/2 linear and branched adjacency, wrapping
+  timestamps, checked underflow/overflow, non-first reference traversal,
+  optional incomplete evidence, required-unmeasurable rejection and
+  transactional clearing. Include public master/control integration tests
+  proving both WKC 0 and the 16-byte receive-time response traverse the normal
+  RX ownership path.
 - Cover explicit/default ESM timeouts, invalid values, ESI/SII OpOnly flag
   separation, PREOP-disabled mapping, enable-after-OP, disable-before-leaving,
   shared deadlines, uniform-override precedence, exact readback failure and
@@ -331,4 +361,9 @@ Correct:
 let profiles = product.startup_profiles()?;
 product.start_startup(&mut startup, generation, now_ns, config, observed)?;
 let reference = startup.selected_reference_clock(); // Published after scan validation.
+let topology = startup.dc_topology(); // Published in the same transaction.
 ```
+
+Do not treat a missing propagation delay as zero or program ESC delay/offset
+registers from an unpublished candidate. Optional evidence stays `None`; a
+product-required slave without a measured path must fail before identity.

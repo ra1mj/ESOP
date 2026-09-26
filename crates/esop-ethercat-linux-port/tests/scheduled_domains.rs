@@ -1608,15 +1608,17 @@ fn drive_startup_to_pdo_barrier(startup: &mut StartupController<2>, expected: &[
     );
     let assign = startup.next_action(5).unwrap().unwrap();
     accept_startup_action(startup, assign, &[], 6);
-    let configuration = startup.next_action(7).unwrap().unwrap();
+    let dl_status = startup.next_action(7).unwrap().unwrap();
+    accept_startup_action(startup, dl_status, &0x5500u16.to_le_bytes(), 8);
+    let configuration = startup.next_action(9).unwrap().unwrap();
     assert_eq!(
         configuration.address(),
         fixed_address(0x1000, ESC_CONFIGURATION)
     );
-    accept_startup_action(startup, configuration, &[0], 8);
-    let status = startup.next_action(9).unwrap().unwrap();
-    accept_startup_action(startup, status, &startup_status(EthercatState::Init), 10);
-    let end_probe = startup.next_action(11).unwrap().unwrap();
+    accept_startup_action(startup, configuration, &[0], 10);
+    let status = startup.next_action(11).unwrap().unwrap();
+    accept_startup_action(startup, status, &startup_status(EthercatState::Init), 12);
+    let end_probe = startup.next_action(13).unwrap().unwrap();
     assert!(matches!(end_probe, StartupAction::Scan(_)));
     startup.timeout(end_probe, end_probe.deadline_ns()).unwrap();
     assert_eq!(startup.phase(), StartupPhase::ReadingIdentity);

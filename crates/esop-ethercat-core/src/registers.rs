@@ -17,6 +17,7 @@ pub const ESC_FEATURE_DC_SUPPORTED: u16 = 1 << 2;
 pub const ESC_FEATURE_DC_64_BIT: u16 = 1 << 3;
 
 pub const ESC_DL_STATUS: u16 = 0x0110;
+pub const ESC_DL_STATUS_LEN: u16 = 2;
 pub const ESC_STATION_ADDRESS: u16 = 0x0010;
 pub const ESC_AL_STATUS: u16 = 0x0130;
 pub const ESC_AL_STATUS_CODE: u16 = 0x0134;
@@ -31,6 +32,7 @@ pub const ESC_DC_TIME0: u16 = 0x0900;
 pub const ESC_DC_TIME1: u16 = 0x0904;
 pub const ESC_DC_TIME2: u16 = 0x0908;
 pub const ESC_DC_TIME3: u16 = 0x090C;
+pub const ESC_DC_RECEIVE_TIME_LEN: u16 = 16;
 pub const ESC_DC_SYSTEM_TIME: u16 = 0x0910;
 pub const ESC_DC_SYSTEM_OFFSET: u16 = 0x0920;
 pub const ESC_DC_SYSTEM_DELAY: u16 = 0x0928;
@@ -43,6 +45,7 @@ pub const ESC_DC_CYCLE1: u16 = 0x09A4;
 
 pub const BASIC_ESC_INFO_LEN: u16 = 12;
 pub const AL_STATUS_WITH_CODE_LEN: u16 = 6;
+pub const ESC_PORT_COUNT: usize = 4;
 
 /// Pack a fixed station address (FPRD/FPWR/FPRW) and ESC offset.
 pub const fn fixed_address(station_address: u16, register: u16) -> u32 {

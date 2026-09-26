@@ -176,12 +176,16 @@ FR-006 当前增量由宿主机 `esop-cfggen` 与 `no_std` 的 `esop-product-con
 | FR-018 | P0 | 系统应识别 DC 能力、选择参考时钟、配置应用时间、SYNC0 周期/相位并监测时钟质量。 | DC 与非 DC 拓扑启动均通过；记录 offset、jitter、last sync、失锁次数和同步窗口状态。 |
 | FR-019 | P0 | 当 DC 未锁定、WKC 无效、命令过期或驱动状态异常时，系统不得发布新的有效运动目标。 | DC 失锁、WKC 异常、命令超时、驱动 fault 联合故障矩阵通过。 |
 
-FR-018 的首个边界现已完成：在线扫描精确解码 12-byte ESC 基础块及 Features
+FR-018 的发现与传播延迟边界现已完成：在线扫描精确解码 12-byte ESC 基础块及 Features
 Supported，对 DC-capable 从站按 32/64-bit 读取 `0x0910` System Time，并区分 WKC 1
-的可参考时钟证据与 WKC 0 的 delay-only 阴性证据。生成产品可声明每从站 DC 必需项和唯一
-参考钟；Startup 在 identity/SII/AL 前校验要求并选择显式参考钟或首个可用候选。应用时间、
-端口传播延迟、offset/delay 补偿、start time、SYNC0/SYNC1、全从站同步和完整质量资格仍属于
-FR-018 后续边界，不能由当前软件测试推导为已完成。
+的可参考时钟证据与 WKC 0 的 delay-only 阴性证据；所有 base-DC 从站继续精确读取
+`0x0900/16` 四端口接收时间，所有从站精确读取 `0x0110/2` Data Link Status。固定容量
+投影按端口 `3,1,2` 重建物理树，以 32-bit 回绕差值和 checked aggregate 算术发布可测
+DC-to-DC 链路及参考钟相对累计传播延迟。生成产品可声明每从站 DC 必需项和唯一参考钟；
+Startup 在 identity/SII/AL 前事务式校验并发布参考钟/拓扑，必需 DC 从站缺少累计延迟时闭锁。
+当前测试只验证调用方交付响应和软件计算边界，不证明物理来源或时序精度；应用时间、
+offset/delay 寄存器补偿、start time、SYNC0/SYNC1、全从站同步和完整质量资格仍属于
+FR-018 后续边界。
 
 ### 7.4 CiA 402 与设备模型
 

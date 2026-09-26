@@ -1014,6 +1014,138 @@ fn startup_control_request_round_trips_through_master_and_rx_consumer() {
 }
 
 #[test]
+fn startup_dc_receive_times_round_trip_through_master_and_rx_consumer() {
+    let config = MasterConfig::new([0xFF; 6], [1, 2, 3, 4, 5, 6]);
+    let mut master = EthercatMaster::<2, MTU>::new(config);
+    let expected = [ExpectedSlave {
+        position: 0,
+        station_address: 0x1000,
+        identity: SlaveIdentity::EMPTY,
+    }];
+    let mut startup = StartupController::<2>::new(0x1000);
+    startup
+        .start(53, 0, StartupConfig::new(EthercatState::PreOp), &expected)
+        .unwrap();
+
+    let probe = startup.next_action(1).unwrap().unwrap();
+    startup
+        .accept(probe, probe.generation(), &[0x88, 0x02], 1, 2)
+        .unwrap();
+    let basic = startup.next_action(3).unwrap().unwrap();
+    let mut basic_payload = [0u8; esop_ethercat_core::BASIC_ESC_INFO_LEN as usize];
+    basic_payload[8..10]
+        .copy_from_slice(&esop_ethercat_core::ESC_FEATURE_DC_SUPPORTED.to_le_bytes());
+    startup
+        .accept(basic, basic.generation(), &basic_payload, 1, 4)
+        .unwrap();
+    let assign = startup.next_action(5).unwrap().unwrap();
+    startup
+        .accept(assign, assign.generation(), &[], 1, 6)
+        .unwrap();
+    let system_time = startup.next_action(7).unwrap().unwrap();
+    startup
+        .accept(
+            system_time,
+            system_time.generation(),
+            &123u32.to_le_bytes(),
+            1,
+            8,
+        )
+        .unwrap();
+
+    let receive_times = startup.next_action(9).unwrap().unwrap();
+    assert_eq!(
+        receive_times.address(),
+        esop_ethercat_core::fixed_address(0x1000, esop_ethercat_core::ESC_DC_TIME0)
+    );
+    assert_eq!(
+        receive_times.response_len(),
+        esop_ethercat_core::ESC_DC_RECEIVE_TIME_LEN as usize
+    );
+    assert_eq!(
+        receive_times.working_counter_policy(),
+        RxWorkingCounterPolicy::Exact
+    );
+
+    let mut response = [0u8; esop_ethercat_core::ESC_DC_RECEIVE_TIME_LEN as usize];
+    for (port, value) in [10u32, 20, 30, 40].iter().copied().enumerate() {
+        response[port * 4..port * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    let mut requests = ControlRequestPool::<1>::new();
+    let request = startup.enqueue_pending(&mut requests).unwrap();
+    let frame = master
+        .acquire_frame(receive_times.generation(), receive_times.deadline_ns())
+        .unwrap();
+    master
+        .build_control_request(&mut requests, request, frame)
+        .unwrap();
+    let mut port = MockPort::with_response(1, &response);
+    master.submit_frame(&mut port, frame).unwrap();
+    let mut scratch = [0; MTU];
+    let report = {
+        let mut consumer = ControlRxConsumer::new(&mut requests);
+        master
+            .cycle_receive_with_consumer(
+                &mut port,
+                &mut scratch,
+                receive_times.generation(),
+                &mut consumer,
+            )
+            .unwrap()
+    };
+    assert_eq!(report.parsed_datagrams, 1);
+    assert_eq!(report.wkc_mismatches, 0);
+    assert_eq!(
+        startup.accept_completed(&mut requests, request, 10),
+        Ok(StartupProgress::Advanced)
+    );
+
+    let dl_status = startup.next_action(11).unwrap().unwrap();
+    startup
+        .accept(
+            dl_status,
+            dl_status.generation(),
+            &0x5500u16.to_le_bytes(),
+            1,
+            12,
+        )
+        .unwrap();
+    let esc_configuration = startup.next_action(13).unwrap().unwrap();
+    startup
+        .accept(
+            esc_configuration,
+            esc_configuration.generation(),
+            &[0],
+            1,
+            14,
+        )
+        .unwrap();
+    let al_status = startup.next_action(15).unwrap().unwrap();
+    startup
+        .accept(
+            al_status,
+            al_status.generation(),
+            &[1, 0, 0, 0, 0, 0],
+            1,
+            16,
+        )
+        .unwrap();
+    let end_probe = startup.next_action(17).unwrap().unwrap();
+    startup
+        .accept(end_probe, end_probe.generation(), &[], 0, 18)
+        .unwrap();
+
+    assert_eq!(
+        startup.dc_capabilities(0).unwrap().receive_times,
+        Some([10, 20, 30, 40])
+    );
+    assert_eq!(
+        startup.dc_topology().unwrap().transmission_delay_ns(0),
+        Some(0)
+    );
+}
+
+#[test]
 fn coe_sdo_round_trips_through_mailbox_control_and_master() {
     let config = MasterConfig::new([0xFF; 6], [1, 2, 3, 4, 5, 6]);
     let mut master = EthercatMaster::<2, MTU>::new(config);

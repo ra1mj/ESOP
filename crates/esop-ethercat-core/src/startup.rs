@@ -13,6 +13,7 @@ use crate::control::{
     ControlError, ControlRequestPool, MAX_CONTROL_PAYLOAD, RegisterOperation, RequestHandle,
     RequestState,
 };
+use crate::dc::{DcTopology, DcTopologyError};
 use crate::mailbox::{MailboxConfig, MailboxConfigError};
 use crate::rx_index::RxWorkingCounterPolicy;
 use crate::scan::{
@@ -395,6 +396,11 @@ pub enum StartupError {
         position: u16,
         requirement: StartupDcRequirement,
     },
+    DcPropagationDelayRequired {
+        position: u16,
+        requirement: StartupDcRequirement,
+    },
+    DcTopology(DcTopologyError),
     MultipleReferenceClocks {
         first_position: u16,
         second_position: u16,
@@ -482,6 +488,7 @@ pub struct StartupController<const MAX_SLAVES: usize> {
     verified_mailboxes: [Option<MailboxConfig>; MAX_SLAVES],
     verified_sii: [Option<SiiConfigurationSignature>; MAX_SLAVES],
     selected_reference_clock: Option<StartupReferenceClock>,
+    dc_topology: Option<DcTopology<MAX_SLAVES>>,
     op_only_gate: [OpOnlyGateState; MAX_SLAVES],
     current_index: usize,
     stage_target: EthercatState,
@@ -514,6 +521,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             verified_mailboxes: [None; MAX_SLAVES],
             verified_sii: [None; MAX_SLAVES],
             selected_reference_clock: None,
+            dc_topology: None,
             op_only_gate: [OpOnlyGateState::Unknown; MAX_SLAVES],
             current_index: 0,
             stage_target: EthercatState::Op,
@@ -591,6 +599,10 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
 
     pub const fn selected_reference_clock(&self) -> Option<StartupReferenceClock> {
         self.selected_reference_clock
+    }
+
+    pub const fn dc_topology(&self) -> Option<&DcTopology<MAX_SLAVES>> {
+        self.dc_topology.as_ref()
     }
 
     pub fn pending_action(&self) -> Option<StartupAction> {
@@ -753,6 +765,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.verified_mailboxes = [None; MAX_SLAVES];
         self.verified_sii = [None; MAX_SLAVES];
         self.selected_reference_clock = None;
+        self.dc_topology = None;
         self.op_only_gate = [OpOnlyGateState::Unknown; MAX_SLAVES];
         self.current_index = 0;
         self.stage_target = if config.configuration_services.is_empty() {
@@ -1232,6 +1245,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.verified_mailboxes = [None; MAX_SLAVES];
         self.verified_sii = [None; MAX_SLAVES];
         self.selected_reference_clock = None;
+        self.dc_topology = None;
         self.op_only_gate = [OpOnlyGateState::Unknown; MAX_SLAVES];
         for item in expected.iter().copied() {
             self.table
@@ -1308,7 +1322,27 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             }
         }
 
-        self.selected_reference_clock = explicit_reference.or(fallback_reference);
+        let selected_reference_clock = explicit_reference.or(fallback_reference);
+        let topology = match DcTopology::build(
+            self.scan.records(),
+            selected_reference_clock.map(|reference| reference.position),
+        ) {
+            Ok(topology) => topology,
+            Err(error) => return self.fail(StartupError::DcTopology(error)),
+        };
+        for profile in self.profiles.iter().take(self.expected_count).copied() {
+            if profile.dc_requirement != StartupDcRequirement::None
+                && topology.transmission_delay_ns(profile.position).is_none()
+            {
+                return self.fail(StartupError::DcPropagationDelayRequired {
+                    position: profile.position,
+                    requirement: profile.dc_requirement,
+                });
+            }
+        }
+
+        self.selected_reference_clock = selected_reference_clock;
+        self.dc_topology = Some(topology);
         if self.expected_count == 0 {
             self.phase = StartupPhase::Ready;
             return Ok(());
@@ -1736,6 +1770,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
 
     fn fail<T>(&mut self, error: StartupError) -> Result<T, StartupError> {
         self.last_error = Some(error);
+        self.selected_reference_clock = None;
+        self.dc_topology = None;
         self.phase = StartupPhase::Faulted;
         Err(error)
     }
@@ -1796,6 +1832,16 @@ mod tests {
     fn basic_info_with_features(features: u16) -> [u8; crate::BASIC_ESC_INFO_LEN as usize] {
         let mut bytes = basic_info();
         bytes[8..10].copy_from_slice(&features.to_le_bytes());
+        bytes
+    }
+
+    fn dc_receive_times(
+        values: [u32; crate::ESC_PORT_COUNT],
+    ) -> [u8; crate::ESC_DC_RECEIVE_TIME_LEN as usize] {
+        let mut bytes = [0; crate::ESC_DC_RECEIVE_TIME_LEN as usize];
+        for (port, value) in values.iter().copied().enumerate() {
+            bytes[port * 4..port * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
         bytes
     }
 
@@ -1904,6 +1950,29 @@ mod tests {
         system_time: Option<u64>,
         now_ns: &mut u64,
     ) {
+        let dl_status = if startup.scan.len() + 1 < startup.expected_count {
+            0x1500
+        } else {
+            0x5500
+        };
+        accept_scanned_slave_with_evidence(
+            startup,
+            features,
+            system_time,
+            [0, 0, 0, 200],
+            dl_status,
+            now_ns,
+        );
+    }
+
+    fn accept_scanned_slave_with_evidence<const MAX_SLAVES: usize>(
+        startup: &mut StartupController<MAX_SLAVES>,
+        features: u16,
+        system_time: Option<u64>,
+        receive_time_values: [u32; crate::ESC_PORT_COUNT],
+        dl_status_value: u16,
+        now_ns: &mut u64,
+    ) {
         let probe = startup.next_action(*now_ns).unwrap().unwrap();
         accept_action(startup, probe, &[0x88, 0x02], 1, *now_ns + 1);
         let basic = startup.next_action(*now_ns + 2).unwrap().unwrap();
@@ -1947,7 +2016,34 @@ mod tests {
                 }
             }
             offset += 2;
+
+            let receive_times = startup.next_action(*now_ns + offset).unwrap().unwrap();
+            assert_eq!(
+                crate::register_from_address(receive_times.address()),
+                crate::ESC_DC_TIME0
+            );
+            accept_action(
+                startup,
+                receive_times,
+                &dc_receive_times(receive_time_values),
+                1,
+                *now_ns + offset + 1,
+            );
+            offset += 2;
         }
+        let dl_status = startup.next_action(*now_ns + offset).unwrap().unwrap();
+        assert_eq!(
+            crate::register_from_address(dl_status.address()),
+            crate::ESC_DL_STATUS
+        );
+        accept_action(
+            startup,
+            dl_status,
+            &dl_status_value.to_le_bytes(),
+            1,
+            *now_ns + offset + 1,
+        );
+        offset += 2;
         let configuration = startup.next_action(*now_ns + offset).unwrap().unwrap();
         accept_action(startup, configuration, &[0], 1, *now_ns + offset + 1);
         let status_action = startup.next_action(*now_ns + offset + 2).unwrap().unwrap();
@@ -2575,19 +2671,25 @@ mod tests {
         let scan_status = startup.next_action(7).unwrap().unwrap();
         assert_eq!(
             scan_status.address(),
+            fixed_address(0x1000, crate::ESC_DL_STATUS)
+        );
+        accept_action(&mut startup, scan_status, &0x5500u16.to_le_bytes(), 1, 8);
+        let scan_status = startup.next_action(9).unwrap().unwrap();
+        assert_eq!(
+            scan_status.address(),
             fixed_address(0x1000, ESC_CONFIGURATION)
         );
-        accept_action(&mut startup, scan_status, &[0], 1, 8);
-        let scan_status = startup.next_action(9).unwrap().unwrap();
+        accept_action(&mut startup, scan_status, &[0], 1, 10);
+        let scan_status = startup.next_action(11).unwrap().unwrap();
         assert_eq!(scan_status.address(), fixed_address(0x1000, ESC_AL_STATUS));
         accept_action(
             &mut startup,
             scan_status,
             &status(EthercatState::SafeOp),
             1,
-            10,
+            12,
         );
-        let end_probe = startup.next_action(11).unwrap().unwrap();
+        let end_probe = startup.next_action(13).unwrap().unwrap();
         assert_eq!(
             startup
                 .timeout(end_probe, end_probe_deadline(end_probe))
@@ -2699,6 +2801,10 @@ mod tests {
             startup.dc_capabilities(1).unwrap().range,
             crate::EscDcRange::Bits64
         );
+        let topology = startup.dc_topology().unwrap();
+        assert_eq!(topology.reference_position(), Some(1));
+        assert_eq!(topology.transmission_delay_ns(1), Some(0));
+        assert_eq!(topology.transmission_delay_ns(0), Some(100));
     }
 
     #[test]
@@ -2779,6 +2885,7 @@ mod tests {
         );
         assert_eq!(startup.phase(), StartupPhase::Faulted);
         assert_eq!(startup.selected_reference_clock(), None);
+        assert_eq!(startup.dc_topology(), None);
         assert_eq!(startup.pending_action(), None);
     }
 
@@ -2832,10 +2939,103 @@ mod tests {
             })
         );
         assert_eq!(startup.selected_reference_clock(), None);
+        assert_eq!(startup.dc_topology(), None);
     }
 
     #[test]
-    fn startup_restart_clears_selected_reference_immediately() {
+    fn startup_rejects_required_unmeasurable_dc_before_identity() {
+        let expected = [
+            ExpectedSlave {
+                position: 0,
+                station_address: 0x1000,
+                identity: SlaveIdentity::EMPTY,
+            },
+            ExpectedSlave {
+                position: 1,
+                station_address: 0x1001,
+                identity: SlaveIdentity::EMPTY,
+            },
+            ExpectedSlave {
+                position: 2,
+                station_address: 0x1002,
+                identity: SlaveIdentity::EMPTY,
+            },
+        ];
+        let profiles = [
+            StartupSlaveProfile::new(0),
+            StartupSlaveProfile::new(1).with_dc_requirement(StartupDcRequirement::ReferenceClock),
+            StartupSlaveProfile::new(2).with_dc_requirement(StartupDcRequirement::SystemTime),
+        ];
+        let mut startup = StartupController::<3>::new(0x1000);
+        startup
+            .start_with_profiles(
+                37,
+                0,
+                StartupConfig::new(EthercatState::PreOp),
+                &expected,
+                &profiles,
+            )
+            .unwrap();
+        let mut now_ns = 1;
+        accept_scanned_slave_with_evidence(&mut startup, 0, None, [0; 4], 0x1100, &mut now_ns);
+        accept_scanned_slave_with_evidence(
+            &mut startup,
+            crate::ESC_FEATURE_DC_SUPPORTED,
+            Some(10),
+            [0; 4],
+            0x5500,
+            &mut now_ns,
+        );
+        accept_scanned_slave_with_evidence(
+            &mut startup,
+            crate::ESC_FEATURE_DC_SUPPORTED,
+            Some(20),
+            [0; 4],
+            0x5500,
+            &mut now_ns,
+        );
+
+        assert_eq!(
+            finish_scan(&mut startup, now_ns),
+            Err(StartupError::DcPropagationDelayRequired {
+                position: 2,
+                requirement: StartupDcRequirement::SystemTime,
+            })
+        );
+        assert_eq!(startup.phase(), StartupPhase::Faulted);
+        assert_eq!(startup.selected_reference_clock(), None);
+        assert_eq!(startup.dc_topology(), None);
+        assert_eq!(startup.pending_action(), None);
+    }
+
+    #[test]
+    fn startup_rejects_malformed_port_topology_transactionally() {
+        let expected = [ExpectedSlave {
+            position: 0,
+            station_address: 0x1000,
+            identity: SlaveIdentity::EMPTY,
+        }];
+        let mut startup = StartupController::<1>::new(0x1000);
+        startup
+            .start(38, 0, StartupConfig::new(EthercatState::PreOp), &expected)
+            .unwrap();
+        let mut now_ns = 1;
+        accept_scanned_slave_with_evidence(&mut startup, 0, None, [0; 4], 0x1500, &mut now_ns);
+
+        assert_eq!(
+            finish_scan(&mut startup, now_ns),
+            Err(StartupError::DcTopology(DcTopologyError::TopologyOverrun {
+                position: 0,
+                port: 3,
+            }))
+        );
+        assert_eq!(startup.phase(), StartupPhase::Faulted);
+        assert_eq!(startup.selected_reference_clock(), None);
+        assert_eq!(startup.dc_topology(), None);
+    }
+
+    #[test]
+    fn startup_restart_clears_dc_evidence_immediately() {
         let expected = [ExpectedSlave {
             position: 0,
             station_address: 0x1000,
@@ -2854,6 +3054,7 @@ mod tests {
         );
         finish_scan(&mut startup, now_ns).unwrap();
         assert!(startup.selected_reference_clock().is_some());
+        assert!(startup.dc_topology().is_some());
 
         startup.phase = StartupPhase::Ready;
         startup
@@ -2865,6 +3066,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(startup.selected_reference_clock(), None);
+        assert_eq!(startup.dc_topology(), None);
         assert_eq!(startup.dc_capabilities(0), None);
     }
 
@@ -3065,16 +3267,18 @@ mod tests {
         let assign = startup.next_action(5).unwrap().unwrap();
         accept_action(&mut startup, assign, &[], 1, 6);
         let scan_status = startup.next_action(7).unwrap().unwrap();
-        accept_action(&mut startup, scan_status, &[0], 1, 8);
+        accept_action(&mut startup, scan_status, &0x5500u16.to_le_bytes(), 1, 8);
         let scan_status = startup.next_action(9).unwrap().unwrap();
+        accept_action(&mut startup, scan_status, &[0], 1, 10);
+        let scan_status = startup.next_action(11).unwrap().unwrap();
         accept_action(
             &mut startup,
             scan_status,
             &status(EthercatState::Init),
             1,
-            10,
+            12,
         );
-        let end_probe = startup.next_action(11).unwrap().unwrap();
+        let end_probe = startup.next_action(13).unwrap().unwrap();
         startup
             .timeout(end_probe, end_probe_deadline(end_probe))
             .unwrap();
@@ -3156,7 +3360,7 @@ mod tests {
             .unwrap();
 
         let mut now_ns = 1;
-        for _ in expected {
+        for index in 0..expected.len() {
             let probe = startup.next_action(now_ns).unwrap().unwrap();
             accept_action(&mut startup, probe, &[0x88, 0x02], 1, now_ns + 1);
             let basic = startup.next_action(now_ns + 2).unwrap().unwrap();
@@ -3164,16 +3368,29 @@ mod tests {
             let assign = startup.next_action(now_ns + 4).unwrap().unwrap();
             accept_action(&mut startup, assign, &[], 1, now_ns + 5);
             let scan_status = startup.next_action(now_ns + 6).unwrap().unwrap();
-            accept_action(&mut startup, scan_status, &[0], 1, now_ns + 7);
+            let dl_status = if index + 1 < expected.len() {
+                0x1500u16
+            } else {
+                0x5500u16
+            };
+            accept_action(
+                &mut startup,
+                scan_status,
+                &dl_status.to_le_bytes(),
+                1,
+                now_ns + 7,
+            );
             let scan_status = startup.next_action(now_ns + 8).unwrap().unwrap();
+            accept_action(&mut startup, scan_status, &[0], 1, now_ns + 9);
+            let scan_status = startup.next_action(now_ns + 10).unwrap().unwrap();
             accept_action(
                 &mut startup,
                 scan_status,
                 &status(EthercatState::Init),
                 1,
-                now_ns + 9,
+                now_ns + 11,
             );
-            now_ns += 10;
+            now_ns += 12;
         }
         let end_probe = startup.next_action(now_ns).unwrap().unwrap();
         startup
@@ -3448,7 +3665,9 @@ mod tests {
         );
         let assign = startup.next_action(5).unwrap().unwrap();
         accept_action(&mut startup, assign, &[], 1, 6);
-        let configuration = startup.next_action(7).unwrap().unwrap();
+        let dl_status = startup.next_action(7).unwrap().unwrap();
+        accept_action(&mut startup, dl_status, &0x5500u16.to_le_bytes(), 1, 8);
+        let configuration = startup.next_action(9).unwrap().unwrap();
         assert_eq!(
             configuration.address(),
             fixed_address(0x1000, ESC_CONFIGURATION)
@@ -3458,17 +3677,17 @@ mod tests {
             configuration,
             &[crate::registers::ESC_DEVICE_EMULATION],
             1,
-            8,
+            10,
         );
-        let status_action = startup.next_action(9).unwrap().unwrap();
+        let status_action = startup.next_action(11).unwrap().unwrap();
         accept_action(
             &mut startup,
             status_action,
             &status_with_code(EthercatState::Init, true, 0x0011),
             1,
-            10,
+            12,
         );
-        let end_probe = startup.next_action(11).unwrap().unwrap();
+        let end_probe = startup.next_action(13).unwrap().unwrap();
         startup
             .timeout(end_probe, end_probe_deadline(end_probe))
             .unwrap();
@@ -3556,16 +3775,24 @@ mod tests {
         let assign = startup.next_action(5).unwrap().unwrap();
         accept_action(&mut startup, assign, &[], 1, 6);
         let scan_status_action = startup.next_action(7).unwrap().unwrap();
-        accept_action(&mut startup, scan_status_action, &[0], 1, 8);
+        accept_action(
+            &mut startup,
+            scan_status_action,
+            &0x5500u16.to_le_bytes(),
+            1,
+            8,
+        );
         let scan_status_action = startup.next_action(9).unwrap().unwrap();
+        accept_action(&mut startup, scan_status_action, &[0], 1, 10);
+        let scan_status_action = startup.next_action(11).unwrap().unwrap();
         accept_action(
             &mut startup,
             scan_status_action,
             &status(EthercatState::SafeOp),
             1,
-            10,
+            12,
         );
-        let end_probe = startup.next_action(11).unwrap().unwrap();
+        let end_probe = startup.next_action(13).unwrap().unwrap();
         startup
             .timeout(end_probe, end_probe_deadline(end_probe))
             .unwrap();

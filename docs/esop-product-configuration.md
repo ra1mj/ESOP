@@ -169,8 +169,11 @@ payload，直到 END 才公开完整镜像；`SiiStreamDiscoveryController` 使�
 原子投影 SyncManager/RxPDO/TxPDO candidate，并保留显式 signedness。Startup 已复用
 同一流控制器和控制请求所有权，在首个 AL 动作前与生成产品重建的固定大小结构签名
 精确比较；signedness 暂不属于在线签名，因为 SII flags 的数据类型语义尚未单独冻结。
-FMMU/SII DC category 语义、DC 端口接收时间、传播延迟、offset/delay 与 SYNC 配置、
-物理响应真实性和 HIL 仍待完成。
+在线扫描现独立于生成 schema 精确采集 DC 端口接收时间和 Data Link Status，Startup
+根据已有 DC requirement/reference policy 事务式发布固定容量拓扑与参考钟相对传播延迟；
+产品必需 DC 从站缺少可测累计延迟时在 identity 前闭锁。FMMU/SII DC category 语义、
+offset/delay 寄存器写入、应用时间/start time、SYNC 配置、物理响应真实性与时序精度和
+HIL 仍待完成。
 
 ## 6. 构建报告接入
 

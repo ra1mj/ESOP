@@ -14,16 +14,420 @@ use crate::engine::RxDatagramConsumer;
 use crate::plan::DatagramPlan;
 use crate::registers::{
     ESC_DC_CUC, ESC_DC_CYCLE0, ESC_DC_CYCLE1, ESC_DC_START0, ESC_DC_SYNC_ACTIVATION,
-    ESC_DC_SYSTEM_TIME, fixed_address,
+    ESC_DC_SYSTEM_TIME, ESC_PORT_COUNT, fixed_address,
 };
 use crate::rx_index::RxMatch;
+use crate::scan::{ScanPortLink, ScanRecord};
 use crate::wire::{Command, DatagramHeader};
 
 pub const DC_SYNC_DELAY_NS: u64 = 100_000_000;
+const DC_DOWNSTREAM_PORTS: [usize; 3] = [3, 1, 2];
+const DC_REVERSE_PORT_ORDER: [usize; ESC_PORT_COUNT] = [2, 3, 1, 0];
 const DC_SYSTEM_TIME_LEN: usize = 8;
 const DC_CYCLE_LEN: usize = 4;
 const DC_ACTIVATION_LEN: usize = 1;
 const DC_MAX_ACTION_PAYLOAD: usize = DC_SYSTEM_TIME_LEN;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DcTopologyPort {
+    pub link: ScanPortLink,
+    pub receive_time_ns: Option<u32>,
+    pub next_slave_position: Option<u16>,
+    pub next_dc_position: Option<u16>,
+    pub propagation_delay_ns: Option<u32>,
+}
+
+impl DcTopologyPort {
+    const EMPTY: Self = Self {
+        link: ScanPortLink::NONE,
+        receive_time_ns: None,
+        next_slave_position: None,
+        next_dc_position: None,
+        propagation_delay_ns: None,
+    };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DcTopologySlave {
+    pub position: u16,
+    pub station_address: u16,
+    pub dc_supported: bool,
+    pub system_time_capable: bool,
+    pub ports: [DcTopologyPort; ESC_PORT_COUNT],
+    pub transmission_delay_ns: Option<u32>,
+}
+
+impl DcTopologySlave {
+    const EMPTY: Self = Self {
+        position: 0,
+        station_address: 0,
+        dc_supported: false,
+        system_time_capable: false,
+        ports: [DcTopologyPort::EMPTY; ESC_PORT_COUNT],
+        transmission_delay_ns: None,
+    };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DcTopologyError {
+    CapacityExceeded,
+    DuplicatePosition(u16),
+    MissingReceiveTimes(u16),
+    TopologyOverrun {
+        position: u16,
+        port: u8,
+    },
+    UnreachablePosition(u16),
+    InvalidReference(u16),
+    DelayUnderflow {
+        position: u16,
+        port: u8,
+        round_trip_ns: u32,
+        downstream_round_trip_ns: u32,
+    },
+    DelayOverflow(u16),
+}
+
+#[derive(Clone, Copy)]
+struct DcTopologyBuildFrame {
+    slave_index: usize,
+    next_port: u8,
+}
+
+impl DcTopologyBuildFrame {
+    const EMPTY: Self = Self {
+        slave_index: 0,
+        next_port: 0,
+    };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DcTopology<const MAX_SLAVES: usize> {
+    slaves: [DcTopologySlave; MAX_SLAVES],
+    len: usize,
+    reference_position: Option<u16>,
+}
+
+impl<const MAX_SLAVES: usize> DcTopology<MAX_SLAVES> {
+    pub const fn empty() -> Self {
+        Self {
+            slaves: [DcTopologySlave::EMPTY; MAX_SLAVES],
+            len: 0,
+            reference_position: None,
+        }
+    }
+
+    pub fn build(
+        records: &[ScanRecord],
+        reference_position: Option<u16>,
+    ) -> Result<Self, DcTopologyError> {
+        if records.len() > MAX_SLAVES {
+            return Err(DcTopologyError::CapacityExceeded);
+        }
+
+        let mut topology = Self::empty();
+        topology.len = records.len();
+        topology.reference_position = reference_position;
+
+        for (index, record) in records.iter().copied().enumerate() {
+            if records[..index]
+                .iter()
+                .any(|existing| existing.position == record.position)
+            {
+                return Err(DcTopologyError::DuplicatePosition(record.position));
+            }
+            if record.dc.supported && record.dc.receive_times.is_none() {
+                return Err(DcTopologyError::MissingReceiveTimes(record.position));
+            }
+
+            let mut ports = [DcTopologyPort::EMPTY; ESC_PORT_COUNT];
+            for port in 0..ESC_PORT_COUNT {
+                ports[port].link = record.port_links[port];
+                ports[port].receive_time_ns = record.dc.receive_times.map(|times| times[port]);
+            }
+            topology.slaves[index] = DcTopologySlave {
+                position: record.position,
+                station_address: record.station_address,
+                dc_supported: record.dc.supported,
+                system_time_capable: record.dc.can_be_reference_clock(),
+                ports,
+                transmission_delay_ns: None,
+            };
+        }
+
+        if topology.len == 0 {
+            if let Some(reference) = reference_position {
+                return Err(DcTopologyError::InvalidReference(reference));
+            }
+            return Ok(topology);
+        }
+
+        topology.build_physical_tree()?;
+        topology.calculate_dc_links()?;
+        topology.calculate_transmission_delays()?;
+        Ok(topology)
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub const fn reference_position(&self) -> Option<u16> {
+        self.reference_position
+    }
+
+    pub fn slaves(&self) -> &[DcTopologySlave] {
+        &self.slaves[..self.len]
+    }
+
+    pub fn slave(&self, position: u16) -> Option<&DcTopologySlave> {
+        self.position_index(position)
+            .map(|index| &self.slaves[index])
+    }
+
+    pub fn transmission_delay_ns(&self, position: u16) -> Option<u32> {
+        self.slave(position)
+            .and_then(|slave| slave.transmission_delay_ns)
+    }
+
+    fn build_physical_tree(&mut self) -> Result<(), DcTopologyError> {
+        let mut stack = [DcTopologyBuildFrame::EMPTY; MAX_SLAVES];
+        stack[0] = DcTopologyBuildFrame {
+            slave_index: 0,
+            next_port: 0,
+        };
+        let mut depth = 1;
+        let mut next_slave_index = 1;
+
+        while depth > 0 {
+            let frame_index = depth - 1;
+            let port_cursor = stack[frame_index].next_port as usize;
+            if port_cursor >= DC_DOWNSTREAM_PORTS.len() {
+                depth -= 1;
+                continue;
+            }
+
+            stack[frame_index].next_port += 1;
+            let slave_index = stack[frame_index].slave_index;
+            let port = DC_DOWNSTREAM_PORTS[port_cursor];
+            if self.slaves[slave_index].ports[port].link.loop_closed {
+                continue;
+            }
+            if next_slave_index >= self.len {
+                return Err(DcTopologyError::TopologyOverrun {
+                    position: self.slaves[slave_index].position,
+                    port: port as u8,
+                });
+            }
+
+            let child_index = next_slave_index;
+            next_slave_index += 1;
+            let parent_position = self.slaves[slave_index].position;
+            let child_position = self.slaves[child_index].position;
+            self.slaves[slave_index].ports[port].next_slave_position = Some(child_position);
+            self.slaves[child_index].ports[0].next_slave_position = Some(parent_position);
+            if depth >= MAX_SLAVES {
+                return Err(DcTopologyError::CapacityExceeded);
+            }
+            stack[depth] = DcTopologyBuildFrame {
+                slave_index: child_index,
+                next_port: 0,
+            };
+            depth += 1;
+        }
+
+        if next_slave_index != self.len {
+            return Err(DcTopologyError::UnreachablePosition(
+                self.slaves[next_slave_index].position,
+            ));
+        }
+        Ok(())
+    }
+
+    fn calculate_dc_links(&mut self) -> Result<(), DcTopologyError> {
+        for source_index in 0..self.len {
+            if !self.slaves[source_index].dc_supported {
+                continue;
+            }
+            for port in DC_DOWNSTREAM_PORTS {
+                let Some(child_position) =
+                    self.slaves[source_index].ports[port].next_slave_position
+                else {
+                    continue;
+                };
+                let child_index = self
+                    .position_index(child_position)
+                    .ok_or(DcTopologyError::UnreachablePosition(child_position))?;
+                let Some(next_dc_index) = self.find_first_dc_in_subtree(child_index)? else {
+                    continue;
+                };
+                let round_trip_ns = self.port_round_trip(source_index, port)?;
+                let downstream_round_trip_ns = self.internal_round_trip_sum(next_dc_index)?;
+                let delay_ns = round_trip_ns.checked_sub(downstream_round_trip_ns).ok_or(
+                    DcTopologyError::DelayUnderflow {
+                        position: self.slaves[source_index].position,
+                        port: port as u8,
+                        round_trip_ns,
+                        downstream_round_trip_ns,
+                    },
+                )? / 2;
+
+                let source_position = self.slaves[source_index].position;
+                let next_dc_position = self.slaves[next_dc_index].position;
+                self.slaves[source_index].ports[port].next_dc_position = Some(next_dc_position);
+                self.slaves[source_index].ports[port].propagation_delay_ns = Some(delay_ns);
+                self.slaves[next_dc_index].ports[0].next_dc_position = Some(source_position);
+                self.slaves[next_dc_index].ports[0].propagation_delay_ns = Some(delay_ns);
+            }
+        }
+        Ok(())
+    }
+
+    fn calculate_transmission_delays(&mut self) -> Result<(), DcTopologyError> {
+        let Some(reference_position) = self.reference_position else {
+            return Ok(());
+        };
+        let reference_index = self
+            .position_index(reference_position)
+            .filter(|index| self.slaves[*index].system_time_capable)
+            .ok_or(DcTopologyError::InvalidReference(reference_position))?;
+
+        let mut visited = [false; MAX_SLAVES];
+        let mut stack_indices = [0usize; MAX_SLAVES];
+        let mut stack_delays = [0u32; MAX_SLAVES];
+        let mut depth = 1;
+        visited[reference_index] = true;
+        self.slaves[reference_index].transmission_delay_ns = Some(0);
+        stack_indices[0] = reference_index;
+
+        while depth > 0 {
+            depth -= 1;
+            let source_index = stack_indices[depth];
+            let source_delay = stack_delays[depth];
+            for port in 0..ESC_PORT_COUNT {
+                let Some(peer_position) = self.slaves[source_index].ports[port].next_dc_position
+                else {
+                    continue;
+                };
+                let Some(link_delay) = self.slaves[source_index].ports[port].propagation_delay_ns
+                else {
+                    continue;
+                };
+                let peer_index = self
+                    .position_index(peer_position)
+                    .ok_or(DcTopologyError::UnreachablePosition(peer_position))?;
+                if visited[peer_index] {
+                    continue;
+                }
+                let peer_delay =
+                    source_delay
+                        .checked_add(link_delay)
+                        .ok_or(DcTopologyError::DelayOverflow(
+                            self.slaves[peer_index].position,
+                        ))?;
+                visited[peer_index] = true;
+                self.slaves[peer_index].transmission_delay_ns = Some(peer_delay);
+                if depth >= MAX_SLAVES {
+                    return Err(DcTopologyError::CapacityExceeded);
+                }
+                stack_indices[depth] = peer_index;
+                stack_delays[depth] = peer_delay;
+                depth += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn find_first_dc_in_subtree(
+        &self,
+        start_index: usize,
+    ) -> Result<Option<usize>, DcTopologyError> {
+        let mut stack = [0usize; MAX_SLAVES];
+        let mut depth = 1;
+        stack[0] = start_index;
+        while depth > 0 {
+            depth -= 1;
+            let slave_index = stack[depth];
+            if self.slaves[slave_index].dc_supported {
+                return Ok(Some(slave_index));
+            }
+            for port in DC_DOWNSTREAM_PORTS.iter().rev().copied() {
+                let Some(position) = self.slaves[slave_index].ports[port].next_slave_position
+                else {
+                    continue;
+                };
+                let child_index = self
+                    .position_index(position)
+                    .ok_or(DcTopologyError::UnreachablePosition(position))?;
+                if depth >= MAX_SLAVES {
+                    return Err(DcTopologyError::CapacityExceeded);
+                }
+                stack[depth] = child_index;
+                depth += 1;
+            }
+        }
+        Ok(None)
+    }
+
+    fn internal_round_trip_sum(&self, slave_index: usize) -> Result<u32, DcTopologyError> {
+        let mut sum = 0u32;
+        for port in DC_DOWNSTREAM_PORTS {
+            if self.slaves[slave_index].ports[port]
+                .next_slave_position
+                .is_none()
+            {
+                continue;
+            }
+            sum = sum
+                .checked_add(self.port_round_trip(slave_index, port)?)
+                .ok_or(DcTopologyError::DelayOverflow(
+                    self.slaves[slave_index].position,
+                ))?;
+        }
+        Ok(sum)
+    }
+
+    fn port_round_trip(&self, slave_index: usize, port: usize) -> Result<u32, DcTopologyError> {
+        let slave = &self.slaves[slave_index];
+        let previous_port = self.previous_connected_port(slave_index, port);
+        let receive_time = slave.ports[port]
+            .receive_time_ns
+            .ok_or(DcTopologyError::MissingReceiveTimes(slave.position))?;
+        let previous_receive_time = slave.ports[previous_port]
+            .receive_time_ns
+            .ok_or(DcTopologyError::MissingReceiveTimes(slave.position))?;
+        Ok(receive_time.wrapping_sub(previous_receive_time))
+    }
+
+    fn previous_connected_port(&self, slave_index: usize, mut port: usize) -> usize {
+        loop {
+            port = DC_REVERSE_PORT_ORDER[port];
+            if port == 0
+                || self.slaves[slave_index].ports[port]
+                    .next_slave_position
+                    .is_some()
+            {
+                return port;
+            }
+        }
+    }
+
+    fn position_index(&self, position: u16) -> Option<usize> {
+        self.slaves[..self.len]
+            .iter()
+            .position(|slave| slave.position == position)
+    }
+}
+
+impl<const MAX_SLAVES: usize> Default for DcTopology<MAX_SLAVES> {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DcSyncMode {
@@ -1028,6 +1432,256 @@ fn u32_payload(value: u32) -> [u8; DC_MAX_ACTION_PAYLOAD] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scan::{EscDcRange, ScanDcCapabilities};
+    use crate::slave::{AlStatus, EthercatState};
+
+    fn topology_links(open_ports: &[usize]) -> [ScanPortLink; ESC_PORT_COUNT] {
+        let mut links = [ScanPortLink {
+            link_up: false,
+            loop_closed: true,
+            signal_detected: false,
+        }; ESC_PORT_COUNT];
+        for port in open_ports.iter().copied() {
+            links[port].loop_closed = false;
+        }
+        links
+    }
+
+    fn topology_record(
+        position: u16,
+        open_ports: &[usize],
+        dc_supported: bool,
+        system_time_capable: bool,
+        receive_times: [u32; ESC_PORT_COUNT],
+    ) -> ScanRecord {
+        ScanRecord {
+            position,
+            station_address: 0x1000 + position,
+            esc_type: 0,
+            revision: 0,
+            build: 0,
+            fmmu_count: 0,
+            sync_manager_count: 0,
+            ram_size: 0,
+            port_descriptor: 0,
+            dl_status: 0,
+            port_links: topology_links(open_ports),
+            dc: ScanDcCapabilities {
+                raw_features: if dc_supported {
+                    crate::ESC_FEATURE_DC_SUPPORTED
+                } else {
+                    0
+                },
+                fmmu_bit_operation: false,
+                supported: dc_supported,
+                range: EscDcRange::Bits32,
+                has_system_time: system_time_capable,
+                system_time: system_time_capable.then_some(1),
+                receive_times: dc_supported.then_some(receive_times),
+            },
+            device_emulation: false,
+            al_status: AlStatus::new(EthercatState::Init as u16, 0),
+            online: true,
+        }
+    }
+
+    #[test]
+    fn dc_topology_builds_branched_physical_tree_in_port_order() {
+        let records = [
+            topology_record(10, &[3, 1], false, false, [0; 4]),
+            topology_record(11, &[3], false, false, [0; 4]),
+            topology_record(12, &[], false, false, [0; 4]),
+            topology_record(13, &[], false, false, [0; 4]),
+        ];
+        let topology = DcTopology::<4>::build(&records, None).unwrap();
+
+        assert_eq!(topology.len(), 4);
+        assert_eq!(
+            topology.slave(10).unwrap().ports[3].next_slave_position,
+            Some(11)
+        );
+        assert_eq!(
+            topology.slave(11).unwrap().ports[0].next_slave_position,
+            Some(10)
+        );
+        assert_eq!(
+            topology.slave(11).unwrap().ports[3].next_slave_position,
+            Some(12)
+        );
+        assert_eq!(
+            topology.slave(12).unwrap().ports[0].next_slave_position,
+            Some(11)
+        );
+        assert_eq!(
+            topology.slave(10).unwrap().ports[1].next_slave_position,
+            Some(13)
+        );
+        assert_eq!(
+            topology.slave(13).unwrap().ports[0].next_slave_position,
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn dc_topology_uses_delay_only_source_and_non_first_reference() {
+        let records = [
+            topology_record(0, &[3], true, false, [0, 0, 0, 200]),
+            topology_record(1, &[], true, true, [0; 4]),
+        ];
+        let topology = DcTopology::<2>::build(&records, Some(1)).unwrap();
+
+        assert_eq!(topology.reference_position(), Some(1));
+        assert_eq!(topology.transmission_delay_ns(1), Some(0));
+        assert_eq!(topology.transmission_delay_ns(0), Some(100));
+        assert_eq!(
+            topology.slave(0).unwrap().ports[3].next_dc_position,
+            Some(1)
+        );
+        assert_eq!(
+            topology.slave(0).unwrap().ports[3].propagation_delay_ns,
+            Some(100)
+        );
+        assert_eq!(
+            topology.slave(1).unwrap().ports[0].next_dc_position,
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn dc_topology_receive_time_delta_wraps_at_u32_boundary() {
+        let records = [
+            topology_record(0, &[3], true, true, [u32::MAX - 15, 0, 0, 16]),
+            topology_record(1, &[], true, false, [0; 4]),
+        ];
+        let topology = DcTopology::<2>::build(&records, Some(0)).unwrap();
+
+        assert_eq!(
+            topology.slave(0).unwrap().ports[3].propagation_delay_ns,
+            Some(16)
+        );
+        assert_eq!(topology.transmission_delay_ns(1), Some(16));
+    }
+
+    #[test]
+    fn dc_topology_leaves_disconnected_dc_branch_unmeasurable() {
+        let records = [
+            topology_record(0, &[3, 1], false, false, [0; 4]),
+            topology_record(1, &[], true, true, [0; 4]),
+            topology_record(2, &[], true, true, [0; 4]),
+        ];
+        let topology = DcTopology::<3>::build(&records, Some(1)).unwrap();
+
+        assert_eq!(topology.transmission_delay_ns(1), Some(0));
+        assert_eq!(topology.transmission_delay_ns(2), None);
+        assert_eq!(topology.slave(1).unwrap().ports[0].next_dc_position, None);
+        assert_eq!(topology.slave(2).unwrap().ports[0].next_dc_position, None);
+    }
+
+    #[test]
+    fn dc_topology_rejects_invalid_structure_and_missing_times() {
+        let open_root = [topology_record(0, &[3], false, false, [0; 4])];
+        assert_eq!(
+            DcTopology::<1>::build(&open_root, None),
+            Err(DcTopologyError::TopologyOverrun {
+                position: 0,
+                port: 3,
+            })
+        );
+
+        let unreachable = [
+            topology_record(0, &[], false, false, [0; 4]),
+            topology_record(1, &[], false, false, [0; 4]),
+        ];
+        assert_eq!(
+            DcTopology::<2>::build(&unreachable, None),
+            Err(DcTopologyError::UnreachablePosition(1))
+        );
+        assert_eq!(
+            DcTopology::<1>::build(&unreachable, None),
+            Err(DcTopologyError::CapacityExceeded)
+        );
+
+        let duplicate = [
+            topology_record(0, &[3], false, false, [0; 4]),
+            topology_record(0, &[], false, false, [0; 4]),
+        ];
+        assert_eq!(
+            DcTopology::<2>::build(&duplicate, None),
+            Err(DcTopologyError::DuplicatePosition(0))
+        );
+
+        let mut missing = topology_record(0, &[], true, true, [0; 4]);
+        missing.dc.receive_times = None;
+        assert_eq!(
+            DcTopology::<1>::build(&[missing], Some(0)),
+            Err(DcTopologyError::MissingReceiveTimes(0))
+        );
+    }
+
+    #[test]
+    fn dc_topology_rejects_delay_underflow_and_overflow() {
+        let underflow = [
+            topology_record(0, &[3], true, true, [0, 0, 0, 10]),
+            topology_record(1, &[3], true, false, [0, 0, 0, 20]),
+            topology_record(2, &[], false, false, [0; 4]),
+        ];
+        assert_eq!(
+            DcTopology::<3>::build(&underflow, Some(0)),
+            Err(DcTopologyError::DelayUnderflow {
+                position: 0,
+                port: 3,
+                round_trip_ns: 10,
+                downstream_round_trip_ns: 20,
+            })
+        );
+
+        let aggregate_overflow = [
+            topology_record(0, &[3], true, true, [0, 0, 0, 100]),
+            topology_record(
+                1,
+                &[3, 1],
+                true,
+                false,
+                [0, u32::MAX - 31, 0, u32::MAX - 15],
+            ),
+            topology_record(2, &[], false, false, [0; 4]),
+            topology_record(3, &[], false, false, [0; 4]),
+        ];
+        assert_eq!(
+            DcTopology::<4>::build(&aggregate_overflow, Some(0)),
+            Err(DcTopologyError::DelayOverflow(1))
+        );
+
+        let mut cumulative = DcTopology::<3>::empty();
+        cumulative.len = 3;
+        cumulative.reference_position = Some(0);
+        for (index, slave) in cumulative.slaves.iter_mut().enumerate() {
+            slave.position = index as u16;
+            slave.dc_supported = true;
+        }
+        cumulative.slaves[0].system_time_capable = true;
+        cumulative.slaves[0].ports[3].next_dc_position = Some(1);
+        cumulative.slaves[0].ports[3].propagation_delay_ns = Some(u32::MAX);
+        cumulative.slaves[1].ports[0].next_dc_position = Some(0);
+        cumulative.slaves[1].ports[0].propagation_delay_ns = Some(u32::MAX);
+        cumulative.slaves[1].ports[3].next_dc_position = Some(2);
+        cumulative.slaves[1].ports[3].propagation_delay_ns = Some(1);
+        cumulative.slaves[2].ports[0].next_dc_position = Some(1);
+        cumulative.slaves[2].ports[0].propagation_delay_ns = Some(1);
+        assert_eq!(
+            cumulative.calculate_transmission_delays(),
+            Err(DcTopologyError::DelayOverflow(2))
+        );
+    }
+
+    #[test]
+    fn dc_topology_rejects_reference_without_system_time() {
+        let records = [topology_record(4, &[], true, false, [0; 4])];
+        assert_eq!(
+            DcTopology::<1>::build(&records, Some(4)),
+            Err(DcTopologyError::InvalidReference(4))
+        );
+    }
 
     #[test]
     fn controller_follows_soem_dc_sync0_sequence() {

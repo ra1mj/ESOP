@@ -7,9 +7,10 @@
 use crate::control::{ControlError, ControlRequestPool, RegisterOperation, RequestHandle};
 use crate::registers::{
     AL_STATUS_WITH_CODE_LEN, BASIC_ESC_INFO_LEN, ESC_AL_STATUS, ESC_CONFIGURATION,
-    ESC_DC_SYSTEM_TIME, ESC_DEVICE_EMULATION, ESC_FEATURE_DC_64_BIT, ESC_FEATURE_DC_SUPPORTED,
-    ESC_FEATURE_FMMU_BIT_OPERATION, ESC_STATION_ADDRESS, ESC_TYPE, auto_increment_address,
-    fixed_address,
+    ESC_DC_RECEIVE_TIME_LEN, ESC_DC_SYSTEM_TIME, ESC_DC_TIME0, ESC_DEVICE_EMULATION, ESC_DL_STATUS,
+    ESC_DL_STATUS_LEN, ESC_FEATURE_DC_64_BIT, ESC_FEATURE_DC_SUPPORTED,
+    ESC_FEATURE_FMMU_BIT_OPERATION, ESC_PORT_COUNT, ESC_STATION_ADDRESS, ESC_TYPE,
+    auto_increment_address, fixed_address,
 };
 use crate::rx_index::RxWorkingCounterPolicy;
 use crate::slave::{AlStatus, EthercatState};
@@ -23,6 +24,8 @@ pub enum ScanPhase {
     ReadingBasicInfo,
     AssigningStationAddress,
     ReadingDcSystemTime,
+    ReadingDcReceiveTimes,
+    ReadingDataLinkStatus,
     ReadingEscConfiguration,
     ReadingAlStatus,
     Complete,
@@ -111,6 +114,7 @@ pub struct ScanDcCapabilities {
     pub range: EscDcRange,
     pub has_system_time: bool,
     pub system_time: Option<u64>,
+    pub receive_times: Option<[u32; ESC_PORT_COUNT]>,
 }
 
 impl ScanDcCapabilities {
@@ -121,6 +125,7 @@ impl ScanDcCapabilities {
         range: EscDcRange::Bits32,
         has_system_time: false,
         system_time: None,
+        receive_times: None,
     };
 
     const fn from_features(raw_features: u16) -> Self {
@@ -135,12 +140,28 @@ impl ScanDcCapabilities {
             },
             has_system_time: false,
             system_time: None,
+            receive_times: None,
         }
     }
 
     pub const fn can_be_reference_clock(self) -> bool {
         self.supported && self.has_system_time
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScanPortLink {
+    pub link_up: bool,
+    pub loop_closed: bool,
+    pub signal_detected: bool,
+}
+
+impl ScanPortLink {
+    pub const NONE: Self = Self {
+        link_up: false,
+        loop_closed: false,
+        signal_detected: false,
+    };
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -154,6 +175,8 @@ pub struct ScanRecord {
     pub sync_manager_count: u8,
     pub ram_size: u16,
     pub port_descriptor: u8,
+    pub dl_status: u16,
+    pub port_links: [ScanPortLink; ESC_PORT_COUNT],
     pub dc: ScanDcCapabilities,
     pub device_emulation: bool,
     pub al_status: AlStatus,
@@ -171,6 +194,8 @@ impl ScanRecord {
         sync_manager_count: 0,
         ram_size: 0,
         port_descriptor: 0,
+        dl_status: 0,
+        port_links: [ScanPortLink::NONE; ESC_PORT_COUNT],
         dc: ScanDcCapabilities::NONE,
         device_emulation: false,
         al_status: AlStatus {
@@ -332,6 +357,24 @@ impl<const MAX_SLAVES: usize> ScanController<MAX_SLAVES> {
                     self.current.position,
                     self.current.station_address,
                 ),
+                ScanPhase::ReadingDcReceiveTimes => (
+                    RegisterOperation::Read,
+                    fixed_address(self.current.station_address, ESC_DC_TIME0),
+                    ESC_DC_RECEIVE_TIME_LEN,
+                    [0; ACTION_PAYLOAD_LEN],
+                    0,
+                    self.current.position,
+                    self.current.station_address,
+                ),
+                ScanPhase::ReadingDataLinkStatus => (
+                    RegisterOperation::Read,
+                    fixed_address(self.current.station_address, ESC_DL_STATUS),
+                    ESC_DL_STATUS_LEN,
+                    [0; ACTION_PAYLOAD_LEN],
+                    0,
+                    self.current.position,
+                    self.current.station_address,
+                ),
                 ScanPhase::ReadingEscConfiguration => (
                     RegisterOperation::Read,
                     fixed_address(self.current.station_address, ESC_CONFIGURATION),
@@ -435,7 +478,7 @@ impl<const MAX_SLAVES: usize> ScanController<MAX_SLAVES> {
         }
         if self.phase == ScanPhase::ReadingDcSystemTime && working_counter == 0 {
             self.pending = None;
-            self.phase = ScanPhase::ReadingEscConfiguration;
+            self.phase = ScanPhase::ReadingDcReceiveTimes;
             return Ok(ScanProgress::Advanced);
         }
         if payload.len() != action.read_len as usize {
@@ -471,7 +514,7 @@ impl<const MAX_SLAVES: usize> ScanController<MAX_SLAVES> {
                 self.phase = if self.current.dc.supported {
                     ScanPhase::ReadingDcSystemTime
                 } else {
-                    ScanPhase::ReadingEscConfiguration
+                    ScanPhase::ReadingDataLinkStatus
                 };
                 ScanProgress::Advanced
             }
@@ -486,6 +529,34 @@ impl<const MAX_SLAVES: usize> ScanController<MAX_SLAVES> {
                     ]),
                 });
                 self.current.dc.has_system_time = true;
+                self.phase = ScanPhase::ReadingDcReceiveTimes;
+                ScanProgress::Advanced
+            }
+            ScanPhase::ReadingDcReceiveTimes => {
+                let mut receive_times = [0; ESC_PORT_COUNT];
+                for (port, receive_time) in receive_times.iter_mut().enumerate() {
+                    let offset = port * 4;
+                    *receive_time = u32::from_le_bytes([
+                        payload[offset],
+                        payload[offset + 1],
+                        payload[offset + 2],
+                        payload[offset + 3],
+                    ]);
+                }
+                self.current.dc.receive_times = Some(receive_times);
+                self.phase = ScanPhase::ReadingDataLinkStatus;
+                ScanProgress::Advanced
+            }
+            ScanPhase::ReadingDataLinkStatus => {
+                let dl_status = u16::from_le_bytes([payload[0], payload[1]]);
+                self.current.dl_status = dl_status;
+                for (port, link) in self.current.port_links.iter_mut().enumerate() {
+                    *link = ScanPortLink {
+                        link_up: dl_status & (1 << (4 + port)) != 0,
+                        loop_closed: dl_status & (1 << (8 + port * 2)) != 0,
+                        signal_detected: dl_status & (1 << (9 + port * 2)) != 0,
+                    };
+                }
                 self.phase = ScanPhase::ReadingEscConfiguration;
                 ScanProgress::Advanced
             }
@@ -548,8 +619,11 @@ impl<const MAX_SLAVES: usize> Default for ScanController<MAX_SLAVES> {
 mod tests {
     use super::*;
     use crate::registers::{
-        ESC_AL_STATUS, ESC_CONFIGURATION, ESC_TYPE, auto_increment_address, fixed_address,
+        ESC_AL_STATUS, ESC_CONFIGURATION, ESC_DC_TIME0, ESC_DL_STATUS, ESC_TYPE,
+        auto_increment_address, fixed_address,
     };
+
+    const CLOSED_DL_STATUS: [u8; ESC_DL_STATUS_LEN as usize] = 0x5500u16.to_le_bytes();
 
     fn basic_info() -> [u8; BASIC_ESC_INFO_LEN as usize] {
         [
@@ -561,6 +635,53 @@ mod tests {
         let mut bytes = basic_info();
         bytes[8..10].copy_from_slice(&features.to_le_bytes());
         bytes
+    }
+
+    fn receive_times(values: [u32; ESC_PORT_COUNT]) -> [u8; ESC_DC_RECEIVE_TIME_LEN as usize] {
+        let mut bytes = [0; ESC_DC_RECEIVE_TIME_LEN as usize];
+        for (port, value) in values.iter().copied().enumerate() {
+            bytes[port * 4..port * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn accept_dl_status<const MAX_SLAVES: usize>(
+        scan: &mut ScanController<MAX_SLAVES>,
+        generation: u16,
+        payload: &[u8],
+        now_ns: u64,
+    ) {
+        let action = scan.next_action(now_ns).unwrap().unwrap();
+        assert_eq!(
+            action.address,
+            fixed_address(action.station_address, ESC_DL_STATUS)
+        );
+        assert_eq!(action.read_len, ESC_DL_STATUS_LEN);
+        scan.accept(action.token, generation, payload, 1, now_ns + 1)
+            .unwrap();
+    }
+
+    fn accept_receive_times<const MAX_SLAVES: usize>(
+        scan: &mut ScanController<MAX_SLAVES>,
+        generation: u16,
+        values: [u32; ESC_PORT_COUNT],
+        now_ns: u64,
+    ) {
+        let action = scan.next_action(now_ns).unwrap().unwrap();
+        assert_eq!(
+            action.address,
+            fixed_address(action.station_address, ESC_DC_TIME0)
+        );
+        assert_eq!(action.read_len, ESC_DC_RECEIVE_TIME_LEN);
+        assert_eq!(action.working_counter_policy, RxWorkingCounterPolicy::Exact);
+        scan.accept(
+            action.token,
+            generation,
+            &receive_times(values),
+            1,
+            now_ns + 1,
+        )
+        .unwrap();
     }
 
     fn advance_to_dc_probe(
@@ -585,6 +706,17 @@ mod tests {
         scan.next_action(7).unwrap().unwrap()
     }
 
+    fn advance_to_dl_status(scan: &mut ScanController<1>, generation: u16) -> ScanAction {
+        let probe = scan.next_action(1).unwrap().unwrap();
+        scan.accept(probe.token, generation, &[1, 0], 1, 2).unwrap();
+        let basic = scan.next_action(3).unwrap().unwrap();
+        scan.accept(basic.token, generation, &basic_info(), 1, 4)
+            .unwrap();
+        let assign = scan.next_action(5).unwrap().unwrap();
+        scan.accept(assign.token, generation, &[], 1, 6).unwrap();
+        scan.next_action(7).unwrap().unwrap()
+    }
+
     #[test]
     fn scan_progresses_through_probe_basic_address_and_al_status() {
         let mut scan = ScanController::<2>::new(0x1000);
@@ -604,21 +736,23 @@ mod tests {
         assert_eq!(assign.payload(), &[0x00, 0x10]);
         scan.accept(assign.token, 7, &[], 1, 6).unwrap();
 
-        let configuration = scan.next_action(7).unwrap().unwrap();
+        accept_dl_status(&mut scan, 7, &CLOSED_DL_STATUS, 7);
+
+        let configuration = scan.next_action(9).unwrap().unwrap();
         assert_eq!(
             configuration.address,
             fixed_address(0x1000, ESC_CONFIGURATION)
         );
         assert_eq!(configuration.read_len, 1);
-        scan.accept(configuration.token, 7, &[ESC_DEVICE_EMULATION], 1, 8)
+        scan.accept(configuration.token, 7, &[ESC_DEVICE_EMULATION], 1, 10)
             .unwrap();
 
-        let status = scan.next_action(9).unwrap().unwrap();
+        let status = scan.next_action(11).unwrap().unwrap();
         assert_eq!(status.address, fixed_address(0x1000, ESC_AL_STATUS));
-        scan.accept(status.token, 7, &[0x04, 0x00, 0, 0, 0, 0], 1, 10)
+        scan.accept(status.token, 7, &[0x04, 0x00, 0, 0, 0, 0], 1, 12)
             .unwrap();
 
-        let next_probe = scan.next_action(11).unwrap().unwrap();
+        let next_probe = scan.next_action(13).unwrap().unwrap();
         assert_eq!(next_probe.position, 1);
         scan.timeout(next_probe.token, next_probe.deadline_ns)
             .unwrap();
@@ -633,6 +767,13 @@ mod tests {
         assert_eq!(scan.records()[0].sync_manager_count, 6);
         assert_eq!(scan.records()[0].ram_size, 0x20);
         assert_eq!(scan.records()[0].port_descriptor, 0xE4);
+        assert_eq!(scan.records()[0].dl_status, 0x5500);
+        assert!(
+            scan.records()[0]
+                .port_links
+                .iter()
+                .all(|link| link.loop_closed)
+        );
         assert_eq!(scan.records()[0].dc.raw_features, 0x0001);
         assert!(scan.records()[0].dc.fmmu_bit_operation);
         assert!(!scan.records()[0].dc.supported);
@@ -648,8 +789,9 @@ mod tests {
         scan.accept(basic.token, 3, &basic_info(), 1, 4).unwrap();
         let assign = scan.next_action(5).unwrap().unwrap();
         scan.accept(assign.token, 3, &[], 1, 6).unwrap();
+        accept_dl_status(&mut scan, 3, &CLOSED_DL_STATUS, 7);
 
-        let configuration = scan.next_action(7).unwrap().unwrap();
+        let configuration = scan.next_action(9).unwrap().unwrap();
         assert_eq!(
             scan.accept(configuration.token, 3, &[], 1, 8),
             Err(ScanError::PayloadLengthMismatch)
@@ -667,8 +809,9 @@ mod tests {
         scan.accept(basic.token, 4, &basic_info(), 1, 4).unwrap();
         let assign = scan.next_action(5).unwrap().unwrap();
         scan.accept(assign.token, 4, &[], 1, 6).unwrap();
+        accept_dl_status(&mut scan, 4, &CLOSED_DL_STATUS, 7);
 
-        let configuration = scan.next_action(7).unwrap().unwrap();
+        let configuration = scan.next_action(9).unwrap().unwrap();
         assert_eq!(
             scan.timeout(configuration.token, configuration.deadline_ns),
             Err(ScanError::Timeout)
@@ -716,16 +859,19 @@ mod tests {
         assert_eq!(dc.working_counter_policy, RxWorkingCounterPolicy::ZeroOrOne);
         scan.accept(dc.token, 5, &[0x78, 0x56, 0x34, 0x12], 1, 8)
             .unwrap();
+        accept_receive_times(&mut scan, 5, [100, 110, 120, 130], 9);
+        accept_dl_status(&mut scan, 5, &CLOSED_DL_STATUS, 11);
 
-        let configuration = scan.next_action(9).unwrap().unwrap();
-        scan.accept(configuration.token, 5, &[0], 1, 10).unwrap();
-        let status = scan.next_action(11).unwrap().unwrap();
-        scan.accept(status.token, 5, &[1, 0, 0, 0, 0, 0], 1, 12)
+        let configuration = scan.next_action(13).unwrap().unwrap();
+        scan.accept(configuration.token, 5, &[0], 1, 14).unwrap();
+        let status = scan.next_action(15).unwrap().unwrap();
+        scan.accept(status.token, 5, &[1, 0, 0, 0, 0, 0], 1, 16)
             .unwrap();
 
         let record = scan.records()[0];
         assert_eq!(record.dc.range, EscDcRange::Bits32);
         assert_eq!(record.dc.system_time, Some(0x1234_5678));
+        assert_eq!(record.dc.receive_times, Some([100, 110, 120, 130]));
         assert!(record.dc.can_be_reference_clock());
     }
 
@@ -740,6 +886,7 @@ mod tests {
             .unwrap();
         assert_eq!(scan.current.dc.range, EscDcRange::Bits64);
         assert_eq!(scan.current.dc.system_time, Some(0x1122_3344_5566_7788));
+        assert_eq!(scan.phase(), ScanPhase::ReadingDcReceiveTimes);
     }
 
     #[test]
@@ -751,11 +898,14 @@ mod tests {
             scan.accept(dc.token, 7, &[], 0, 8),
             Ok(ScanProgress::Advanced)
         );
-        assert_eq!(scan.phase(), ScanPhase::ReadingEscConfiguration);
+        assert_eq!(scan.phase(), ScanPhase::ReadingDcReceiveTimes);
         assert!(scan.current.dc.supported);
         assert!(!scan.current.dc.has_system_time);
         assert_eq!(scan.current.dc.system_time, None);
         assert!(!scan.current.dc.can_be_reference_clock());
+
+        accept_receive_times(&mut scan, 7, [1, 2, 3, 4], 9);
+        assert_eq!(scan.current.dc.receive_times, Some([1, 2, 3, 4]));
     }
 
     #[test]
@@ -792,17 +942,119 @@ mod tests {
         scan.start(11, 0, 1_000, 100).unwrap();
         let dc = advance_to_dc_probe(&mut scan, 11, ESC_FEATURE_DC_SUPPORTED);
         scan.accept(dc.token, 11, &[1, 0, 0, 0], 1, 8).unwrap();
-        let configuration = scan.next_action(9).unwrap().unwrap();
-        scan.accept(configuration.token, 11, &[0], 1, 10).unwrap();
-        let status = scan.next_action(11).unwrap().unwrap();
-        scan.accept(status.token, 11, &[1, 0, 0, 0, 0, 0], 1, 12)
+        accept_receive_times(&mut scan, 11, [1, 2, 3, 4], 9);
+        accept_dl_status(&mut scan, 11, &CLOSED_DL_STATUS, 11);
+        let configuration = scan.next_action(13).unwrap().unwrap();
+        scan.accept(configuration.token, 11, &[0], 1, 14).unwrap();
+        let status = scan.next_action(15).unwrap().unwrap();
+        scan.accept(status.token, 11, &[1, 0, 0, 0, 0, 0], 1, 16)
             .unwrap();
         assert!(scan.records()[0].dc.can_be_reference_clock());
-        assert_eq!(scan.next_action(13).unwrap(), None);
+        assert_eq!(scan.next_action(17).unwrap(), None);
         assert_eq!(scan.phase(), ScanPhase::Complete);
 
         scan.start(12, 20, 1_000, 100).unwrap();
         assert!(scan.records().is_empty());
         assert_eq!(scan.current.dc, ScanDcCapabilities::NONE);
+    }
+
+    #[test]
+    fn dl_status_decodes_all_port_flags() {
+        let mut scan = ScanController::<1>::new(0x1000);
+        scan.start(12, 0, 1_000, 100).unwrap();
+        let probe = scan.next_action(1).unwrap().unwrap();
+        scan.accept(probe.token, 12, &[1, 0], 1, 2).unwrap();
+        let basic = scan.next_action(3).unwrap().unwrap();
+        scan.accept(basic.token, 12, &basic_info(), 1, 4).unwrap();
+        let assign = scan.next_action(5).unwrap().unwrap();
+        scan.accept(assign.token, 12, &[], 1, 6).unwrap();
+
+        let raw = (1 << 4) | (1 << 6) | (1 << 9) | (1 << 10) | (1 << 13) | (1 << 14);
+        accept_dl_status(&mut scan, 12, &u16::to_le_bytes(raw), 7);
+        assert_eq!(scan.current.dl_status, raw);
+        assert_eq!(
+            scan.current.port_links,
+            [
+                ScanPortLink {
+                    link_up: true,
+                    loop_closed: false,
+                    signal_detected: true,
+                },
+                ScanPortLink {
+                    link_up: false,
+                    loop_closed: true,
+                    signal_detected: false,
+                },
+                ScanPortLink {
+                    link_up: true,
+                    loop_closed: false,
+                    signal_detected: true,
+                },
+                ScanPortLink {
+                    link_up: false,
+                    loop_closed: true,
+                    signal_detected: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn receive_time_and_dl_reads_fail_closed() {
+        let mut short = ScanController::<1>::new(0x1000);
+        short.start(13, 0, 1_000, 100).unwrap();
+        let dc = advance_to_dc_probe(&mut short, 13, ESC_FEATURE_DC_SUPPORTED);
+        short.accept(dc.token, 13, &[0; 4], 1, 8).unwrap();
+        let times = short.next_action(9).unwrap().unwrap();
+        assert_eq!(
+            short.accept(times.token, 13, &[0; 15], 1, 10),
+            Err(ScanError::PayloadLengthMismatch)
+        );
+        assert!(short.records().is_empty());
+
+        let mut invalid_wkc = ScanController::<1>::new(0x1000);
+        invalid_wkc.start(14, 0, 1_000, 100).unwrap();
+        let dc = advance_to_dc_probe(&mut invalid_wkc, 14, ESC_FEATURE_DC_SUPPORTED);
+        invalid_wkc.accept(dc.token, 14, &[0; 4], 1, 8).unwrap();
+        let times = invalid_wkc.next_action(9).unwrap().unwrap();
+        assert_eq!(
+            invalid_wkc.accept(times.token, 14, &[0; 16], 0, 10),
+            Err(ScanError::UnexpectedWorkingCounter)
+        );
+
+        let mut times_timeout = ScanController::<1>::new(0x1000);
+        times_timeout.start(15, 0, 1_000, 10).unwrap();
+        let dc = advance_to_dc_probe(&mut times_timeout, 15, ESC_FEATURE_DC_SUPPORTED);
+        times_timeout.accept(dc.token, 15, &[0; 4], 1, 8).unwrap();
+        let times = times_timeout.next_action(9).unwrap().unwrap();
+        assert_eq!(
+            times_timeout.timeout(times.token, times.deadline_ns),
+            Err(ScanError::Timeout)
+        );
+
+        let mut dl_short = ScanController::<1>::new(0x1000);
+        dl_short.start(16, 0, 1_000, 100).unwrap();
+        let dl = advance_to_dl_status(&mut dl_short, 16);
+        assert_eq!(
+            dl_short.accept(dl.token, 16, &[0], 1, 8),
+            Err(ScanError::PayloadLengthMismatch)
+        );
+
+        let mut dl_wkc = ScanController::<1>::new(0x1000);
+        dl_wkc.start(17, 0, 1_000, 100).unwrap();
+        let dl = advance_to_dl_status(&mut dl_wkc, 17);
+        assert_eq!(
+            dl_wkc.accept(dl.token, 17, &[0; 2], 0, 8),
+            Err(ScanError::UnexpectedWorkingCounter)
+        );
+
+        let mut dl_timeout = ScanController::<1>::new(0x1000);
+        dl_timeout.start(18, 0, 1_000, 10).unwrap();
+        let dl = advance_to_dl_status(&mut dl_timeout, 18);
+        assert_eq!(
+            dl_timeout.timeout(dl.token, dl.deadline_ns),
+            Err(ScanError::Timeout)
+        );
+        assert!(dl_timeout.records().is_empty());
     }
 }

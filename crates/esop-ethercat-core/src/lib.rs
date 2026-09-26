@@ -56,7 +56,7 @@ pub use control::{
 pub use dc::{
     DC_SYNC_DELAY_NS, DcAction, DcActionKind, DcConfig, DcController, DcCyclicConfig,
     DcCyclicError, DcCyclicSync, DcError, DcLockState, DcMonitor, DcPhase, DcProgress, DcSample,
-    DcSyncMode,
+    DcSyncMode, DcTopology, DcTopologyError, DcTopologyPort, DcTopologySlave,
 };
 pub use diag::{
     CoeEmergencyEvent, CoeEmergencyQueue, DiagnosticConsumer, Diagnostics, EmergencySink,
@@ -115,12 +115,13 @@ pub use production_service::{
 };
 pub use registers::{
     AL_STATUS_WITH_CODE_LEN, BASIC_ESC_INFO_LEN, ESC_AL_CONTROL, ESC_AL_STATUS, ESC_AL_STATUS_CODE,
-    ESC_BUILD, ESC_CONFIGURATION, ESC_DC_CUC, ESC_DC_CYCLE0, ESC_DC_CYCLE1, ESC_DC_START0,
-    ESC_DC_SYNC_ACTIVATION, ESC_DC_SYSTEM_DELAY, ESC_DC_SYSTEM_DIFF, ESC_DC_SYSTEM_OFFSET,
-    ESC_DC_SYSTEM_TIME, ESC_DC_TIME0, ESC_DC_TIME1, ESC_DC_TIME2, ESC_DC_TIME3,
-    ESC_DEVICE_EMULATION, ESC_DL_STATUS, ESC_EEPROM_ADDRESS, ESC_EEPROM_CONTROL, ESC_EEPROM_DATA,
-    ESC_FEATURE_DC_64_BIT, ESC_FEATURE_DC_SUPPORTED, ESC_FEATURE_FMMU_BIT_OPERATION,
-    ESC_FEATURES_SUPPORTED, ESC_FMMU_COUNT, ESC_PORT_DESCRIPTOR, ESC_RAM_SIZE, ESC_REVISION,
+    ESC_BUILD, ESC_CONFIGURATION, ESC_DC_CUC, ESC_DC_CYCLE0, ESC_DC_CYCLE1,
+    ESC_DC_RECEIVE_TIME_LEN, ESC_DC_START0, ESC_DC_SYNC_ACTIVATION, ESC_DC_SYSTEM_DELAY,
+    ESC_DC_SYSTEM_DIFF, ESC_DC_SYSTEM_OFFSET, ESC_DC_SYSTEM_TIME, ESC_DC_TIME0, ESC_DC_TIME1,
+    ESC_DC_TIME2, ESC_DC_TIME3, ESC_DEVICE_EMULATION, ESC_DL_STATUS, ESC_DL_STATUS_LEN,
+    ESC_EEPROM_ADDRESS, ESC_EEPROM_CONTROL, ESC_EEPROM_DATA, ESC_FEATURE_DC_64_BIT,
+    ESC_FEATURE_DC_SUPPORTED, ESC_FEATURE_FMMU_BIT_OPERATION, ESC_FEATURES_SUPPORTED,
+    ESC_FMMU_COUNT, ESC_PORT_COUNT, ESC_PORT_DESCRIPTOR, ESC_RAM_SIZE, ESC_REVISION,
     ESC_STATION_ADDRESS, ESC_SYNC_MANAGER_COUNT, ESC_TYPE, auto_increment_address, fixed_address,
     register_from_address, station_from_address,
 };
@@ -130,8 +131,8 @@ pub use rx_index::{
     RxResponse, RxSlotState, RxWorkingCounterPolicy,
 };
 pub use scan::{
-    EscDcRange, ScanAction, ScanController, ScanDcCapabilities, ScanError, ScanPhase, ScanProgress,
-    ScanRecord,
+    EscDcRange, ScanAction, ScanController, ScanDcCapabilities, ScanError, ScanPhase, ScanPortLink,
+    ScanProgress, ScanRecord,
 };
 pub use schedule::{ScheduleDomain, ScheduleError, ScheduleSlot, ScheduleTable};
 pub use scheduled_domains::{
