@@ -14,7 +14,10 @@ use crate::control::{
     RequestState,
 };
 use crate::mailbox::{MailboxConfig, MailboxConfigError};
-use crate::scan::{ScanAction, ScanController, ScanError, ScanPhase, ScanProgress};
+use crate::rx_index::RxWorkingCounterPolicy;
+use crate::scan::{
+    ScanAction, ScanController, ScanDcCapabilities, ScanError, ScanPhase, ScanProgress,
+};
 use crate::sii::{
     SII_STANDARD_MAILBOX_WORD_COUNT, SII_STANDARD_RECEIVE_MAILBOX_OFFSET_WORD, SiiAction,
     SiiBlockReader, SiiBlockRequest, SiiError, SiiIdentityReader, SiiMailboxError, SiiPhase,
@@ -64,6 +67,7 @@ impl ExpectedSlave {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StartupSlaveProfile {
     pub position: u16,
+    pub dc_requirement: StartupDcRequirement,
     pub transition_timeouts: AlTransitionTimeouts,
     pub op_only_outputs: OpOnlySyncManagerProfile,
     pub expected_mailbox: Option<MailboxConfig>,
@@ -73,6 +77,7 @@ pub struct StartupSlaveProfile {
 impl StartupSlaveProfile {
     pub const EMPTY: Self = Self {
         position: 0,
+        dc_requirement: StartupDcRequirement::None,
         transition_timeouts: ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
         op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
         expected_mailbox: None,
@@ -94,6 +99,11 @@ impl StartupSlaveProfile {
         self
     }
 
+    pub const fn with_dc_requirement(mut self, dc_requirement: StartupDcRequirement) -> Self {
+        self.dc_requirement = dc_requirement;
+        self
+    }
+
     pub const fn with_op_only_outputs(mut self, op_only_outputs: OpOnlySyncManagerProfile) -> Self {
         self.op_only_outputs = op_only_outputs;
         self
@@ -108,6 +118,20 @@ impl StartupSlaveProfile {
         self.expected_sii = Some(expected_sii);
         self
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum StartupDcRequirement {
+    None = 0,
+    SystemTime = 1,
+    ReferenceClock = 2,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StartupReferenceClock {
+    pub position: u16,
+    pub station_address: u16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -307,6 +331,17 @@ impl StartupAction {
         }
     }
 
+    pub const fn working_counter_policy(self) -> RxWorkingCounterPolicy {
+        match self {
+            Self::Scan(action) => action.working_counter_policy,
+            Self::Sii(_)
+            | Self::SiiMailbox(_)
+            | Self::SiiConfiguration(_)
+            | Self::Al(_)
+            | Self::OpOnly(_) => RxWorkingCounterPolicy::Exact,
+        }
+    }
+
     pub const fn datagram_len(self) -> usize {
         match self {
             Self::Scan(action) => action.datagram_len(),
@@ -355,6 +390,15 @@ pub enum StartupError {
     ProfileCountMismatch,
     DuplicateProfilePosition(u16),
     MissingProfilePosition(u16),
+    MissingScanPosition(u16),
+    DcSystemTimeRequired {
+        position: u16,
+        requirement: StartupDcRequirement,
+    },
+    MultipleReferenceClocks {
+        first_position: u16,
+        second_position: u16,
+    },
     InvalidTransitionTimeoutProfile(u16),
     InvalidMailboxProfile {
         position: u16,
@@ -437,6 +481,7 @@ pub struct StartupController<const MAX_SLAVES: usize> {
     device_emulation: [bool; MAX_SLAVES],
     verified_mailboxes: [Option<MailboxConfig>; MAX_SLAVES],
     verified_sii: [Option<SiiConfigurationSignature>; MAX_SLAVES],
+    selected_reference_clock: Option<StartupReferenceClock>,
     op_only_gate: [OpOnlyGateState; MAX_SLAVES],
     current_index: usize,
     stage_target: EthercatState,
@@ -468,6 +513,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             device_emulation: [false; MAX_SLAVES],
             verified_mailboxes: [None; MAX_SLAVES],
             verified_sii: [None; MAX_SLAVES],
+            selected_reference_clock: None,
             op_only_gate: [OpOnlyGateState::Unknown; MAX_SLAVES],
             current_index: 0,
             stage_target: EthercatState::Op,
@@ -533,6 +579,18 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
 
     pub fn scan_records(&self) -> &[crate::scan::ScanRecord] {
         self.scan.records()
+    }
+
+    pub fn dc_capabilities(&self, position: u16) -> Option<ScanDcCapabilities> {
+        self.scan
+            .records()
+            .iter()
+            .find(|record| record.position == position)
+            .map(|record| record.dc)
+    }
+
+    pub const fn selected_reference_clock(&self) -> Option<StartupReferenceClock> {
+        self.selected_reference_clock
     }
 
     pub fn pending_action(&self) -> Option<StartupAction> {
@@ -694,6 +752,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.device_emulation = [false; MAX_SLAVES];
         self.verified_mailboxes = [None; MAX_SLAVES];
         self.verified_sii = [None; MAX_SLAVES];
+        self.selected_reference_clock = None;
         self.op_only_gate = [OpOnlyGateState::Unknown; MAX_SLAVES];
         self.current_index = 0;
         self.stage_target = if config.configuration_services.is_empty() {
@@ -798,7 +857,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         pool: &mut ControlRequestPool<REQUESTS>,
     ) -> Result<RequestHandle, ControlError> {
         let action = self.pending_action().ok_or(ControlError::InvalidState)?;
-        pool.acquire_with_response_len(
+        pool.acquire_with_response_len_and_wkc_policy(
             action.datagram_index(),
             action.generation(),
             action.address(),
@@ -806,6 +865,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             action.payload(),
             action.datagram_len(),
             action.deadline_ns(),
+            action.working_counter_policy(),
         )
     }
 
@@ -975,7 +1035,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                     action.payload(),
                     action.datagram_len(),
                     action.deadline_ns(),
-                ) || request.length < action.response_len()
+                ) || request.working_counter_policy() != action.working_counter_policy()
+                    || request.length < action.response_len()
                 {
                     let _ = pool.release(handle);
                     return self.fail(StartupError::ActionMismatch);
@@ -998,7 +1059,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                     action.payload(),
                     action.datagram_len(),
                     action.deadline_ns(),
-                ) {
+                ) || request.working_counter_policy() != action.working_counter_policy()
+                {
                     let _ = pool.release(handle);
                     return self.fail(StartupError::ActionMismatch);
                 }
@@ -1169,6 +1231,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.device_emulation = [false; MAX_SLAVES];
         self.verified_mailboxes = [None; MAX_SLAVES];
         self.verified_sii = [None; MAX_SLAVES];
+        self.selected_reference_clock = None;
         self.op_only_gate = [OpOnlyGateState::Unknown; MAX_SLAVES];
         for item in expected.iter().copied() {
             self.table
@@ -1199,6 +1262,53 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         if self.scan.len() != self.expected_count {
             return self.fail(StartupError::ExpectedCountMismatch);
         }
+
+        let mut fallback_reference = None;
+        for record in self.scan.records().iter().copied() {
+            if fallback_reference.is_none() && record.dc.can_be_reference_clock() {
+                fallback_reference = Some(StartupReferenceClock {
+                    position: record.position,
+                    station_address: record.station_address,
+                });
+            }
+        }
+
+        let mut explicit_reference: Option<StartupReferenceClock> = None;
+        for profile in self.profiles.iter().take(self.expected_count).copied() {
+            let record = match self
+                .scan
+                .records()
+                .iter()
+                .find(|record| record.position == profile.position)
+                .copied()
+            {
+                Some(record) => record,
+                None => return self.fail(StartupError::MissingScanPosition(profile.position)),
+            };
+            if profile.dc_requirement != StartupDcRequirement::None
+                && !record.dc.can_be_reference_clock()
+            {
+                return self.fail(StartupError::DcSystemTimeRequired {
+                    position: profile.position,
+                    requirement: profile.dc_requirement,
+                });
+            }
+            if profile.dc_requirement == StartupDcRequirement::ReferenceClock {
+                let candidate = StartupReferenceClock {
+                    position: record.position,
+                    station_address: record.station_address,
+                };
+                if let Some(first) = explicit_reference {
+                    return self.fail(StartupError::MultipleReferenceClocks {
+                        first_position: first.position,
+                        second_position: candidate.position,
+                    });
+                }
+                explicit_reference = Some(candidate);
+            }
+        }
+
+        self.selected_reference_clock = explicit_reference.or(fallback_reference);
         if self.expected_count == 0 {
             self.phase = StartupPhase::Ready;
             return Ok(());
@@ -1679,6 +1789,16 @@ mod tests {
         bytes
     }
 
+    fn basic_info() -> [u8; crate::BASIC_ESC_INFO_LEN as usize] {
+        [0x88, 0x02, 3, 4, 1, 2, 0x20, 0xE4, 0, 0, 0, 0]
+    }
+
+    fn basic_info_with_features(features: u16) -> [u8; crate::BASIC_ESC_INFO_LEN as usize] {
+        let mut bytes = basic_info();
+        bytes[8..10].copy_from_slice(&features.to_le_bytes());
+        bytes
+    }
+
     fn status_with_code(state: EthercatState, error: bool, code: u16) -> [u8; 6] {
         let mut bytes = status(state);
         if error {
@@ -1776,6 +1896,81 @@ mod tests {
         startup
             .accept(action, action.generation(), payload, wkc, now_ns)
             .unwrap()
+    }
+
+    fn accept_scanned_slave<const MAX_SLAVES: usize>(
+        startup: &mut StartupController<MAX_SLAVES>,
+        features: u16,
+        system_time: Option<u64>,
+        now_ns: &mut u64,
+    ) {
+        let probe = startup.next_action(*now_ns).unwrap().unwrap();
+        accept_action(startup, probe, &[0x88, 0x02], 1, *now_ns + 1);
+        let basic = startup.next_action(*now_ns + 2).unwrap().unwrap();
+        accept_action(
+            startup,
+            basic,
+            &basic_info_with_features(features),
+            1,
+            *now_ns + 3,
+        );
+        let assign = startup.next_action(*now_ns + 4).unwrap().unwrap();
+        accept_action(startup, assign, &[], 1, *now_ns + 5);
+        let mut offset = 6;
+        if features & crate::ESC_FEATURE_DC_SUPPORTED != 0 {
+            let dc = startup.next_action(*now_ns + offset).unwrap().unwrap();
+            assert_eq!(
+                crate::register_from_address(dc.address()),
+                crate::ESC_DC_SYSTEM_TIME
+            );
+            match system_time {
+                Some(system_time) if dc.response_len() == 8 => {
+                    accept_action(
+                        startup,
+                        dc,
+                        &system_time.to_le_bytes(),
+                        1,
+                        *now_ns + offset + 1,
+                    );
+                }
+                Some(system_time) => {
+                    accept_action(
+                        startup,
+                        dc,
+                        &(system_time as u32).to_le_bytes(),
+                        1,
+                        *now_ns + offset + 1,
+                    );
+                }
+                None => {
+                    accept_action(startup, dc, &[], 0, *now_ns + offset + 1);
+                }
+            }
+            offset += 2;
+        }
+        let configuration = startup.next_action(*now_ns + offset).unwrap().unwrap();
+        accept_action(startup, configuration, &[0], 1, *now_ns + offset + 1);
+        let status_action = startup.next_action(*now_ns + offset + 2).unwrap().unwrap();
+        accept_action(
+            startup,
+            status_action,
+            &status(EthercatState::Init),
+            1,
+            *now_ns + offset + 3,
+        );
+        *now_ns += offset + 4;
+    }
+
+    fn finish_scan<const MAX_SLAVES: usize>(
+        startup: &mut StartupController<MAX_SLAVES>,
+        now_ns: u64,
+    ) -> Result<StartupProgress, StartupError> {
+        match startup.next_action(now_ns)? {
+            Some(end_probe @ StartupAction::Scan(_)) => {
+                startup.accept(end_probe, end_probe.generation(), &[], 0, now_ns + 1)
+            }
+            Some(_) | None => Ok(StartupProgress::Advanced),
+        }
     }
 
     fn accept_al_state<const MAX_SLAVES: usize>(
@@ -2374,13 +2569,7 @@ mod tests {
         accept_action(&mut startup, probe, &[0x88, 0x02], 1, 2);
 
         let basic = startup.next_action(3).unwrap().unwrap();
-        accept_action(
-            &mut startup,
-            basic,
-            &[0x88, 0x02, 3, 4, 1, 2, 0x00, 0x20, 1],
-            1,
-            4,
-        );
+        accept_action(&mut startup, basic, &basic_info(), 1, 4);
         let assign = startup.next_action(5).unwrap().unwrap();
         accept_action(&mut startup, assign, &[], 1, 6);
         let scan_status = startup.next_action(7).unwrap().unwrap();
@@ -2452,6 +2641,231 @@ mod tests {
         assert_eq!(startup.device_emulation(0), Some(false));
         assert_eq!(startup.records()[0].identity, identity);
         assert_eq!(startup.records()[0].al_status.state, EthercatState::Op);
+    }
+
+    #[test]
+    fn startup_selects_explicit_reference_and_retains_position_evidence() {
+        let expected = [
+            ExpectedSlave {
+                position: 0,
+                station_address: 0x1000,
+                identity: SlaveIdentity::EMPTY,
+            },
+            ExpectedSlave {
+                position: 1,
+                station_address: 0x1001,
+                identity: SlaveIdentity::EMPTY,
+            },
+        ];
+        let profiles = [
+            StartupSlaveProfile::new(0).with_dc_requirement(StartupDcRequirement::SystemTime),
+            StartupSlaveProfile::new(1).with_dc_requirement(StartupDcRequirement::ReferenceClock),
+        ];
+        let mut startup = StartupController::<2>::new(0x1000);
+        startup
+            .start_with_profiles(
+                31,
+                0,
+                StartupConfig::new(EthercatState::PreOp),
+                &expected,
+                &profiles,
+            )
+            .unwrap();
+        let mut now_ns = 1;
+        accept_scanned_slave(
+            &mut startup,
+            crate::ESC_FEATURE_DC_SUPPORTED,
+            Some(10),
+            &mut now_ns,
+        );
+        accept_scanned_slave(
+            &mut startup,
+            crate::ESC_FEATURE_DC_SUPPORTED | crate::ESC_FEATURE_DC_64_BIT,
+            Some(20),
+            &mut now_ns,
+        );
+        finish_scan(&mut startup, now_ns).unwrap();
+
+        assert_eq!(startup.phase(), StartupPhase::ReadingIdentity);
+        assert_eq!(
+            startup.selected_reference_clock(),
+            Some(StartupReferenceClock {
+                position: 1,
+                station_address: 0x1001,
+            })
+        );
+        assert_eq!(startup.dc_capabilities(0).unwrap().system_time, Some(10));
+        assert_eq!(
+            startup.dc_capabilities(1).unwrap().range,
+            crate::EscDcRange::Bits64
+        );
+    }
+
+    #[test]
+    fn startup_uses_first_capable_reference_when_none_is_explicit() {
+        let expected = [
+            ExpectedSlave {
+                position: 0,
+                station_address: 0x1000,
+                identity: SlaveIdentity::EMPTY,
+            },
+            ExpectedSlave {
+                position: 1,
+                station_address: 0x1001,
+                identity: SlaveIdentity::EMPTY,
+            },
+        ];
+        let mut startup = StartupController::<2>::new(0x1000);
+        startup
+            .start(32, 0, StartupConfig::new(EthercatState::PreOp), &expected)
+            .unwrap();
+        let mut now_ns = 1;
+        accept_scanned_slave(
+            &mut startup,
+            crate::ESC_FEATURE_DC_SUPPORTED,
+            Some(10),
+            &mut now_ns,
+        );
+        accept_scanned_slave(
+            &mut startup,
+            crate::ESC_FEATURE_DC_SUPPORTED,
+            Some(20),
+            &mut now_ns,
+        );
+        finish_scan(&mut startup, now_ns).unwrap();
+
+        assert_eq!(
+            startup.selected_reference_clock(),
+            Some(StartupReferenceClock {
+                position: 0,
+                station_address: 0x1000,
+            })
+        );
+    }
+
+    #[test]
+    fn required_dc_mismatch_faults_before_identity_and_publishes_no_reference() {
+        let expected = [ExpectedSlave {
+            position: 0,
+            station_address: 0x1000,
+            identity: SlaveIdentity::EMPTY,
+        }];
+        let profiles =
+            [StartupSlaveProfile::new(0).with_dc_requirement(StartupDcRequirement::SystemTime)];
+        let mut startup = StartupController::<1>::new(0x1000);
+        startup
+            .start_with_profiles(
+                33,
+                0,
+                StartupConfig::new(EthercatState::PreOp),
+                &expected,
+                &profiles,
+            )
+            .unwrap();
+        let mut now_ns = 1;
+        accept_scanned_slave(
+            &mut startup,
+            crate::ESC_FEATURE_DC_SUPPORTED,
+            None,
+            &mut now_ns,
+        );
+
+        assert_eq!(
+            finish_scan(&mut startup, now_ns),
+            Err(StartupError::DcSystemTimeRequired {
+                position: 0,
+                requirement: StartupDcRequirement::SystemTime,
+            })
+        );
+        assert_eq!(startup.phase(), StartupPhase::Faulted);
+        assert_eq!(startup.selected_reference_clock(), None);
+        assert_eq!(startup.pending_action(), None);
+    }
+
+    #[test]
+    fn multiple_explicit_references_fail_transactionally() {
+        let expected = [
+            ExpectedSlave {
+                position: 0,
+                station_address: 0x1000,
+                identity: SlaveIdentity::EMPTY,
+            },
+            ExpectedSlave {
+                position: 1,
+                station_address: 0x1001,
+                identity: SlaveIdentity::EMPTY,
+            },
+        ];
+        let profiles = [
+            StartupSlaveProfile::new(0).with_dc_requirement(StartupDcRequirement::ReferenceClock),
+            StartupSlaveProfile::new(1).with_dc_requirement(StartupDcRequirement::ReferenceClock),
+        ];
+        let mut startup = StartupController::<2>::new(0x1000);
+        startup
+            .start_with_profiles(
+                34,
+                0,
+                StartupConfig::new(EthercatState::PreOp),
+                &expected,
+                &profiles,
+            )
+            .unwrap();
+        let mut now_ns = 1;
+        accept_scanned_slave(
+            &mut startup,
+            crate::ESC_FEATURE_DC_SUPPORTED,
+            Some(10),
+            &mut now_ns,
+        );
+        accept_scanned_slave(
+            &mut startup,
+            crate::ESC_FEATURE_DC_SUPPORTED,
+            Some(20),
+            &mut now_ns,
+        );
+
+        assert_eq!(
+            finish_scan(&mut startup, now_ns),
+            Err(StartupError::MultipleReferenceClocks {
+                first_position: 0,
+                second_position: 1,
+            })
+        );
+        assert_eq!(startup.selected_reference_clock(), None);
+    }
+
+    #[test]
+    fn startup_restart_clears_selected_reference_immediately() {
+        let expected = [ExpectedSlave {
+            position: 0,
+            station_address: 0x1000,
+            identity: SlaveIdentity::EMPTY,
+        }];
+        let mut startup = StartupController::<1>::new(0x1000);
+        startup
+            .start(35, 0, StartupConfig::new(EthercatState::PreOp), &expected)
+            .unwrap();
+        let mut now_ns = 1;
+        accept_scanned_slave(
+            &mut startup,
+            crate::ESC_FEATURE_DC_SUPPORTED,
+            Some(10),
+            &mut now_ns,
+        );
+        finish_scan(&mut startup, now_ns).unwrap();
+        assert!(startup.selected_reference_clock().is_some());
+
+        startup.phase = StartupPhase::Ready;
+        startup
+            .start(
+                36,
+                now_ns + 10,
+                StartupConfig::new(EthercatState::PreOp),
+                &expected,
+            )
+            .unwrap();
+        assert_eq!(startup.selected_reference_clock(), None);
+        assert_eq!(startup.dc_capabilities(0), None);
     }
 
     #[test]
@@ -2647,13 +3061,7 @@ mod tests {
         let probe = startup.next_action(1).unwrap().unwrap();
         accept_action(&mut startup, probe, &[0x88, 0x02], 1, 2);
         let basic = startup.next_action(3).unwrap().unwrap();
-        accept_action(
-            &mut startup,
-            basic,
-            &[0x88, 0x02, 3, 4, 1, 2, 0x00, 0x20, 1],
-            1,
-            4,
-        );
+        accept_action(&mut startup, basic, &basic_info(), 1, 4);
         let assign = startup.next_action(5).unwrap().unwrap();
         accept_action(&mut startup, assign, &[], 1, 6);
         let scan_status = startup.next_action(7).unwrap().unwrap();
@@ -2752,13 +3160,7 @@ mod tests {
             let probe = startup.next_action(now_ns).unwrap().unwrap();
             accept_action(&mut startup, probe, &[0x88, 0x02], 1, now_ns + 1);
             let basic = startup.next_action(now_ns + 2).unwrap().unwrap();
-            accept_action(
-                &mut startup,
-                basic,
-                &[0x88, 0x02, 3, 4, 1, 2, 0x00, 0x20, 1],
-                1,
-                now_ns + 3,
-            );
+            accept_action(&mut startup, basic, &basic_info(), 1, now_ns + 3);
             let assign = startup.next_action(now_ns + 4).unwrap().unwrap();
             accept_action(&mut startup, assign, &[], 1, now_ns + 5);
             let scan_status = startup.next_action(now_ns + 6).unwrap().unwrap();
@@ -3037,7 +3439,13 @@ mod tests {
         let probe = startup.next_action(1).unwrap().unwrap();
         accept_action(&mut startup, probe, &[0x88, 0x02], 1, 2);
         let basic = startup.next_action(3).unwrap().unwrap();
-        accept_action(&mut startup, basic, &[0; 9], 1, 4);
+        accept_action(
+            &mut startup,
+            basic,
+            &[0; crate::BASIC_ESC_INFO_LEN as usize],
+            1,
+            4,
+        );
         let assign = startup.next_action(5).unwrap().unwrap();
         accept_action(&mut startup, assign, &[], 1, 6);
         let configuration = startup.next_action(7).unwrap().unwrap();
@@ -3138,7 +3546,13 @@ mod tests {
         let probe = startup.next_action(1).unwrap().unwrap();
         accept_action(&mut startup, probe, &[0x01, 0x00], 1, 2);
         let basic = startup.next_action(3).unwrap().unwrap();
-        accept_action(&mut startup, basic, &[0; 9], 1, 4);
+        accept_action(
+            &mut startup,
+            basic,
+            &[0; crate::BASIC_ESC_INFO_LEN as usize],
+            1,
+            4,
+        );
         let assign = startup.next_action(5).unwrap().unwrap();
         accept_action(&mut startup, assign, &[], 1, 6);
         let scan_status_action = startup.next_action(7).unwrap().unwrap();

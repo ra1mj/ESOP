@@ -3,7 +3,7 @@ use esop_product_config::{
     ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, FramePlanSetError, MailboxConfig, MailboxConfigError,
     MailboxDirection, OperatingMode, PdoConfigBatchPlanError, PdoConfigPlanError, PdoSdoWrite,
     ProcBuf, ProcBufHeaderError, ProductActivationError, ProductMailboxBinding,
-    ProductPdoBatchError, ProductPdoPlanError, ProductSlaveKind, SlaveRecord,
+    ProductPdoBatchError, ProductPdoPlanError, ProductSlaveKind, SlaveRecord, StartupDcRequirement,
 };
 
 mod generated {
@@ -51,9 +51,9 @@ fn checked_in_product_activates_exact_generated_evidence() {
     assert_eq!(
         active.metadata().config_sha256,
         [
-            0x71, 0x8e, 0xe3, 0x3a, 0xfe, 0xc4, 0x75, 0xdd, 0x94, 0xc4, 0x55, 0xf4, 0x71, 0xd7,
-            0x63, 0xf7, 0x39, 0x9b, 0x5b, 0x8e, 0xe0, 0xf7, 0x47, 0x09, 0x59, 0x43, 0x99, 0x63,
-            0x17, 0x2d, 0x9f, 0x50,
+            0xef, 0x26, 0x3b, 0x5d, 0x47, 0xd6, 0x0a, 0x53, 0x3d, 0xda, 0x06, 0x13, 0xd0, 0x16,
+            0xbf, 0x69, 0x61, 0xa1, 0x17, 0x04, 0x1c, 0x2c, 0x81, 0x3e, 0x26, 0x15, 0xdc, 0xc7,
+            0x43, 0xcb, 0xd2, 0x87,
         ]
     );
 
@@ -70,6 +70,18 @@ fn checked_in_product_activates_exact_generated_evidence() {
         ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1
     );
     assert!(startup_profiles[2].op_only_outputs.is_empty());
+    assert_eq!(
+        startup_profiles[0].dc_requirement,
+        StartupDcRequirement::ReferenceClock
+    );
+    assert_eq!(
+        startup_profiles[1].dc_requirement,
+        StartupDcRequirement::SystemTime
+    );
+    assert_eq!(
+        startup_profiles[2].dc_requirement,
+        StartupDcRequirement::None
+    );
     for (profile, slave) in startup_profiles
         .iter()
         .zip(generated::PRODUCT_CONFIG.slaves)

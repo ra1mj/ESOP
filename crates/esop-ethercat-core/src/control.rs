@@ -1,4 +1,4 @@
-use crate::rx_index::{RxExpectation, RxIndexError};
+use crate::rx_index::{RxExpectation, RxIndexError, RxWorkingCounterPolicy};
 use crate::wire::{Command, FrameBuilder, WireError};
 
 pub const MAX_CONTROL_PAYLOAD: usize = 128;
@@ -60,6 +60,7 @@ pub struct ControlRequest {
     pub deadline_ns: u64,
     pub state: RequestState,
     pub actual_wkc: u16,
+    working_counter_policy: RxWorkingCounterPolicy,
     last_error: Option<ControlError>,
     payload: [u8; MAX_CONTROL_PAYLOAD],
 }
@@ -75,6 +76,7 @@ impl ControlRequest {
         deadline_ns: 0,
         state: RequestState::Free,
         actual_wkc: 0,
+        working_counter_policy: RxWorkingCounterPolicy::Exact,
         last_error: None,
         payload: [0; MAX_CONTROL_PAYLOAD],
     };
@@ -89,6 +91,10 @@ impl ControlRequest {
 
     pub const fn last_error(&self) -> Option<ControlError> {
         self.last_error
+    }
+
+    pub const fn working_counter_policy(&self) -> RxWorkingCounterPolicy {
+        self.working_counter_policy
     }
 
     /// Match this pool entry to the immutable action still owned by a service
@@ -180,7 +186,7 @@ impl ControlRequest {
         self.payload[..payload.len()].copy_from_slice(payload);
         self.length = self.response_length;
         self.actual_wkc = working_counter;
-        if working_counter != 1 {
+        if !self.working_counter_policy.accepts(1, working_counter) {
             return self.fail(ControlError::WorkingCounterMismatch);
         }
         self.state = RequestState::Complete;
@@ -301,6 +307,30 @@ impl<const REQUESTS: usize> ControlRequestPool<REQUESTS> {
         response_length: usize,
         deadline_ns: u64,
     ) -> Result<RequestHandle, ControlError> {
+        self.acquire_with_response_len_and_wkc_policy(
+            datagram_index,
+            generation,
+            address,
+            operation,
+            payload,
+            response_length,
+            deadline_ns,
+            RxWorkingCounterPolicy::Exact,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn acquire_with_response_len_and_wkc_policy(
+        &mut self,
+        datagram_index: u8,
+        generation: u16,
+        address: u32,
+        operation: RegisterOperation,
+        payload: &[u8],
+        response_length: usize,
+        deadline_ns: u64,
+        working_counter_policy: RxWorkingCounterPolicy,
+    ) -> Result<RequestHandle, ControlError> {
         if REQUESTS == 0 || REQUESTS > 64 {
             return Err(ControlError::TooManyRequests);
         }
@@ -333,6 +363,7 @@ impl<const REQUESTS: usize> ControlRequestPool<REQUESTS> {
         request.response_length = datagram_length;
         request.deadline_ns = deadline_ns;
         request.actual_wkc = 0;
+        request.working_counter_policy = working_counter_policy;
         request.last_error = None;
         request.payload.fill(0);
         request.payload[..payload.len()].copy_from_slice(payload);
@@ -610,6 +641,34 @@ mod tests {
             pool.get(handle).unwrap().last_error(),
             Some(ControlError::WorkingCounterMismatch)
         );
+    }
+
+    #[test]
+    fn capability_request_preserves_zero_or_one_wkc_policy() {
+        let mut pool = ControlRequestPool::<1>::new();
+        let handle = pool
+            .acquire_with_response_len_and_wkc_policy(
+                4,
+                9,
+                0x1000_0910,
+                RegisterOperation::Read,
+                &[],
+                4,
+                10_000,
+                RxWorkingCounterPolicy::ZeroOrOne,
+            )
+            .unwrap();
+        assert_eq!(
+            pool.get(handle).unwrap().working_counter_policy(),
+            RxWorkingCounterPolicy::ZeroOrOne
+        );
+        let mut frame = [0; 128];
+        pool.build_into_buffer(handle, &mut frame, [0; 6], [1; 6])
+            .unwrap();
+        pool.complete(handle, 9, 0x1000_0910, &[0; 4], 0).unwrap();
+        let request = pool.get(handle).unwrap();
+        assert_eq!(request.state, RequestState::Complete);
+        assert_eq!(request.actual_wkc, 0);
     }
 
     #[test]

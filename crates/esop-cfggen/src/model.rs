@@ -152,9 +152,20 @@ pub struct SlaveManifest {
     pub revision: HexU32,
     #[serde(default)]
     pub serial: Option<HexU32>,
+    #[serde(default)]
+    pub dc: SlaveDcManifest,
     pub domain_id: u8,
     pub rx_pdos: Vec<HexU16>,
     pub tx_pdos: Vec<HexU16>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SlaveDcManifest {
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub reference_clock: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

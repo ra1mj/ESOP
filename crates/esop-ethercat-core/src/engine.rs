@@ -632,7 +632,7 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
 
         let destination = self.config.destination_mac;
         let source = self.config.source_mac;
-        let (length, datagram_index, expectation) = {
+        let (length, datagram_index, expectation, working_counter_policy) = {
             let slot = self
                 .frames
                 .slot_mut(frame)
@@ -647,6 +647,7 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
                 length,
                 control_request.datagram_index,
                 control_request.expectation(),
+                control_request.working_counter_policy(),
             )
         };
         self.frames
@@ -654,7 +655,12 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
             .ok_or(CycleError::FramePool(FramePoolError::InvalidHandle))?
             .len = length;
         self.rx_index
-            .arm(datagram_index, request.index() as u16, expectation)
+            .arm_with_working_counter_policy(
+                datagram_index,
+                request.index() as u16,
+                expectation,
+                working_counter_policy,
+            )
             .map_err(CycleError::RxIndex)?;
         self.frames
             .slot_mut(frame)

@@ -43,6 +43,11 @@ pub fn StaticProductConfig::build_generated_pdo_configuration_batch<
 pub fn StaticProductConfig::startup_profiles(...) ->
     Result<[StartupSlaveProfile; SLAVES], ProductStartupError>;
 pub fn StaticProductConfig::start_startup(...) -> Result<(), ProductStartupError>;
+pub enum StartupDcRequirement { None, SystemTime, ReferenceClock }
+pub fn StartupController::selected_reference_clock(...) ->
+    Option<StartupReferenceClock>;
+pub fn StartupController::dc_capabilities(position: u16) ->
+    Option<ScanDcCapabilities>;
 ```
 
 ## 3. Contracts
@@ -52,7 +57,10 @@ Input schema `esop.product.v1` is strict (`deny_unknown_fields`) and owns:
 - product/robot/policy identity;
 - ProcBuf dimensions and generator capacities;
 - period/deadline and platform metadata;
-- ordered Domain, slave, selected ESI PDO, and axis policy declarations.
+- ordered Domain, slave, selected ESI PDO, and axis policy declarations;
+- an optional strict per-slave `dc` object whose `required` and
+  `reference_clock` booleans default false, where reference implies required
+  and at most one slave may select reference.
 
 ESI paths are confined relative paths and their canonical targets must remain
 under the product directory. Names/labels rendered into C are nonempty,
@@ -118,6 +126,11 @@ intentionally excluded from live comparison.
 mailbox ranges, generated SM count/enabled mask, OpOnly flags, exclusive
 selected RxPDO ownership, and contiguous PDO groups before rebuilding the
 expected SII signature from the static fields used by runtime configuration.
+It first validates the product-wide DC invariant and maps each static policy to
+`StartupDcRequirement::{None,SystemTime,ReferenceClock}`; invalid policy must
+return before Startup mutation. The DC fields are present in normalized JSON,
+device inventory, generated C/Rust and the product configuration SHA-256. They
+are product semantics and must not alter an ESI source's semantic hash.
 `start_startup` supplies those profiles to Startup. After identity and optional
 mailbox verification, profiles with this expectation enter a distinct bounded
 configuration stream phase. Startup publishes position-keyed signature
@@ -130,6 +143,17 @@ work for one step share one absolute deadline. Non-OP and leaving-OP paths
 disable/read back every OpOnly output before readiness or AL transition;
 entering OP enables/read backs only after OP is observed. Any mismatch, WKC,
 generation, length, or timeout fault blocks Ready.
+
+Before identity, mailbox, category-stream, or AL work, Startup consumes the
+completed position-keyed scan records. The scanner reads the exact 12-byte ESC
+base range from `0x0000`, decodes type/revision/build/FMMU/SM/RAM/port/features
+at protocol widths, and probes fixed-address System Time `0x0910` with four or
+eight bytes according to Features Supported. WKC 1 publishes a sample; WKC 0
+is capability-negative and means delay-only; every other WKC or response fault
+latches scan. Startup stages an explicit reference or first capable fallback
+locally and publishes it only after all profiles validate. Restart clears both
+scan evidence and selected reference. This contract does not perform receive-
+time topology, propagation-delay, offset/delay or SYNC configuration.
 
 Per-slave PDO startup-plan construction uses the same generated order and the
 shared 256-entry cfggen bound. For each SyncManager it clears assignment
@@ -191,6 +215,9 @@ datagrams, FCS, and inter-packet gap respectively.
 | Invalid expected mailbox, live SII parse/CoE/layout mismatch, or SII request fault | Latch typed Startup fault before AL and publish no mailbox evidence. |
 | SII category image exceeds capacity, lacks END, overflows EEPROM addressing, or fails a response check | Latch the first stream fault and publish neither image nor configuration candidate. |
 | Invalid generated SII SM mask/PDO grouping, empty per-slave PDO mapping, or live structural signature mismatch | Reject before Startup mutation or latch Startup before AL; publish no SII verification evidence. |
+| DC reference without required, or multiple generated references | Reject before Startup mutation or generated output publication. |
+| Required System Time absent, delay-only WKC 0, or explicit reference not capable | Latch Startup before identity/SII/AL and publish no selected reference. |
+| System Time WKC greater than one, malformed payload, stale generation, ownership mismatch, or timeout | Latch the first typed scan fault; publish no partial slave record. |
 | Runtime Domain/axis evidence or capacity mismatch | Reject with typed owning-contract evidence and return no partial configuration. |
 | PDO plan owner/SM/group/capacity mismatch | Reject before returning any startup plan. |
 | Invalid generated mailbox or invalid/missing/duplicate/unknown override binding | Reject before returning any batch. |
@@ -205,12 +232,14 @@ datagrams, FCS, and inter-packet gap respectively.
 
 - Good: the checked-in dual-drive plus IO example generates six artifacts, a
   C11-clean header, a byte-identical compiled Rust module, 36 PDO bytes, 2
-  frames, WKC 6, 20 copy bytes, 180 wire bytes, and a 4144-byte ProcBuf region.
+  frames, WKC 6, 20 copy bytes, 180 wire bytes, a 4144-byte ProcBuf region,
+  two DC-required drives, and one explicit left-drive reference.
 - Base: no `PRODUCT_INPUT` produces the existing unqualified host build
-  report.
+  report; an omitted slave `dc` object produces no Startup DC requirement.
 - Bad: a selected RxPDO moved to TxPDO, a malformed Controlword width, a
-  duplicate object, a path escape, zero product limit, or forged qualification
-  fails without partial publication.
+  duplicate object, a path escape, zero product limit, reference-without-
+  required, duplicate reference, or forged qualification fails without partial
+  publication.
 
 ## 6. Tests Required
 
@@ -224,6 +253,12 @@ datagrams, FCS, and inter-packet gap respectively.
 - Compare the generated Rust module byte-for-byte with the checked-in example,
   activate it in integration tests, and check `esop-product-config` for
   `aarch64-unknown-none`.
+- Cover omitted/default DC policy, unknown fields, reference invariants,
+  configuration-hash changes, generated C/Rust/JSON/inventory fields, runtime
+  profile propagation, 32/64-bit System Time reads, WKC 0/1/>1, malformed and
+  timed-out responses, explicit/fallback selection, pre-identity mismatch and
+  restart clearing. Include one public master/control integration test proving
+  that WKC 0 reaches the scanner without an RX-index mismatch.
 - Cover explicit/default ESM timeouts, invalid values, ESI/SII OpOnly flag
   separation, PREOP-disabled mapping, enable-after-OP, disable-before-leaving,
   shared deadlines, uniform-override precedence, exact readback failure and
@@ -280,3 +315,20 @@ let wire_bytes = 8 + mac_frame_bytes + 12;
 Generated plans and exact comparison of supplied SDO responses are software
 evidence, not proof of production mailbox execution, authentic physical
 read-back, drive behavior, measured timing, or functional safety.
+
+### DC policy and scan evidence
+
+Wrong:
+
+```rust
+// Slave kind is not proof of DC capability, and direct selection bypasses scan.
+let reference_station = product.slaves[0].station_address;
+```
+
+Correct:
+
+```rust
+let profiles = product.startup_profiles()?;
+product.start_startup(&mut startup, generation, now_ns, config, observed)?;
+let reference = startup.selected_reference_clock(); // Published after scan validation.
+```

@@ -68,6 +68,10 @@
       "product_code": "0x00004020",
       "revision": "0x00000001",
       "serial": "0x00000001",
+      "dc": {
+        "required": true,
+        "reference_clock": true
+      },
       "domain_id": 0,
       "rx_pdos": ["0x1600"],
       "tx_pdos": ["0x1a00"]
@@ -85,6 +89,10 @@
       "product_code": "0x00004020",
       "revision": "0x00000001",
       "serial": "0x00000002",
+      "dc": {
+        "required": true,
+        "reference_clock": false
+      },
       "domain_id": 0,
       "rx_pdos": ["0x1600"],
       "tx_pdos": ["0x1a00"]
@@ -102,6 +110,10 @@
       "product_code": "0x00007010",
       "revision": "0x00000001",
       "serial": null,
+      "dc": {
+        "required": false,
+        "reference_clock": false
+      },
       "domain_id": 1,
       "rx_pdos": ["0x1601"],
       "tx_pdos": ["0x1a01"]

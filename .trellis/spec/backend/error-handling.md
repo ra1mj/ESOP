@@ -57,3 +57,20 @@ transition. Device Emulation slaves must never receive bit 4 because AL Control
 is mirrored into AL Status. A later acknowledgement timeout or malformed
 response may become the terminal error, but it must not replace the original
 slave position, requested/actual state, status code, or acknowledgement stage.
+
+## Capability-Probe Working Counter Policy
+
+Keep ordinary RX expectations exact. A capability probe that intentionally
+distinguishes “register absent” from transport failure must carry an explicit
+`RxWorkingCounterPolicy` through the service action, `ControlRequest`, master
+RX index and service completion check. Do not infer the exception from an
+address or phase in the engine.
+
+Only auto-increment end-of-topology probing and DC System Time `0x0910` may use
+`ZeroOrOne` today. For System Time, WKC 1 requires the exact 32/64-bit payload
+and publishes the sample; WKC 0 publishes no sample and cannot satisfy a DC
+requirement or reference-clock selection. WKC greater than one, short payload,
+stale generation, wrong owner/address/operation, or timeout latches the first
+typed scan/Startup fault. A zero-WKC datagram still travels through the normal
+master validation and control consumer; bypassing `RxIndexTable` would lose
+ownership and deadline evidence.

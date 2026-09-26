@@ -119,16 +119,20 @@ pub use registers::{
     ESC_DC_SYNC_ACTIVATION, ESC_DC_SYSTEM_DELAY, ESC_DC_SYSTEM_DIFF, ESC_DC_SYSTEM_OFFSET,
     ESC_DC_SYSTEM_TIME, ESC_DC_TIME0, ESC_DC_TIME1, ESC_DC_TIME2, ESC_DC_TIME3,
     ESC_DEVICE_EMULATION, ESC_DL_STATUS, ESC_EEPROM_ADDRESS, ESC_EEPROM_CONTROL, ESC_EEPROM_DATA,
-    ESC_FMMU_COUNT, ESC_PORT_DESCRIPTOR, ESC_RAM_SIZE, ESC_REVISION, ESC_STATION_ADDRESS,
-    ESC_SYNC_MANAGER_COUNT, ESC_TYPE, auto_increment_address, fixed_address, register_from_address,
-    station_from_address,
+    ESC_FEATURE_DC_64_BIT, ESC_FEATURE_DC_SUPPORTED, ESC_FEATURE_FMMU_BIT_OPERATION,
+    ESC_FEATURES_SUPPORTED, ESC_FMMU_COUNT, ESC_PORT_DESCRIPTOR, ESC_RAM_SIZE, ESC_REVISION,
+    ESC_STATION_ADDRESS, ESC_SYNC_MANAGER_COUNT, ESC_TYPE, auto_increment_address, fixed_address,
+    register_from_address, station_from_address,
 };
 pub use ring::{RingError, SpscConsumer, SpscProducer, SpscRing};
 pub use rx_index::{
     RxExpectation, RxExpiry, RxExpiryIndices, RxIndexEntry, RxIndexError, RxIndexTable, RxMatch,
-    RxResponse, RxSlotState,
+    RxResponse, RxSlotState, RxWorkingCounterPolicy,
 };
-pub use scan::{ScanAction, ScanController, ScanError, ScanPhase, ScanProgress, ScanRecord};
+pub use scan::{
+    EscDcRange, ScanAction, ScanController, ScanDcCapabilities, ScanError, ScanPhase, ScanProgress,
+    ScanRecord,
+};
 pub use schedule::{ScheduleDomain, ScheduleError, ScheduleSlot, ScheduleTable};
 pub use scheduled_domains::{
     ScheduledControlCycleError, ScheduledControlCycleReport, ScheduledDomainBank,
@@ -174,6 +178,6 @@ pub use slave_copy::{SlaveCopyError, SlaveCopyOutcome, SlaveCopyPlan, SlaveCopyS
 pub use startup::{
     ExpectedSlave, STARTUP_SII_IMAGE_BYTE_CAPACITY, STARTUP_SII_IMAGE_WORD_CAPACITY,
     STARTUP_SII_PDO_ENTRY_CAPACITY, StartupAction, StartupAlFault, StartupConfig,
-    StartupConfigurationServices, StartupController, StartupError, StartupPhase, StartupProgress,
-    StartupSlaveProfile,
+    StartupConfigurationServices, StartupController, StartupDcRequirement, StartupError,
+    StartupPhase, StartupProgress, StartupReferenceClock, StartupSlaveProfile,
 };

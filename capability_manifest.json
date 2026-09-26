@@ -15,6 +15,27 @@
       "limitation": "Real slave interoperability, target MAC ports and long-duration HIL remain open"
     },
     {
+      "id": "ethercat_dc_capability_discovery",
+      "status": "implemented",
+      "scope": "Allocation-free exact 12-byte ESC base-register decoding, Features Supported projection, 32/64-bit DC System Time probing with explicit WKC 0/1 policy, generated per-slave DC requirements, and deterministic pre-SII/AL reference-clock evidence selection",
+      "evidence": [
+        "crates/esop-ethercat-core/src/registers.rs",
+        "crates/esop-ethercat-core/src/rx_index.rs",
+        "crates/esop-ethercat-core/src/control.rs",
+        "crates/esop-ethercat-core/src/scan.rs",
+        "crates/esop-ethercat-core/src/startup.rs",
+        "crates/esop-ethercat-core/tests/cycle.rs",
+        "crates/esop-cfggen/src/generator.rs",
+        "crates/esop-cfggen/tests/generation.rs",
+        "crates/esop-product-config/src/lib.rs",
+        "crates/esop-product-config/tests/generated_product.rs",
+        "config/examples/sim-dual-axis/product.json",
+        "docs/ethercat-master-requirements.md",
+        "docs/esop-product-configuration.md"
+      ],
+      "limitation": "Software tests cover caller-delivered register responses and capability/selection policy only; DC port receive times, propagation delay, offset/delay writes, application-time/start-time setup, SYNC0/SYNC1 configuration, all-slave synchronization, clock-quality qualification, SII/ESI DC category parsing, physical response authenticity, interoperability, target WCET, HIL and functional safety remain open"
+    },
+    {
       "id": "ethercat_sii_category_stream",
       "status": "implemented",
       "scope": "Allocation-free bounded SII category acquisition from standard word 0x0040 through END, atomic SyncManager/RxPDO/TxPDO projection, versioned structural signatures, and Startup-owned generated-versus-live verification before the first AL action",
@@ -33,7 +54,7 @@
     {
       "id": "product_config_generator",
       "status": "implemented",
-      "scope": "Deterministic host-only esop.product.v1 and bounded ESI-subset compilation into static C/Rust, normalized Domain/PDO/Frame Plan, per-slave CoE mailbox, structural SII SM evidence, ESM timeout and OpOnly profiles, device inventory, exact ProcBuf v6 layout and fail-closed build input",
+      "scope": "Deterministic host-only esop.product.v1 and bounded ESI-subset compilation into static C/Rust, normalized Domain/PDO/Frame Plan, per-slave CoE mailbox, structural SII SM evidence, ESM timeout, OpOnly and explicit DC System Time/reference-clock profiles, device inventory, exact ProcBuf v6 layout and fail-closed build input",
       "evidence": [
         "crates/esop-cfggen/src/lib.rs",
         "crates/esop-cfggen/src/generator.rs",
@@ -42,7 +63,7 @@
         "scripts/tests/test_robot_build_report.py",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "The supported ESI subset is byte-aligned and explicit; modular devices, bit-packed PDOs, vendor scaling/quirks, artifact signing/distribution, complete mapping/DC descriptor generation, physical slave interoperability and response authenticity, measured wire timing, target resource/WCET and safety qualification remain open"
+      "limitation": "The supported ESI subset is byte-aligned and explicit; modular devices, bit-packed PDOs, vendor scaling/quirks, artifact signing/distribution, complete mapping and DC topology/configuration generation, physical slave interoperability and response authenticity, measured wire timing, target resource/WCET and safety qualification remain open"
     },
     {
       "id": "ethercat_product_mailbox_config",
@@ -65,7 +86,7 @@
     {
       "id": "product_runtime_attachment",
       "status": "implemented",
-      "scope": "Allocation-free no_std activation of generated Rust product configuration with exact hash, ProcBuf v6, observed topology, Domain/PDO/datagram/WKC, schedule/frame-plan, per-slave ESM timeout, OpOnly, mailbox and structural SII startup profiles, CiA 402 map and axis-policy validation plus deterministic all-slave PDO batch construction",
+      "scope": "Allocation-free no_std activation of generated Rust product configuration with exact hash, ProcBuf v6, observed topology, Domain/PDO/datagram/WKC, schedule/frame-plan, per-slave ESM timeout, OpOnly, mailbox, structural SII and DC requirement/reference startup profiles, CiA 402 map and axis-policy validation plus deterministic all-slave PDO batch construction",
       "evidence": [
         "crates/esop-product-config/src/lib.rs",
         "crates/esop-product-config/tests/generated_product.rs",
@@ -74,7 +95,7 @@
         "Makefile",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Activation validates static expectations, attaches generated mailbox and structural SII expectations to Startup and builds a bounded ordered PDO batch; comparison does not authenticate the physical response, and mapping/DC descriptor discovery, artifact signing/deployment policy, interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
+      "limitation": "Activation validates static expectations, attaches generated mailbox, structural SII and DC requirement/reference expectations to Startup and builds a bounded ordered PDO batch; comparison does not authenticate physical responses, and complete mapping/DC topology and clock configuration, artifact signing/deployment policy, interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
     },
     {
       "id": "pdo_configuration_readback",

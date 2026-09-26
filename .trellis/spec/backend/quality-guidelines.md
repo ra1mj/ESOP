@@ -32,6 +32,21 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   flood terminates even when the port clock does not advance.
 - Add a regression test for every lifecycle or validation change. Prefer
   public integration tests when a change crosses crates.
+- Keep working-counter exceptions explicit and end-to-end. Ordinary requests
+  use exact WKC; only a named `RxWorkingCounterPolicy` owned by the service may
+  allow WKC 0, and the same policy must be checked by `RxIndexTable`, the
+  `ControlRequest`, and the consuming FSM. Never special-case a register
+  address inside the generic RX engine.
+- Decode ESC base registers at their protocol widths from one exact bounded
+  block. Type/revision are bytes, build is little-endian `u16`, RAM and port
+  descriptor are separate bytes, and Features Supported is its own `u16`.
+  Short or non-unit base reads publish no partial `ScanRecord`.
+- Treat DC reference selection as Startup evidence, not product assumption.
+  Generated `required/reference_clock` policy maps to an explicit profile;
+  after scan and before identity/SII/AL, validate every position and stage the
+  explicit or first-capable fallback locally. Publish only after the complete
+  pass succeeds, and clear scan-derived evidence on restart. WKC 0 System Time
+  is delay-only and can never satisfy a requirement.
 - Preserve the existing `EthercatPort` copy-compatible path while adding a
   separate DMA trait for zero-copy platform adapters.
 - Keep ProcBuf as a standalone `no_std` ABI layer. Use its header/layout hash

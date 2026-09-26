@@ -38,6 +38,8 @@ CI 重新生成相同示例、校验产品化构建报告，并上传六个生�
 - 平台身份与可选 DMA 预算；
 - Domain ID、逻辑地址、过程镜像范围、周期和相位；
 - 从站位置、站地址、ESI 来源、vendor/product/revision/serial、PDO 选择；
+- 每从站可选严格 `dc` 对象：`required` 表示必须确认 System Time 能力，
+  `reference_clock` 表示该从站是唯一参考钟且隐含 `required=true`；省略时两项均为 false；
 - CiA 402 轴、CSP/CSV/CST 模式、带方向的 SI/raw 缩放、机械范围和每周期限幅。
 
 十六进制身份字段必须使用 `0x` 前缀。进入生成 C 字符串的名称/label 最长
@@ -79,10 +81,10 @@ index/subindex/bit length/DataType。未提供 timeout 时使用版本化的 ETG
 | `robot_build_input.json` | 设备数、PDO/frame/wire/WKC/copy、周期和资源输入。 |
 
 生成的 inventory、JSON、C 和 Rust product slave 均携带精确主站发送/接收邮箱
-地址与容量；规范化 JSON、C 和 Rust 还携带 SII SyncManager 数量与 enabled mask，
-ESI inventory 保留两侧 control byte。它们与 timeout profile、`OpOnly` mask 及
-activation template 一起参与 ESI semantic hash 和配置
-SHA-256。配置 SHA-256 只依赖规范化产品语义和排序后的 ESI 语义内容，不依赖 JSON
+地址与容量及显式 DC requirement/reference policy；规范化 JSON、C 和 Rust 还携带 SII SyncManager 数量与 enabled mask，
+ESI inventory 保留两侧 control byte。ESI mailbox、timeout profile、`OpOnly` mask 及
+activation template 参与 ESI semantic hash 和配置 SHA-256；显式 DC policy 属于产品
+语义，只参与配置 SHA-256，不反向改写 ESI 内容 hash。配置 SHA-256 只依赖规范化产品语义和排序后的 ESI 语义内容，不依赖 JSON
 键顺序、XML 排版、输入/输出路径、主机或当前时间。同一语义输入必须生成
 逐字节相同的六个文件。
 
@@ -104,11 +106,15 @@ ProcBuf。激活按以下顺序 fail-closed：
 6. 逐轴校验连续索引、驱动归属、冻结策略和选定模式的 `Cia402PdoMap`。
 
 `PRODUCT_CONFIG.startup_profiles()` 会在任何 Startup 动作发出前校验每个从站的
-timeout 非零、position 一一对应、生成邮箱范围有效、SII SyncManager count/enabled
+DC reference 必须同时 required、全产品最多一个 reference、timeout 非零、position 一一对应、生成邮箱范围有效、SII SyncManager count/enabled
 mask 有界、`OpOnly` mask/flag 有效，并要求每个 `OpOnly` SyncManager 只关联所选
 RxPDO、每个 PDO 分组连续。运行时从这些静态字段重新构建版本化 SII 结构签名，而不是
-信任预生成摘要。`start_startup()` 将这些 profile 与精确
-从站拓扑一起交给 `StartupController`。身份验证后、首个 AL 动作前，Startup 对携带
+信任预生成摘要。DC booleans 分别映射为 `StartupDcRequirement::None`、`SystemTime`
+或 `ReferenceClock`。`start_startup()` 将这些 profile 与精确
+从站拓扑一起交给 `StartupController`。在线扫描完成后、任何身份读取之前，Startup 以
+position-keyed 扫描证据验证所有 DC 要求：显式 reference 合格时选中它，否则选择扫描顺序
+中的首个 System-Time-capable 从站；失败时不发布部分选择，也不进入 identity/SII/AL。
+身份验证后、首个 AL 动作前，Startup 对携带
 邮箱期望的 profile 精确读取 SII `0x001C..0x0020`，要求 CoE，并只比较 SII 可表示的
 send/receive 地址和容量；轮询、超时、重试和 Status Bit 仍是运行期策略，不参与布局
 相等判定。匹配后才按 position 发布验证证据，任一读取、协议、范围或布局错误均闭锁
@@ -163,7 +169,8 @@ payload，直到 END 才公开完整镜像；`SiiStreamDiscoveryController` 使�
 原子投影 SyncManager/RxPDO/TxPDO candidate，并保留显式 signedness。Startup 已复用
 同一流控制器和控制请求所有权，在首个 AL 动作前与生成产品重建的固定大小结构签名
 精确比较；signedness 暂不属于在线签名，因为 SII flags 的数据类型语义尚未单独冻结。
-FMMU/DC category 语义、物理响应真实性和 HIL 仍待完成。
+FMMU/SII DC category 语义、DC 端口接收时间、传播延迟、offset/delay 与 SYNC 配置、
+物理响应真实性和 HIL 仍待完成。
 
 ## 6. 构建报告接入
 
@@ -187,9 +194,10 @@ make build-report \
 跨周期请求所有权、重试/超时、精确回读、故障阻断和生命周期门控，但该软件
 证据还覆盖全从站 PREOP 屏障、真实服务 phase 释放、保留拓扑、合法 SAFEOP/OP
 顺序、逐转换 deadline 选择、`OpOnly` 写入读回顺序，以及调用方交付 SII 响应的邮箱
-布局比对、完整 category stream/candidate 投影和生成结构签名的 AL 前精确比较；它不证明
+布局比对、完整 category stream/candidate 投影和生成结构签名的 AL 前精确比较，以及调用方
+交付 ESC/System Time 响应的能力判断和参考时钟选择；它不证明
 该响应来自真实目标从站，也不等于真实从站 PDO
-assignment/mapping、ESM timeout 或 SyncManager 响应证据，更不证明驱动
+assignment/mapping、ESM timeout、SyncManager 或 DC 时钟响应证据，更不证明驱动
 接受映射、完整周期 WKC、实际线缆时间、WCET、DMA/cache 正确性、制动/机械适配、
 STO/FSoE 或功能安全。生成示例和构建报告必须保持
 `passed: false`，直到独立的目标构建、HIL、周期测量和发布审核提供证据。

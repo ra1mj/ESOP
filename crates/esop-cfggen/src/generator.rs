@@ -3,8 +3,8 @@ use crate::esi::{
     self, EsiCatalog, EsiDevice, EsiEntry, EsiMailbox, EsiPdo, EsiTransitionTimeouts,
 };
 use crate::model::{
-    AxisMode, AxisPolicyManifest, DomainManifest, HexU16, HexU32, ProductManifest, SlaveKind,
-    SlaveManifest,
+    AxisMode, AxisPolicyManifest, DomainManifest, HexU16, HexU32, ProductManifest, SlaveDcManifest,
+    SlaveKind, SlaveManifest,
 };
 use esop_ethercat_core::wire::{
     Command, ETHERCAT_FRAME_HEADER_LEN, ETHERNET_HEADER_LEN, MIN_ETHERNET_FRAME_LEN,
@@ -126,6 +126,7 @@ struct GeneratedSlave {
     product_code: HexU32,
     revision: HexU32,
     serial: Option<HexU32>,
+    dc: SlaveDcManifest,
     esi_label: String,
     esi_semantic_sha256: String,
     esi_type_name: String,
@@ -287,6 +288,7 @@ fn build_artifacts(input: &Path) -> Result<GeneratedArtifacts> {
             product_code: slave.manifest.product_code,
             revision: slave.manifest.revision,
             serial: slave.manifest.serial,
+            dc: slave.manifest.dc,
             esi_label: slave.manifest.esi.label.clone(),
             esi_semantic_sha256: slave.semantic_sha256.clone(),
             esi_type_name: slave.device.type_name.clone(),
@@ -495,6 +497,7 @@ fn normalize_and_validate_manifest(manifest: &mut ProductManifest) -> Result<()>
     let mut names = BTreeSet::new();
     let mut positions = BTreeSet::new();
     let mut stations = BTreeSet::new();
+    let mut reference_clock = None;
     for slave in &manifest.slaves {
         validate_text("slave.name", &slave.name)?;
         validate_text("slave.esi.label", &slave.esi.label)?;
@@ -519,6 +522,21 @@ fn normalize_and_validate_manifest(manifest: &mut ProductManifest) -> Result<()>
                 "slave {} references unknown Domain {}",
                 slave.name, slave.domain_id
             )));
+        }
+        if slave.dc.reference_clock && !slave.dc.required {
+            return Err(GeneratorError::Invalid(format!(
+                "slave {} selects a DC reference clock without requiring DC System Time",
+                slave.name
+            )));
+        }
+        if slave.dc.reference_clock {
+            if let Some(first) = reference_clock {
+                return Err(GeneratorError::Invalid(format!(
+                    "slaves {first} and {} both select the DC reference clock",
+                    slave.name
+                )));
+            }
+            reference_clock = Some(slave.name.as_str());
         }
         reject_duplicates(&slave.rx_pdos, &format!("slave {} rx_pdos", slave.name))?;
         reject_duplicates(&slave.tx_pdos, &format!("slave {} tx_pdos", slave.name))?;
@@ -1295,7 +1313,7 @@ fn render_header(
     let mut header = String::from(
         "#ifndef ESOP_PRODUCT_CONFIG_H\n#define ESOP_PRODUCT_CONFIG_H\n\n#include <stdint.h>\n\n",
     );
-    header.push_str("typedef struct { const char *name; uint16_t position; uint16_t station_address; uint8_t domain_id; uint8_t kind; uint32_t vendor_id; uint32_t product_code; uint32_t revision; uint32_t serial; uint8_t has_serial; uint16_t mailbox_send_address; uint16_t mailbox_send_capacity; uint16_t mailbox_receive_address; uint16_t mailbox_receive_capacity; uint8_t sii_sync_manager_count; uint16_t sii_enabled_sync_managers; } esop_slave_config_t;\n");
+    header.push_str("typedef struct { const char *name; uint16_t position; uint16_t station_address; uint8_t domain_id; uint8_t kind; uint32_t vendor_id; uint32_t product_code; uint32_t revision; uint32_t serial; uint8_t has_serial; uint8_t dc_required; uint8_t dc_reference_clock; uint16_t mailbox_send_address; uint16_t mailbox_send_capacity; uint16_t mailbox_receive_address; uint16_t mailbox_receive_capacity; uint8_t sii_sync_manager_count; uint16_t sii_enabled_sync_managers; } esop_slave_config_t;\n");
     header.push_str("typedef struct { const char *name; uint8_t id; uint32_t logical_address; uint32_t image_offset; uint32_t image_bytes; uint32_t output_bytes; uint32_t input_bytes; uint32_t period_ticks; uint32_t phase_ticks; uint16_t expected_wkc; } esop_domain_config_t;\n");
     header.push_str("typedef struct { uint8_t domain_id; uint16_t slave_position; uint16_t assignment_index; uint8_t sync_manager; uint16_t object_index; uint8_t subindex; uint8_t direction; uint32_t bit_offset; uint8_t bit_length; uint8_t is_signed; } esop_pdo_config_t;\n");
     header.push_str("typedef struct { uint8_t domain_id; uint8_t command; uint8_t index; uint32_t logical_address; uint32_t image_offset; uint16_t payload_len; uint16_t expected_wkc; uint8_t input; } esop_datagram_config_t;\n");
@@ -1327,7 +1345,7 @@ fn render_header(
     } else {
         for slave in slaves {
             header.push_str(&format!(
-                "  {{{}, {}u, UINT16_C(0x{:04x}), {}u, {}u, UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), {}u, UINT16_C(0x{:04x}), UINT16_C({}), UINT16_C(0x{:04x}), UINT16_C({}), {}u, UINT16_C(0x{:04x})}},\n",
+                "  {{{}, {}u, UINT16_C(0x{:04x}), {}u, {}u, UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), {}u, {}u, {}u, UINT16_C(0x{:04x}), UINT16_C({}), UINT16_C(0x{:04x}), UINT16_C({}), {}u, UINT16_C(0x{:04x})}},\n",
                 c_string(&slave.name),
                 slave.position,
                 slave.station_address.0,
@@ -1338,6 +1356,8 @@ fn render_header(
                 slave.revision.0,
                 slave.serial.map_or(0, |value| value.0),
                 u8::from(slave.serial.is_some()),
+                u8::from(slave.dc.required),
+                u8::from(slave.dc.reference_clock),
                 slave.mailbox.send_address,
                 slave.mailbox.send_capacity,
                 slave.mailbox.receive_address,
@@ -1533,7 +1553,7 @@ use esop_product_config::{\n\
             .collect::<Vec<_>>()
             .join(", ");
         output.push_str(&format!(
-            "        ProductSlaveConfig {{ name: {}, position: {}, station_address: 0x{:04x}, domain_id: {}, kind: ProductSlaveKind::{}, identity: SlaveIdentity {{ vendor_id: 0x{:08x}, product_code: 0x{:08x}, revision: 0x{:08x}, serial: 0x{:08x} }}, transition_timeouts: AlTransitionTimeouts::new({}, {}, {}, {}), mailbox_config: MailboxConfig::new(0x{:04x}, {}, 0x{:04x}, {}), op_only_outputs: OpOnlySyncManagerProfile::from_raw(0x{:04x}, [{}]), sii_sync_manager_count: {}, sii_enabled_sync_managers: 0x{:04x} }},\n",
+            "        ProductSlaveConfig {{ name: {}, position: {}, station_address: 0x{:04x}, domain_id: {}, kind: ProductSlaveKind::{}, identity: SlaveIdentity {{ vendor_id: 0x{:08x}, product_code: 0x{:08x}, revision: 0x{:08x}, serial: 0x{:08x} }}, dc_required: {}, dc_reference_clock: {}, transition_timeouts: AlTransitionTimeouts::new({}, {}, {}, {}), mailbox_config: MailboxConfig::new(0x{:04x}, {}, 0x{:04x}, {}), op_only_outputs: OpOnlySyncManagerProfile::from_raw(0x{:04x}, [{}]), sii_sync_manager_count: {}, sii_enabled_sync_managers: 0x{:04x} }},\n",
             rust_string(&slave.name),
             slave.position,
             slave.station_address.0,
@@ -1543,6 +1563,8 @@ use esop_product_config::{\n\
             slave.product_code.0,
             slave.revision.0,
             slave.serial.map_or(0, |value| value.0),
+            slave.dc.required,
+            slave.dc.reference_clock,
             slave.transition_timeouts.preop_ns,
             slave.transition_timeouts.safeop_to_op_ns,
             slave.transition_timeouts.back_to_init_ns,

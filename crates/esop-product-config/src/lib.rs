@@ -16,7 +16,7 @@ pub use esop_ethercat_core::{
     PdoConfigPlanError, PdoDirection, PdoEntry, PdoEntrySpec, PdoRegistrationRequest, PdoSdoWrite,
     ScheduleTable, SiiConfigurationSignature, SiiConfigurationSignatureBuilder,
     SiiConfigurationSignatureError, SlaveIdentity, SlaveRecord, StartupConfig, StartupController,
-    StartupError, StartupSlaveProfile,
+    StartupDcRequirement, StartupError, StartupSlaveProfile,
 };
 pub use esop_lifecycle_guard::procbuf::{Cia402AxisCommandPolicy, Cia402AxisCommandPolicyError};
 pub use esop_procbuf::{
@@ -56,6 +56,8 @@ pub struct ProductSlaveConfig {
     pub domain_id: u8,
     pub kind: ProductSlaveKind,
     pub identity: SlaveIdentity,
+    pub dc_required: bool,
+    pub dc_reference_clock: bool,
     pub transition_timeouts: AlTransitionTimeouts,
     pub mailbox_config: MailboxConfig,
     pub op_only_outputs: OpOnlySyncManagerProfile,
@@ -65,6 +67,13 @@ pub struct ProductSlaveConfig {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProductStartupError {
+    DcReferenceRequiresRequired {
+        position: u16,
+    },
+    MultipleDcReferenceClocks {
+        first_position: u16,
+        second_position: u16,
+    },
     InvalidTransitionTimeoutProfile {
         position: u16,
     },
@@ -408,6 +417,24 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
     StaticProductConfig<'a, SLAVES, DOMAINS, AXES>
 {
     pub fn startup_profiles(&self) -> Result<[StartupSlaveProfile; SLAVES], ProductStartupError> {
+        let mut reference_position = None;
+        for slave in self.slaves.iter().copied() {
+            if slave.dc_reference_clock && !slave.dc_required {
+                return Err(ProductStartupError::DcReferenceRequiresRequired {
+                    position: slave.position,
+                });
+            }
+            if slave.dc_reference_clock {
+                if let Some(first_position) = reference_position {
+                    return Err(ProductStartupError::MultipleDcReferenceClocks {
+                        first_position,
+                        second_position: slave.position,
+                    });
+                }
+                reference_position = Some(slave.position);
+            }
+        }
+
         let mut profiles = [StartupSlaveProfile::EMPTY; SLAVES];
         for (index, slave) in self.slaves.iter().copied().enumerate() {
             if !slave.transition_timeouts.is_valid() {
@@ -455,7 +482,15 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                 }
             }
             let expected_sii = self.sii_configuration_signature(slave)?;
+            let dc_requirement = if slave.dc_reference_clock {
+                StartupDcRequirement::ReferenceClock
+            } else if slave.dc_required {
+                StartupDcRequirement::SystemTime
+            } else {
+                StartupDcRequirement::None
+            };
             profiles[index] = StartupSlaveProfile::new(slave.position)
+                .with_dc_requirement(dc_requirement)
                 .with_transition_timeouts(slave.transition_timeouts)
                 .with_op_only_outputs(slave.op_only_outputs)
                 .with_expected_mailbox(slave.mailbox_config)
@@ -1186,6 +1221,8 @@ mod tests {
                 domain_id: 0,
                 kind: ProductSlaveKind::Cia402Drive,
                 identity: IDENTITY,
+                dc_required: false,
+                dc_reference_clock: false,
                 transition_timeouts: ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
                 mailbox_config: MailboxConfig::new(0x1000, 32, 0x1100, 32),
                 op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
@@ -1271,9 +1308,15 @@ mod tests {
             .unwrap();
         config.slaves[0].transition_timeouts = timeouts;
         config.slaves[0].op_only_outputs = op_only;
+        config.slaves[0].dc_required = true;
+        config.slaves[0].dc_reference_clock = true;
 
         let profiles = config.startup_profiles().unwrap();
         assert_eq!(profiles[0].position, 0);
+        assert_eq!(
+            profiles[0].dc_requirement,
+            StartupDcRequirement::ReferenceClock
+        );
         assert_eq!(profiles[0].transition_timeouts, timeouts);
         assert_eq!(profiles[0].op_only_outputs, op_only);
         assert_eq!(
@@ -1318,6 +1361,44 @@ mod tests {
             Err(ProductStartupError::OpOnlyOutputMissingRxPdo {
                 position: 0,
                 sync_manager: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn product_rejects_invalid_dc_reference_policy_before_profile_building() {
+        let mut invalid = config();
+        invalid.slaves[0].dc_reference_clock = true;
+        assert_eq!(
+            invalid.startup_profiles(),
+            Err(ProductStartupError::DcReferenceRequiresRequired { position: 0 })
+        );
+
+        let base = config();
+        let second = ProductSlaveConfig {
+            position: 1,
+            station_address: 0x1001,
+            dc_required: true,
+            dc_reference_clock: true,
+            ..base.slaves[0]
+        };
+        let mut first = base.slaves[0];
+        first.dc_required = true;
+        first.dc_reference_clock = true;
+        let duplicate = StaticProductConfig {
+            metadata: base.metadata,
+            procbuf_layout: base.procbuf_layout,
+            slaves: [first, second],
+            domains: base.domains,
+            pdos: base.pdos,
+            datagrams: base.datagrams,
+            axes: base.axes,
+        };
+        assert_eq!(
+            duplicate.startup_profiles(),
+            Err(ProductStartupError::MultipleDcReferenceClocks {
+                first_position: 0,
+                second_position: 1,
             })
         );
     }

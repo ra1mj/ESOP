@@ -7,8 +7,8 @@ use esop_ethercat_core::{
     Domain, DomainSegment, EthercatDmaTxPort, EthercatMaster, EthercatPort, EthercatState,
     EventCode, ExpectedSlave, FrameHandle, FramePlan, LinkState, MailboxConfig, MailboxController,
     MailboxProtocol, MasterConfig, NoopDmaCache, PortError, RegisterOperation, RxExpectation,
-    RxPoll, RxSlotState, SdoProgress, SdoTransfer, SlaveIdentity, StartupConfig, StartupController,
-    StartupProgress,
+    RxPoll, RxSlotState, RxWorkingCounterPolicy, SdoProgress, SdoTransfer, SlaveIdentity,
+    StartupConfig, StartupController, StartupProgress,
 };
 
 const MTU: usize = MAX_ETHERNET_FRAME_LEN;
@@ -922,6 +922,47 @@ fn control_request_is_built_armed_and_completed_by_the_master() {
         requests.get(request).unwrap().state,
         esop_ethercat_core::RequestState::Complete
     );
+}
+
+#[test]
+fn zero_or_one_control_request_accepts_zero_wkc_through_master_receive() {
+    let config = MasterConfig::new([0xFF; 6], [1, 2, 3, 4, 5, 6]);
+    let mut master = EthercatMaster::<2, MTU>::new(config);
+    let mut requests = ControlRequestPool::<2>::new();
+    let request = requests
+        .acquire_with_response_len_and_wkc_policy(
+            20,
+            52,
+            0x1000_0910,
+            RegisterOperation::Read,
+            &[],
+            4,
+            100_000,
+            RxWorkingCounterPolicy::ZeroOrOne,
+        )
+        .unwrap();
+    let frame = master.acquire_frame(52, 100_000).unwrap();
+    master
+        .build_control_request(&mut requests, request, frame)
+        .unwrap();
+
+    let mut port = MockPort::with_response(0, &[0; 4]);
+    master.submit_frame(&mut port, frame).unwrap();
+    let mut scratch = [0; MTU];
+    let report = {
+        let mut consumer = ControlRxConsumer::new(&mut requests);
+        let report = master
+            .cycle_receive_with_consumer(&mut port, &mut scratch, 52, &mut consumer)
+            .unwrap();
+        assert_eq!(consumer.rejected(), 0);
+        report
+    };
+
+    assert_eq!(report.parsed_datagrams, 1);
+    assert_eq!(report.wkc_mismatches, 0);
+    let completed = requests.get(request).unwrap();
+    assert_eq!(completed.state, esop_ethercat_core::RequestState::Complete);
+    assert_eq!(completed.actual_wkc, 0);
 }
 
 #[test]

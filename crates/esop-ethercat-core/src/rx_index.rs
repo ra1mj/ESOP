@@ -8,6 +8,21 @@ pub enum RxSlotState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RxWorkingCounterPolicy {
+    Exact,
+    ZeroOrOne,
+}
+
+impl RxWorkingCounterPolicy {
+    pub const fn accepts(self, expected: u16, actual: u16) -> bool {
+        match self {
+            Self::Exact => actual == expected,
+            Self::ZeroOrOne => expected == 1 && actual <= 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RxIndexEntry {
     pub slot_id: u16,
     pub generation: u16,
@@ -16,6 +31,7 @@ pub struct RxIndexEntry {
     pub expected_size: u16,
     pub expected_type: u8,
     pub expected_wkc: u16,
+    pub working_counter_policy: RxWorkingCounterPolicy,
     pub state: RxSlotState,
 }
 
@@ -48,6 +64,7 @@ impl RxIndexEntry {
         expected_size: 0,
         expected_type: 0,
         expected_wkc: 0,
+        working_counter_policy: RxWorkingCounterPolicy::Exact,
         state: RxSlotState::Empty,
     };
 }
@@ -151,6 +168,21 @@ impl RxIndexTable {
         slot_id: u16,
         expectation: RxExpectation,
     ) -> Result<(), RxIndexError> {
+        self.arm_with_working_counter_policy(
+            index,
+            slot_id,
+            expectation,
+            RxWorkingCounterPolicy::Exact,
+        )
+    }
+
+    pub fn arm_with_working_counter_policy(
+        &mut self,
+        index: u8,
+        slot_id: u16,
+        expectation: RxExpectation,
+        working_counter_policy: RxWorkingCounterPolicy,
+    ) -> Result<(), RxIndexError> {
         let entry = &mut self.entries[index as usize];
         if entry.state == RxSlotState::Armed {
             return Err(RxIndexError::AlreadyArmed);
@@ -166,6 +198,7 @@ impl RxIndexTable {
             expected_size: expectation.expected_size,
             expected_type: expectation.expected_type,
             expected_wkc: expectation.expected_wkc,
+            working_counter_policy,
             state: RxSlotState::Armed,
         };
         Ok(())
@@ -203,7 +236,10 @@ impl RxIndexTable {
             entry.state = RxSlotState::Rejected;
             return Err(RxIndexError::TypeMismatch);
         }
-        if entry.expected_wkc != response.working_counter {
+        if !entry
+            .working_counter_policy
+            .accepts(entry.expected_wkc, response.working_counter)
+        {
             entry.state = RxSlotState::Rejected;
             return Err(RxIndexError::WorkingCounterMismatch);
         }
@@ -482,5 +518,58 @@ mod tests {
         assert_eq!(table.entry(1).state, RxSlotState::Empty);
         assert_eq!(table.entry(2).state, RxSlotState::Empty);
         assert_eq!(table.entry(3).state, RxSlotState::Armed);
+    }
+
+    #[test]
+    fn zero_or_one_policy_admits_capability_negative_responses_only() {
+        let mut table = RxIndexTable::new();
+        let expectation = RxExpectation {
+            generation: 1,
+            deadline_ns: 100,
+            expected_address: 0x1000_0910,
+            expected_size: 4,
+            expected_type: 0x04,
+            expected_wkc: 1,
+        };
+
+        table
+            .arm_with_working_counter_policy(1, 9, expectation, RxWorkingCounterPolicy::ZeroOrOne)
+            .unwrap();
+        assert_eq!(
+            table.validate_and_complete(
+                1,
+                RxResponse {
+                    generation: 1,
+                    address: 0x1000_0910,
+                    payload_size: 4,
+                    command: 0x04,
+                    working_counter: 0,
+                    received_at_ns: 10,
+                },
+            ),
+            Ok(RxMatch {
+                slot_id: 9,
+                generation: 1,
+                working_counter: 0,
+            })
+        );
+
+        table
+            .arm_with_working_counter_policy(1, 9, expectation, RxWorkingCounterPolicy::ZeroOrOne)
+            .unwrap();
+        assert_eq!(
+            table.validate_and_complete(
+                1,
+                RxResponse {
+                    generation: 1,
+                    address: 0x1000_0910,
+                    payload_size: 4,
+                    command: 0x04,
+                    working_counter: 2,
+                    received_at_ns: 10,
+                },
+            ),
+            Err(RxIndexError::WorkingCounterMismatch)
+        );
     }
 }

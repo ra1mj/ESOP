@@ -11,6 +11,10 @@ pub const ESC_FMMU_COUNT: u16 = 0x0004;
 pub const ESC_SYNC_MANAGER_COUNT: u16 = 0x0005;
 pub const ESC_RAM_SIZE: u16 = 0x0006;
 pub const ESC_PORT_DESCRIPTOR: u16 = 0x0007;
+pub const ESC_FEATURES_SUPPORTED: u16 = 0x0008;
+pub const ESC_FEATURE_FMMU_BIT_OPERATION: u16 = 1 << 0;
+pub const ESC_FEATURE_DC_SUPPORTED: u16 = 1 << 2;
+pub const ESC_FEATURE_DC_64_BIT: u16 = 1 << 3;
 
 pub const ESC_DL_STATUS: u16 = 0x0110;
 pub const ESC_STATION_ADDRESS: u16 = 0x0010;
@@ -37,7 +41,7 @@ pub const ESC_DC_START0: u16 = 0x0990;
 pub const ESC_DC_CYCLE0: u16 = 0x09A0;
 pub const ESC_DC_CYCLE1: u16 = 0x09A4;
 
-pub const BASIC_ESC_INFO_LEN: u16 = 9;
+pub const BASIC_ESC_INFO_LEN: u16 = 12;
 pub const AL_STATUS_WITH_CODE_LEN: u16 = 6;
 
 /// Pack a fixed station address (FPRD/FPWR/FPRW) and ESC offset.

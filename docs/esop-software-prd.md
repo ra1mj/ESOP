@@ -176,6 +176,13 @@ FR-006 当前增量由宿主机 `esop-cfggen` 与 `no_std` 的 `esop-product-con
 | FR-018 | P0 | 系统应识别 DC 能力、选择参考时钟、配置应用时间、SYNC0 周期/相位并监测时钟质量。 | DC 与非 DC 拓扑启动均通过；记录 offset、jitter、last sync、失锁次数和同步窗口状态。 |
 | FR-019 | P0 | 当 DC 未锁定、WKC 无效、命令过期或驱动状态异常时，系统不得发布新的有效运动目标。 | DC 失锁、WKC 异常、命令超时、驱动 fault 联合故障矩阵通过。 |
 
+FR-018 的首个边界现已完成：在线扫描精确解码 12-byte ESC 基础块及 Features
+Supported，对 DC-capable 从站按 32/64-bit 读取 `0x0910` System Time，并区分 WKC 1
+的可参考时钟证据与 WKC 0 的 delay-only 阴性证据。生成产品可声明每从站 DC 必需项和唯一
+参考钟；Startup 在 identity/SII/AL 前校验要求并选择显式参考钟或首个可用候选。应用时间、
+端口传播延迟、offset/delay 补偿、start time、SYNC0/SYNC1、全从站同步和完整质量资格仍属于
+FR-018 后续边界，不能由当前软件测试推导为已完成。
+
 ### 7.4 CiA 402 与设备模型
 
 | ID | 优先级 | 需求 | 验收标准 |

@@ -194,6 +194,12 @@ Motion Control Feature Pack 要求 DC。完整 DC 不是只写 SYNC0 周期，�
 7. 记录 offset、jitter、last sync、失锁次数和连续异常。
 8. DC 未锁定时阻止新的有效 CSP/CSV/CST 运动目标，按策略 hold、ramp 或 disable。
 
+当前软件已完成第 1 项的基础能力识别和第 4 项的参考候选选择边界：扫描精确读取
+ESC 基础寄存器与 Features Supported，并以 32/64-bit `0x0910` System Time 响应确认
+参考时钟资格；生成产品可要求 DC 并唯一指定参考钟，Startup 在 identity/SII/AL 前
+事务式校验和选择。端口拓扑接收时间、第 2/3 项传播延迟与 offset 补偿，以及第 4 项中的
+start time/SYNC 配置和第 5-7 项运行同步/质量仍保持开放，当前模拟响应也不证明真实硬件来源。
+
 ### 4.8 诊断与恢复
 
 P0 诊断至少提供：

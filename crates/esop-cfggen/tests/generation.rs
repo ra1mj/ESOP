@@ -102,11 +102,18 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert_eq!(product["slaves"][2]["mailbox"]["send_capacity"], 32);
     assert_eq!(product["slaves"][0]["sii_sync_manager_count"], 4);
     assert_eq!(product["slaves"][0]["sii_enabled_sync_managers"], 15);
+    assert_eq!(product["slaves"][0]["dc"]["required"], true);
+    assert_eq!(product["slaves"][0]["dc"]["reference_clock"], true);
+    assert_eq!(product["slaves"][1]["dc"]["required"], true);
+    assert_eq!(product["slaves"][1]["dc"]["reference_clock"], false);
+    assert_eq!(product["slaves"][2]["dc"]["required"], false);
 
     let header = fs::read_to_string(first.join("esop_product_config.h")).unwrap();
     assert!(header.contains("uint16_t mailbox_send_address"));
     assert!(header.contains("uint8_t sii_sync_manager_count"));
     assert!(header.contains("uint16_t sii_enabled_sync_managers"));
+    assert!(header.contains("uint8_t dc_required"));
+    assert!(header.contains("uint8_t dc_reference_clock"));
     assert!(header.contains("UINT16_C(0x1000), UINT16_C(64), UINT16_C(0x1100), UINT16_C(64)"));
     assert!(header.contains("4u, UINT16_C(0x000f)"));
 
@@ -115,6 +122,8 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(rust.contains("MailboxConfig::new(0x1200, 32, 0x1300, 32)"));
     assert!(rust.contains("sii_sync_manager_count: 4"));
     assert!(rust.contains("sii_enabled_sync_managers: 0x000f"));
+    assert!(rust.contains("dc_required: true, dc_reference_clock: true"));
+    assert!(rust.contains("dc_required: false, dc_reference_clock: false"));
 
     fixture.edit_product(|_| {});
     let xml = fs::read_to_string(&fixture.esi).unwrap();
@@ -128,6 +137,64 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
 
     assert_eq!(first_summary.config_sha256, second_summary.config_sha256);
     assert_eq!(artifact_bytes(&first), artifact_bytes(&second));
+}
+
+#[test]
+fn dc_policy_defaults_hashes_and_invalid_references_are_strict() {
+    let fixture = Fixture::new();
+    let baseline = generate(&fixture.product, &fixture.output("dc-baseline")).unwrap();
+    fixture.edit_product(|product| {
+        product["slaves"][1]["dc"]["required"] = Value::Bool(false);
+    });
+    let changed = generate(&fixture.product, &fixture.output("dc-changed")).unwrap();
+    assert_ne!(baseline.config_sha256, changed.config_sha256);
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        product["slaves"][2].as_object_mut().unwrap().remove("dc");
+    });
+    let output = fixture.output("dc-default");
+    generate(&fixture.product, &output).unwrap();
+    let product: Value =
+        serde_json::from_slice(&fs::read(output.join("product_config.json")).unwrap()).unwrap();
+    assert_eq!(product["slaves"][2]["dc"]["required"], false);
+    assert_eq!(product["slaves"][2]["dc"]["reference_clock"], false);
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        product["slaves"][0]["dc"]["required"] = Value::Bool(false);
+    });
+    assert!(
+        generate(
+            &fixture.product,
+            &fixture.output("dc-reference-without-required")
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("without requiring DC System Time")
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        product["slaves"][1]["dc"]["reference_clock"] = Value::Bool(true);
+    });
+    assert!(
+        generate(&fixture.product, &fixture.output("dc-duplicate-reference"))
+            .unwrap_err()
+            .to_string()
+            .contains("both select the DC reference clock")
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        product["slaves"][0]["dc"]["unexpected"] = Value::Bool(true);
+    });
+    assert!(
+        generate(&fixture.product, &fixture.output("dc-unknown-field"))
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field")
+    );
 }
 
 #[test]

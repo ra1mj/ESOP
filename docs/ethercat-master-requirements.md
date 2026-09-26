@@ -221,7 +221,7 @@ for (;;) {
 | ID | 优先级 | 需求 | 验收证据 |
 | --- | --- | --- | --- |
 | CFG-001 | P0 | 上电扫描以自动递增寻址发现从站，读取基本 ESC 信息并分配固定站地址。 | 1、8、32 从站 HIL 拓扑报告与地址唯一性测试。 |
-| CFG-002 | P0 | 支持 ESC 寄存器读写和 SII 基础读取，输出 vendor ID、product code、revision、serial、mailbox/SM/FMMU 能力及端口拓扑。 | 软件测试覆盖身份、标准 CoE 邮箱布局交叉验证、从 `0x0040` 到 END 的 SM/PDO category stream 及 Startup 结构比对；FMMU/DC 语义和真实从站证据由后续集成/HIL 补齐。 |
+| CFG-002 | P0 | 支持 ESC 寄存器读写和 SII 基础读取，输出 vendor ID、product code、revision、serial、mailbox/SM/FMMU 能力及端口拓扑。 | 软件测试覆盖身份、ESC `0x0000..0x000B` 精确字段与 Features Supported、DC `0x0910` System Time 能力、标准 CoE 邮箱布局交叉验证、从 `0x0040` 到 END 的 SM/PDO category stream 及 Startup 结构比对；FMMU、完整 DC 拓扑和真实从站证据由后续集成/HIL 补齐。 |
 | CFG-003 | P0 | 实现 INIT/PREOP/SAFEOP/OP 状态转换、错误确认和状态超时；失败事件必须带从站号、请求/实际状态、AL status code。 | 每条转换及错误状态的故障注入测试。 |
 | CFG-004 | P0 | 静态配置必须按 alias/position 和 vendor/product/revision 匹配从站；不匹配时禁止进入 OP。 | 正常、型号错误、位置错误三组测试。 |
 | CFG-005 | P0 | 支持 SM、FMMU、watchdog 和固定逻辑地址的配置；逻辑映像必须可复现。 | 对同一配置多次启动得到相同映射和帧计划。 |
@@ -242,14 +242,14 @@ for (;;) {
 | PDO-005 | P1 | 对每个 Domain 公开有效性、最后成功周期、连续 WKC 失配数和输入年龄。 | 故障注入后状态转换正确。 |
 | PDO-006 | P0 | 支持由静态配置描述的 Slave-to-Slave communication via master，在不超过两周期的有界路径中复制并携带源数据质量。 | 源从站到目标从站复制、源 WKC 错误和数据过期测试。 |
 
-当前实现已增加 `DomainRegistry`：它在激活前以固定容量登记多个 Domain、PDO entry 和 datagram，自动返回稳定的 Domain-local bit offset，并把 datagram 的相对过程映像 offset 转换为全局 `FramePlan` offset。注册表同时校验 Domain 过程映像/逻辑地址重叠、全局 datagram index、PDO bit overlap、WKC 溢出和多速率 hyperperiod；`activate` 成功后拒绝继续注册。`SiiConfigurationCandidate` 可冻结为 `SiiDomainProjection`，在进入注册表前再次核对 Rx/Tx 统一映像偏移、FMMU 与 SyncManager 物理范围、逻辑基址和映像容量；字节对齐 segment 可由 `LWR`/`LRD` 自动绑定，位打包 segment 必须由调用方提供聚合 datagram。`FramePlanSet` 在激活期按 MTU 和固定容量拆帧，计划与 phase 采用原子发布；失败不会发布部分 Domain/PDO/计划。生成产品配置可构造逐从站 PDO assignment/mapping 计划，从严格 ESI `MBoxOut`/`MBoxIn` 与 `Mailbox/CoE` 生成每从站 `MailboxConfig`，并按冻结顺序组装为 `PdoConfigBatchPlan`；position-keyed 绑定保留为显式覆盖。Startup 会在身份验证后、首个 AL 动作前精确读取 SII 标准邮箱五字固定头，要求 CoE，并把四个物理地址/容量字段与生成配置交叉验证；策略字段不参与布局判定，失败时不发布证据也不进入 AL。`PdoConfigBatch` 复用现有 PDO/邮箱控制器，以独立 generation 串行执行并精确 upload 回读；空 job 有界跳过，故障保留当前 job，显式重启才清除。`ScheduledPdoConfiguration` 在 PREOP 屏障内自动推进整批，只有 batch、Mapping 和 DC 必需服务全部真实 Complete 才复用身份/拓扑逐站经过 SAFEOP 到最终 SAFEOP/OP；报告持续携带 Startup phase 和批状态，使 Topology/Configuration 保持 fail-closed。扫描器还会对每个固定站地址精确读取 ESC Configuration `0x0141`，把 bit 0 作为 Device Emulation 能力冻结到 Startup。普通 ESC 的首个 AL 错误会保留请求/实际状态和 status code，写入“实际状态 + Error Acknowledge bit”并有界轮询；ACK 清除后仍保持故障闭锁，必须显式重启。Device Emulation 路径从策略层禁止 bit 4 写入并直接闭锁。ESI 解析器会冻结四类状态转换 timeout，缺失时使用命名的 ETG.1020 默认 profile；显式 legacy uniform timeout 仍具有最高优先级。ESI/SII `OpOnly` 只允许输出/RxPDO SyncManager，PREOP mapping 强制写成 disabled；Startup 在非 OP 或离开 OP 前写入并读回禁用状态，只有观测到 OP 后才启用并读回，失败不得发布 Ready。软件模拟覆盖多从站邮箱顺序、动作所有权、错配/无 CoE/超时阻断、两 job 自动切换、跨周期请求、精确回读、能力读取、ACK 成功/超时、Device Emulation 禁止 ACK、四类 deadline 选择、`OpOnly` 顺序/读回故障阻断及激活顺序。完整 SM-FMMU/DC 描述发现、完整周期 WKC、物理响应真实性、真实从站 ESM/PDO 互操作、FMMU/SM 物理回读真实性与硬件 HIL 仍需完成。
+当前实现已增加 `DomainRegistry`：它在激活前以固定容量登记多个 Domain、PDO entry 和 datagram，自动返回稳定的 Domain-local bit offset，并把 datagram 的相对过程映像 offset 转换为全局 `FramePlan` offset。注册表同时校验 Domain 过程映像/逻辑地址重叠、全局 datagram index、PDO bit overlap、WKC 溢出和多速率 hyperperiod；`activate` 成功后拒绝继续注册。`SiiConfigurationCandidate` 可冻结为 `SiiDomainProjection`，在进入注册表前再次核对 Rx/Tx 统一映像偏移、FMMU 与 SyncManager 物理范围、逻辑基址和映像容量；字节对齐 segment 可由 `LWR`/`LRD` 自动绑定，位打包 segment 必须由调用方提供聚合 datagram。`FramePlanSet` 在激活期按 MTU 和固定容量拆帧，计划与 phase 采用原子发布；失败不会发布部分 Domain/PDO/计划。生成产品配置可构造逐从站 PDO assignment/mapping 计划，从严格 ESI `MBoxOut`/`MBoxIn` 与 `Mailbox/CoE` 生成每从站 `MailboxConfig`，并按冻结顺序组装为 `PdoConfigBatchPlan`；position-keyed 绑定保留为显式覆盖。Startup 会在身份验证后、首个 AL 动作前精确读取 SII 标准邮箱五字固定头，要求 CoE，并把四个物理地址/容量字段与生成配置交叉验证；策略字段不参与布局判定，失败时不发布证据也不进入 AL。`PdoConfigBatch` 复用现有 PDO/邮箱控制器，以独立 generation 串行执行并精确 upload 回读；空 job 有界跳过，故障保留当前 job，显式重启才清除。`ScheduledPdoConfiguration` 在 PREOP 屏障内自动推进整批，只有 batch、Mapping 和 DC 必需服务全部真实 Complete 才复用身份/拓扑逐站经过 SAFEOP 到最终 SAFEOP/OP；报告持续携带 Startup phase 和批状态，使 Topology/Configuration 保持 fail-closed。扫描器还会对每个固定站地址精确读取 ESC Configuration `0x0141`，把 bit 0 作为 Device Emulation 能力冻结到 Startup。普通 ESC 的首个 AL 错误会保留请求/实际状态和 status code，写入“实际状态 + Error Acknowledge bit”并有界轮询；ACK 清除后仍保持故障闭锁，必须显式重启。Device Emulation 路径从策略层禁止 bit 4 写入并直接闭锁。ESI 解析器会冻结四类状态转换 timeout，缺失时使用命名的 ETG.1020 默认 profile；显式 legacy uniform timeout 仍具有最高优先级。ESI/SII `OpOnly` 只允许输出/RxPDO SyncManager，PREOP mapping 强制写成 disabled；Startup 在非 OP 或离开 OP 前写入并读回禁用状态，只有观测到 OP 后才启用并读回，失败不得发布 Ready。软件模拟覆盖多从站邮箱顺序、动作所有权、错配/无 CoE/超时阻断、两 job 自动切换、跨周期请求、精确回读、能力读取、ACK 成功/超时、Device Emulation 禁止 ACK、四类 deadline 选择、`OpOnly` 顺序/读回故障阻断及激活顺序。完整 SM-FMMU 描述、完整 DC 拓扑/传播延迟/时钟配置、完整周期 WKC、物理响应真实性、真实从站 ESM/PDO 互操作、FMMU/SM 物理回读真实性与硬件 HIL 仍需完成。
 
 核心另提供固定容量 `SiiCategoryStreamReader`，从标准 `0x0040` 自动读取两字
 category header 和精确 payload 到 END，跨内部 block 保持 token/datagram 游标和
 一个绝对 deadline；`SiiStreamDiscoveryController` 仅在完整镜像成功转换后原子发布
 signedness-aware SM/RxPDO/TxPDO candidate。Startup 在身份和可选邮箱验证后复用该
 控制器，按生成的 SM count/enabled/OpOnly 与有序 PDO 结构签名精确比较，匹配前不允许
-任何 AL 动作；旧 profile 仍可显式保持兼容路径。该软件证据不解释 FMMU/DC category，
+任何 AL 动作；旧 profile 仍可显式保持兼容路径。该软件证据不解释 FMMU 或 SII DC category，
 因此不改变上述硬件与产品验收缺口。
 
 PDO-006 的软件复制路径使用 `SlaveCopyPlan`：注册表激活后以源 TxPDO、目标 RxPDO、目标质量 RxPDO 绑定一次静态计划，校验不同从站、等宽字节对齐、方向与输入/输出数据报覆盖。周期所有者必须在 `finish_receive` 后、目标到期发送前调用 `apply_to_domains` 或同 Domain 的 `apply_within_domain`；源最近一次成功接收只能是本周期或上一周期，且 WKC、完整性及配置相位均通过。目标质量字节为 `1`（源有效）或 `0`（源无效）；失配或过期时目标字段替换为产品显式配置的降级字节，并输出源周期/年龄诊断。映像、域或目标到期检查失败则返回错误且目标不变，周期所有者不得发送该目标帧。该质量字节不是功能安全信号，降级字节也必须由产品评审其物理意义。主站模拟帧收发与静态检查已覆盖成功、WKC 错误、时效过期及拒绝路径；真实从站映射/回读、端到端时间上界与实物 HIL 仍待验证。
@@ -262,6 +262,16 @@ PDO-006 的软件复制路径使用 `SlaveCopyPlan`：注册表激活后以源 T
 | DC-002 | P0 | 应用以单调纳秒时间提供 `application_time`；主站支持参考时钟同步、从站时钟同步和 SYNC0 周期/相位配置。 | 具备 DC 的驱动从站上采集偏差、SYNC0 周期一致性。 |
 | DC-003 | P1 | 公开 DC 偏差、最后同步时间、失锁状态；连续失锁不得被静默忽略。 | 时钟跳变/延迟注入测试。 |
 | DC-004 | P1 | DC 同步数据报与 PDO 数据报可共帧或分帧，策略由帧计划器显式选择。 | 两种计划都能通过 WKC 与周期测试。 |
+
+DC-001 的首个软件边界现已实现：扫描以固定 12-byte 块精确解码 ESC
+`0x0000..0x000B`，保留 type、revision、16-bit build、FMMU/SM 数量、RAM、端口描述和
+Features Supported；bit 2/3 决定是否按 32/64-bit 读取固定站地址的 `0x0910`。WKC 1
+发布 System Time 样本，WKC 0 仅保留“支持 DC 但只能用于 delay measurement”的阴性证据，
+WKC 大于 1、短响应、旧 generation、所有权错误或 timeout 均闭锁扫描。生成产品可按从站声明
+`required` 和唯一 `reference_clock`；Startup 在任何 identity/SII/AL 动作前事务式校验要求，
+选择显式参考钟，否则选择扫描顺序中的首个 System-Time-capable 从站。没有可用 DC 且产品未要求
+DC 时仍保持兼容路径。该实现只关闭 DC-001 的能力识别和参考候选选择子项；端口接收时间、传播
+延迟、offset/delay 写入、应用时间/start time、SYNC0/SYNC1、全从站同步及硬件时钟质量仍未实现。
 
 ### 5.6 邮箱、CoE 和扩展协议
 

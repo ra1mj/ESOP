@@ -1600,7 +1600,12 @@ fn drive_startup_to_pdo_barrier(startup: &mut StartupController<2>, expected: &[
     let probe = startup.next_action(1).unwrap().unwrap();
     accept_startup_action(startup, probe, &[0x88, 0x02], 2);
     let basic = startup.next_action(3).unwrap().unwrap();
-    accept_startup_action(startup, basic, &[0x88, 0x02, 3, 4, 1, 2, 0x00, 0x20, 1], 4);
+    accept_startup_action(
+        startup,
+        basic,
+        &[0x88, 0x02, 3, 4, 1, 2, 0x20, 0xE4, 0, 0, 0, 0],
+        4,
+    );
     let assign = startup.next_action(5).unwrap().unwrap();
     accept_startup_action(startup, assign, &[], 6);
     let configuration = startup.next_action(7).unwrap().unwrap();
