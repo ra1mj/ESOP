@@ -1396,3 +1396,37 @@ Corrected ESC base decoding, added DC System Time capability and reference selec
 ### Next Steps
 
 - None - task complete
+
+
+## Session 42: DC receive-time topology and propagation delay
+
+**Date**: 2026-09-27
+**Task**: DC receive-time topology and propagation delay
+**Branch**: `main`
+
+### Summary
+
+Implemented exact EtherCAT DC receive-time and Data Link Status scanning, fixed-capacity physical topology with reference-relative propagation-delay evidence, transactional Startup gating, public integration coverage, documentation, and complete local/GitHub verification.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f86bbd17fb8cf00e159fe277ee0cdb2156fb49d0` | (see git log) |
+| `e9a86fe` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
