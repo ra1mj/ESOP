@@ -29,7 +29,7 @@
 - [x] Run focused core/product tests and generated artifact checks.
 - [x] Run `cargo fmt --all -- --check`, `git diff --check`, capability validation,
       `make ci`, `make bpf`, `make test-hil`, and `make test-zenoh`.
-- [ ] Commit, push `main`, verify the matching GitHub Actions run, archive the task and
+- [x] Commit, push `main`, verify the matching GitHub Actions run, archive the task and
       record the Trellis journal.
 
 ## Risk and rollback points
