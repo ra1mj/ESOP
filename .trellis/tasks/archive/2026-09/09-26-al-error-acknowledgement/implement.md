@@ -17,7 +17,7 @@
       safety guidance.
 - [x] Run focused tests, format, Clippy, `no_std` checks, full CI, BPF, HIL, and
       Zenoh gates.
-- [ ] Commit implementation, archive the task, update the journal, and push
+- [x] Commit implementation, archive the task, update the journal, and push
       `main` to `ra1mj/ESOP`; verify the resulting GitHub Actions run.
 
 ## Validation Commands
