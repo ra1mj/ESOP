@@ -341,7 +341,9 @@ P50/P90/P99/P99.9 由非实时任务从直方图或原始 trace 计算。事件 
 
 当前 `esop-cfggen` 增量已实现严格 `esop.product.v1`、namespace-qualified
 ESI byte-aligned PDO 子集、Domain/Frame Plan/schedule/CiA 402 policy/ProcBuf
-统一校验，以及五个原子发布产物。`robot_build_input.json` 保留每周期 wire
+统一校验，以及六个原子发布产物；生成的 Rust 模块由 `esop-product-config`
+在 `no_std` 激活期重新校验 hash、ProcBuf、拓扑、Domain/WKC、schedule、
+frame plan 与轴映射。`robot_build_input.json` 保留每周期 wire
 bytes，并可严格投影到 fail-closed `esop.build.v1`；DMA/stack/text、真实线缆
 时间和 WCET 未测量时不得通过资格。
 

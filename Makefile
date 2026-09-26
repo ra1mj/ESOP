@@ -5,8 +5,9 @@ RUSTUP ?= rustup
 RUST_TARGET ?= aarch64-unknown-none
 CFGGEN_EXAMPLE ?= config/examples/sim-dual-axis/product.json
 CFGGEN_OUTPUT ?= build/generated/sim-dual-axis
+CFGGEN_EXPECTED_RUST ?= config/examples/sim-dual-axis/expected/esop_product_config.rs
 
-.PHONY: test test-hil test-ipc test-zenoh test-ebpf-gateway-runtime test-ebpf-raw-port-runtime test-ebpf-process-exit-runtime test-ebpf-oom-runtime test-ebpf-scheduler-migration-runtime test-ebpf-scheduler-runqueue-runtime test-ebpf-softirq-runtime test-ebpf-page-fault-runtime test-ebpf-network-drop-runtime test-ebpf-observability-degradation-runtime check fmt-check lint release no-std bpf-syntax bpf capability-manifest proto-schema cfggen-example build-report cfggen-build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-oom-report ebpf-scheduler-migration-report ebpf-scheduler-runqueue-report ebpf-softirq-report ebpf-page-fault-report ebpf-network-drop-report ebpf-observability-degradation-report r2-qualification zenoh-check setup-rust ci
+.PHONY: test test-hil test-ipc test-zenoh test-ebpf-gateway-runtime test-ebpf-raw-port-runtime test-ebpf-process-exit-runtime test-ebpf-oom-runtime test-ebpf-scheduler-migration-runtime test-ebpf-scheduler-runqueue-runtime test-ebpf-softirq-runtime test-ebpf-page-fault-runtime test-ebpf-network-drop-runtime test-ebpf-observability-degradation-runtime check fmt-check lint release no-std bpf-syntax bpf capability-manifest proto-schema cfggen-example cfggen-runtime-example build-report cfggen-build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-oom-report ebpf-scheduler-migration-report ebpf-scheduler-runqueue-report ebpf-softirq-report ebpf-page-fault-report ebpf-network-drop-report ebpf-observability-degradation-report r2-qualification zenoh-check setup-rust ci
 
 test:
 	$(CARGO) test --workspace --all-features
@@ -69,6 +70,7 @@ no-std:
 		exit 1; \
 	fi
 	$(CARGO) check -p esop-ethercat-core --target $(RUST_TARGET)
+	$(CARGO) check -p esop-product-config --target $(RUST_TARGET)
 
 # GCC checks the C syntax and ABI declarations without requiring a BPF target.
 bpf-syntax:
@@ -88,6 +90,10 @@ cfggen-example:
 	$(CARGO) run -p esop-cfggen -- --input $(CFGGEN_EXAMPLE) --output $(CFGGEN_OUTPUT)
 	gcc -std=c11 -Wall -Wextra -Werror -x c -fsyntax-only $(CFGGEN_OUTPUT)/esop_product_config.h
 
+cfggen-runtime-example: cfggen-example
+	cmp $(CFGGEN_OUTPUT)/esop_product_config.rs $(CFGGEN_EXPECTED_RUST)
+	$(CARGO) test -p esop-product-config
+
 build-report:
 	@if [ -n "$(PRODUCT_INPUT)" ]; then \
 		python3 scripts/generate-robot-build-report.py --product-input "$(PRODUCT_INPUT)" --output build/robot_build_report.json; \
@@ -97,7 +103,7 @@ build-report:
 	python3 scripts/validate-robot-build-report.py build/robot_build_report.json
 	python3 -m unittest discover -s scripts/tests -p 'test_robot_build_report.py'
 
-cfggen-build-report: cfggen-example
+cfggen-build-report: cfggen-runtime-example
 	python3 scripts/generate-robot-build-report.py --product-input $(CFGGEN_OUTPUT)/robot_build_input.json --output build/robot_build_report.json
 	python3 scripts/validate-robot-build-report.py build/robot_build_report.json
 	python3 -m unittest discover -s scripts/tests -p 'test_robot_build_report.py'

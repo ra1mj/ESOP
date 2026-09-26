@@ -677,6 +677,7 @@ dependencies = [
  "esop-ethercat-core",
  "esop-lifecycle-guard",
  "esop-procbuf",
+ "esop-product-config",
  "esop-profile-cia402",
  "quick-xml",
  "serde",
@@ -753,6 +754,16 @@ version = "0.1.0"
 dependencies = [
  "esop-ebpf-agent",
  "esop-lifecycle-guard",
+ "esop-profile-cia402",
+]
+
+[[package]]
+name = "esop-product-config"
+version = "0.1.0"
+dependencies = [
+ "esop-ethercat-core",
+ "esop-lifecycle-guard",
+ "esop-procbuf",
  "esop-profile-cia402",
 ]
 

@@ -127,9 +127,9 @@ ESOP 要解决以下产品问题：
 | FR-003 | P0 | 激活前应将实际网络与静态配置的 alias/position、vendor/product/revision 进行比对；不匹配时不得进入 OP。 | 正常、位置错误、型号错误和 revision 错误测试均得到预期拒绝结果。 |
 | FR-004 | P0 | 系统应支持静态 SM、FMMU、watchdog、PDO assignment/mapping 和固定逻辑地址配置。 | 同一配置重复激活的映射、预期 WKC 和帧计划一致；配置期 PDO 写入可 read-back 验证。 |
 | FR-005 | P1 | 系统应支持显式设备识别与完整 SII PDO/SM 信息校验，用于防止同型号设备错位或换线。 | 交换同型号设备或变更识别对象后，按配置拒绝激活并给出原因。 |
-| FR-006 | P0 | 配置生成工具应把设备/ESI/产品配置转为静态固件配置和可读报告，不将 XML 运行时带入固件。 | 生成 C 配置、ProcBuf 布局、设备清单和构建报告；同一输入生成一致的配置 hash。 |
+| FR-006 | P0 | 配置生成工具应把设备/ESI/产品配置转为静态固件配置和可读报告，不将 XML 运行时带入固件。 | 生成 C/Rust 配置、ProcBuf 布局、设备清单和构建报告；同一输入生成一致的配置 hash；固件运行时对 hash、拓扑、布局和计划 fail-closed 激活。 |
 
-FR-006 当前增量由宿主机 `esop-cfggen` 实现：严格解析 `esop.product.v1` 和 byte-aligned ESI 子集，通过既有 Domain/Frame Plan/CiA 402/ProcBuf 校验路径，原子输出静态 C 配置、规范化产品、设备清单、ProcBuf ABI v6 布局和 build input。同一语义的 JSON/ESI 排版变化不改变 SHA-256 或输出字节。模块化设备、bit-packed PDO、厂商 scaling/quirk 和完整 ENI/ESI 仍明确拒绝，不能被解释为完整 ESI 兼容。
+FR-006 当前增量由宿主机 `esop-cfggen` 与 `no_std` 的 `esop-product-config` 共同实现：前者严格解析 `esop.product.v1` 和 byte-aligned ESI 子集，通过既有 Domain/Frame Plan/CiA 402/ProcBuf 校验路径，原子输出静态 C/Rust 配置、规范化产品、设备清单、ProcBuf ABI v6 布局和 build input；后者在固件激活时重新校验配置 hash、ProcBuf header/layout、精确从站拓扑、Domain/PDO/datagram/WKC、schedule/frame plan、轴策略和 CiA 402 PDO map，并仅在全部成功后返回冻结配置。同一语义的 JSON/ESI 排版变化不改变 SHA-256 或输出字节。模块化设备、bit-packed PDO、厂商 scaling/quirk、完整 ENI/ESI 和真实 SII/PDO read-back 仍明确拒绝或留待硬件集成，不能被解释为完整 ESI 兼容或 HIL 资格。
 
 ### 7.2 EtherCAT 周期数据与 Domain
 

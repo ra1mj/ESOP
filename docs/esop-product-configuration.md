@@ -11,6 +11,7 @@
 
 ```bash
 make cfggen-example
+make cfggen-runtime-example
 make cfggen-build-report
 ```
 
@@ -22,8 +23,9 @@ cargo run -p esop-cfggen -- \
   --output build/generated/sim-dual-axis
 ```
 
-生成成功后，严格 GCC 语法检查会验证静态 C header。CI 重新生成相同
-示例、校验产品化构建报告，并上传五个生成文件。
+生成成功后，严格 GCC 语法检查会验证静态 C header；运行时示例门会将
+Rust 模块与检入黄金文件逐字节比较，并通过 `esop-product-config` 激活它。
+CI 重新生成相同示例、校验产品化构建报告，并上传六个生成文件。
 
 ## 2. 输入契约
 
@@ -64,6 +66,7 @@ PDO entry 的 index/subindex/bit length/DataType。它明确拒绝：
 | 文件 | 内容 |
 | --- | --- |
 | `esop_product_config.h` | 固定大小的 slave、Domain、PDO、datagram、轴策略和 ProcBuf 常量。 |
+| `esop_product_config.rs` | 可直接编入 `no_std` 固件的静态产品合同与 32-byte 配置 hash。 |
 | `product_config.json` | 规范化后的产品、注册、Frame Plan、schedule 和配置 hash。 |
 | `device_inventory.json` | ESI identity、选择的 PDO 和语义化 ESI SHA-256。 |
 | `procbuf_layout.json` | ProcBuf ABI v6、维度、精确字节数和 layout hash。 |
@@ -71,12 +74,30 @@ PDO entry 的 index/subindex/bit length/DataType。它明确拒绝：
 
 配置 SHA-256 只依赖规范化产品语义和排序后的 ESI 语义内容，不依赖 JSON
 键顺序、XML 排版、输入/输出路径、主机或当前时间。同一语义输入必须生成
-逐字节相同的五个文件。
+逐字节相同的六个文件。
 
 输出先写入同级 staging 目录并同步文件，再以目录替换发布。失败保留原
 输出；成功替换会删除旧 schema 遗留文件。
 
-## 5. 构建报告接入
+## 5. 固件运行时激活
+
+`crates/esop-product-config/` 不解析 JSON、XML 或 C header，也不分配内存。
+固件包含生成的 `esop_product_config.rs` 后，调用 `PRODUCT_CONFIG.activate`
+并提供外部期望配置 hash、当前 boot ID、已扫描的 `SlaveRecord` 和实时
+ProcBuf。激活按以下顺序 fail-closed：
+
+1. 校验 `esop.product-runtime.v1` 与 32-byte 配置 hash；
+2. 重算 ProcBuf ABI v6 layout，并校验 robot/boot/layout/region/capacity header；
+3. 要求从站数量、position、station address、online、configured 和 identity 精确匹配；
+4. 通过 `DomainRegistry` 重新登记 Domain/PDO/datagram，核对 PDO/datagram/WKC；
+5. 通过既有 API 生成多速率 schedule 与每 Domain `FramePlanSet`；
+6. 逐轴校验连续索引、驱动归属、冻结策略和选定模式的 `Cia402PdoMap`。
+
+任何阶段失败都不会返回部分运行时配置；成功结果持有只读 registry、
+schedule、frame plan、轴模式、策略和 PDO map。每轴 PDO 临时映射上限固定为
+32，cfggen 与运行时共享同一常量并在超限时拒绝。
+
+## 6. 构建报告接入
 
 `generate-robot-build-report.py` 可选接收严格的产品输入：
 
@@ -90,9 +111,10 @@ make build-report \
 资源投影到 `esop.build.v1`；未传 `PRODUCT_INPUT` 时仍生成原有的主机
 占位报告。
 
-## 6. 资格边界
+## 7. 资格边界
 
 配置生成证明的是输入合同、静态布局和软件规划的一致性，不证明 ESI 与
-真实从站固件一致，也不证明驱动接受映射、实际线缆时间、WCET、DMA/cache
-正确性、制动/机械适配、STO/FSoE 或功能安全。生成示例和构建报告必须保持
+真实从站固件一致。运行时激活证明静态期望与调用方提供的拓扑/ProcBuf
+记录一致，但不等于真实 SII/PDO assignment read-back，也不证明驱动接受映射、
+实际线缆时间、WCET、DMA/cache 正确性、制动/机械适配、STO/FSoE 或功能安全。生成示例和构建报告必须保持
 `passed: false`，直到独立的目标构建、HIL、周期测量和发布审核提供证据。

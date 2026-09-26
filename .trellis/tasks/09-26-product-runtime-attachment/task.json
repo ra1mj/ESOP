@@ -1,0 +1,32 @@
+{
+  "id": "product-runtime-attachment",
+  "name": "product-runtime-attachment",
+  "title": "Attach generated product configuration to runtime",
+  "description": "Generate a deterministic no_std Rust product module and fail-closed runtime activation path for topology, ProcBuf, Domain, schedule, CiA 402 map, and axis policy evidence.",
+  "status": "in_progress",
+  "dev_type": "backend",
+  "scope": "runtime product configuration attachment and cfggen integration",
+  "package": "workspace",
+  "priority": "P1",
+  "creator": "mj",
+  "assignee": "mj",
+  "createdAt": "2026-09-26",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "crates/esop-cfggen",
+    "crates/esop-product-config",
+    "config/examples/sim-dual-axis",
+    "docs/esop-product-configuration.md",
+    "Makefile"
+  ],
+  "notes": "Software activation evidence only; physical HIL, target WCET/resources, wire timing, mechanics, and functional safety remain separate qualification gates.",
+  "meta": {}
+}

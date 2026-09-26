@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
-const ARTIFACTS: [&str; 5] = [
+const ARTIFACTS: [&str; 6] = [
     "device_inventory.json",
     "esop_product_config.h",
+    "esop_product_config.rs",
     "procbuf_layout.json",
     "product_config.json",
     "robot_build_input.json",
@@ -67,6 +68,7 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     let first = fixture.output("first");
     let second = fixture.output("second");
     let first_summary = generate(&fixture.product, &first).unwrap();
+    assert_eq!(first_summary.artifact_count, ARTIFACTS.len());
 
     let build_input: Value =
         serde_json::from_slice(&fs::read(first.join("robot_build_input.json")).unwrap()).unwrap();
@@ -277,6 +279,10 @@ fn generated_c_strings_escape_untrusted_product_text() {
     let header = fs::read_to_string(output.join("esop_product_config.h")).unwrap();
     assert!(header.contains("quoted \\\"name\\\"\\012#error injected"));
     assert!(!header.lines().any(|line| line.starts_with("#error")));
+
+    let rust = fs::read_to_string(output.join("esop_product_config.rs")).unwrap();
+    assert!(rust.contains("product_name: \"quoted \\\"name\\\"\\n#error injected\""));
+    assert!(!rust.lines().any(|line| line.starts_with("#error")));
 }
 
 #[test]

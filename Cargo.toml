@@ -13,6 +13,7 @@ members = [
     "crates/esop-proto",
     "crates/esop-zenoh-gateway",
     "crates/esop-ipc",
+    "crates/esop-product-config",
     "crates/esop-cfggen",
 ]
 

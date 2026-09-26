@@ -2,16 +2,18 @@
 
 ## 1. Scope / Trigger
 
-Use this contract when changing `esop-cfggen`, `esop.product.v1`, ProcBuf
-runtime layout reporting, generated C/JSON artifacts, or product build-report
-projection. The generator is host-only; generated cyclic data must remain
-directly representable by existing fixed-capacity `no_std` contracts.
+Use this contract when changing `esop-cfggen`, `esop-product-config`,
+`esop.product.v1`, ProcBuf runtime layout reporting, generated C/Rust/JSON
+artifacts, runtime product attachment, or product build-report projection. The
+generator is host-only; generated cyclic data must remain directly
+representable by fixed-capacity `no_std` contracts.
 
 ## 2. Signatures
 
 ```text
 esop-cfggen --input <product.json> --output <directory>
 make cfggen-example
+make cfggen-runtime-example
 make build-report PRODUCT_INPUT=<directory>/robot_build_input.json
 make cfggen-build-report
 ```
@@ -26,6 +28,8 @@ pub fn describe_layout(
 pub fn Cia402AxisCommandPolicy::validate_for_product(
     self,
 ) -> Result<(), Cia402AxisCommandPolicyError>;
+pub fn StaticProductConfig::activate(...) ->
+    Result<ActivatedProduct<...>, ProductActivationError>;
 ```
 
 ## 3. Contracts
@@ -45,11 +49,20 @@ Successful generation atomically replaces the output directory with exactly:
 
 ```text
 esop_product_config.h
+esop_product_config.rs
 product_config.json
 device_inventory.json
 procbuf_layout.json
 robot_build_input.json
 ```
+
+`esop_product_config.rs` contains only static data and the public/re-exported
+`esop-product-config` API. Runtime activation checks `esop.product-runtime.v1`,
+the caller-expected 32-byte hash, exact ProcBuf v6 descriptor/header, exact
+observed online/configured topology, rebuilt Domain/PDO/datagram/WKC evidence,
+schedule/frame plans, drive ownership, product policies, and selected-mode
+CiA 402 PDO maps.
+It returns the owning frozen result only after all checks pass.
 
 The configuration SHA-256 covers normalized product semantics and a sorted
 label-to-semantic-ESI-hash map. It excludes timestamps, host paths, compiler,
@@ -79,16 +92,18 @@ datagrams, FCS, and inter-packet gap respectively.
 | Ambiguous ESI identity/PDO, duplicate object, wrong direction/width | Reject with identity/PDO/CiA 402 context. |
 | Duplicate Domain/slave/axis identity or overlapping range | Reject before registry mutation/publication. |
 | Capacity, schedule, raw policy, or ProcBuf layout overflow | Reject with the owning contract error. |
-| Generation failure with an existing output | Preserve the previous five-file directory byte-for-byte. |
+| Generation failure with an existing output | Preserve the previous six-file directory byte-for-byte. |
 | Successful regeneration | Replace the directory and remove stale schema files. |
+| Runtime schema/hash/ProcBuf/topology mismatch | Reject before registry activation. |
+| Runtime Domain/axis evidence or capacity mismatch | Reject with typed owning-contract evidence and return no partial configuration. |
 | Product build input with unknown fields, invalid hash/budget, or `passed=true` | Reject before report write. |
 | Missing target/HIL/WCET/resource evidence | Keep report unqualified. |
 
 ## 5. Good / Base / Bad Cases
 
-- Good: the checked-in dual-drive plus IO example generates five artifacts,
-  a C11-clean header, 36 PDO bytes, 2 frames, WKC 6, 20 copy bytes, 180 wire
-  bytes, and a 4144-byte ProcBuf region.
+- Good: the checked-in dual-drive plus IO example generates six artifacts, a
+  C11-clean header, a byte-identical compiled Rust module, 36 PDO bytes, 2
+  frames, WKC 6, 20 copy bytes, 180 wire bytes, and a 4144-byte ProcBuf region.
 - Base: no `PRODUCT_INPUT` produces the existing unqualified host build
   report.
 - Bad: a selected RxPDO moved to TxPDO, a malformed Controlword width, a
@@ -104,6 +119,9 @@ datagrams, FCS, and inter-packet gap respectively.
   string escaping, atomic failure preservation, and stale-file removal.
 - Compile the generated header with
   `gcc -std=c11 -Wall -Wextra -Werror -x c -fsyntax-only`.
+- Compare the generated Rust module byte-for-byte with the checked-in example,
+  activate it in integration tests, and check `esop-product-config` for
+  `aarch64-unknown-none`.
 - Validate both default and product-input build reports, including forged pass
   rejection and exact wire metric projection.
 - Run `make ci`, `make bpf`, and `make test-zenoh` before delivery.

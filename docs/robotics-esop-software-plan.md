@@ -120,12 +120,13 @@ Platform layer
 | `esop_device` | Rust `no_std`，实时节点 | 驱动/传感器/IO 的统一能力与生命周期 | `esop_procbuf` |
 | `esop_periph_*` | Rust `no_std`，实时节点 | I2C/SPI/UART/CAN-FD/GPIO/USB 外设适配 | `esop_device`、BSP port |
 | `esop_procbuf` | Rust `no_std`，双域 | 固定布局 RT 缓冲、双页快照、事件 ring、质量位 | 独立 ABI 层；不引入平台依赖 |
+| `esop-product-config` | Rust `no_std`，实时节点激活期 | 消费生成 Rust 配置，校验 hash、ProcBuf、拓扑、Domain/WKC、schedule/frame plan、CiA 402 map 与轴策略后冻结运行时配置 | `esop-ethercat-core`、`esop-procbuf`、`esop-profile-cia402`、`esop-lifecycle-guard` |
 | `esop_ipc` | Rust，Linux 宿主域 | 固定容量版本化帧、非阻塞 Unix datagram、peer identity/boot/sequence/time 生命周期检测、可选 ProcBuf/Protobuf payload、严格命令 target 准入与重试发布适配 | `std::os::unix`；host feature 单向依赖 ProcBuf/Proto/CommandIngress，不进入实时核心；shared memory/RPMsg、生产 ACL 与资格待实现，下游 RT 产品策略执行由 lifecycle adapter 单独负责 |
 | `esop_proto` | `.proto` + 生成代码，非实时域 | API、配置、状态、事件、记录数据定义 | protobuf runtime |
 | `esop_zenoh_gateway` | C++/Rust/C，Linux | Protobuf pub/sub/query、远程状态与命令网关 | Zenoh、`esop_ipc` |
 | `esop_ros2_control` | C++，Linux | `hardware_interface::SystemInterface` 插件，`read()`/`write()` 映射 ProcBuf | ROS 2、`esop_ipc` |
 | `esop_ros2_bridge` | C++，Linux | ROS topic/service/action 与 ESOP Proto/诊断的显式映射 | ROS 2、`esop_ipc` |
-| `esop-cfggen` | Rust，宿主机 | 严格产品 JSON 与受限 ESI 子集生成静态 C 配置、Domain/PDO/Frame Plan、设备清单、ProcBuf layout 和 build input | `serde`、`quick-xml`、SHA-256；非固件工具依赖 |
+| `esop-cfggen` | Rust，宿主机 | 严格产品 JSON 与受限 ESI 子集生成静态 C/Rust 配置、Domain/PDO/Frame Plan、设备清单、ProcBuf layout 和 build input | `serde`、`quick-xml`、SHA-256；非固件工具依赖 |
 | `esop_sim` | C++/Python，CI | 虚拟从站、PCAP 回放、ProcBuf 与 API 合约测试 | host 工具链 |
 
 `esop_ecat`、`esop_coe`、`esop_dc`、`esop_profile_cia402`、`esop_device` 与 `esop_procbuf` 是 P0 实时闭环。Zenoh、ROS 2 和 protobuf runtime 绝不能进入这些模块的链接依赖图。
@@ -134,7 +135,7 @@ Platform layer
 
 当前 `crates/esop-ethercat-core/src/domain_registry.rs` 已提供固定容量的多 Domain/PDO/datagram 注册层：它在激活前分配稳定 bit offset、校验过程映像和逻辑地址范围、生成多速率调度表，并在激活后锁定配置。`SiiConfigurationCandidate` 可冻结为 `SiiDomainProjection`，将方向局部 PDO 布局与已核验的 FMMU/SyncManager 映射事务式登记到统一 Domain；字节对齐的 segment 可自动绑定 `LWR`/`LRD`，`FramePlanSet` 可按 MTU 拆分并在激活时原子发布。它不替代真实 SII/ESI 自动发现或 FMMU/SM 硬件回读。
 
-当前 `crates/esop-cfggen/` 已把上述注册层用于宿主机产品编译：显式 ESI identity/PDO 选择、稳定 Rx-then-Tx offset、每 Domain 的 LWR/LRD、expected WKC、多速率 schedule、CiA 402 对象/缩放/限幅和 ProcBuf ABI v6 布局会在发布前统一验证。它生成开发证据，不替代启动时 SII/拓扑 read-back、真实从站互操作或 HIL。
+当前 `crates/esop-cfggen/` 已把上述注册层用于宿主机产品编译：显式 ESI identity/PDO 选择、稳定 Rx-then-Tx offset、每 Domain 的 LWR/LRD、expected WKC、多速率 schedule、CiA 402 对象/缩放/限幅和 ProcBuf ABI v6 布局会在发布前统一验证。`crates/esop-product-config/` 消费生成的 Rust 静态数据，在激活期通过相同注册/校验 API 重建并冻结计划；配置 hash、ProcBuf、精确从站记录、Domain 证据或轴映射任一不一致均拒绝。该软件证据仍不替代启动时真实 SII/PDO assignment read-back、真实从站互操作或 HIL。
 
 ## 5. ProcBuf：机器人实时数据载体
 
@@ -145,6 +146,7 @@ ProcBuf 是 ESOP 的稳定实时 ABI，用于连接：EtherCAT PDO Domain、设�
 每个机器人配置由 `esop-cfggen` 生成：
 
 - `esop_product_config.h`：固定 slave、Domain、PDO、datagram、axis policy 和 ProcBuf 常量；
+- `esop_product_config.rs`：可编入 `no_std` 固件并由运行时 fail-closed 激活的静态合同；
 - `product_config.json`：规范化注册、Frame Plan、schedule 和 config SHA-256；
 - `device_inventory.json`：ESI identity、选中 PDO 和语义内容 SHA-256；
 - `procbuf_layout.json`：ABI v6 维度、精确 region bytes 和 layout hash；
@@ -353,7 +355,7 @@ Linux ARM host + STM32/HPM real-time node
 | ROB-008 | P1 | Zenoh gateway 必须执行 key namespace、命令 TTL、source identity、ACL 和限流。 | 未授权、重放、过期、断连重连测试。 |
 | ROB-009 | P1 | `esop_ros2_control` 的 `read()`/`write()` 只访问 ProcBuf/IPC，不直接访问 EtherCAT 或网络。 | 单元测试、依赖检查和 controller HIL。 |
 | ROB-010 | P1 | ROS 2 使用 Zenoh RMW 时，router 存活、发现失败和版本固定必须是部署健康检查项。 | router 不可达/恢复的系统测试。 |
-| ROB-011 | P1 | 每个机器人 build 输出静态内存、ProcBuf 大小、PDO 带宽、预期 WKC、周期预算和设备清单。 | CI 通过 `make cfggen-build-report` 生成五个产品产物并审核 `robot_build_report.json`；生成证据保持未资格。 |
+| ROB-011 | P1 | 每个机器人 build 输出静态内存、ProcBuf 大小、PDO 带宽、预期 WKC、周期预算和设备清单。 | CI 通过 `make cfggen-build-report` 生成六个产品产物、逐字节比对 Rust 黄金模块、执行运行时激活测试并审核 `robot_build_report.json`；生成证据保持未资格。 |
 | ROB-012 | P2 | FSoE/安全 PLC 集成须形成独立安全需求、测试和证据包，不复用普通 EtherCAT 验收结论。 | 安全项目独立评审通过。 |
 
 ## 11. 测试、可观测性和发布标准
