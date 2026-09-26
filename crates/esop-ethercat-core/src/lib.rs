@@ -155,8 +155,9 @@ pub use sii::{
     SiiSyncManagerCategory,
 };
 pub use sii_config::{
-    SiiConfigurationCandidate, SiiConfigurationError, SiiConfigurationProgress,
-    SiiDomainProjection, SiiProcessDataSegment,
+    SII_CONFIGURATION_SIGNATURE_SCHEMA, SiiConfigurationCandidate, SiiConfigurationError,
+    SiiConfigurationProgress, SiiConfigurationSignature, SiiConfigurationSignatureBuilder,
+    SiiConfigurationSignatureError, SiiDomainProjection, SiiProcessDataSegment,
 };
 pub use sii_discovery::{
     SiiDiscoveryController, SiiDiscoveryError, SiiDiscoveryPhase, SiiDiscoveryRequest,
@@ -171,6 +172,8 @@ pub use slave::{
 };
 pub use slave_copy::{SlaveCopyError, SlaveCopyOutcome, SlaveCopyPlan, SlaveCopyStatus};
 pub use startup::{
-    ExpectedSlave, StartupAction, StartupAlFault, StartupConfig, StartupConfigurationServices,
-    StartupController, StartupError, StartupPhase, StartupProgress, StartupSlaveProfile,
+    ExpectedSlave, STARTUP_SII_IMAGE_BYTE_CAPACITY, STARTUP_SII_IMAGE_WORD_CAPACITY,
+    STARTUP_SII_PDO_ENTRY_CAPACITY, StartupAction, StartupAlFault, StartupConfig,
+    StartupConfigurationServices, StartupController, StartupError, StartupPhase, StartupProgress,
+    StartupSlaveProfile,
 };

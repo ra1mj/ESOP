@@ -717,6 +717,9 @@ dependencies = [
 [[package]]
 name = "esop-ethercat-core"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "esop-ethercat-linux-port"

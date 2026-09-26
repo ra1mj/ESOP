@@ -132,6 +132,8 @@ struct GeneratedSlave {
     esi_device_name: String,
     transition_timeouts: EsiTransitionTimeouts,
     mailbox: EsiMailbox,
+    sii_sync_manager_count: u8,
+    sii_enabled_sync_managers: u16,
     op_only_outputs: Vec<GeneratedOpOnlySyncManager>,
     rx_pdos: Vec<HexU16>,
     tx_pdos: Vec<HexU16>,
@@ -291,6 +293,15 @@ fn build_artifacts(input: &Path) -> Result<GeneratedArtifacts> {
             esi_device_name: slave.device.name.clone(),
             transition_timeouts: slave.device.transition_timeouts,
             mailbox: slave.mailbox,
+            sii_sync_manager_count: slave.device.sync_managers.len() as u8,
+            sii_enabled_sync_managers: slave
+                .device
+                .sync_managers
+                .iter()
+                .filter(|sync_manager| sync_manager.is_enabled())
+                .fold(0u16, |mask, sync_manager| {
+                    mask | (1u16 << sync_manager.index)
+                }),
             op_only_outputs: slave
                 .device
                 .sync_managers
@@ -1284,7 +1295,7 @@ fn render_header(
     let mut header = String::from(
         "#ifndef ESOP_PRODUCT_CONFIG_H\n#define ESOP_PRODUCT_CONFIG_H\n\n#include <stdint.h>\n\n",
     );
-    header.push_str("typedef struct { const char *name; uint16_t position; uint16_t station_address; uint8_t domain_id; uint8_t kind; uint32_t vendor_id; uint32_t product_code; uint32_t revision; uint32_t serial; uint8_t has_serial; uint16_t mailbox_send_address; uint16_t mailbox_send_capacity; uint16_t mailbox_receive_address; uint16_t mailbox_receive_capacity; } esop_slave_config_t;\n");
+    header.push_str("typedef struct { const char *name; uint16_t position; uint16_t station_address; uint8_t domain_id; uint8_t kind; uint32_t vendor_id; uint32_t product_code; uint32_t revision; uint32_t serial; uint8_t has_serial; uint16_t mailbox_send_address; uint16_t mailbox_send_capacity; uint16_t mailbox_receive_address; uint16_t mailbox_receive_capacity; uint8_t sii_sync_manager_count; uint16_t sii_enabled_sync_managers; } esop_slave_config_t;\n");
     header.push_str("typedef struct { const char *name; uint8_t id; uint32_t logical_address; uint32_t image_offset; uint32_t image_bytes; uint32_t output_bytes; uint32_t input_bytes; uint32_t period_ticks; uint32_t phase_ticks; uint16_t expected_wkc; } esop_domain_config_t;\n");
     header.push_str("typedef struct { uint8_t domain_id; uint16_t slave_position; uint16_t assignment_index; uint8_t sync_manager; uint16_t object_index; uint8_t subindex; uint8_t direction; uint32_t bit_offset; uint8_t bit_length; uint8_t is_signed; } esop_pdo_config_t;\n");
     header.push_str("typedef struct { uint8_t domain_id; uint8_t command; uint8_t index; uint32_t logical_address; uint32_t image_offset; uint16_t payload_len; uint16_t expected_wkc; uint8_t input; } esop_datagram_config_t;\n");
@@ -1316,7 +1327,7 @@ fn render_header(
     } else {
         for slave in slaves {
             header.push_str(&format!(
-                "  {{{}, {}u, UINT16_C(0x{:04x}), {}u, {}u, UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), {}u, UINT16_C(0x{:04x}), UINT16_C({}), UINT16_C(0x{:04x}), UINT16_C({})}},\n",
+                "  {{{}, {}u, UINT16_C(0x{:04x}), {}u, {}u, UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), {}u, UINT16_C(0x{:04x}), UINT16_C({}), UINT16_C(0x{:04x}), UINT16_C({}), {}u, UINT16_C(0x{:04x})}},\n",
                 c_string(&slave.name),
                 slave.position,
                 slave.station_address.0,
@@ -1331,6 +1342,8 @@ fn render_header(
                 slave.mailbox.send_capacity,
                 slave.mailbox.receive_address,
                 slave.mailbox.receive_capacity,
+                slave.sii_sync_manager_count,
+                slave.sii_enabled_sync_managers,
             ));
         }
     }
@@ -1520,7 +1533,7 @@ use esop_product_config::{\n\
             .collect::<Vec<_>>()
             .join(", ");
         output.push_str(&format!(
-            "        ProductSlaveConfig {{ name: {}, position: {}, station_address: 0x{:04x}, domain_id: {}, kind: ProductSlaveKind::{}, identity: SlaveIdentity {{ vendor_id: 0x{:08x}, product_code: 0x{:08x}, revision: 0x{:08x}, serial: 0x{:08x} }}, transition_timeouts: AlTransitionTimeouts::new({}, {}, {}, {}), mailbox_config: MailboxConfig::new(0x{:04x}, {}, 0x{:04x}, {}), op_only_outputs: OpOnlySyncManagerProfile::from_raw(0x{:04x}, [{}]) }},\n",
+            "        ProductSlaveConfig {{ name: {}, position: {}, station_address: 0x{:04x}, domain_id: {}, kind: ProductSlaveKind::{}, identity: SlaveIdentity {{ vendor_id: 0x{:08x}, product_code: 0x{:08x}, revision: 0x{:08x}, serial: 0x{:08x} }}, transition_timeouts: AlTransitionTimeouts::new({}, {}, {}, {}), mailbox_config: MailboxConfig::new(0x{:04x}, {}, 0x{:04x}, {}), op_only_outputs: OpOnlySyncManagerProfile::from_raw(0x{:04x}, [{}]), sii_sync_manager_count: {}, sii_enabled_sync_managers: 0x{:04x} }},\n",
             rust_string(&slave.name),
             slave.position,
             slave.station_address.0,
@@ -1540,6 +1553,8 @@ use esop_product_config::{\n\
             slave.mailbox.receive_capacity,
             op_only_mask,
             activation,
+            slave.sii_sync_manager_count,
+            slave.sii_enabled_sync_managers,
         ));
     }
     output.push_str("    ],\n");

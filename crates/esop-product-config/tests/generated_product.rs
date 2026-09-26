@@ -75,6 +75,19 @@ fn checked_in_product_activates_exact_generated_evidence() {
         .zip(generated::PRODUCT_CONFIG.slaves)
     {
         assert_eq!(profile.expected_mailbox, Some(slave.mailbox_config));
+        let expected_sii = profile.expected_sii.expect("generated SII expectation");
+        assert_eq!(
+            expected_sii.sync_manager_count(),
+            slave.sii_sync_manager_count
+        );
+        assert_eq!(
+            expected_sii.enabled_sync_managers(),
+            slave.sii_enabled_sync_managers
+        );
+        assert_eq!(
+            expected_sii.op_only_sync_managers(),
+            slave.op_only_outputs.mask()
+        );
     }
 
     assert_eq!(active.registry().domain_count(), 2);

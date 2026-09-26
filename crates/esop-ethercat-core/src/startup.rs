@@ -20,6 +20,11 @@ use crate::sii::{
     SiiBlockReader, SiiBlockRequest, SiiError, SiiIdentityReader, SiiMailboxError, SiiPhase,
     SiiProgress, SiiStandardMailbox,
 };
+use crate::sii_config::{SiiConfigurationSignature, SiiConfigurationSignatureError};
+use crate::sii_discovery::{
+    SiiDiscoveryError, SiiDiscoveryPhase, SiiStreamDiscoveryController, SiiStreamDiscoveryRequest,
+};
+use crate::sii_stream::{SiiCategoryStreamProgress, SiiCategoryStreamRequest};
 use crate::slave::{
     EthercatState, SlaveIdentity, SlaveRecord, SlaveTable, SlaveTableError, next_state,
 };
@@ -28,6 +33,18 @@ use crate::{
     OpOnlySyncManagerError, OpOnlySyncManagerPhase, OpOnlySyncManagerProfile,
     OpOnlySyncManagerProgress,
 };
+
+pub const STARTUP_SII_IMAGE_WORD_CAPACITY: usize = 4096;
+pub const STARTUP_SII_IMAGE_BYTE_CAPACITY: usize = STARTUP_SII_IMAGE_WORD_CAPACITY * 2;
+pub const STARTUP_SII_PDO_ENTRY_CAPACITY: usize = 256;
+
+type StartupSiiDiscovery = SiiStreamDiscoveryController<
+    STARTUP_SII_IMAGE_WORD_CAPACITY,
+    { crate::MAX_ESC_SYNC_MANAGERS },
+    0,
+    STARTUP_SII_PDO_ENTRY_CAPACITY,
+    STARTUP_SII_PDO_ENTRY_CAPACITY,
+>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExpectedSlave {
@@ -50,6 +67,7 @@ pub struct StartupSlaveProfile {
     pub transition_timeouts: AlTransitionTimeouts,
     pub op_only_outputs: OpOnlySyncManagerProfile,
     pub expected_mailbox: Option<MailboxConfig>,
+    pub expected_sii: Option<SiiConfigurationSignature>,
 }
 
 impl StartupSlaveProfile {
@@ -58,6 +76,7 @@ impl StartupSlaveProfile {
         transition_timeouts: ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
         op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
         expected_mailbox: None,
+        expected_sii: None,
     };
 
     pub const fn new(position: u16) -> Self {
@@ -82,6 +101,11 @@ impl StartupSlaveProfile {
 
     pub const fn with_expected_mailbox(mut self, expected_mailbox: MailboxConfig) -> Self {
         self.expected_mailbox = Some(expected_mailbox);
+        self
+    }
+
+    pub const fn with_expected_sii(mut self, expected_sii: SiiConfigurationSignature) -> Self {
+        self.expected_sii = Some(expected_sii);
         self
     }
 }
@@ -142,6 +166,7 @@ impl Default for StartupConfigurationServices {
 pub struct StartupConfig {
     pub scan_timeout_ns: u64,
     pub identity_timeout_ns: u64,
+    pub sii_configuration_timeout_ns: u64,
     pub transition_timeout_ns: u64,
     pub request_timeout_ns: u64,
     pub target_state: EthercatState,
@@ -153,6 +178,7 @@ impl StartupConfig {
         Self {
             scan_timeout_ns: 1_000_000_000,
             identity_timeout_ns: 1_000_000_000,
+            sii_configuration_timeout_ns: 30_000_000_000,
             transition_timeout_ns: 0,
             request_timeout_ns: 1_000_000,
             target_state,
@@ -175,6 +201,7 @@ pub enum StartupPhase {
     Scanning,
     ReadingIdentity,
     ReadingMailbox,
+    ReadingConfiguration,
     TransitioningAl,
     AwaitingConfiguration,
     Ready,
@@ -186,6 +213,7 @@ pub enum StartupAction {
     Scan(ScanAction),
     Sii(SiiAction),
     SiiMailbox(SiiAction),
+    SiiConfiguration(SiiAction),
     Al(AlAction),
     OpOnly(OpOnlySyncManagerAction),
 }
@@ -196,6 +224,7 @@ impl StartupAction {
             Self::Scan(action) => action.token,
             Self::Sii(action) => action.token,
             Self::SiiMailbox(action) => action.token,
+            Self::SiiConfiguration(action) => action.token,
             Self::Al(action) => action.token,
             Self::OpOnly(action) => action.token,
         }
@@ -206,6 +235,7 @@ impl StartupAction {
             Self::Scan(action) => action.datagram_index,
             Self::Sii(action) => action.datagram_index,
             Self::SiiMailbox(action) => action.datagram_index,
+            Self::SiiConfiguration(action) => action.datagram_index,
             Self::Al(action) => action.datagram_index,
             Self::OpOnly(action) => action.datagram_index,
         }
@@ -216,6 +246,7 @@ impl StartupAction {
             Self::Scan(action) => action.generation,
             Self::Sii(action) => action.generation,
             Self::SiiMailbox(action) => action.generation,
+            Self::SiiConfiguration(action) => action.generation,
             Self::Al(action) => action.generation,
             Self::OpOnly(action) => action.generation,
         }
@@ -226,6 +257,7 @@ impl StartupAction {
             Self::Scan(action) => action.address,
             Self::Sii(action) => action.address,
             Self::SiiMailbox(action) => action.address,
+            Self::SiiConfiguration(action) => action.address,
             Self::Al(action) => action.address,
             Self::OpOnly(action) => action.address,
         }
@@ -236,6 +268,7 @@ impl StartupAction {
             Self::Scan(action) => action.operation,
             Self::Sii(action) => action.operation,
             Self::SiiMailbox(action) => action.operation,
+            Self::SiiConfiguration(action) => action.operation,
             Self::Al(action) => action.operation,
             Self::OpOnly(action) => action.operation,
         }
@@ -246,6 +279,7 @@ impl StartupAction {
             Self::Scan(action) => action.payload(),
             Self::Sii(action) => action.payload(),
             Self::SiiMailbox(action) => action.payload(),
+            Self::SiiConfiguration(action) => action.payload(),
             Self::Al(action) => action.payload(),
             Self::OpOnly(action) => action.payload(),
         }
@@ -256,6 +290,7 @@ impl StartupAction {
             Self::Scan(action) => action.deadline_ns,
             Self::Sii(action) => action.deadline_ns,
             Self::SiiMailbox(action) => action.deadline_ns,
+            Self::SiiConfiguration(action) => action.deadline_ns,
             Self::Al(action) => action.deadline_ns,
             Self::OpOnly(action) => action.deadline_ns,
         }
@@ -266,6 +301,7 @@ impl StartupAction {
             Self::Scan(action) => action.expected_wkc,
             Self::Sii(action) => action.expected_wkc,
             Self::SiiMailbox(action) => action.expected_wkc,
+            Self::SiiConfiguration(action) => action.expected_wkc,
             Self::Al(action) => action.expected_wkc,
             Self::OpOnly(action) => action.expected_wkc,
         }
@@ -276,6 +312,7 @@ impl StartupAction {
             Self::Scan(action) => action.datagram_len(),
             Self::Sii(action) => action.datagram_len(),
             Self::SiiMailbox(action) => action.datagram_len(),
+            Self::SiiConfiguration(action) => action.datagram_len(),
             Self::Al(action) => action.datagram_len(),
             Self::OpOnly(action) => action.datagram_len(),
         }
@@ -286,6 +323,7 @@ impl StartupAction {
             Self::Scan(action) => action.read_len as usize,
             Self::Sii(action) => action.read_len as usize,
             Self::SiiMailbox(action) => action.read_len as usize,
+            Self::SiiConfiguration(action) => action.read_len as usize,
             Self::Al(action) => action.read_len as usize,
             Self::OpOnly(action) => action.response_len(),
         }
@@ -298,6 +336,7 @@ pub enum StartupProgress {
     SlaveDiscovered(usize),
     IdentityVerified(usize),
     MailboxVerified(usize),
+    SiiConfigurationVerified(usize),
     SlaveReady(usize),
     AwaitingConfiguration,
     ConfigurationReleased,
@@ -336,6 +375,13 @@ pub enum StartupError {
     Scan(ScanError),
     Sii(SiiError),
     SiiMailbox(SiiMailboxError),
+    SiiConfiguration(SiiDiscoveryError),
+    SiiConfigurationSignature(SiiConfigurationSignatureError),
+    SiiConfigurationMismatch {
+        position: u16,
+        expected: SiiConfigurationSignature,
+        observed: SiiConfigurationSignature,
+    },
     MailboxMismatch {
         position: u16,
         expected: MailboxConfig,
@@ -383,11 +429,14 @@ pub struct StartupController<const MAX_SLAVES: usize> {
     scan: ScanController<MAX_SLAVES>,
     sii: SiiIdentityReader,
     sii_mailbox: SiiBlockReader<SII_STANDARD_MAILBOX_WORD_COUNT>,
+    sii_configuration: StartupSiiDiscovery,
+    sii_configuration_scratch: [u8; STARTUP_SII_IMAGE_BYTE_CAPACITY],
     al: AlTransitionController,
     op_only: OpOnlySyncManagerController,
     table: SlaveTable<MAX_SLAVES>,
     device_emulation: [bool; MAX_SLAVES],
     verified_mailboxes: [Option<MailboxConfig>; MAX_SLAVES],
+    verified_sii: [Option<SiiConfigurationSignature>; MAX_SLAVES],
     op_only_gate: [OpOnlyGateState; MAX_SLAVES],
     current_index: usize,
     stage_target: EthercatState,
@@ -411,11 +460,14 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             scan: ScanController::new(station_address_base),
             sii: SiiIdentityReader::new(),
             sii_mailbox: SiiBlockReader::new(),
+            sii_configuration: SiiStreamDiscoveryController::new(),
+            sii_configuration_scratch: [0; STARTUP_SII_IMAGE_BYTE_CAPACITY],
             al: AlTransitionController::new(),
             op_only: OpOnlySyncManagerController::new(),
             table: SlaveTable::new(),
             device_emulation: [false; MAX_SLAVES],
             verified_mailboxes: [None; MAX_SLAVES],
+            verified_sii: [None; MAX_SLAVES],
             op_only_gate: [OpOnlyGateState::Unknown; MAX_SLAVES],
             current_index: 0,
             stage_target: EthercatState::Op,
@@ -459,6 +511,14 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             .and_then(|index| self.verified_mailboxes[index])
     }
 
+    pub fn verified_sii(&self, position: u16) -> Option<SiiConfigurationSignature> {
+        self.table
+            .records()
+            .iter()
+            .position(|record| record.position == position)
+            .and_then(|index| self.verified_sii[index])
+    }
+
     pub const fn expected_count(&self) -> usize {
         self.expected_count
     }
@@ -482,6 +542,10 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             StartupPhase::ReadingMailbox => {
                 self.sii_mailbox.pending().map(StartupAction::SiiMailbox)
             }
+            StartupPhase::ReadingConfiguration => self
+                .sii_configuration
+                .pending()
+                .map(StartupAction::SiiConfiguration),
             StartupPhase::TransitioningAl => match self.transition_stage {
                 StartupTransitionStage::Al => self.al.pending().map(StartupAction::Al),
                 StartupTransitionStage::OpOnlyBeforeAl | StartupTransitionStage::OpOnlyAfterAl => {
@@ -622,11 +686,14 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.scan = ScanController::new(self.station_address_base);
         self.sii = SiiIdentityReader::new();
         self.sii_mailbox = SiiBlockReader::new();
+        self.sii_configuration = SiiStreamDiscoveryController::new();
+        self.sii_configuration_scratch = [0; STARTUP_SII_IMAGE_BYTE_CAPACITY];
         self.al = AlTransitionController::new();
         self.op_only = OpOnlySyncManagerController::new();
         self.table = SlaveTable::new();
         self.device_emulation = [false; MAX_SLAVES];
         self.verified_mailboxes = [None; MAX_SLAVES];
+        self.verified_sii = [None; MAX_SLAVES];
         self.op_only_gate = [OpOnlyGateState::Unknown; MAX_SLAVES];
         self.current_index = 0;
         self.stage_target = if config.configuration_services.is_empty() {
@@ -677,6 +744,23 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                         Err(error) => {
                             return self
                                 .fail(StartupError::SiiMailbox(SiiMailboxError::Block(error)));
+                        }
+                    }
+                }
+                StartupPhase::ReadingConfiguration => {
+                    self.start_sii_configuration_reader(now_ns)?;
+                    match self.sii_configuration.next_action(now_ns) {
+                        Ok(Some(action)) => {
+                            return Ok(Some(StartupAction::SiiConfiguration(action)));
+                        }
+                        Ok(None)
+                            if self.sii_configuration.phase() == SiiDiscoveryPhase::Projecting =>
+                        {
+                            self.finish_sii_configuration(now_ns)?;
+                        }
+                        Ok(None) => return Ok(None),
+                        Err(error) => {
+                            return self.fail(StartupError::SiiConfiguration(error));
                         }
                     }
                 }
@@ -798,6 +882,25 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                 };
                 if progress == SiiProgress::Complete {
                     return self.finish_mailbox(now_ns);
+                }
+                Ok(StartupProgress::Advanced)
+            }
+            StartupAction::SiiConfiguration(action) => {
+                if self.phase != StartupPhase::ReadingConfiguration {
+                    return self.fail(StartupError::NoPendingAction);
+                }
+                let progress = match self.sii_configuration.accept(
+                    action.token,
+                    generation,
+                    payload,
+                    working_counter,
+                    now_ns,
+                ) {
+                    Ok(progress) => progress,
+                    Err(error) => return self.fail(StartupError::SiiConfiguration(error)),
+                };
+                if matches!(progress, SiiCategoryStreamProgress::Complete { .. }) {
+                    return self.finish_sii_configuration(now_ns);
                 }
                 Ok(StartupProgress::Advanced)
             }
@@ -979,6 +1082,12 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                     }
                 }
             }
+            StartupAction::SiiConfiguration(action) => {
+                match self.sii_configuration.timeout(action.token, now_ns) {
+                    Ok(()) => Ok(StartupProgress::Advanced),
+                    Err(error) => self.fail(StartupError::SiiConfiguration(error)),
+                }
+            }
             StartupAction::Al(action) => match self.al.timeout(action.token, now_ns) {
                 Ok(()) => self.fail(StartupError::Al(AlError::Timeout)),
                 Err(error) => {
@@ -1052,11 +1161,14 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.scan = ScanController::new(self.station_address_base);
         self.sii = SiiIdentityReader::new();
         self.sii_mailbox = SiiBlockReader::new();
+        self.sii_configuration = SiiStreamDiscoveryController::new();
+        self.sii_configuration_scratch = [0; STARTUP_SII_IMAGE_BYTE_CAPACITY];
         self.al = AlTransitionController::new();
         self.op_only = OpOnlySyncManagerController::new();
         self.table = SlaveTable::new();
         self.device_emulation = [false; MAX_SLAVES];
         self.verified_mailboxes = [None; MAX_SLAVES];
+        self.verified_sii = [None; MAX_SLAVES];
         self.op_only_gate = [OpOnlyGateState::Unknown; MAX_SLAVES];
         for item in expected.iter().copied() {
             self.table
@@ -1149,6 +1261,35 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         }
     }
 
+    fn start_sii_configuration_reader(&mut self, now_ns: u64) -> Result<(), StartupError> {
+        if !matches!(
+            self.sii_configuration.phase(),
+            SiiDiscoveryPhase::Idle | SiiDiscoveryPhase::Ready | SiiDiscoveryPhase::Faulted
+        ) {
+            return Ok(());
+        }
+        let record = self
+            .table
+            .records()
+            .get(self.current_index)
+            .copied()
+            .ok_or(StartupError::ExpectedCountMismatch)?;
+        let request = SiiStreamDiscoveryRequest {
+            stream: SiiCategoryStreamRequest::standard(
+                record.station_address,
+                self.generation,
+                now_ns,
+                self.config.sii_configuration_timeout_ns,
+                self.config.request_timeout_ns,
+            ),
+            signed: false,
+        };
+        match self.sii_configuration.start(request) {
+            Ok(()) => Ok(()),
+            Err(error) => self.fail(StartupError::SiiConfiguration(error)),
+        }
+    }
+
     fn finish_identity(&mut self, now_ns: u64) -> Result<StartupProgress, StartupError> {
         let scan_record = self
             .scan
@@ -1194,6 +1335,10 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             self.phase = StartupPhase::ReadingMailbox;
             return Ok(StartupProgress::IdentityVerified(self.current_index));
         }
+        if profile.expected_sii.is_some() {
+            self.phase = StartupPhase::ReadingConfiguration;
+            return Ok(StartupProgress::IdentityVerified(self.current_index));
+        }
         self.phase = StartupPhase::TransitioningAl;
         self.start_al_for_current(now_ns)
     }
@@ -1225,9 +1370,60 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             });
         }
         self.verified_mailboxes[self.current_index] = Some(observed);
+        if self
+            .profile_for_position(record.position)?
+            .expected_sii
+            .is_some()
+        {
+            self.phase = StartupPhase::ReadingConfiguration;
+            return Ok(StartupProgress::MailboxVerified(self.current_index));
+        }
         self.phase = StartupPhase::TransitioningAl;
         match self.start_al_for_current(now_ns)? {
             StartupProgress::IdentityVerified(index) => Ok(StartupProgress::MailboxVerified(index)),
+            progress => Ok(progress),
+        }
+    }
+
+    fn finish_sii_configuration(&mut self, now_ns: u64) -> Result<StartupProgress, StartupError> {
+        if let Err(error) = self
+            .sii_configuration
+            .finalize(&mut self.sii_configuration_scratch)
+        {
+            return self.fail(StartupError::SiiConfiguration(error));
+        }
+        let observed = match self
+            .sii_configuration
+            .candidate()
+            .ok_or(StartupError::NoPendingAction)?
+            .signature()
+        {
+            Ok(signature) => signature,
+            Err(error) => return self.fail(StartupError::SiiConfigurationSignature(error)),
+        };
+        let record = self
+            .table
+            .records()
+            .get(self.current_index)
+            .copied()
+            .ok_or(StartupError::ExpectedCountMismatch)?;
+        let expected = self
+            .profile_for_position(record.position)?
+            .expected_sii
+            .ok_or(StartupError::NoPendingAction)?;
+        if observed != expected {
+            return self.fail(StartupError::SiiConfigurationMismatch {
+                position: record.position,
+                expected,
+                observed,
+            });
+        }
+        self.verified_sii[self.current_index] = Some(observed);
+        self.phase = StartupPhase::TransitioningAl;
+        match self.start_al_for_current(now_ns)? {
+            StartupProgress::IdentityVerified(index) => {
+                Ok(StartupProgress::SiiConfigurationVerified(index))
+            }
             progress => Ok(progress),
         }
     }
@@ -1467,8 +1663,14 @@ mod tests {
     use super::*;
     use crate::op_only::{SYNC_MANAGER_ENABLE_FLAG, SYNC_MANAGER_OP_ONLY_FLAG};
     use crate::registers::{
-        ESC_AL_STATUS, ESC_CONFIGURATION, ESC_TYPE, auto_increment_address, fixed_address,
+        ESC_AL_STATUS, ESC_CONFIGURATION, ESC_EEPROM_CONTROL, ESC_EEPROM_DATA, ESC_TYPE,
+        auto_increment_address, fixed_address, register_from_address,
     };
+    use crate::sii::{
+        SII_CATEGORY_END, SII_CATEGORY_RX_PDO, SII_CATEGORY_SYNC_MANAGER, SII_CATEGORY_TX_PDO,
+    };
+    use crate::sii_config::SiiConfigurationSignatureBuilder;
+    use crate::sii_stream::SII_CATEGORY_START_WORD;
     use crate::slave::AL_ERROR_FLAG;
 
     fn status(state: EthercatState) -> [u8; 6] {
@@ -1685,6 +1887,295 @@ mod tests {
             .unwrap();
         startup.stage_target = EthercatState::Op;
         startup
+    }
+
+    fn append_sii_category(bytes: &mut std::vec::Vec<u8>, kind: u16, payload: &[u8]) {
+        assert_eq!(payload.len() % 2, 0);
+        bytes.extend_from_slice(&kind.to_le_bytes());
+        bytes.extend_from_slice(&((payload.len() / 2) as u16).to_le_bytes());
+        bytes.extend_from_slice(payload);
+    }
+
+    fn startup_sii_image(rx_object: u16) -> std::vec::Vec<u8> {
+        let mut image = std::vec::Vec::new();
+        append_sii_category(
+            &mut image,
+            SII_CATEGORY_SYNC_MANAGER,
+            &[
+                0x00, 0x10, 0x02, 0x00, 0x26, 0x00, 0x01, 0x00, 0x00, 0x11, 0x02, 0x00, 0x22, 0x00,
+                0x01, 0x00,
+            ],
+        );
+        for (kind, pdo_index, sync_manager, object_index) in [
+            (SII_CATEGORY_RX_PDO, 0x1600u16, 0u8, rx_object),
+            (SII_CATEGORY_TX_PDO, 0x1A00u16, 1u8, 0x6041u16),
+        ] {
+            let mut pdo = [0u8; 16];
+            pdo[0..2].copy_from_slice(&pdo_index.to_le_bytes());
+            pdo[2] = 1;
+            pdo[3] = sync_manager;
+            pdo[8..10].copy_from_slice(&object_index.to_le_bytes());
+            pdo[10] = 0;
+            pdo[12] = 16;
+            append_sii_category(&mut image, kind, &pdo);
+        }
+        image.extend_from_slice(&SII_CATEGORY_END.to_le_bytes());
+        image.extend_from_slice(&0u16.to_le_bytes());
+        image
+    }
+
+    fn startup_sii_signature(rx_object: u16) -> SiiConfigurationSignature {
+        let mut builder = SiiConfigurationSignatureBuilder::new(2, 0b11, 0).unwrap();
+        builder
+            .begin_pdo(crate::PdoDirection::Rx, 0x1600, 0)
+            .unwrap();
+        builder.entry(rx_object, 0, 16).unwrap();
+        builder.end_pdo().unwrap();
+        builder
+            .begin_pdo(crate::PdoDirection::Tx, 0x1A00, 1)
+            .unwrap();
+        builder.entry(0x6041, 0, 16).unwrap();
+        builder.end_pdo().unwrap();
+        builder.finish().unwrap()
+    }
+
+    fn prepared_sii_verification(expected_sii: SiiConfigurationSignature) -> StartupController<1> {
+        let identity = SlaveIdentity {
+            vendor_id: 1,
+            product_code: 2,
+            revision: 3,
+            serial: 4,
+        };
+        let mut config = StartupConfig::new(EthercatState::Op);
+        config.sii_configuration_timeout_ns = 100_000;
+        config.request_timeout_ns = 1_000;
+        let mut startup = StartupController::<1>::new(0x1000);
+        startup.phase = StartupPhase::ReadingConfiguration;
+        startup.config = config;
+        startup.generation = 7;
+        startup.expected[0] = ExpectedSlave {
+            position: 0,
+            station_address: 0x1000,
+            identity,
+        };
+        startup.profiles[0] = StartupSlaveProfile::new(0).with_expected_sii(expected_sii);
+        startup.expected_count = 1;
+        startup
+            .table
+            .add(0, 0x1000, identity)
+            .and_then(|_| {
+                startup.table.observe_status(
+                    0,
+                    crate::slave::AlStatus::new(EthercatState::SafeOp as u16, 0),
+                    0,
+                )
+            })
+            .and_then(|_| startup.table.verify_identity(0, identity))
+            .unwrap();
+        startup.stage_target = EthercatState::Op;
+        startup
+    }
+
+    fn prepared_multi_sii_verification(
+        expected_sii: [SiiConfigurationSignature; 2],
+        identities: [SlaveIdentity; 2],
+    ) -> StartupController<2> {
+        let mut config = StartupConfig::new(EthercatState::Op);
+        config.sii_configuration_timeout_ns = 100_000;
+        config.request_timeout_ns = 1_000;
+        let mut startup = StartupController::<2>::new(0x1000);
+        startup.phase = StartupPhase::ReadingConfiguration;
+        startup.config = config;
+        startup.generation = 7;
+        startup.expected_count = 2;
+        startup.stage_target = EthercatState::Op;
+        for index in 0..2 {
+            startup.expected[index] = ExpectedSlave {
+                position: index as u16,
+                station_address: 0x1000 + index as u16,
+                identity: identities[index],
+            };
+            startup.profiles[index] =
+                StartupSlaveProfile::new(index as u16).with_expected_sii(expected_sii[index]);
+            startup
+                .table
+                .add(index as u16, 0x1000 + index as u16, identities[index])
+                .and_then(|_| {
+                    startup.table.observe_status(
+                        index as u16,
+                        crate::slave::AlStatus::new(EthercatState::SafeOp as u16, 0),
+                        0,
+                    )
+                })
+                .and_then(|_| {
+                    startup
+                        .table
+                        .verify_identity(index as u16, identities[index])
+                })
+                .unwrap();
+        }
+        startup
+    }
+
+    fn drive_sii_configuration<const MAX_SLAVES: usize>(
+        startup: &mut StartupController<MAX_SLAVES>,
+        image: &[u8],
+        now_ns: &mut u64,
+    ) -> Result<StartupProgress, StartupError> {
+        let mut progress = StartupProgress::Advanced;
+        while startup.phase() == StartupPhase::ReadingConfiguration {
+            let action = startup.next_action(*now_ns)?.unwrap();
+            let StartupAction::SiiConfiguration(inner) = action else {
+                panic!("expected SII configuration action");
+            };
+            let payload = if inner.read_len == 0 {
+                std::vec::Vec::new()
+            } else {
+                match register_from_address(inner.address) {
+                    ESC_EEPROM_CONTROL => std::vec::Vec::from([0, 0]),
+                    ESC_EEPROM_DATA => {
+                        let offset = usize::from(inner.word_address - SII_CATEGORY_START_WORD) * 2;
+                        image[offset..offset + inner.read_len as usize].to_vec()
+                    }
+                    register => panic!("unexpected EEPROM register {register:#06x}"),
+                }
+            };
+            progress = startup.accept(
+                action,
+                action.generation(),
+                &payload,
+                inner.expected_wkc,
+                *now_ns + 1,
+            )?;
+            *now_ns += 2;
+        }
+        Ok(progress)
+    }
+
+    #[test]
+    fn startup_verifies_complete_sii_stream_before_first_al_action() {
+        let expected = startup_sii_signature(0x6040);
+        let mut startup = prepared_sii_verification(expected);
+        let mut now_ns = 1;
+        assert_eq!(
+            drive_sii_configuration(&mut startup, &startup_sii_image(0x6040), &mut now_ns),
+            Ok(StartupProgress::SiiConfigurationVerified(0))
+        );
+        assert_eq!(startup.verified_sii(0), Some(expected));
+        assert_eq!(startup.phase(), StartupPhase::TransitioningAl);
+        assert!(matches!(
+            startup.next_action(now_ns),
+            Ok(Some(StartupAction::Al(_)))
+        ));
+    }
+
+    #[test]
+    fn startup_fails_closed_on_sii_configuration_mismatch() {
+        let expected = startup_sii_signature(0x6040);
+        let observed = startup_sii_signature(0x607A);
+        let mut startup = prepared_sii_verification(expected);
+        let mut now_ns = 1;
+        assert_eq!(
+            drive_sii_configuration(&mut startup, &startup_sii_image(0x607A), &mut now_ns),
+            Err(StartupError::SiiConfigurationMismatch {
+                position: 0,
+                expected,
+                observed,
+            })
+        );
+        assert_eq!(startup.phase(), StartupPhase::Faulted);
+        assert_eq!(startup.verified_sii(0), None);
+        assert_eq!(startup.next_action(now_ns), Ok(None));
+    }
+
+    #[test]
+    fn sii_configuration_actions_and_deadlines_fail_closed() {
+        let expected = startup_sii_signature(0x6040);
+        let mut crossed = prepared_sii_verification(expected);
+        let pending = crossed.next_action(1).unwrap().unwrap();
+        let StartupAction::SiiConfiguration(inner) = pending else {
+            panic!("expected SII configuration action");
+        };
+        assert_eq!(
+            crossed.accept(StartupAction::Sii(inner), inner.generation, &[], 1, 2),
+            Err(StartupError::ActionMismatch)
+        );
+        assert_eq!(crossed.phase(), StartupPhase::Faulted);
+        assert_eq!(crossed.verified_sii(0), None);
+
+        let mut timed_out = prepared_sii_verification(expected);
+        timed_out.config.sii_configuration_timeout_ns = 2;
+        timed_out.config.request_timeout_ns = 100;
+        let pending = timed_out.next_action(10).unwrap().unwrap();
+        assert_eq!(
+            timed_out.timeout(pending, pending.deadline_ns()),
+            Err(StartupError::SiiConfiguration(SiiDiscoveryError::Stream(
+                crate::SiiCategoryStreamError::Block(crate::sii::SiiBlockError::Timeout,)
+            )))
+        );
+        assert_eq!(timed_out.phase(), StartupPhase::Faulted);
+        assert_eq!(timed_out.verified_sii(0), None);
+        assert_eq!(timed_out.next_action(pending.deadline_ns() + 1), Ok(None));
+    }
+
+    #[test]
+    fn sii_verification_reuses_workspace_in_slave_order_and_restart_clears_evidence() {
+        let signatures = [startup_sii_signature(0x6040), startup_sii_signature(0x607A)];
+        let identities = [
+            SlaveIdentity {
+                vendor_id: 1,
+                product_code: 2,
+                revision: 3,
+                serial: 4,
+            },
+            SlaveIdentity {
+                vendor_id: 5,
+                product_code: 6,
+                revision: 7,
+                serial: 8,
+            },
+        ];
+        let mut startup = prepared_multi_sii_verification(signatures, identities);
+        let mut now_ns = 1;
+        assert_eq!(
+            drive_sii_configuration(&mut startup, &startup_sii_image(0x6040), &mut now_ns),
+            Ok(StartupProgress::SiiConfigurationVerified(0))
+        );
+        assert_eq!(startup.verified_sii(0), Some(signatures[0]));
+        assert_eq!(startup.verified_sii(1), None);
+        assert_eq!(
+            accept_al_state(&mut startup, EthercatState::Op, now_ns),
+            StartupProgress::SlaveReady(0)
+        );
+        now_ns += 4;
+        assert_eq!(startup.phase(), StartupPhase::ReadingIdentity);
+        assert_eq!(startup.current_index(), 1);
+        startup.phase = StartupPhase::ReadingConfiguration;
+        assert_eq!(
+            drive_sii_configuration(&mut startup, &startup_sii_image(0x607A), &mut now_ns),
+            Ok(StartupProgress::SiiConfigurationVerified(1))
+        );
+        assert_eq!(startup.verified_sii(0), Some(signatures[0]));
+        assert_eq!(startup.verified_sii(1), Some(signatures[1]));
+
+        assert_eq!(
+            accept_al_state(&mut startup, EthercatState::Op, now_ns),
+            StartupProgress::Ready
+        );
+        let expected = startup.expected;
+        let profiles = startup.profiles;
+        startup
+            .start_with_profiles(
+                8,
+                now_ns + 4,
+                StartupConfig::new(EthercatState::Op),
+                &expected[..2],
+                &profiles[..2],
+            )
+            .unwrap();
+        assert_eq!(startup.phase(), StartupPhase::Scanning);
+        assert_eq!(startup.verified_sii(0), None);
+        assert_eq!(startup.verified_sii(1), None);
     }
 
     #[test]
@@ -2622,6 +3113,7 @@ mod tests {
             StartupAction::Scan(action) => action.deadline_ns,
             StartupAction::Sii(_)
             | StartupAction::SiiMailbox(_)
+            | StartupAction::SiiConfiguration(_)
             | StartupAction::Al(_)
             | StartupAction::OpOnly(_) => 0,
         }
@@ -2782,6 +3274,41 @@ mod tests {
         assert!(matches!(
             startup.next_action(3),
             Ok(Some(StartupAction::SiiMailbox(_)))
+        ));
+    }
+
+    #[test]
+    fn completed_sii_configuration_request_preserves_action_ownership() {
+        let mut startup = prepared_sii_verification(startup_sii_signature(0x6040));
+        let action = startup.next_action(1).unwrap().unwrap();
+        assert!(matches!(action, StartupAction::SiiConfiguration(_)));
+
+        let mut pool = ControlRequestPool::<1>::new();
+        let handle = startup.enqueue_pending(&mut pool).unwrap();
+        let request = pool.get(handle).unwrap();
+        assert_eq!(request.length, action.datagram_len());
+        assert_eq!(request.response_length, action.datagram_len());
+        assert_eq!(action.response_len(), 0);
+        let mut frame = [0; crate::wire::MAX_ETHERNET_FRAME_LEN];
+        pool.build_into_buffer(handle, &mut frame, [0xFF; 6], [1, 2, 3, 4, 5, 6])
+            .unwrap();
+        pool.complete(
+            handle,
+            action.generation(),
+            action.address(),
+            action.payload(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            startup.accept_completed(&mut pool, handle, 2),
+            Ok(StartupProgress::Advanced)
+        );
+        assert_eq!(pool.in_use(), 0);
+        assert_eq!(startup.phase(), StartupPhase::ReadingConfiguration);
+        assert!(matches!(
+            startup.next_action(3),
+            Ok(Some(StartupAction::SiiConfiguration(_)))
         ));
     }
 

@@ -100,14 +100,21 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
         serde_json::from_slice(&fs::read(first.join("product_config.json")).unwrap()).unwrap();
     assert_eq!(product["slaves"][0]["mailbox"]["receive_capacity"], 64);
     assert_eq!(product["slaves"][2]["mailbox"]["send_capacity"], 32);
+    assert_eq!(product["slaves"][0]["sii_sync_manager_count"], 4);
+    assert_eq!(product["slaves"][0]["sii_enabled_sync_managers"], 15);
 
     let header = fs::read_to_string(first.join("esop_product_config.h")).unwrap();
     assert!(header.contains("uint16_t mailbox_send_address"));
+    assert!(header.contains("uint8_t sii_sync_manager_count"));
+    assert!(header.contains("uint16_t sii_enabled_sync_managers"));
     assert!(header.contains("UINT16_C(0x1000), UINT16_C(64), UINT16_C(0x1100), UINT16_C(64)"));
+    assert!(header.contains("4u, UINT16_C(0x000f)"));
 
     let rust = fs::read_to_string(first.join("esop_product_config.rs")).unwrap();
     assert!(rust.contains("MailboxConfig::new(0x1000, 64, 0x1100, 64)"));
     assert!(rust.contains("MailboxConfig::new(0x1200, 32, 0x1300, 32)"));
+    assert!(rust.contains("sii_sync_manager_count: 4"));
+    assert!(rust.contains("sii_enabled_sync_managers: 0x000f"));
 
     fixture.edit_product(|_| {});
     let xml = fs::read_to_string(&fixture.esi).unwrap();

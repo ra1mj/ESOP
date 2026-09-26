@@ -14,8 +14,9 @@ pub use esop_ethercat_core::{
     OpOnlySyncManagerProfile, PdoConfigBatch, PdoConfigBatchError, PdoConfigBatchPhase,
     PdoConfigBatchPlan, PdoConfigBatchPlanError, PdoConfigBatchStatus, PdoConfigJob, PdoConfigPlan,
     PdoConfigPlanError, PdoDirection, PdoEntry, PdoEntrySpec, PdoRegistrationRequest, PdoSdoWrite,
-    ScheduleTable, SlaveIdentity, SlaveRecord, StartupConfig, StartupController, StartupError,
-    StartupSlaveProfile,
+    ScheduleTable, SiiConfigurationSignature, SiiConfigurationSignatureBuilder,
+    SiiConfigurationSignatureError, SlaveIdentity, SlaveRecord, StartupConfig, StartupController,
+    StartupError, StartupSlaveProfile,
 };
 pub use esop_lifecycle_guard::procbuf::{Cia402AxisCommandPolicy, Cia402AxisCommandPolicyError};
 pub use esop_procbuf::{
@@ -58,6 +59,8 @@ pub struct ProductSlaveConfig {
     pub transition_timeouts: AlTransitionTimeouts,
     pub mailbox_config: MailboxConfig,
     pub op_only_outputs: OpOnlySyncManagerProfile,
+    pub sii_sync_manager_count: u8,
+    pub sii_enabled_sync_managers: u16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,6 +83,19 @@ pub enum ProductStartupError {
     OpOnlyOutputHasTxPdo {
         position: u16,
         sync_manager: u8,
+    },
+    NonContiguousPdoGroup {
+        position: u16,
+        direction: PdoDirection,
+        assignment_index: u16,
+        sync_manager: u8,
+    },
+    EmptyPdoMapping {
+        position: u16,
+    },
+    SiiConfiguration {
+        position: u16,
+        error: SiiConfigurationSignatureError,
     },
     Startup(StartupError),
 }
@@ -438,12 +454,103 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                     });
                 }
             }
+            let expected_sii = self.sii_configuration_signature(slave)?;
             profiles[index] = StartupSlaveProfile::new(slave.position)
                 .with_transition_timeouts(slave.transition_timeouts)
                 .with_op_only_outputs(slave.op_only_outputs)
-                .with_expected_mailbox(slave.mailbox_config);
+                .with_expected_mailbox(slave.mailbox_config)
+                .with_expected_sii(expected_sii);
         }
         Ok(profiles)
+    }
+
+    fn sii_configuration_signature(
+        &self,
+        slave: ProductSlaveConfig,
+    ) -> Result<SiiConfigurationSignature, ProductStartupError> {
+        let mut builder = SiiConfigurationSignatureBuilder::new(
+            slave.sii_sync_manager_count,
+            slave.sii_enabled_sync_managers,
+            slave.op_only_outputs.mask(),
+        )
+        .map_err(|error| ProductStartupError::SiiConfiguration {
+            position: slave.position,
+            error,
+        })?;
+
+        let mut pdo_count = 0usize;
+        for direction in [PdoDirection::Rx, PdoDirection::Tx] {
+            let mut current_group = None;
+            for (pdo_index, pdo) in self.pdos.iter().copied().enumerate() {
+                if pdo.request.slave_position != slave.position
+                    || pdo.request.direction != direction
+                {
+                    continue;
+                }
+                let group = (pdo.assignment_index, pdo.sync_manager);
+                if current_group != Some(group) {
+                    if current_group.is_some() {
+                        builder.end_pdo().map_err(|error| {
+                            ProductStartupError::SiiConfiguration {
+                                position: slave.position,
+                                error,
+                            }
+                        })?;
+                    }
+                    if self.pdos[..pdo_index].iter().any(|previous| {
+                        previous.request.slave_position == slave.position
+                            && previous.request.direction == direction
+                            && previous.assignment_index == group.0
+                            && previous.sync_manager == group.1
+                    }) {
+                        return Err(ProductStartupError::NonContiguousPdoGroup {
+                            position: slave.position,
+                            direction,
+                            assignment_index: group.0,
+                            sync_manager: group.1,
+                        });
+                    }
+                    builder
+                        .begin_pdo(direction, group.0, group.1)
+                        .map_err(|error| ProductStartupError::SiiConfiguration {
+                            position: slave.position,
+                            error,
+                        })?;
+                    current_group = Some(group);
+                }
+                builder
+                    .entry(
+                        pdo.request.index,
+                        pdo.request.subindex,
+                        pdo.request.bit_length,
+                    )
+                    .map_err(|error| ProductStartupError::SiiConfiguration {
+                        position: slave.position,
+                        error,
+                    })?;
+                pdo_count += 1;
+            }
+            if current_group.is_some() {
+                builder
+                    .end_pdo()
+                    .map_err(|error| ProductStartupError::SiiConfiguration {
+                        position: slave.position,
+                        error,
+                    })?;
+            }
+        }
+        if pdo_count == 0 {
+            return Err(ProductStartupError::EmptyPdoMapping {
+                position: slave.position,
+            });
+        }
+
+        builder
+            .finish()
+            .map_err(|error| ProductStartupError::SiiConfiguration {
+                position: slave.position,
+                error,
+            })
     }
 
     pub fn expected_slaves(&self) -> [ExpectedSlave; SLAVES] {
@@ -1082,6 +1189,8 @@ mod tests {
                 transition_timeouts: ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
                 mailbox_config: MailboxConfig::new(0x1000, 32, 0x1100, 32),
                 op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
+                sii_sync_manager_count: 4,
+                sii_enabled_sync_managers: 0x000f,
             }],
             domains: [ProductDomainConfig {
                 name: "motion",
@@ -1171,6 +1280,14 @@ mod tests {
             profiles[0].expected_mailbox,
             Some(config.slaves[0].mailbox_config)
         );
+        let signature = profiles[0].expected_sii.unwrap();
+        assert_eq!(signature.sync_manager_count(), 4);
+        assert_eq!(signature.enabled_sync_managers(), 0x000f);
+        assert_eq!(signature.op_only_sync_managers(), 1 << 2);
+        assert_eq!(signature.rx_pdo_count(), 1);
+        assert_eq!(signature.tx_pdo_count(), 1);
+        assert_eq!(signature.rx_entry_count(), 3);
+        assert_eq!(signature.tx_entry_count(), 5);
 
         let mut startup = StartupController::<1>::new(0x1000);
         config
@@ -1201,6 +1318,43 @@ mod tests {
             Err(ProductStartupError::OpOnlyOutputMissingRxPdo {
                 position: 0,
                 sync_manager: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn product_rejects_invalid_sii_masks_and_non_contiguous_pdo_groups() {
+        let mut empty = config();
+        empty.pdos = &[];
+        assert_eq!(
+            empty.startup_profiles(),
+            Err(ProductStartupError::EmptyPdoMapping { position: 0 })
+        );
+
+        let mut invalid_mask = config();
+        invalid_mask.slaves[0].sii_enabled_sync_managers = 1 << 4;
+        assert_eq!(
+            invalid_mask.startup_profiles(),
+            Err(ProductStartupError::SiiConfiguration {
+                position: 0,
+                error: SiiConfigurationSignatureError::EnabledSyncManagerOutOfRange,
+            })
+        );
+
+        let mut pdos = PDOS;
+        pdos[2].assignment_index = 0x1601;
+        pdos[3].assignment_index = 0x1600;
+        pdos[3].sync_manager = 2;
+        pdos[3].request.direction = PdoDirection::Rx;
+        let mut non_contiguous = config();
+        non_contiguous.pdos = &pdos;
+        assert_eq!(
+            non_contiguous.startup_profiles(),
+            Err(ProductStartupError::NonContiguousPdoGroup {
+                position: 0,
+                direction: PdoDirection::Rx,
+                assignment_index: 0x1600,
+                sync_manager: 2,
             })
         );
     }

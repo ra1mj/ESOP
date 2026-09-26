@@ -13,6 +13,244 @@ use crate::sii::{
     SiiBlockReader, SiiCategory, SiiCategoryError, SiiCategoryReader,
 };
 use crate::sii_stream::{SiiCategoryStreamError, SiiCategoryStreamReader};
+use sha2::{Digest, Sha256};
+
+pub const SII_CONFIGURATION_SIGNATURE_SCHEMA: u8 = 1;
+
+const SII_CONFIGURATION_SIGNATURE_DOMAIN: &[u8] = b"esop.sii-configuration.v1";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SiiConfigurationSignatureError {
+    SyncManagerCountOutOfBounds,
+    EnabledSyncManagerOutOfRange,
+    OpOnlySyncManagerOutOfRange,
+    UnknownSyncManager(u8),
+    PdoAlreadyOpen,
+    PdoNotOpen,
+    EmptyPdo,
+    InvalidBitLength,
+    CountOverflow,
+    DirectionOrder,
+    EntryRangeOutOfBounds,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SiiConfigurationSignature {
+    schema: u8,
+    sync_manager_count: u8,
+    enabled_sync_managers: u16,
+    op_only_sync_managers: u16,
+    rx_pdo_count: u16,
+    tx_pdo_count: u16,
+    rx_entry_count: u16,
+    tx_entry_count: u16,
+    digest: [u8; 32],
+}
+
+impl SiiConfigurationSignature {
+    pub const fn schema(self) -> u8 {
+        self.schema
+    }
+
+    pub const fn sync_manager_count(self) -> u8 {
+        self.sync_manager_count
+    }
+
+    pub const fn enabled_sync_managers(self) -> u16 {
+        self.enabled_sync_managers
+    }
+
+    pub const fn op_only_sync_managers(self) -> u16 {
+        self.op_only_sync_managers
+    }
+
+    pub const fn rx_pdo_count(self) -> u16 {
+        self.rx_pdo_count
+    }
+
+    pub const fn tx_pdo_count(self) -> u16 {
+        self.tx_pdo_count
+    }
+
+    pub const fn rx_entry_count(self) -> u16 {
+        self.rx_entry_count
+    }
+
+    pub const fn tx_entry_count(self) -> u16 {
+        self.tx_entry_count
+    }
+
+    pub const fn digest(self) -> [u8; 32] {
+        self.digest
+    }
+}
+
+pub struct SiiConfigurationSignatureBuilder {
+    hasher: Sha256,
+    sync_manager_count: u8,
+    enabled_sync_managers: u16,
+    op_only_sync_managers: u16,
+    rx_pdo_count: u16,
+    tx_pdo_count: u16,
+    rx_entry_count: u16,
+    tx_entry_count: u16,
+    open_direction: Option<PdoDirection>,
+    open_entry_count: u16,
+    tx_started: bool,
+}
+
+impl SiiConfigurationSignatureBuilder {
+    pub fn new(
+        sync_manager_count: u8,
+        enabled_sync_managers: u16,
+        op_only_sync_managers: u16,
+    ) -> Result<Self, SiiConfigurationSignatureError> {
+        if usize::from(sync_manager_count) > crate::MAX_ESC_SYNC_MANAGERS {
+            return Err(SiiConfigurationSignatureError::SyncManagerCountOutOfBounds);
+        }
+        let valid_mask = if usize::from(sync_manager_count) == crate::MAX_ESC_SYNC_MANAGERS {
+            u16::MAX
+        } else if sync_manager_count == 0 {
+            0
+        } else {
+            (1u16 << sync_manager_count) - 1
+        };
+        if enabled_sync_managers & !valid_mask != 0 {
+            return Err(SiiConfigurationSignatureError::EnabledSyncManagerOutOfRange);
+        }
+        if op_only_sync_managers & !valid_mask != 0 {
+            return Err(SiiConfigurationSignatureError::OpOnlySyncManagerOutOfRange);
+        }
+
+        let mut hasher = Sha256::new();
+        hasher.update(SII_CONFIGURATION_SIGNATURE_DOMAIN);
+        hasher.update([SII_CONFIGURATION_SIGNATURE_SCHEMA]);
+        hasher.update([sync_manager_count]);
+        hasher.update(enabled_sync_managers.to_le_bytes());
+        hasher.update(op_only_sync_managers.to_le_bytes());
+        Ok(Self {
+            hasher,
+            sync_manager_count,
+            enabled_sync_managers,
+            op_only_sync_managers,
+            rx_pdo_count: 0,
+            tx_pdo_count: 0,
+            rx_entry_count: 0,
+            tx_entry_count: 0,
+            open_direction: None,
+            open_entry_count: 0,
+            tx_started: false,
+        })
+    }
+
+    pub fn begin_pdo(
+        &mut self,
+        direction: PdoDirection,
+        pdo_index: u16,
+        sync_manager: u8,
+    ) -> Result<(), SiiConfigurationSignatureError> {
+        if self.open_direction.is_some() {
+            return Err(SiiConfigurationSignatureError::PdoAlreadyOpen);
+        }
+        if sync_manager >= self.sync_manager_count {
+            return Err(SiiConfigurationSignatureError::UnknownSyncManager(
+                sync_manager,
+            ));
+        }
+        if direction == PdoDirection::Rx && self.tx_started {
+            return Err(SiiConfigurationSignatureError::DirectionOrder);
+        }
+        if direction == PdoDirection::Tx {
+            self.tx_started = true;
+        }
+        let count = match direction {
+            PdoDirection::Rx => &mut self.rx_pdo_count,
+            PdoDirection::Tx => &mut self.tx_pdo_count,
+        };
+        *count = count
+            .checked_add(1)
+            .ok_or(SiiConfigurationSignatureError::CountOverflow)?;
+        self.hasher.update([0x10, direction_code(direction)]);
+        self.hasher.update(pdo_index.to_le_bytes());
+        self.hasher.update([sync_manager]);
+        self.open_direction = Some(direction);
+        self.open_entry_count = 0;
+        Ok(())
+    }
+
+    pub fn entry(
+        &mut self,
+        index: u16,
+        subindex: u8,
+        bit_length: u8,
+    ) -> Result<(), SiiConfigurationSignatureError> {
+        let direction = self
+            .open_direction
+            .ok_or(SiiConfigurationSignatureError::PdoNotOpen)?;
+        if !(1..=64).contains(&bit_length) {
+            return Err(SiiConfigurationSignatureError::InvalidBitLength);
+        }
+        self.open_entry_count = self
+            .open_entry_count
+            .checked_add(1)
+            .ok_or(SiiConfigurationSignatureError::CountOverflow)?;
+        let count = match direction {
+            PdoDirection::Rx => &mut self.rx_entry_count,
+            PdoDirection::Tx => &mut self.tx_entry_count,
+        };
+        *count = count
+            .checked_add(1)
+            .ok_or(SiiConfigurationSignatureError::CountOverflow)?;
+        self.hasher.update([0x11]);
+        self.hasher.update(index.to_le_bytes());
+        self.hasher.update([subindex, bit_length]);
+        Ok(())
+    }
+
+    pub fn end_pdo(&mut self) -> Result<(), SiiConfigurationSignatureError> {
+        if self.open_direction.is_none() {
+            return Err(SiiConfigurationSignatureError::PdoNotOpen);
+        }
+        if self.open_entry_count == 0 {
+            return Err(SiiConfigurationSignatureError::EmptyPdo);
+        }
+        self.hasher.update([0x12]);
+        self.hasher.update(self.open_entry_count.to_le_bytes());
+        self.open_direction = None;
+        self.open_entry_count = 0;
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<SiiConfigurationSignature, SiiConfigurationSignatureError> {
+        if self.open_direction.is_some() {
+            return Err(SiiConfigurationSignatureError::PdoAlreadyOpen);
+        }
+        self.hasher.update([0xff]);
+        self.hasher.update(self.rx_pdo_count.to_le_bytes());
+        self.hasher.update(self.tx_pdo_count.to_le_bytes());
+        self.hasher.update(self.rx_entry_count.to_le_bytes());
+        self.hasher.update(self.tx_entry_count.to_le_bytes());
+        let digest = self.hasher.finalize().into();
+        Ok(SiiConfigurationSignature {
+            schema: SII_CONFIGURATION_SIGNATURE_SCHEMA,
+            sync_manager_count: self.sync_manager_count,
+            enabled_sync_managers: self.enabled_sync_managers,
+            op_only_sync_managers: self.op_only_sync_managers,
+            rx_pdo_count: self.rx_pdo_count,
+            tx_pdo_count: self.tx_pdo_count,
+            rx_entry_count: self.rx_entry_count,
+            tx_entry_count: self.tx_entry_count,
+            digest,
+        })
+    }
+}
+
+const fn direction_code(direction: PdoDirection) -> u8 {
+    match direction {
+        PdoDirection::Rx => 0,
+        PdoDirection::Tx => 1,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SiiConfigurationError {
@@ -52,7 +290,10 @@ pub enum SiiConfigurationProgress {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SiiProcessDataSegment {
     pub direction: PdoDirection,
+    pub pdo_index: u16,
     pub sync_manager: u8,
+    pub entry_start: usize,
+    pub entry_count: usize,
     pub logical_bit_offset: usize,
     pub physical_bit_offset: usize,
     pub bit_length: usize,
@@ -61,7 +302,10 @@ pub struct SiiProcessDataSegment {
 impl SiiProcessDataSegment {
     const EMPTY: Self = Self {
         direction: PdoDirection::Rx,
+        pdo_index: 0,
         sync_manager: 0,
+        entry_start: 0,
+        entry_count: 0,
         logical_bit_offset: 0,
         physical_bit_offset: 0,
         bit_length: 0,
@@ -212,6 +456,28 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
 
     pub const fn tx_sync_manager(&self) -> Option<u8> {
         self.tx_sync_manager
+    }
+
+    pub fn signature(&self) -> Result<SiiConfigurationSignature, SiiConfigurationSignatureError> {
+        let sync_manager_count = u8::try_from(self.mapping.sync_manager_count())
+            .map_err(|_| SiiConfigurationSignatureError::SyncManagerCountOutOfBounds)?;
+        let mut enabled_sync_managers = 0u16;
+        for sync_manager in self.mapping.sync_managers() {
+            if usize::from(sync_manager.index) >= crate::MAX_ESC_SYNC_MANAGERS {
+                return Err(SiiConfigurationSignatureError::SyncManagerCountOutOfBounds);
+            }
+            if sync_manager.enable {
+                enabled_sync_managers |= 1u16 << sync_manager.index;
+            }
+        }
+        let mut builder = SiiConfigurationSignatureBuilder::new(
+            sync_manager_count,
+            enabled_sync_managers,
+            self.mapping.op_only_outputs().mask(),
+        )?;
+        append_signature_segments(&mut builder, self.rx_segments(), self.rx_layout.entries())?;
+        append_signature_segments(&mut builder, self.tx_segments(), self.tx_layout.entries())?;
+        builder.finish()
     }
 
     /// Validate and freeze the SII layout for use by a unified Domain image.
@@ -486,7 +752,10 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
                     physical_bit_offset(&segments, self.rx_segment_count, sync_manager)?;
                 let segment = SiiProcessDataSegment {
                     direction,
+                    pdo_index,
                     sync_manager,
+                    entry_start: self.rx_layout.len(),
+                    entry_count: entries,
                     logical_bit_offset: self.rx_layout.total_bits(),
                     physical_bit_offset,
                     bit_length: next.total_bits() - self.rx_layout.total_bits(),
@@ -510,7 +779,10 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
                     physical_bit_offset(&segments, self.tx_segment_count, sync_manager)?;
                 let segment = SiiProcessDataSegment {
                     direction,
+                    pdo_index,
                     sync_manager,
+                    entry_start: self.tx_layout.len(),
+                    entry_count: entries,
                     logical_bit_offset: self.tx_layout.total_bits(),
                     physical_bit_offset,
                     bit_length: next.total_bits() - self.tx_layout.total_bits(),
@@ -552,6 +824,31 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
         }
         Ok(())
     }
+}
+
+fn append_signature_segments(
+    builder: &mut SiiConfigurationSignatureBuilder,
+    segments: &[SiiProcessDataSegment],
+    entries: &[PdoEntry],
+) -> Result<(), SiiConfigurationSignatureError> {
+    for segment in segments {
+        let entry_end = segment
+            .entry_start
+            .checked_add(segment.entry_count)
+            .ok_or(SiiConfigurationSignatureError::EntryRangeOutOfBounds)?;
+        let segment_entries = entries
+            .get(segment.entry_start..entry_end)
+            .ok_or(SiiConfigurationSignatureError::EntryRangeOutOfBounds)?;
+        builder.begin_pdo(segment.direction, segment.pdo_index, segment.sync_manager)?;
+        for entry in segment_entries {
+            if entry.direction != segment.direction {
+                return Err(SiiConfigurationSignatureError::EntryRangeOutOfBounds);
+            }
+            builder.entry(entry.index, entry.subindex, entry.bit_length)?;
+        }
+        builder.end_pdo()?;
+    }
+    Ok(())
 }
 
 fn validate_segment_mapping<const SMS: usize, const FMMUS: usize>(
@@ -769,6 +1066,194 @@ mod tests {
         bytes.extend_from_slice(&kind.to_le_bytes());
         bytes.extend_from_slice(&((data.len() / 2) as u16).to_le_bytes());
         bytes.extend_from_slice(data);
+    }
+
+    fn configuration_bytes(rx_object: u16) -> std::vec::Vec<u8> {
+        let mut bytes = std::vec::Vec::new();
+        append_category(
+            &mut bytes,
+            SII_CATEGORY_SYNC_MANAGER,
+            &[
+                0x00, 0x10, 0x02, 0x00, 0x26, 0x00, 0x01, 0x00, 0x00, 0x11, 0x02, 0x00, 0x22, 0x00,
+                0x01, 0x00,
+            ],
+        );
+        for (kind, pdo_index, sync_manager, object_index) in [
+            (SII_CATEGORY_RX_PDO, 0x1600u16, 0u8, rx_object),
+            (SII_CATEGORY_TX_PDO, 0x1A00u16, 1u8, 0x6041u16),
+        ] {
+            let mut pdo = [0u8; 16];
+            pdo[0..2].copy_from_slice(&pdo_index.to_le_bytes());
+            pdo[2] = 1;
+            pdo[3] = sync_manager;
+            pdo[8..10].copy_from_slice(&object_index.to_le_bytes());
+            pdo[10] = 0;
+            pdo[12] = 16;
+            append_category(&mut bytes, kind, &pdo);
+        }
+        bytes.extend_from_slice(&SII_CATEGORY_END.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes
+    }
+
+    fn expected_configuration_signature(
+        rx_object: u16,
+    ) -> Result<SiiConfigurationSignature, SiiConfigurationSignatureError> {
+        let mut builder = SiiConfigurationSignatureBuilder::new(2, 0b11, 0)?;
+        builder.begin_pdo(PdoDirection::Rx, 0x1600, 0)?;
+        builder.entry(rx_object, 0, 16)?;
+        builder.end_pdo()?;
+        builder.begin_pdo(PdoDirection::Tx, 0x1A00, 1)?;
+        builder.entry(0x6041, 0, 16)?;
+        builder.end_pdo()?;
+        builder.finish()
+    }
+
+    fn detailed_configuration_signature(
+        sync_manager_count: u8,
+        enabled_sync_managers: u16,
+        op_only_sync_managers: u16,
+        first: (u16, u8, u16, u8, u8),
+        second: Option<(u16, u8, u16, u8, u8)>,
+        reverse_rx_order: bool,
+    ) -> SiiConfigurationSignature {
+        fn append(
+            builder: &mut SiiConfigurationSignatureBuilder,
+            direction: PdoDirection,
+            item: (u16, u8, u16, u8, u8),
+        ) {
+            builder.begin_pdo(direction, item.0, item.1).unwrap();
+            builder.entry(item.2, item.3, item.4).unwrap();
+            builder.end_pdo().unwrap();
+        }
+
+        let mut builder = SiiConfigurationSignatureBuilder::new(
+            sync_manager_count,
+            enabled_sync_managers,
+            op_only_sync_managers,
+        )
+        .unwrap();
+        if reverse_rx_order {
+            append(&mut builder, PdoDirection::Rx, second.unwrap());
+            append(&mut builder, PdoDirection::Rx, first);
+        } else {
+            append(&mut builder, PdoDirection::Rx, first);
+            if let Some(second) = second {
+                append(&mut builder, PdoDirection::Rx, second);
+            }
+        }
+        append(&mut builder, PdoDirection::Tx, (0x1A00, 3, 0x6041, 0, 16));
+        builder.finish().unwrap()
+    }
+
+    #[test]
+    fn configuration_signature_covers_ordered_sm_and_pdo_structure() {
+        let bytes = configuration_bytes(0x6040);
+        let mut unsigned = SiiConfigurationCandidate::<2, 0, 2, 2>::new();
+        unsigned.apply_bytes_with_signed(&bytes, false).unwrap();
+        let signature = unsigned.signature().unwrap();
+        assert_eq!(signature, expected_configuration_signature(0x6040).unwrap());
+        assert_eq!(signature.schema(), SII_CONFIGURATION_SIGNATURE_SCHEMA);
+        assert_eq!(signature.sync_manager_count(), 2);
+        assert_eq!(signature.enabled_sync_managers(), 0b11);
+        assert_eq!(signature.op_only_sync_managers(), 0);
+        assert_eq!(signature.rx_pdo_count(), 1);
+        assert_eq!(signature.tx_pdo_count(), 1);
+        assert_eq!(signature.rx_entry_count(), 1);
+        assert_eq!(signature.tx_entry_count(), 1);
+
+        let mut signed = SiiConfigurationCandidate::<2, 0, 2, 2>::new();
+        signed.apply_bytes_with_signed(&bytes, true).unwrap();
+        assert_eq!(signed.signature().unwrap(), signature);
+        assert_ne!(expected_configuration_signature(0x607A).unwrap(), signature);
+
+        let mut reordered = SiiConfigurationSignatureBuilder::new(2, 0b11, 0).unwrap();
+        reordered.begin_pdo(PdoDirection::Tx, 0x1A00, 1).unwrap();
+        reordered.entry(0x6041, 0, 16).unwrap();
+        reordered.end_pdo().unwrap();
+        assert_eq!(
+            reordered.begin_pdo(PdoDirection::Rx, 0x1600, 0),
+            Err(SiiConfigurationSignatureError::DirectionOrder)
+        );
+    }
+
+    #[test]
+    fn configuration_signature_builder_rejects_invalid_profiles() {
+        assert!(matches!(
+            SiiConfigurationSignatureBuilder::new(1, 0b10, 0),
+            Err(SiiConfigurationSignatureError::EnabledSyncManagerOutOfRange)
+        ));
+        assert!(matches!(
+            SiiConfigurationSignatureBuilder::new(1, 0, 0b10),
+            Err(SiiConfigurationSignatureError::OpOnlySyncManagerOutOfRange)
+        ));
+        let mut builder = SiiConfigurationSignatureBuilder::new(1, 1, 0).unwrap();
+        assert_eq!(
+            builder.begin_pdo(PdoDirection::Rx, 0x1600, 1),
+            Err(SiiConfigurationSignatureError::UnknownSyncManager(1))
+        );
+        builder.begin_pdo(PdoDirection::Rx, 0x1600, 0).unwrap();
+        assert_eq!(
+            builder.end_pdo(),
+            Err(SiiConfigurationSignatureError::EmptyPdo)
+        );
+    }
+
+    #[test]
+    fn every_structural_signature_field_changes_the_comparison_value() {
+        let first = (0x1600, 2, 0x6040, 0, 16);
+        let second = (0x1601, 2, 0x607A, 0, 32);
+        let baseline =
+            detailed_configuration_signature(4, 0x000f, 0x0004, first, Some(second), false);
+        for changed in [
+            detailed_configuration_signature(5, 0x000f, 0x0004, first, Some(second), false),
+            detailed_configuration_signature(4, 0x0007, 0x0004, first, Some(second), false),
+            detailed_configuration_signature(4, 0x000f, 0, first, Some(second), false),
+            detailed_configuration_signature(
+                4,
+                0x000f,
+                0x0004,
+                (0x1602, 2, 0x6040, 0, 16),
+                Some(second),
+                false,
+            ),
+            detailed_configuration_signature(
+                4,
+                0x000f,
+                0x0004,
+                (0x1600, 1, 0x6040, 0, 16),
+                Some(second),
+                false,
+            ),
+            detailed_configuration_signature(
+                4,
+                0x000f,
+                0x0004,
+                (0x1600, 2, 0x6041, 0, 16),
+                Some(second),
+                false,
+            ),
+            detailed_configuration_signature(
+                4,
+                0x000f,
+                0x0004,
+                (0x1600, 2, 0x6040, 1, 16),
+                Some(second),
+                false,
+            ),
+            detailed_configuration_signature(
+                4,
+                0x000f,
+                0x0004,
+                (0x1600, 2, 0x6040, 0, 8),
+                Some(second),
+                false,
+            ),
+            detailed_configuration_signature(4, 0x000f, 0x0004, first, None, false),
+            detailed_configuration_signature(4, 0x000f, 0x0004, first, Some(second), true),
+        ] {
+            assert_ne!(changed, baseline);
+        }
     }
 
     #[test]
