@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 30
+- **Total Sessions**: 31
 - **Last Active**: 2026-09-26
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1029 | Active |
+| `journal-1.md` | ~1062 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 31 | 2026-09-26 | Verify generated PDO configuration readback | `18752a01fe40888733b97e8d8c6c0eb17bd4c489` | `main` |
 | 30 | 2026-09-26 | Attach generated product configuration to runtime | `c99573c0a1ccb3e74d93696318bfa59cb2e78095` | `main` |
 | 29 | 2026-09-26 | Generate deterministic product configuration artifacts | `e822a8a4ad040c49f067039526e66b70ba4b8deb` | `main` |
 | 28 | 2026-09-26 | Publish CiA 402 feedback into ProcBuf state | `1411fb26aa4521169904a240bf44502f80fa3931` | `main` |

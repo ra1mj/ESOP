@@ -1027,3 +1027,36 @@ Added deterministic generated Rust product configuration and a fail-closed no_st
 ### Next Steps
 
 - None - task complete
+
+
+## Session 31: Verify generated PDO configuration readback
+
+**Date**: 2026-09-26
+**Task**: Verify generated PDO configuration readback
+**Branch**: `main`
+
+### Summary
+
+Added deterministic per-slave PDO assignment/mapping startup plans and an allocation-free CoE controller that verifies every write through exact upload readback before advancing. Added typed mismatch failures, segmented-readback coverage, generated product validation, capability/PRD documentation, and passed local CI/BPF/Zenoh plus GitHub Actions quality run 36224658089.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `18752a01fe40888733b97e8d8c6c0eb17bd4c489` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
