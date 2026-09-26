@@ -7,7 +7,10 @@
 //! a lower-priority service to overtake the active transaction.
 
 use crate::control::{ControlError, ControlRequestPool, RequestHandle, RequestState};
-use crate::dc::{DcController, DcCyclicSync, DcError, DcPhase, DcProgress};
+use crate::dc::{
+    DcClockController, DcClockError, DcClockPhase, DcClockProgress, DcController, DcCyclicSync,
+    DcError, DcPhase, DcProgress,
+};
 use crate::engine::EthercatMaster;
 use crate::mailbox::{
     MAX_MAILBOX_BYTES, MailboxConfig, MailboxController, MailboxError, MailboxPhase,
@@ -34,6 +37,7 @@ pub enum ScheduledProductionServiceKind {
     Startup,
     PdoConfiguration,
     Mapping,
+    DcClockConfiguration,
     DcConfiguration,
     Mailbox,
 }
@@ -51,6 +55,7 @@ pub enum ScheduledProductionServiceProgress {
     Startup(StartupProgress),
     PdoConfiguration(ScheduledPdoConfigurationProgress),
     Mapping(MappingConfigProgress),
+    DcClockConfiguration(DcClockProgress),
     DcConfiguration(DcProgress),
     Mailbox(MailboxProgress),
 }
@@ -61,6 +66,7 @@ pub enum ScheduledProductionServiceFault {
     Startup(StartupError),
     PdoConfiguration(PdoConfigError),
     Mapping(MappingConfigError),
+    DcClockConfiguration(DcClockError),
     DcConfiguration(DcError),
     Mailbox(MailboxError),
 }
@@ -196,6 +202,7 @@ pub struct ScheduledProductionServices<
     pub startup: Option<&'a mut StartupController<MAX_SLAVES>>,
     pdo_configuration: Option<ScheduledPdoConfiguration<'a, PDO_OPS, PDO_JOBS>>,
     pub mapping: Option<&'a mut MappingConfigController<SMS, FMMUS>>,
+    pub dc_clock_configuration: Option<&'a mut DcClockController<MAX_SLAVES>>,
     pub dc_configuration: Option<&'a mut DcController>,
     pub mailbox: Option<&'a mut MailboxController>,
 }
@@ -219,6 +226,7 @@ impl<
             startup,
             pdo_configuration: None,
             mapping,
+            dc_clock_configuration: None,
             dc_configuration,
             mailbox,
         }
@@ -229,6 +237,14 @@ impl<
         pdo_configuration: ScheduledPdoConfiguration<'a, PDO_OPS, PDO_JOBS>,
     ) -> Self {
         self.pdo_configuration = Some(pdo_configuration);
+        self
+    }
+
+    pub fn with_dc_clock_configuration(
+        mut self,
+        dc_clock_configuration: &'a mut DcClockController<MAX_SLAVES>,
+    ) -> Self {
+        self.dc_clock_configuration = Some(dc_clock_configuration);
         self
     }
 }
@@ -759,6 +775,13 @@ impl ScheduledProductionServiceScheduler {
                 ScheduledProductionServiceKind::Mapping,
             ));
         }
+        if requirements.requires_dc_clock_configuration()
+            && services.dc_clock_configuration.is_none()
+        {
+            return Err(StartupBarrierReleaseError::MissingController(
+                ScheduledProductionServiceKind::DcClockConfiguration,
+            ));
+        }
         if requirements.requires_dc_configuration() && services.dc_configuration.is_none() {
             return Err(StartupBarrierReleaseError::MissingController(
                 ScheduledProductionServiceKind::DcConfiguration,
@@ -788,12 +811,17 @@ impl ScheduledProductionServiceScheduler {
                 .mapping
                 .as_deref()
                 .is_some_and(|controller| controller.phase() == MappingConfigPhase::Complete);
+        let dc_clock_complete = !requirements.requires_dc_clock_configuration()
+            || services
+                .dc_clock_configuration
+                .as_deref()
+                .is_some_and(|controller| controller.phase() == DcClockPhase::Complete);
         let dc_complete = !requirements.requires_dc_configuration()
             || services
                 .dc_configuration
                 .as_deref()
                 .is_some_and(|controller| controller.phase() == DcPhase::Complete);
-        if !(pdo_complete && mapping_complete && dc_complete) {
+        if !(pdo_complete && mapping_complete && dc_clock_complete && dc_complete) {
             return Ok(());
         }
 
@@ -844,6 +872,13 @@ impl ScheduledProductionServiceScheduler {
                     .is_some_and(|controller| controller.phase() == MappingConfigPhase::Complete)
             {
                 ScheduledProductionServiceKind::Mapping
+            } else if requirements.requires_dc_clock_configuration()
+                && !services
+                    .dc_clock_configuration
+                    .as_deref()
+                    .is_some_and(|controller| controller.phase() == DcClockPhase::Complete)
+            {
+                ScheduledProductionServiceKind::DcClockConfiguration
             } else if requirements.requires_dc_configuration()
                 && !services
                     .dc_configuration
@@ -860,6 +895,7 @@ impl ScheduledProductionServiceScheduler {
             ScheduledProductionServiceKind::Startup,
             ScheduledProductionServiceKind::PdoConfiguration,
             ScheduledProductionServiceKind::Mapping,
+            ScheduledProductionServiceKind::DcClockConfiguration,
             ScheduledProductionServiceKind::DcConfiguration,
             ScheduledProductionServiceKind::Mailbox,
         ]
@@ -903,6 +939,15 @@ impl ScheduledProductionServiceScheduler {
                     )
                 })
             }
+            ScheduledProductionServiceKind::DcClockConfiguration => services
+                .dc_clock_configuration
+                .as_deref()
+                .is_some_and(|controller| {
+                    !matches!(
+                        controller.phase(),
+                        DcClockPhase::Idle | DcClockPhase::Complete
+                    )
+                }),
             ScheduledProductionServiceKind::DcConfiguration => services
                 .dc_configuration
                 .as_deref()
@@ -989,6 +1034,21 @@ impl ScheduledProductionServiceScheduler {
                 .mapping
                 .as_deref()
                 .and_then(MappingConfigController::pending)
+                .is_some_and(|action| {
+                    request.matches_action(
+                        action.datagram_index,
+                        action.generation,
+                        action.address,
+                        action.operation,
+                        action.payload(),
+                        action.datagram_len(),
+                        action.deadline_ns,
+                    )
+                }),
+            ScheduledProductionServiceKind::DcClockConfiguration => services
+                .dc_clock_configuration
+                .as_deref()
+                .and_then(DcClockController::pending)
                 .is_some_and(|action| {
                     request.matches_action(
                         action.datagram_index,
@@ -1239,6 +1299,46 @@ impl ScheduledProductionServiceScheduler {
                     ..ScheduledProductionEnqueueOutcome::EMPTY
                 })
             }
+            ScheduledProductionServiceKind::DcClockConfiguration => {
+                let controller = services
+                    .dc_clock_configuration
+                    .as_deref_mut()
+                    .ok_or(ControlError::InvalidState)?;
+                let action = match controller.next_action(now_ns) {
+                    Ok(action) => action,
+                    Err(error) => {
+                        return Ok(ScheduledProductionEnqueueOutcome {
+                            fault: Some(ScheduledProductionServiceFault::DcClockConfiguration(
+                                error,
+                            )),
+                            ..ScheduledProductionEnqueueOutcome::EMPTY
+                        });
+                    }
+                };
+                let Some(action) = action else {
+                    return Ok(ScheduledProductionEnqueueOutcome::EMPTY);
+                };
+                if action.deadline_ns <= now_ns {
+                    return Ok(match controller.timeout(action, now_ns) {
+                        Ok(progress) => ScheduledProductionEnqueueOutcome {
+                            progress: Some(
+                                ScheduledProductionServiceProgress::DcClockConfiguration(progress),
+                            ),
+                            ..ScheduledProductionEnqueueOutcome::EMPTY
+                        },
+                        Err(error) => ScheduledProductionEnqueueOutcome {
+                            fault: Some(ScheduledProductionServiceFault::DcClockConfiguration(
+                                error,
+                            )),
+                            ..ScheduledProductionEnqueueOutcome::EMPTY
+                        },
+                    });
+                }
+                Ok(ScheduledProductionEnqueueOutcome {
+                    request: Some(controller.enqueue_pending(controls)?),
+                    ..ScheduledProductionEnqueueOutcome::EMPTY
+                })
+            }
             ScheduledProductionServiceKind::DcConfiguration => {
                 let controller = services
                     .dc_configuration
@@ -1342,6 +1442,15 @@ impl ScheduledProductionServiceScheduler {
                 .accept_completed(controls, handle, now_ns)
                 .map(ScheduledProductionServiceProgress::Mapping)
                 .map_err(ScheduledProductionServiceFault::Mapping),
+            ScheduledProductionServiceKind::DcClockConfiguration => services
+                .dc_clock_configuration
+                .as_deref_mut()
+                .ok_or(ScheduledProductionServiceFault::Control(
+                    ControlError::InvalidState,
+                ))?
+                .accept_completed(controls, handle, now_ns)
+                .map(ScheduledProductionServiceProgress::DcClockConfiguration)
+                .map_err(ScheduledProductionServiceFault::DcClockConfiguration),
             ScheduledProductionServiceKind::DcConfiguration => services
                 .dc_configuration
                 .as_deref_mut()
@@ -1386,6 +1495,11 @@ impl ScheduledProductionServiceScheduler {
                 .as_deref()
                 .and_then(MappingConfigController::last_error)
                 .map(ScheduledProductionServiceFault::Mapping),
+            ScheduledProductionServiceKind::DcClockConfiguration => services
+                .dc_clock_configuration
+                .as_deref()
+                .and_then(DcClockController::last_error)
+                .map(ScheduledProductionServiceFault::DcClockConfiguration),
             ScheduledProductionServiceKind::DcConfiguration => services
                 .dc_configuration
                 .as_deref()
@@ -1423,6 +1537,10 @@ impl ScheduledProductionServiceScheduler {
                 .mapping
                 .as_deref()
                 .is_some_and(|controller| controller.phase() == MappingConfigPhase::Complete),
+            ScheduledProductionServiceKind::DcClockConfiguration => services
+                .dc_clock_configuration
+                .as_deref()
+                .is_some_and(|controller| controller.phase() == DcClockPhase::Complete),
             ScheduledProductionServiceKind::DcConfiguration => services
                 .dc_configuration
                 .as_deref()
@@ -1505,9 +1623,11 @@ impl Default for ScheduledProductionServiceScheduler {
 mod tests {
     use super::*;
     use crate::coe::{CoeHeader, CoeService};
+    use crate::dc::{DcClockConfig, DcTopology};
     use crate::mapping::MappingTable;
     use crate::pdo_config::{PdoConfigBatchPlan, PdoConfigJob, PdoConfigPlan, PdoSdoWrite};
-    use crate::slave::{EthercatState, SlaveIdentity};
+    use crate::scan::{EscDcRange, ScanDcCapabilities, ScanPortLink, ScanRecord};
+    use crate::slave::{AlStatus, EthercatState, SlaveIdentity};
     use crate::startup::{
         ExpectedSlave, StartupAction, StartupConfig, StartupConfigurationServices,
     };
@@ -1533,6 +1653,39 @@ mod tests {
             )
             .unwrap();
         startup
+    }
+
+    fn dc_clock_topology() -> DcTopology<1> {
+        let record = ScanRecord {
+            position: 0,
+            station_address: 0x1000,
+            esc_type: 0,
+            revision: 0,
+            build: 0,
+            fmmu_count: 0,
+            sync_manager_count: 0,
+            ram_size: 0,
+            port_descriptor: 0,
+            dl_status: 0,
+            port_links: [ScanPortLink {
+                link_up: false,
+                loop_closed: true,
+                signal_detected: false,
+            }; 4],
+            dc: ScanDcCapabilities {
+                raw_features: crate::ESC_FEATURE_DC_SUPPORTED,
+                fmmu_bit_operation: false,
+                supported: true,
+                range: EscDcRange::Bits64,
+                has_system_time: true,
+                system_time: Some(0),
+                receive_times: Some([0; 4]),
+            },
+            device_emulation: false,
+            al_status: AlStatus::new(EthercatState::Init as u16, 0),
+            online: true,
+        };
+        DcTopology::build(&[record], Some(0)).unwrap()
     }
 
     fn complete_current_batch_job<const JOBS: usize>(
@@ -1665,10 +1818,28 @@ mod tests {
     }
 
     #[test]
+    fn startup_barrier_reports_missing_required_dc_clock_binding() {
+        let mut startup =
+            startup_at_barrier(StartupConfigurationServices::new().with_dc_clock_configuration());
+        let mut services =
+            ScheduledProductionServices::<1, 0, 0, 0>::new(Some(&mut startup), None, None, None);
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+
+        assert_eq!(
+            scheduler.release_startup_configuration(1, &mut services),
+            Err(StartupBarrierReleaseError::MissingController(
+                ScheduledProductionServiceKind::DcClockConfiguration
+            ))
+        );
+        assert_eq!(startup.phase(), StartupPhase::AwaitingConfiguration);
+    }
+
+    #[test]
     fn startup_barrier_selects_idle_required_services_in_fixed_order() {
         let requirements = StartupConfigurationServices::new()
             .with_pdo_configuration()
             .with_mapping()
+            .with_dc_clock_configuration()
             .with_dc_configuration();
         let mailbox_config = MailboxConfig::new(0x1000, 32, 0x1100, 32);
 
@@ -1676,6 +1847,7 @@ mod tests {
         let mut pdo = PdoConfigController::<0>::new();
         let mut pdo_mailbox = MailboxController::new();
         let mut mapping = MappingConfigController::<0, 0>::new();
+        let mut dc_clock = DcClockController::<1>::new();
         let mut dc = DcController::new();
         let mut scheduler = ScheduledProductionServiceScheduler::new();
         {
@@ -1685,6 +1857,7 @@ mod tests {
                 Some(&mut dc),
                 None,
             )
+            .with_dc_clock_configuration(&mut dc_clock)
             .with_pdo_configuration(ScheduledPdoConfiguration::new(
                 &mut pdo,
                 &mut pdo_mailbox,
@@ -1703,6 +1876,7 @@ mod tests {
                 Some(&mut dc),
                 None,
             )
+            .with_dc_clock_configuration(&mut dc_clock)
             .with_pdo_configuration(ScheduledPdoConfiguration::new(
                 &mut pdo,
                 &mut pdo_mailbox,
@@ -1730,6 +1904,7 @@ mod tests {
                 Some(&mut dc),
                 None,
             )
+            .with_dc_clock_configuration(&mut dc_clock)
             .with_pdo_configuration(ScheduledPdoConfiguration::new(
                 &mut pdo,
                 &mut pdo_mailbox,
@@ -1749,6 +1924,30 @@ mod tests {
                 Some(&mut dc),
                 None,
             )
+            .with_dc_clock_configuration(&mut dc_clock)
+            .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                &mut pdo,
+                &mut pdo_mailbox,
+                mailbox_config,
+            ));
+            scheduler.refresh_selection(&services);
+            assert_eq!(
+                scheduler.active(),
+                ScheduledProductionServiceKind::DcClockConfiguration
+            );
+        }
+
+        dc_clock
+            .start(DcClockConfig::new(), &DcTopology::empty(), 7, 0, 0)
+            .unwrap();
+        {
+            let services = ScheduledProductionServices::new(
+                Some(&mut startup),
+                Some(&mut mapping),
+                Some(&mut dc),
+                None,
+            )
+            .with_dc_clock_configuration(&mut dc_clock)
             .with_pdo_configuration(ScheduledPdoConfiguration::new(
                 &mut pdo,
                 &mut pdo_mailbox,
@@ -1761,6 +1960,129 @@ mod tests {
             );
         }
         assert_eq!(startup.phase(), StartupPhase::AwaitingConfiguration);
+    }
+
+    #[test]
+    fn completed_dc_clock_service_releases_startup_barrier() {
+        let requirements = StartupConfigurationServices::new().with_dc_clock_configuration();
+        let mut startup = startup_at_barrier(requirements);
+        let mut dc_clock = DcClockController::<1>::new();
+        dc_clock
+            .start(DcClockConfig::new(), &DcTopology::empty(), 7, 0, 0)
+            .unwrap();
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+        let mut services =
+            ScheduledProductionServices::<1, 0, 0, 0>::new(Some(&mut startup), None, None, None)
+                .with_dc_clock_configuration(&mut dc_clock);
+
+        assert_eq!(
+            scheduler.release_startup_configuration(1, &mut services),
+            Ok(())
+        );
+        assert_eq!(startup.phase(), StartupPhase::TransitioningAl);
+    }
+
+    #[test]
+    fn scheduler_consumes_dc_clock_read_and_write_requests() {
+        let topology = dc_clock_topology();
+        let mut dc_clock = DcClockController::new();
+        dc_clock
+            .start(DcClockConfig::new(), &topology, 7, 1_000, 0)
+            .unwrap();
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+        let mut controls = ControlRequestPool::<1>::new();
+
+        {
+            let services = ScheduledProductionServices::<1, 0, 0, 0>::new(None, None, None, None)
+                .with_dc_clock_configuration(&mut dc_clock);
+            scheduler.refresh_selection(&services);
+            assert_eq!(
+                scheduler.active(),
+                ScheduledProductionServiceKind::DcClockConfiguration
+            );
+        }
+
+        let read_handle = {
+            let mut services =
+                ScheduledProductionServices::<1, 0, 0, 0>::new(None, None, None, None)
+                    .with_dc_clock_configuration(&mut dc_clock);
+            let outcome = scheduler
+                .enqueue_due(1, &mut controls, &mut services)
+                .unwrap();
+            assert_eq!(outcome.fault, None);
+            outcome.request.unwrap()
+        };
+        let read_action = dc_clock.pending().unwrap();
+        let mut frame = [0; MAX_ETHERNET_FRAME_LEN];
+        controls
+            .get_mut(read_handle)
+            .unwrap()
+            .build_frame(&mut frame, [0xFF; 6], [1, 2, 3, 4, 5, 6])
+            .unwrap();
+        let mut sample = [0; 24];
+        sample[..8].copy_from_slice(&900u64.to_le_bytes());
+        sample[16..24].copy_from_slice(&5u64.to_le_bytes());
+        controls
+            .complete(
+                read_handle,
+                read_action.generation,
+                read_action.address,
+                &sample,
+                1,
+            )
+            .unwrap();
+        {
+            let mut services =
+                ScheduledProductionServices::<1, 0, 0, 0>::new(None, None, None, None)
+                    .with_dc_clock_configuration(&mut dc_clock);
+            assert_eq!(
+                scheduler.consume_terminal(&mut controls, &mut services, read_handle, 2),
+                Ok(ScheduledProductionServiceProgress::DcClockConfiguration(
+                    DcClockProgress::Advanced
+                ))
+            );
+        }
+        scheduler.request = None;
+
+        let write_handle = {
+            let mut services =
+                ScheduledProductionServices::<1, 0, 0, 0>::new(None, None, None, None)
+                    .with_dc_clock_configuration(&mut dc_clock);
+            scheduler
+                .enqueue_due(3, &mut controls, &mut services)
+                .unwrap()
+                .request
+                .unwrap()
+        };
+        let write_action = dc_clock.pending().unwrap();
+        controls
+            .get_mut(write_handle)
+            .unwrap()
+            .build_frame(&mut frame, [0xFF; 6], [1, 2, 3, 4, 5, 6])
+            .unwrap();
+        controls
+            .complete(
+                write_handle,
+                write_action.generation,
+                write_action.address,
+                write_action.payload(),
+                1,
+            )
+            .unwrap();
+        {
+            let mut services =
+                ScheduledProductionServices::<1, 0, 0, 0>::new(None, None, None, None)
+                    .with_dc_clock_configuration(&mut dc_clock);
+            assert_eq!(
+                scheduler.consume_terminal(&mut controls, &mut services, write_handle, 4),
+                Ok(ScheduledProductionServiceProgress::DcClockConfiguration(
+                    DcClockProgress::Complete
+                ))
+            );
+        }
+        assert_eq!(dc_clock.phase(), DcClockPhase::Complete);
+        assert_eq!(dc_clock.programmed_slaves()[0].new_offset, 107);
+        assert_eq!(controls.in_use(), 0);
     }
 
     #[test]

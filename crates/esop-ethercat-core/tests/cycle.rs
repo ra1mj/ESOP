@@ -3,11 +3,13 @@ use esop_ethercat_core::wire::{
     FrameBuilder, FrameView, MAX_ETHERNET_FRAME_LEN,
 };
 use esop_ethercat_core::{
-    ControlRequestPool, ControlRxConsumer, DatagramPlan, DmaDescriptorRing, DmaOwner, DmaTxHandle,
-    Domain, DomainSegment, EthercatDmaTxPort, EthercatMaster, EthercatPort, EthercatState,
-    EventCode, ExpectedSlave, FrameHandle, FramePlan, LinkState, MailboxConfig, MailboxController,
-    MailboxProtocol, MasterConfig, NoopDmaCache, PortError, RegisterOperation, RxExpectation,
-    RxPoll, RxSlotState, RxWorkingCounterPolicy, SdoProgress, SdoTransfer, SlaveIdentity,
+    AlStatus, ControlRequestPool, ControlRxConsumer, DatagramPlan, DcClockConfig,
+    DcClockController, DcClockProgress, DcTopology, DmaDescriptorRing, DmaOwner, DmaTxHandle,
+    Domain, DomainSegment, ESC_FEATURE_DC_SUPPORTED, EscDcRange, EthercatDmaTxPort, EthercatMaster,
+    EthercatPort, EthercatState, EventCode, ExpectedSlave, FrameHandle, FramePlan, LinkState,
+    MailboxConfig, MailboxController, MailboxProtocol, MasterConfig, NoopDmaCache, PortError,
+    RegisterOperation, RxExpectation, RxPoll, RxSlotState, RxWorkingCounterPolicy,
+    ScanDcCapabilities, ScanPortLink, ScanRecord, SdoProgress, SdoTransfer, SlaveIdentity,
     StartupConfig, StartupController, StartupProgress,
 };
 
@@ -1010,6 +1012,108 @@ fn startup_control_request_round_trips_through_master_and_rx_consumer() {
         startup.accept_completed(&mut requests, request, 2),
         Ok(StartupProgress::Advanced)
     );
+    assert_eq!(requests.in_use(), 0);
+}
+
+#[test]
+fn dc_clock_offset_delay_round_trips_through_master_and_rx_consumer() {
+    let record = ScanRecord {
+        position: 0,
+        station_address: 0x1000,
+        esc_type: 0,
+        revision: 0,
+        build: 0,
+        fmmu_count: 0,
+        sync_manager_count: 0,
+        ram_size: 0,
+        port_descriptor: 0,
+        dl_status: 0,
+        port_links: [ScanPortLink {
+            link_up: false,
+            loop_closed: true,
+            signal_detected: false,
+        }; 4],
+        dc: ScanDcCapabilities {
+            raw_features: ESC_FEATURE_DC_SUPPORTED,
+            fmmu_bit_operation: false,
+            supported: true,
+            range: EscDcRange::Bits64,
+            has_system_time: true,
+            system_time: Some(0),
+            receive_times: Some([0; 4]),
+        },
+        device_emulation: false,
+        al_status: AlStatus::new(EthercatState::Init as u16, 0),
+        online: true,
+    };
+    let topology = DcTopology::<1>::build(&[record], Some(0)).unwrap();
+    let mut controller = DcClockController::new();
+    controller
+        .start(DcClockConfig::new(), &topology, 61, 1_000, 0)
+        .unwrap();
+    let config = MasterConfig::new([0xFF; 6], [1, 2, 3, 4, 5, 6]);
+    let mut master = EthercatMaster::<2, MTU>::new(config);
+    let mut requests = ControlRequestPool::<1>::new();
+    let mut scratch = [0; MTU];
+
+    let read = controller.next_action(1).unwrap().unwrap();
+    assert_eq!(read.datagram_len(), 24);
+    let read_request = controller.enqueue_pending(&mut requests).unwrap();
+    let read_frame = master
+        .acquire_frame(read.generation, read.deadline_ns)
+        .unwrap();
+    master
+        .build_control_request(&mut requests, read_request, read_frame)
+        .unwrap();
+    let mut sample = [0; 24];
+    sample[..8].copy_from_slice(&900u64.to_le_bytes());
+    sample[16..24].copy_from_slice(&5u64.to_le_bytes());
+    let mut port = MockPort::with_response(1, &sample);
+    master.submit_frame(&mut port, read_frame).unwrap();
+    {
+        let mut consumer = ControlRxConsumer::new(&mut requests);
+        let report = master
+            .cycle_receive_with_consumer(&mut port, &mut scratch, read.generation, &mut consumer)
+            .unwrap();
+        assert_eq!(report.consumer_rejections, 0);
+    }
+    assert_eq!(
+        controller.accept_completed(&mut requests, read_request, 2),
+        Ok(DcClockProgress::Advanced)
+    );
+
+    let write = controller.next_action(3).unwrap().unwrap();
+    assert_eq!(write.datagram_len(), 12);
+    assert_eq!(
+        u64::from_le_bytes(write.payload()[..8].try_into().unwrap()),
+        107
+    );
+    assert_eq!(
+        u32::from_le_bytes(write.payload()[8..12].try_into().unwrap()),
+        0
+    );
+    let write_request = controller.enqueue_pending(&mut requests).unwrap();
+    let write_frame = master
+        .acquire_frame(write.generation, write.deadline_ns)
+        .unwrap();
+    master
+        .build_control_request(&mut requests, write_request, write_frame)
+        .unwrap();
+    port.set_response(write.payload());
+    master.submit_frame(&mut port, write_frame).unwrap();
+    {
+        let mut consumer = ControlRxConsumer::new(&mut requests);
+        let report = master
+            .cycle_receive_with_consumer(&mut port, &mut scratch, write.generation, &mut consumer)
+            .unwrap();
+        assert_eq!(report.consumer_rejections, 0);
+    }
+    assert_eq!(
+        controller.accept_completed(&mut requests, write_request, 4),
+        Ok(DcClockProgress::Complete)
+    );
+    assert_eq!(controller.programmed_slaves().len(), 1);
+    assert_eq!(controller.programmed_slaves()[0].new_offset, 107);
     assert_eq!(requests.in_use(), 0);
 }
 

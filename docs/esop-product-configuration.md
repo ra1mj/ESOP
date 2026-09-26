@@ -142,10 +142,10 @@ count，并返回固定站地址。核心 `PdoConfigController` 对每个写值�
 动作、超时和 mismatch 均沿类型化故障路径 fail-closed。调用方可通过
 `ScheduledPdoConfiguration` 把该控制器、`MailboxController` 和运行期
 `MailboxConfig` 绑定到 `ScheduledProductionServiceScheduler`；调度器按
-Startup、PDO Configuration、Mapping、DC Configuration、Mailbox 的固定顺序，
+Startup、PDO Configuration、Mapping、DC Clock Configuration、DC Configuration、Mailbox 的固定顺序，
 把每笔 CoE 请求交给现有邮箱/DC/共享 RX 路径，并在精确 upload 回读完成后才
 放行 Configuration/CoE 生命周期门。调用方可在 `StartupConfig` 中冻结所需的
-PDO Configuration、Mapping 和 DC Configuration 集合：所有期望从站先确认
+PDO Configuration、Mapping、DC Clock Configuration 和 DC Configuration 集合：所有期望从站先确认
 PREOP，Startup 进入 `AwaitingConfiguration` 后只向这些服务让出优先级；调度器
 仅在所有必需控制器真实进入 `Complete` 后释放屏障，并复用已验证从站表逐站经过
 SAFEOP 到最终 SAFEOP/OP，不重新扫描或读取 SII。
@@ -171,9 +171,12 @@ payload，直到 END 才公开完整镜像；`SiiStreamDiscoveryController` 使�
 精确比较；signedness 暂不属于在线签名，因为 SII flags 的数据类型语义尚未单独冻结。
 在线扫描现独立于生成 schema 精确采集 DC 端口接收时间和 Data Link Status，Startup
 根据已有 DC requirement/reference policy 事务式发布固定容量拓扑与参考钟相对传播延迟；
-产品必需 DC 从站缺少可测累计延迟时在 identity 前闭锁。FMMU/SII DC category 语义、
-offset/delay 寄存器写入、应用时间/start time、SYNC 配置、物理响应真实性与时序精度和
-HIL 仍待完成。
+产品必需 DC 从站缺少可测累计延迟时在 identity 前闭锁。`DcClockController` 可从该发布
+拓扑构造固定容量计划，逐个精确读取 `0x0910/24`，以调用方应用时间样本和响应时单调时间
+计算 32-bit 回绕或 64-bit 有符号 offset 修正，并把新 offset 与累计 delay 作为一个
+`0x0920/12` 写入；参考钟 delay 为零，完整批次仅在所有精确 WKC 1 写入成功后发布，并可作为
+独立必需服务接入上述 PREOP 屏障。FMMU/SII DC category 语义、外部应用授时源、完整 start
+time、生成式全从站 SYNC 配置、物理响应真实性与时序精度和 HIL 仍待完成。
 
 ## 6. 构建报告接入
 

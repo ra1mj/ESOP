@@ -1,0 +1,32 @@
+{
+  "id": "dc-offset-delay-programming",
+  "name": "dc-offset-delay-programming",
+  "title": "DC offset and propagation delay programming",
+  "description": "Program every System-Time-capable ESC with a measured propagation delay and corrected DC system-time offset, then expose the operation through the bounded production scheduler and lifecycle gate.",
+  "status": "in_progress",
+  "dev_type": "backend",
+  "scope": "cross-layer",
+  "package": "esop-ethercat-core",
+  "priority": "P0",
+  "creator": "mj",
+  "assignee": "mj",
+  "createdAt": "2026-09-27",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "crates/esop-ethercat-core/src/dc.rs",
+    "crates/esop-ethercat-core/src/production_service.rs",
+    "crates/esop-ethercat-core/src/startup.rs",
+    "crates/esop-lifecycle-guard/src/ethercat.rs",
+    "docs/ethercat-master-requirements.md"
+  ],
+  "notes": "",
+  "meta": {}
+}

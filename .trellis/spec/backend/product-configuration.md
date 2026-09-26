@@ -54,6 +54,16 @@ pub fn DcTopology::<MAX_SLAVES>::build(
     records: &[ScanRecord],
     reference_position: Option<u16>,
 ) -> Result<DcTopology<MAX_SLAVES>, DcTopologyError>;
+pub fn DcClockController::<MAX_SLAVES>::start(
+    config: DcClockConfig,
+    topology: &DcTopology<MAX_SLAVES>,
+    generation: u16,
+    application_time_ns: u64,
+    monotonic_now_ns: u64,
+) -> Result<(), DcClockError>;
+pub fn ScheduledProductionServices::with_dc_clock_configuration(
+    controller: &mut DcClockController<MAX_SLAVES>,
+) -> ScheduledProductionServices<...>;
 ```
 
 ## 3. Contracts
@@ -171,9 +181,22 @@ symmetric measurable DC-to-DC edges; an iterative graph walk publishes checked
 cumulative delay from the selected reference. Optional unmeasurable DC remains
 `None`, while `SystemTime` or `ReferenceClock` requirements without cumulative
 delay latch Startup before identity. Restart or any Startup fault clears both
-selected reference and topology. This contract does not write `0x0920` or
-`0x0928`, inject application time, choose start time, configure SYNC0/SYNC1, or
-prove physical response origin or timing precision.
+selected reference and topology.
+
+Clock initialization consumes only this published immutable topology. Before
+emitting a request, `DcClockController` validates the selected reference and
+every System-Time-capable slave's range and cumulative delay. It reads exactly
+24 bytes from `0x0910`, advances the caller's paired application-time sample by
+checked monotonic elapsed time, applies a 32-bit wrapping or checked 64-bit
+signed correction to the old raw offset, then writes one coherent 12-byte
+offset-plus-delay payload at `0x0920`. The selected reference delay is zero;
+every other programmed delay comes from topology evidence. Exact action,
+generation, response length, WKC 1 and deadline checks are mandatory. Public
+programmed evidence remains empty until the whole plan completes, while a
+fault may retain only a diagnostic completed count because accepted ESC writes
+cannot be rolled back. The controller does not authenticate the application
+time, choose complete start-time/SYNC policy, prove runtime lock, or prove
+physical response origin or timing precision.
 
 Per-slave PDO startup-plan construction uses the same generated order and the
 shared 256-entry cfggen bound. For each SyncManager it clears assignment
@@ -362,8 +385,18 @@ let profiles = product.startup_profiles()?;
 product.start_startup(&mut startup, generation, now_ns, config, observed)?;
 let reference = startup.selected_reference_clock(); // Published after scan validation.
 let topology = startup.dc_topology(); // Published in the same transaction.
+dc_clock.start(
+    dc_clock_config,
+    topology.ok_or(Error::MissingTopology)?,
+    generation,
+    application_time_ns,
+    monotonic_now_ns,
+)?;
 ```
 
 Do not treat a missing propagation delay as zero or program ESC delay/offset
-registers from an unpublished candidate. Optional evidence stays `None`; a
-product-required slave without a measured path must fail before identity.
+registers from an unpublished candidate. The only zero-delay exception is the
+selected reference already published with measured topology evidence. Optional
+evidence stays `None`; a product-required slave without a measured path must
+fail before identity, and a partial physical write sequence must never be
+reported as a complete software batch.

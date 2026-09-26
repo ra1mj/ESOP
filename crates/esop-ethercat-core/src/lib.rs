@@ -54,9 +54,11 @@ pub use control::{
     ControlRxConsumer, MAX_CONTROL_PAYLOAD, RegisterOperation, RequestHandle, RequestState,
 };
 pub use dc::{
-    DC_SYNC_DELAY_NS, DcAction, DcActionKind, DcConfig, DcController, DcCyclicConfig,
-    DcCyclicError, DcCyclicSync, DcError, DcLockState, DcMonitor, DcPhase, DcProgress, DcSample,
-    DcSyncMode, DcTopology, DcTopologyError, DcTopologyPort, DcTopologySlave,
+    DC_SYNC_DELAY_NS, DcAction, DcActionKind, DcClockAction, DcClockActionKind, DcClockConfig,
+    DcClockController, DcClockError, DcClockPhase, DcClockProgrammedSlave, DcClockProgress,
+    DcConfig, DcController, DcCyclicConfig, DcCyclicError, DcCyclicSync, DcError, DcLockState,
+    DcMonitor, DcPhase, DcProgress, DcSample, DcSyncMode, DcTopology, DcTopologyError,
+    DcTopologyPort, DcTopologySlave,
 };
 pub use diag::{
     CoeEmergencyEvent, CoeEmergencyQueue, DiagnosticConsumer, Diagnostics, EmergencySink,

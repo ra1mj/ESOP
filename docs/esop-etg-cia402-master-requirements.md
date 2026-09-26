@@ -23,7 +23,7 @@
 9. CiA 402 驱动状态机、CSP/CSV/CST、对象绑定、模式切换和故障策略。
 10. 配置生成器、诊断、恢复、HIL、性能资格和一致性声明管理。
 
-**当前状态：仓库已包含 Rust `no_std` EtherCAT 核心、Linux AF_PACKET 开发/HIL 端口、固定 SPSC ring、固定诊断事件环、控制请求闭环、单 Domain PDO 接收提交路径、扫描/SII/AL 基础状态机、ESC `0x0141[0]` Device Emulation 识别、普通 ESC 的有界 AL Error Acknowledge、Device Emulation 禁止 ACK 与首故障诊断保留、ESI 四类 ESM timeout 与版本化 ETG.1020 默认值、严格 ESI CoE 邮箱对校验与生成配置传播、SII 标准邮箱固定头解析、SII/ESI `OpOnly` 输出校验及 OP 前后写入读回门控、SII SyncManager/RxPDO/TxPDO category 只读解析及事务式固定容量配置候选、SM/FMMU 写入读回配置 FSM、生成式固定容量 CoE PDO assignment/mapping 计划和逐写精确 SDO upload 回读、产品顺序的多从站 PDO 配置批次、PDO 配置到统一生产调度/邮箱/DC/共享 RX 与 Configuration 生命周期门的有界接入、可选全从站 PREOP 配置屏障、从实际整批 PDO/Mapping/DC Complete phase 自动释放并保留拓扑继续 SAFEOP/OP、独立生命周期守卫、Mailbox 轮询 FSM、有限预算重试与协议错帧恢复、可配置 Status Bit 轮询、CoE SDO expedited/segmented codec/事务 FSM、异步 CoE Emergency 固定事件环，以及 DC SYNC0/SYNC1 配置 FSM、FRMW reference-clock 周期同步槽和 offset/jitter 监测器。固定容量 `DomainRegistry` 已支持多 Domain/PDO/datagram、SII 字节对齐 segment 的 `LWR`/`LRD` 绑定、按 MTU 拆帧和原子激活。另有独立 `esop-profile-cia402` crate，已实现 Statusword FSA 解码、基础 Controlword 使能序列、生命周期拒绝、Fault reset 单脉冲、CSP/CSV/CST 模式监督、标准周期 PDO typed raw binding 和四项运动门槛。仍未形成完整主站；Startup 已完成实时 SII 标准邮箱布局的软件交叉验证，但完整 SM-FMMU/DC 描述符自动发现与批处理、完整周期 WKC 资格、完整 SII/ESI 自动发现、真实从站 ESM/PDO 互操作、DC offset/delay 寄存器编程、应用时间/start time、全从站运行时同步、物理时序精度、厂商缩放/quirk、MCU DMA 端口和真实设备 HIL 仍未实现。**现有内容是架构与验收基线，不是 ETG 认证证据。
+**当前状态：仓库已包含 Rust `no_std` EtherCAT 核心、Linux AF_PACKET 开发/HIL 端口、固定 SPSC ring、固定诊断事件环、控制请求闭环、单 Domain PDO 接收提交路径、扫描/SII/AL 基础状态机、ESC `0x0141[0]` Device Emulation 识别、普通 ESC 的有界 AL Error Acknowledge、Device Emulation 禁止 ACK 与首故障诊断保留、ESI 四类 ESM timeout 与版本化 ETG.1020 默认值、严格 ESI CoE 邮箱对校验与生成配置传播、SII 标准邮箱固定头解析、SII/ESI `OpOnly` 输出校验及 OP 前后写入读回门控、SII SyncManager/RxPDO/TxPDO category 只读解析及事务式固定容量配置候选、SM/FMMU 写入读回配置 FSM、生成式固定容量 CoE PDO assignment/mapping 计划和逐写精确 SDO upload 回读、产品顺序的多从站 PDO 配置批次、PDO 配置到统一生产调度/邮箱/DC/共享 RX 与 Configuration 生命周期门的有界接入、可选全从站 PREOP 配置屏障、从实际整批 PDO/Mapping/DC Clock/DC SYNC Complete phase 自动释放并保留拓扑继续 SAFEOP/OP、独立生命周期守卫、Mailbox 轮询 FSM、有限预算重试与协议错帧恢复、可配置 Status Bit 轮询、CoE SDO expedited/segmented codec/事务 FSM、异步 CoE Emergency 固定事件环，以及拓扑范围驱动的精确 `0x0910/24` 时钟采样与 `0x0920/12` offset/delay 初始化、DC SYNC0/SYNC1 配置 FSM、FRMW reference-clock 周期同步槽和 offset/jitter 监测器。固定容量 `DomainRegistry` 已支持多 Domain/PDO/datagram、SII 字节对齐 segment 的 `LWR`/`LRD` 绑定、按 MTU 拆帧和原子激活。另有独立 `esop-profile-cia402` crate，已实现 Statusword FSA 解码、基础 Controlword 使能序列、生命周期拒绝、Fault reset 单脉冲、CSP/CSV/CST 模式监督、标准周期 PDO typed raw binding 和四项运动门槛。仍未形成完整主站；Startup 已完成实时 SII 标准邮箱布局的软件交叉验证，但完整 SM-FMMU/DC 描述符自动发现与批处理、完整周期 WKC 资格、完整 SII/ESI 自动发现、真实从站 ESM/PDO 互操作、外部应用授时、完整 start time/生成式全从站 SYNC 配置、全从站运行时同步、物理时序精度、厂商缩放/quirk、MCU DMA 端口和真实设备 HIL 仍未实现。**现有内容是架构与验收基线，不是 ETG 认证证据。
 
 SII 增量现已包含从标准 `0x0040` 到 END 的固定容量 category stream acquisition，
 内部续读保持动作游标和绝对 deadline，并在完整读取后原子投影 signedness-aware
@@ -194,14 +194,17 @@ Motion Control Feature Pack 要求 DC。完整 DC 不是只写 SYNC0 周期，�
 7. 记录 offset、jitter、last sync、失锁次数和连续异常。
 8. DC 未锁定时阻止新的有效 CSP/CSV/CST 运动目标，按策略 hold、ramp 或 disable。
 
-当前软件已完成第 1 项、第 2 项的软件边界和第 4 项的参考候选选择：扫描精确读取
+当前软件已完成第 1、2、3 项的软件边界和第 4 项的参考候选选择：扫描精确读取
 ESC 基础寄存器与 Features Supported，并以 32/64-bit `0x0910` System Time 响应确认
 参考时钟资格；所有 base-DC 从站读取 `0x0900/16` 四端口接收时间，所有从站读取
 `0x0110/2` Data Link Status。固定容量投影按端口 `3,1,2` 重建物理树，并以 32-bit
 回绕时间差和 checked aggregate 算术发布可测 DC 链路及参考钟相对累计传播延迟。生成产品
 可要求 DC 并唯一指定参考钟，Startup 在 identity/SII/AL 前事务式校验并发布参考钟/拓扑，
-必需 DC 从站缺少可测累计延迟时闭锁。第 3 项 offset 补偿、第 4 项 start time/SYNC 配置和
-第 5-7 项运行同步/质量仍保持开放；当前调用方交付响应也不证明真实硬件来源或传播延迟精度。
+必需 DC 从站缺少可测累计延迟时闭锁。独立固定容量控制器随后逐个读取 `0x0910/24`，以
+调用方应用时间样本及响应时单调时间计算 32/64-bit offset 修正，并把新 offset 和累计 delay
+作为一个 `0x0920/12` 写入；完整结果只在所有精确 WKC 1 写入成功后发布。第 4 项完整
+start time/生成式全从站 SYNC 配置和第 5-7 项运行同步/质量仍保持开放；当前调用方交付响应
+也不证明应用时间真实性、真实硬件来源或传播延迟精度。
 
 ### 4.8 诊断与恢复
 
@@ -500,7 +503,7 @@ absolute timer release
 | --- | --- | --- |
 | M0 | `esop_queue`、wire codec、arena、Linux simulation port、测试框架 | 部分实现：wire codec、调用方固定 arena、固定帧池、SPSC ring、Linux AF_PACKET port、固定容量确定性 `SimulatedPort`、通用 DMA descriptor ownership/cache 契约和测试基础已具备；STM32/HPMicro 具体 DMA 端口仍未实现 |
 | M1 | scan/SII/AL/SM/FMMU、单 Domain PDO、WKC、诊断 | 部分实现：scan/ESC、Device Emulation 能力读取、普通 ESC 的有界 AL Error Acknowledge、Device Emulation 禁止 ACK、首故障诊断保留、ESI 四类 ESM timeout 与版本化 ETG.1020 默认值、严格 ESI CoE 邮箱对生成、SII 标准邮箱固定头解析、SII/ESI `OpOnly` 输出校验及 OP 前后写入读回门控、SII 身份读取、固定容量 EEPROM 分块读取、SyncManager/RxPDO/TxPDO category 只读解析、事务式固定容量配置候选、按 PDO 类别分段的多 SyncManager FMMU 逻辑地址分配、AL 单步转换、可选全从站 PREOP 屏障、产品顺序多从站 PDO 批次、真实整批 Complete 门控和保留拓扑的 SAFEOP/OP 继续、PDO 位域、SM/FMMU 校验与写入读回 FSM、生成式固定容量 CoE PDO assignment/mapping 计划与逐写回读 FSM、PDO 配置统一生产调度/邮箱接入、启动控制面闭环、单 Domain Frame Plan/WKC 提交、固定容量多 Domain/PDO/datagram 注册、SII segment datagram 绑定、MTU 拆帧与多速率激活编排、固定事件诊断和 Linux HIL 端口已具备；Startup 实时 SII 标准邮箱布局交叉验证已具备；完整 SM-FMMU/DC 描述符自动发现与批处理、完整周期 WKC、完整 SII/ESI 自动发现、真实从站 ESM/PDO 互操作和真实总线 HIL 未实现 |
-| M2 | Mailbox resilient/polling、CoE SDO/Emergency、DC | 部分实现：固定容量 Mailbox 发送/轮询 FSM、有限预算重试、协议/计数器/长度异常恢复、可配置 Status Bit 轮询、CoE SDO expedited/segmented upload/download、abort、Emergency payload 解码及固定事件环接入、DC System Time/receive-time/Data Link Status 精确扫描、固定容量物理拓扑与参考钟相对传播延迟投影、DC SYNC0/SYNC1 配置 FSM、FRMW reference-clock 周期同步槽、offset/jitter 锁定监测和主站控制请求闭环已具备；Status Bit 的 ESI/SII 自动发现、DC offset/delay 寄存器编程、应用时间/start time、全从站运行时同步、真实时序精度和真实从站互操作仍未实现 |
+| M2 | Mailbox resilient/polling、CoE SDO/Emergency、DC | 部分实现：固定容量 Mailbox 发送/轮询 FSM、有限预算重试、协议/计数器/长度异常恢复、可配置 Status Bit 轮询、CoE SDO expedited/segmented upload/download、abort、Emergency payload 解码及固定事件环接入、DC System Time/receive-time/Data Link Status 精确扫描、固定容量物理拓扑与参考钟相对传播延迟投影、拓扑范围驱动的全从站 `0x0920/12` offset/delay 初始化、DC SYNC0/SYNC1 配置 FSM、FRMW reference-clock 周期同步槽、offset/jitter 锁定监测和主站控制请求闭环已具备；Status Bit 的 ESI/SII 自动发现、外部应用授时源、完整 start time、生成式全从站 SYNC、全从站运行时漂移补偿、真实时序精度和真实从站互操作仍未实现 |
 | M3 | CiA 402 FSA、CSP/CSV/CST、两厂商驱动 HIL | 部分实现：独立 profile 已具备 Statusword FSA 解码、基础 Controlword 使能序列、生命周期拒绝、Fault reset 单脉冲、模式切换监督、实际模式确认、Operation Enabled 门槛、周期设定值首目标/限幅守卫、固定容量双轴独立控制、配置停止动作和新 permit epoch 恢复约束，以及基于核心 `PdoEntry` 的标准 `0x6040/0x6060/0x6041/0x6061/0x603F` 与 CSP/CSV/CST 目标/实际值 typed binding；厂商 quirk、单位/缩放、三模式真实对象互操作和两厂商驱动 HIL 仍未实现 |
 | M4 | STM32/HPM port、500 us 资格、完整 capability manifest | 部分实现：仓库已提供证据绑定的 `capability_manifest.json` 及 CI 校验；STM32/HPMicro 具体 DMA 端口、500 us 目标板资格和完整硬件能力证据仍未实现 |
 | M5 | ETG 官方一致性/互操作流程、Class A 差距评估 | 未开始 |

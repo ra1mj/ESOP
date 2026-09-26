@@ -142,6 +142,7 @@ impl StartupConfigurationServices {
     const PDO_CONFIGURATION: u8 = 1 << 0;
     const MAPPING: u8 = 1 << 1;
     const DC_CONFIGURATION: u8 = 1 << 2;
+    const DC_CLOCK_CONFIGURATION: u8 = 1 << 3;
 
     pub const NONE: Self = Self(0);
 
@@ -164,6 +165,11 @@ impl StartupConfigurationServices {
         self
     }
 
+    pub const fn with_dc_clock_configuration(mut self) -> Self {
+        self.0 |= Self::DC_CLOCK_CONFIGURATION;
+        self
+    }
+
     pub const fn requires_pdo_configuration(self) -> bool {
         self.0 & Self::PDO_CONFIGURATION != 0
     }
@@ -174,6 +180,10 @@ impl StartupConfigurationServices {
 
     pub const fn requires_dc_configuration(self) -> bool {
         self.0 & Self::DC_CONFIGURATION != 0
+    }
+
+    pub const fn requires_dc_clock_configuration(self) -> bool {
+        self.0 & Self::DC_CLOCK_CONFIGURATION != 0
     }
 
     pub const fn is_empty(self) -> bool {

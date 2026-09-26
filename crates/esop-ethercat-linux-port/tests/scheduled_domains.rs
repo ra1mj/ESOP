@@ -3,24 +3,27 @@ use esop_ethercat_core::wire::{
     MAX_ETHERNET_FRAME_LEN, WORKING_COUNTER_LEN,
 };
 use esop_ethercat_core::{
-    CoeHeader, CoeService, ControlError, ControlRequestPool, CycleError, DatagramPlan,
-    DcCyclicConfig, DcCyclicError, DcCyclicSync, DcMonitor, Domain, DomainSegment, ESC_AL_STATUS,
-    ESC_CONFIGURATION, EthercatMaster, EthercatPort, EthercatState, ExpectedSlave, FramePlan,
-    FramePlanSet, LinkState, MAX_MAILBOX_BYTES, MailboxConfig, MailboxController, MailboxError,
-    MailboxHeader, MailboxPhase, MailboxProgress, MailboxProtocol, MailboxRetryPolicy,
-    MappingConfigController, MappingConfigPhase, MappingConfigProgress, MappingTable, MasterConfig,
-    PdoConfigAction, PdoConfigBatch, PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigController,
-    PdoConfigError, PdoConfigJob, PdoConfigPhase, PdoConfigPlan, PdoConfigProgress, PdoConfigStep,
-    PdoSdoWrite, PortError, RegisterOperation, RequestHandle, RequestState, RxPoll, RxSlotState,
-    ScheduleDomain, ScheduleTable, ScheduledControlCycleError, ScheduledDomainBank,
-    ScheduledDomainEntry, ScheduledPdoConfiguration, ScheduledPdoConfigurationProgress,
-    ScheduledProcessInputEntry, ScheduledProcessInputs, ScheduledProductionServiceCycleError,
-    ScheduledProductionServiceFault, ScheduledProductionServiceKind,
-    ScheduledProductionServiceProgress, ScheduledProductionServiceRecovery,
-    ScheduledProductionServiceScheduler, ScheduledProductionServices, ScheduledReceiveError,
-    ScheduledServiceFrameError, ScheduledServiceTxError, ScheduledServiceTxFailure, SlaveIdentity,
-    StartupAction, StartupConfig, StartupConfigurationServices, StartupController, StartupPhase,
-    StartupProgress, SyncManagerConfig, fixed_address,
+    AlStatus, CoeHeader, CoeService, ControlError, ControlRequestPool, CycleError, DatagramPlan,
+    DcClockConfig, DcClockController, DcClockProgress, DcCyclicConfig, DcCyclicError, DcCyclicSync,
+    DcMonitor, DcTopology, Domain, DomainSegment, ESC_AL_STATUS, ESC_CONFIGURATION,
+    ESC_DC_SYSTEM_TIME, ESC_FEATURE_DC_SUPPORTED, EscDcRange, EthercatMaster, EthercatPort,
+    EthercatState, ExpectedSlave, FramePlan, FramePlanSet, LinkState, MAX_MAILBOX_BYTES,
+    MailboxConfig, MailboxController, MailboxError, MailboxHeader, MailboxPhase, MailboxProgress,
+    MailboxProtocol, MailboxRetryPolicy, MappingConfigController, MappingConfigPhase,
+    MappingConfigProgress, MappingTable, MasterConfig, PdoConfigAction, PdoConfigBatch,
+    PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigController, PdoConfigError, PdoConfigJob,
+    PdoConfigPhase, PdoConfigPlan, PdoConfigProgress, PdoConfigStep, PdoSdoWrite, PortError,
+    RegisterOperation, RequestHandle, RequestState, RxPoll, RxSlotState, ScanDcCapabilities,
+    ScanPortLink, ScanRecord, ScheduleDomain, ScheduleTable, ScheduledControlCycleError,
+    ScheduledDomainBank, ScheduledDomainEntry, ScheduledPdoConfiguration,
+    ScheduledPdoConfigurationProgress, ScheduledProcessInputEntry, ScheduledProcessInputs,
+    ScheduledProductionServiceCycleError, ScheduledProductionServiceFault,
+    ScheduledProductionServiceKind, ScheduledProductionServiceProgress,
+    ScheduledProductionServiceRecovery, ScheduledProductionServiceScheduler,
+    ScheduledProductionServices, ScheduledReceiveError, ScheduledServiceFrameError,
+    ScheduledServiceTxError, ScheduledServiceTxFailure, SlaveIdentity, StartupAction,
+    StartupConfig, StartupConfigurationServices, StartupController, StartupPhase, StartupProgress,
+    SyncManagerConfig, fixed_address,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::ethercat::{
@@ -251,6 +254,43 @@ fn production_service_scheduler_prioritizes_mapping_and_accepts_its_own_generati
     mapping
         .start(1, 41, 100_000, 500_000, 100_000, &table)
         .unwrap();
+    let topology = DcTopology::<1>::build(
+        &[ScanRecord {
+            position: 0,
+            station_address: 0x1000,
+            esc_type: 0,
+            revision: 0,
+            build: 0,
+            fmmu_count: 0,
+            sync_manager_count: 0,
+            ram_size: 0,
+            port_descriptor: 0,
+            dl_status: 0,
+            port_links: [ScanPortLink {
+                link_up: false,
+                loop_closed: true,
+                signal_detected: false,
+            }; 4],
+            dc: ScanDcCapabilities {
+                raw_features: ESC_FEATURE_DC_SUPPORTED,
+                fmmu_bit_operation: false,
+                supported: true,
+                range: EscDcRange::Bits64,
+                has_system_time: true,
+                system_time: Some(0),
+                receive_times: Some([0; 4]),
+            },
+            device_emulation: false,
+            al_status: AlStatus::new(EthercatState::Init as u16, 0),
+            online: true,
+        }],
+        Some(0),
+    )
+    .unwrap();
+    let mut dc_clock = DcClockController::new();
+    dc_clock
+        .start(DcClockConfig::new(), &topology, 51, 1_000, 100_000)
+        .unwrap();
     let mailbox_config = MailboxConfig::new(0x1000, 16, 0x1100, 16);
     let mut mailbox = MailboxController::new();
     mailbox
@@ -307,12 +347,13 @@ fn production_service_scheduler_prioritizes_mapping_and_accepts_its_own_generati
             &mut dc_image,
             100_000,
             &mut controls,
-            &mut ScheduledProductionServices::<0, 1, 0>::new(
+            &mut ScheduledProductionServices::<1, 1, 0>::new(
                 None,
                 Some(&mut mapping),
                 None,
                 Some(&mut mailbox),
-            ),
+            )
+            .with_dc_clock_configuration(&mut dc_clock),
             1,
             150_000,
             150_000,
@@ -346,12 +387,13 @@ fn production_service_scheduler_prioritizes_mapping_and_accepts_its_own_generati
             &mut dc_image,
             200_000,
             &mut controls,
-            &mut ScheduledProductionServices::<0, 1, 0>::new(
+            &mut ScheduledProductionServices::<1, 1, 0>::new(
                 None,
                 Some(&mut mapping),
                 None,
                 Some(&mut mailbox),
-            ),
+            )
+            .with_dc_clock_configuration(&mut dc_clock),
             2,
             250_000,
             250_000,
@@ -377,6 +419,10 @@ fn production_service_scheduler_prioritizes_mapping_and_accepts_its_own_generati
         .unwrap();
     assert_eq!(mapping.phase(), MappingConfigPhase::Complete);
 
+    let mut clock_sample = [0; 24];
+    clock_sample[..8].copy_from_slice(&900u64.to_le_bytes());
+    clock_sample[16..24].copy_from_slice(&5u64.to_le_bytes());
+    port.set_next_control_response(fixed_address(0x1000, ESC_DC_SYSTEM_TIME), &clock_sample);
     port.set_now_ns(300_000);
     let third = scheduler
         .run_cycle(
@@ -388,23 +434,99 @@ fn production_service_scheduler_prioritizes_mapping_and_accepts_its_own_generati
             &mut dc_image,
             300_000,
             &mut controls,
-            &mut ScheduledProductionServices::<0, 1, 0>::new(
+            &mut ScheduledProductionServices::<1, 1, 0>::new(
                 None,
                 Some(&mut mapping),
                 None,
                 Some(&mut mailbox),
-            ),
+            )
+            .with_dc_clock_configuration(&mut dc_clock),
             3,
             350_000,
             350_000,
         )
         .unwrap();
-    assert_eq!(third.selected(), ScheduledProductionServiceKind::Mailbox);
+    assert_eq!(
+        third.selected(),
+        ScheduledProductionServiceKind::DcClockConfiguration
+    );
     assert_eq!(
         third.progress(),
+        ScheduledProductionServiceProgress::DcClockConfiguration(DcClockProgress::Advanced)
+    );
+    assert!(!third.service_ready());
+    assert!(
+        !other_cycle_facts_from_production_service_cycle(&third, ready_other_cycle_facts())
+            .coe_ready
+    );
+
+    port.set_now_ns(400_000);
+    let fourth = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            400_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<1, 1, 0>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                Some(&mut mailbox),
+            )
+            .with_dc_clock_configuration(&mut dc_clock),
+            4,
+            450_000,
+            450_000,
+        )
+        .unwrap();
+    assert_eq!(
+        fourth.selected(),
+        ScheduledProductionServiceKind::DcClockConfiguration
+    );
+    assert_eq!(
+        fourth.progress(),
+        ScheduledProductionServiceProgress::DcClockConfiguration(DcClockProgress::Complete)
+    );
+    assert!(fourth.service_ready());
+    assert!(
+        other_cycle_facts_from_production_service_cycle(&fourth, ready_other_cycle_facts())
+            .coe_ready
+    );
+    assert_eq!(dc_clock.programmed_slaves()[0].transmission_delay_ns, 0);
+
+    port.set_now_ns(500_000);
+    let fifth = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            500_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<1, 1, 0>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                Some(&mut mailbox),
+            )
+            .with_dc_clock_configuration(&mut dc_clock),
+            5,
+            550_000,
+            550_000,
+        )
+        .unwrap();
+    assert_eq!(fifth.selected(), ScheduledProductionServiceKind::Mailbox);
+    assert_eq!(
+        fifth.progress(),
         ScheduledProductionServiceProgress::Mailbox(MailboxProgress::Advanced)
     );
-    assert!(third.service_ready());
+    assert!(fifth.service_ready());
     assert_eq!(controls.in_use(), 0);
 }
 
