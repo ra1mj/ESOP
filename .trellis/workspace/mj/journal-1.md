@@ -1159,3 +1159,36 @@ Added fixed-capacity all-slave PDO batch planning and execution, scheduler-owned
 ### Next Steps
 
 - None - task complete
+
+
+## Session 35: EtherCAT AL error acknowledgement
+
+**Date**: 2026-09-26
+**Task**: EtherCAT AL error acknowledgement
+**Branch**: `main`
+
+### Summary
+
+Implemented exact Device Emulation discovery, bounded normal-ESC AL Error Indication acknowledgement, ACK suppression for emulated ESCs, immutable first-fault diagnostics, restart clearing, production-path simulation coverage, and synchronized PRD/capability documentation. All local CI, BPF, HIL, and Zenoh gates passed.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `52bbd18` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
