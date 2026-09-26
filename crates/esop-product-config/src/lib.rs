@@ -10,11 +10,12 @@ pub use esop_ethercat_core::wire::Command;
 pub use esop_ethercat_core::{
     AlTransitionTimeouts, DomainConfig, DomainDatagramSpec, DomainInfo, DomainRegistry,
     DomainRegistryError, ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, ExpectedSlave, FramePlanSet,
-    FramePlanSetError, MailboxConfig, OpOnlyProfileError, OpOnlySyncManagerProfile, PdoConfigBatch,
-    PdoConfigBatchError, PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigBatchPlanError,
-    PdoConfigBatchStatus, PdoConfigJob, PdoConfigPlan, PdoConfigPlanError, PdoDirection, PdoEntry,
-    PdoEntrySpec, PdoRegistrationRequest, PdoSdoWrite, ScheduleTable, SlaveIdentity, SlaveRecord,
-    StartupConfig, StartupController, StartupError, StartupSlaveProfile,
+    FramePlanSetError, MailboxConfig, MailboxConfigError, MailboxDirection, OpOnlyProfileError,
+    OpOnlySyncManagerProfile, PdoConfigBatch, PdoConfigBatchError, PdoConfigBatchPhase,
+    PdoConfigBatchPlan, PdoConfigBatchPlanError, PdoConfigBatchStatus, PdoConfigJob, PdoConfigPlan,
+    PdoConfigPlanError, PdoDirection, PdoEntry, PdoEntrySpec, PdoRegistrationRequest, PdoSdoWrite,
+    ScheduleTable, SlaveIdentity, SlaveRecord, StartupConfig, StartupController, StartupError,
+    StartupSlaveProfile,
 };
 pub use esop_lifecycle_guard::procbuf::{Cia402AxisCommandPolicy, Cia402AxisCommandPolicyError};
 pub use esop_procbuf::{
@@ -55,6 +56,7 @@ pub struct ProductSlaveConfig {
     pub kind: ProductSlaveKind,
     pub identity: SlaveIdentity,
     pub transition_timeouts: AlTransitionTimeouts,
+    pub mailbox_config: MailboxConfig,
     pub op_only_outputs: OpOnlySyncManagerProfile,
 }
 
@@ -169,6 +171,10 @@ pub enum ProductPdoPlanError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProductPdoBatchError {
+    InvalidMailboxConfig {
+        position: u16,
+        error: MailboxConfigError,
+    },
     MissingMailboxBinding {
         position: u16,
     },
@@ -479,14 +485,36 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
             }
         }
 
-        let mut batch = PdoConfigBatchPlan::new();
-        for slave in self.slaves {
-            let binding = mailbox_bindings
+        self.build_pdo_configuration_batch_with(|slave| {
+            mailbox_bindings
                 .iter()
                 .find(|binding| binding.slave_position == slave.position)
+                .map(|binding| binding.mailbox_config)
                 .ok_or(ProductPdoBatchError::MissingMailboxBinding {
                     position: slave.position,
-                })?;
+                })
+        })
+    }
+
+    pub fn build_generated_pdo_configuration_batch<const JOBS: usize, const OPS: usize>(
+        &self,
+    ) -> Result<PdoConfigBatchPlan<JOBS, OPS>, ProductPdoBatchError> {
+        self.build_pdo_configuration_batch_with(|slave| Ok(slave.mailbox_config))
+    }
+
+    fn build_pdo_configuration_batch_with<const JOBS: usize, const OPS: usize>(
+        &self,
+        mut mailbox_for: impl FnMut(ProductSlaveConfig) -> Result<MailboxConfig, ProductPdoBatchError>,
+    ) -> Result<PdoConfigBatchPlan<JOBS, OPS>, ProductPdoBatchError> {
+        let mut batch = PdoConfigBatchPlan::new();
+        for slave in self.slaves {
+            let mailbox_config = mailbox_for(slave)?;
+            mailbox_config.validate().map_err(|error| {
+                ProductPdoBatchError::InvalidMailboxConfig {
+                    position: slave.position,
+                    error,
+                }
+            })?;
             let startup = self
                 .build_pdo_startup_plan::<OPS>(slave.position)
                 .map_err(|error| ProductPdoBatchError::SlavePlan {
@@ -497,7 +525,7 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                 .push(PdoConfigJob::new(
                     startup.station_address(),
                     startup.into_plan(),
-                    binding.mailbox_config,
+                    mailbox_config,
                 ))
                 .map_err(ProductPdoBatchError::Batch)?;
         }
@@ -1041,6 +1069,7 @@ mod tests {
                 kind: ProductSlaveKind::Cia402Drive,
                 identity: IDENTITY,
                 transition_timeouts: ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
+                mailbox_config: MailboxConfig::new(0x1000, 32, 0x1100, 32),
                 op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
             }],
             domains: [ProductDomainConfig {

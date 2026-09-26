@@ -124,6 +124,22 @@ pub struct MailboxConfig {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MailboxDirection {
+    Send,
+    Receive,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MailboxConfigError {
+    AddressZero(MailboxDirection),
+    CapacityTooSmall(MailboxDirection),
+    CapacityExceeded(MailboxDirection),
+    AddressRangeOverflow(MailboxDirection),
+    AddressRangeOverlap,
+    InvalidStatusBit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MailboxStatusBit {
     pub address: u16,
     pub mask: u8,
@@ -191,6 +207,51 @@ impl MailboxConfig {
         self.status_bit = Some(status_bit);
         self
     }
+
+    pub fn validate(self) -> Result<(), MailboxConfigError> {
+        let send = mailbox_range(
+            self.send_address,
+            self.send_capacity,
+            MailboxDirection::Send,
+        )?;
+        let receive = mailbox_range(
+            self.receive_address,
+            self.receive_capacity,
+            MailboxDirection::Receive,
+        )?;
+        if send.0 < receive.1 && receive.0 < send.1 {
+            return Err(MailboxConfigError::AddressRangeOverlap);
+        }
+        if self
+            .status_bit
+            .is_some_and(|status_bit| status_bit.mask == 0)
+        {
+            return Err(MailboxConfigError::InvalidStatusBit);
+        }
+        Ok(())
+    }
+}
+
+fn mailbox_range(
+    address: u16,
+    capacity: u16,
+    direction: MailboxDirection,
+) -> Result<(u32, u32), MailboxConfigError> {
+    if address == 0 {
+        return Err(MailboxConfigError::AddressZero(direction));
+    }
+    if usize::from(capacity) < MAILBOX_HEADER_LEN {
+        return Err(MailboxConfigError::CapacityTooSmall(direction));
+    }
+    if usize::from(capacity) > MAX_MAILBOX_BYTES {
+        return Err(MailboxConfigError::CapacityExceeded(direction));
+    }
+    let start = u32::from(address);
+    let end = start + u32::from(capacity);
+    if end > u32::from(u16::MAX) + 1 {
+        return Err(MailboxConfigError::AddressRangeOverflow(direction));
+    }
+    Ok((start, end))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -380,12 +441,7 @@ impl MailboxController {
         ) {
             return Err(MailboxError::Busy);
         }
-        if (config.send_capacity as usize) > MAX_MAILBOX_BYTES
-            || (config.receive_capacity as usize) > MAX_MAILBOX_BYTES
-            || (config.receive_capacity as usize) < MAILBOX_HEADER_LEN
-            || config
-                .status_bit
-                .is_some_and(|status_bit| status_bit.mask == 0)
+        if config.validate().is_err()
             || payload.len() + MAILBOX_HEADER_LEN > (config.send_capacity as usize)
             || payload.len() + MAILBOX_HEADER_LEN > MAX_MAILBOX_BYTES
         {
@@ -786,6 +842,44 @@ mod tests {
     use super::*;
     use crate::coe::{CoeHeader, CoeService};
     use crate::diag::{CoeEmergencyEvent, CoeEmergencyQueue};
+
+    #[test]
+    fn mailbox_config_validation_rejects_invalid_ranges_transactionally() {
+        assert_eq!(
+            MailboxConfig::new(0x1000, 32, 0x1100, 64).validate(),
+            Ok(())
+        );
+        assert_eq!(
+            MailboxConfig::new(0, 32, 0x1100, 32).validate(),
+            Err(MailboxConfigError::AddressZero(MailboxDirection::Send))
+        );
+        assert_eq!(
+            MailboxConfig::new(0x1000, 5, 0x1100, 32).validate(),
+            Err(MailboxConfigError::CapacityTooSmall(MailboxDirection::Send))
+        );
+        assert_eq!(
+            MailboxConfig::new(0x1000, 32, 0x1100, 129).validate(),
+            Err(MailboxConfigError::CapacityExceeded(
+                MailboxDirection::Receive
+            ))
+        );
+        assert_eq!(
+            MailboxConfig::new(0xFFF0, 17, 0x1000, 32).validate(),
+            Err(MailboxConfigError::AddressRangeOverflow(
+                MailboxDirection::Send
+            ))
+        );
+        assert_eq!(
+            MailboxConfig::new(0x1000, 32, 0x1010, 32).validate(),
+            Err(MailboxConfigError::AddressRangeOverlap)
+        );
+        assert_eq!(
+            MailboxConfig::new(0x1000, 32, 0x1100, 32)
+                .with_status_bit(MailboxStatusBit::new(0x1200, 0, true))
+                .validate(),
+            Err(MailboxConfigError::InvalidStatusBit)
+        );
+    }
 
     #[test]
     fn mailbox_header_round_trips_protocol_and_counter() {

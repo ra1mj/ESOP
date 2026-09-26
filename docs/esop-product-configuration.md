@@ -49,13 +49,16 @@ ESI/ENI 的兼容声明。
 
 当前解析器支持 namespace-qualified XML 中的 vendor ID、Device Type
 identity/name、四类 `StateMachine/Timeout`、带 `Enable`/`OpOnly` 的有序
-SyncManager、RxPDO/TxPDO assignment，以及 byte-aligned PDO entry 的
+SyncManager、`MBoxOut`/`MBoxIn` 的 `StartAddress`/`DefaultSize`/`ControlByte`、
+`Mailbox/CoE`、RxPDO/TxPDO assignment，以及 byte-aligned PDO entry 的
 index/subindex/bit length/DataType。未提供 timeout 时使用版本化的 ETG.1020
 默认 profile。它明确拒绝：
 
 - 模块化设备和复杂 FMMU 规则；
 - bit-packed 或嵌套 PDO entry；
 - 零值、非法或纳秒换算溢出的 timeout，以及非 output SyncManager 的 `OpOnly`；
+- 缺失 CoE、缺半边/重复/禁用的邮箱 SyncManager、缺失物理字段、容量越界及地址
+  溢出或重叠；
 - 未选择、重复、方向错误或宽度不匹配的对象；
 - vendor-specific scaling、替代对象和隐式默认映射。
 
@@ -75,8 +78,9 @@ index/subindex/bit length/DataType。未提供 timeout 时使用版本化的 ETG
 | `procbuf_layout.json` | ProcBuf ABI v6、维度、精确字节数和 layout hash。 |
 | `robot_build_input.json` | 设备数、PDO/frame/wire/WKC/copy、周期和资源输入。 |
 
-生成的 inventory、JSON 和 Rust product slave 均携带精确 timeout profile、
-`OpOnly` mask 及 activation template；这些字段参与 ESI semantic hash 和配置
+生成的 inventory、JSON、C 和 Rust product slave 均携带精确主站发送/接收邮箱
+地址与容量；ESI inventory 还保留两侧 control byte。它们与 timeout profile、
+`OpOnly` mask 及 activation template 一起参与 ESI semantic hash 和配置
 SHA-256。配置 SHA-256 只依赖规范化产品语义和排序后的 ESI 语义内容，不依赖 JSON
 键顺序、XML 排版、输入/输出路径、主机或当前时间。同一语义输入必须生成
 逐字节相同的六个文件。
@@ -127,15 +131,20 @@ PREOP，Startup 进入 `AwaitingConfiguration` 后只向这些服务让出优先
 仅在所有必需控制器真实进入 `Complete` 后释放屏障，并复用已验证从站表逐站经过
 SAFEOP 到最终 SAFEOP/OP，不重新扫描或读取 SII。
 
-产品调用方也可为每个 slave position 提供一个 `ProductMailboxBinding`，再调用
-`build_pdo_configuration_batch::<JOBS, OPS>`。构建器会先校验绑定与产品从站一一
-覆盖，再按冻结的产品顺序生成全部 job；缺失、重复或未知 position、重复站地址、
-job/operation 容量不足及任一逐站计划错误都会在返回批次前失败。`PdoConfigBatch`
+产品默认调用 `build_generated_pdo_configuration_batch::<JOBS, OPS>()`，直接使用每个
+`ProductSlaveConfig` 中由 ESI 生成并校验的 `MailboxConfig`。原有 position-keyed
+`ProductMailboxBinding` 与 `build_pdo_configuration_batch` 继续作为测试、维护和显式
+替换路径。两条路径共用邮箱范围、重复站地址、job/operation 容量及逐站计划校验，
+任一失败都不会返回部分批次。`PdoConfigBatch`
 启动一次后复用同一 PDO/邮箱控制器，以 `base_generation + job_index` 自动推进；
 空计划有界跳过，故障保留当前 index/station，只有显式重启才替换计划和清除故障。
 `ScheduledPdoConfiguration::batch` 将当前 job 接入原有邮箱/DC/共享 RX 路径，报告
-公开批 phase、当前 index、总 job 数和当前站地址。调用方仍须提供静态
-`MailboxConfig`、SM/FMMU 与 DC 描述；本接口不发现这些硬件参数。
+公开批 phase、当前 index、总 job 数和当前站地址。
+
+核心另提供严格的 SII 标准邮箱五字固定头解析：只接受精确 word 起点/长度和已完成
+`SiiBlockReader`，检查 CoE 协议位，并把从站 receive/send 字段转换为主站
+send/receive `MailboxConfig`。当前尚未把该解析器接入 Startup 的在线 EEPROM 读取，
+也未把实时 SII 与生成 ESI 自动交叉验证；完整 SM/FMMU/DC 描述仍待发现和接入。
 
 ## 6. 构建报告接入
 
@@ -159,7 +168,7 @@ make build-report \
 跨周期请求所有权、重试/超时、精确回读、故障阻断和生命周期门控，但该软件
 证据还覆盖全从站 PREOP 屏障、真实服务 phase 释放、保留拓扑、合法 SAFEOP/OP
 顺序、逐转换 deadline 选择和 `OpOnly` 写入读回顺序；它不等于真实从站 PDO
-assignment/mapping、ESM timeout 或 SyncManager 响应证据，也不证明驱动
+assignment/mapping、ESM timeout、SII 邮箱头或 SyncManager 响应证据，也不证明驱动
 接受映射、完整周期 WKC、实际线缆时间、WCET、DMA/cache 正确性、制动/机械适配、
 STO/FSoE 或功能安全。生成示例和构建报告必须保持
 `passed: false`，直到独立的目标构建、HIL、周期测量和发布审核提供证据。

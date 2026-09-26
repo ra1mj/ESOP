@@ -1,7 +1,7 @@
 use crate::error::{GeneratorError, Result};
 use esop_ethercat_core::{
-    ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, MAX_ESC_SYNC_MANAGERS, SYNC_MANAGER_ENABLE_FLAG,
-    SYNC_MANAGER_OP_ONLY_FLAG,
+    ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, MAX_ESC_SYNC_MANAGERS, MailboxConfig,
+    SYNC_MANAGER_ENABLE_FLAG, SYNC_MANAGER_OP_ONLY_FLAG,
 };
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
@@ -23,6 +23,8 @@ pub struct EsiDevice {
     pub revision: u32,
     pub transition_timeouts: EsiTransitionTimeouts,
     pub sync_managers: Vec<EsiSyncManager>,
+    pub mailbox: Option<EsiMailbox>,
+    pub coe_supported: bool,
     pub rx_pdos: Vec<EsiPdo>,
     pub tx_pdos: Vec<EsiPdo>,
 }
@@ -51,6 +53,9 @@ impl Default for EsiTransitionTimeouts {
 pub struct EsiSyncManager {
     pub index: u8,
     pub direction: String,
+    pub start_address: Option<u16>,
+    pub default_size: Option<u16>,
+    pub control_byte: Option<u8>,
     pub activation: u8,
     pub op_only: bool,
 }
@@ -58,6 +63,39 @@ pub struct EsiSyncManager {
 impl EsiSyncManager {
     pub fn is_output(&self) -> bool {
         self.direction.eq_ignore_ascii_case("Outputs")
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.activation & SYNC_MANAGER_ENABLE_FLAG != 0
+    }
+
+    pub fn is_mailbox_out(&self) -> bool {
+        self.direction.eq_ignore_ascii_case("MBoxOut")
+    }
+
+    pub fn is_mailbox_in(&self) -> bool {
+        self.direction.eq_ignore_ascii_case("MBoxIn")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct EsiMailbox {
+    pub send_address: u16,
+    pub send_capacity: u16,
+    pub send_control_byte: u8,
+    pub receive_address: u16,
+    pub receive_capacity: u16,
+    pub receive_control_byte: u8,
+}
+
+impl EsiMailbox {
+    pub fn mailbox_config(self) -> MailboxConfig {
+        MailboxConfig::new(
+            self.send_address,
+            self.send_capacity,
+            self.receive_address,
+            self.receive_capacity,
+        )
     }
 }
 
@@ -85,12 +123,14 @@ struct DeviceBuilder {
     revision: Option<u32>,
     transition_timeouts: EsiTransitionTimeouts,
     sync_managers: Vec<EsiSyncManager>,
+    coe_supported: bool,
     rx_pdos: Vec<EsiPdo>,
     tx_pdos: Vec<EsiPdo>,
 }
 
 impl DeviceBuilder {
     fn finish(self) -> std::result::Result<EsiDevice, String> {
+        let mailbox = mailbox_from_sync_managers(&self.sync_managers)?;
         Ok(EsiDevice {
             type_name: self.type_name.ok_or("Device Type text is missing")?,
             name: self.name.ok_or("Device Name is missing")?,
@@ -100,6 +140,8 @@ impl DeviceBuilder {
             revision: self.revision.ok_or("Device Type RevisionNo is missing")?,
             transition_timeouts: self.transition_timeouts,
             sync_managers: self.sync_managers,
+            mailbox,
+            coe_supported: self.coe_supported,
             rx_pdos: self.rx_pdos,
             tx_pdos: self.tx_pdos,
         })
@@ -109,6 +151,9 @@ impl DeviceBuilder {
 struct SyncManagerBuilder {
     enabled: bool,
     op_only: bool,
+    start_address: Option<u16>,
+    default_size: Option<u16>,
+    control_byte: Option<u8>,
 }
 
 impl SyncManagerBuilder {
@@ -138,10 +183,69 @@ impl SyncManagerBuilder {
         Ok(EsiSyncManager {
             index: index as u8,
             direction: direction.to_owned(),
+            start_address: self.start_address,
+            default_size: self.default_size,
+            control_byte: self.control_byte,
             activation,
             op_only: self.op_only,
         })
     }
+}
+
+fn mailbox_from_sync_managers(
+    sync_managers: &[EsiSyncManager],
+) -> std::result::Result<Option<EsiMailbox>, String> {
+    let mut mailbox_out = None;
+    let mut mailbox_in = None;
+    for sync_manager in sync_managers {
+        let slot = if sync_manager.is_mailbox_out() {
+            &mut mailbox_out
+        } else if sync_manager.is_mailbox_in() {
+            &mut mailbox_in
+        } else {
+            continue;
+        };
+        if slot.replace(sync_manager).is_some() {
+            return Err(format!(
+                "duplicate {} SyncManager declarations",
+                sync_manager.direction
+            ));
+        }
+    }
+    let (mailbox_out, mailbox_in) = match (mailbox_out, mailbox_in) {
+        (None, None) => return Ok(None),
+        (Some(_), None) => return Err("MBoxOut is present but MBoxIn is missing".to_owned()),
+        (None, Some(_)) => return Err("MBoxIn is present but MBoxOut is missing".to_owned()),
+        (Some(mailbox_out), Some(mailbox_in)) => (mailbox_out, mailbox_in),
+    };
+    if !mailbox_out.is_enabled() || !mailbox_in.is_enabled() {
+        return Err("mailbox SyncManagers must be enabled".to_owned());
+    }
+    let mailbox = EsiMailbox {
+        send_address: mailbox_attribute(mailbox_out, mailbox_out.start_address, "StartAddress")?,
+        send_capacity: mailbox_attribute(mailbox_out, mailbox_out.default_size, "DefaultSize")?,
+        send_control_byte: mailbox_attribute(mailbox_out, mailbox_out.control_byte, "ControlByte")?,
+        receive_address: mailbox_attribute(mailbox_in, mailbox_in.start_address, "StartAddress")?,
+        receive_capacity: mailbox_attribute(mailbox_in, mailbox_in.default_size, "DefaultSize")?,
+        receive_control_byte: mailbox_attribute(
+            mailbox_in,
+            mailbox_in.control_byte,
+            "ControlByte",
+        )?,
+    };
+    mailbox
+        .mailbox_config()
+        .validate()
+        .map_err(|error| format!("invalid ESI mailbox configuration: {error:?}"))?;
+    Ok(Some(mailbox))
+}
+
+fn mailbox_attribute<T: Copy>(
+    sync_manager: &EsiSyncManager,
+    value: Option<T>,
+    name: &str,
+) -> std::result::Result<T, String> {
+    value.ok_or_else(|| format!("{} SyncManager is missing {name}", sync_manager.direction))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -301,7 +405,23 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                                 detail: format!("invalid Sm OpOnly: {detail}"),
                             })?
                             .unwrap_or(false);
-                        sync_manager = Some(SyncManagerBuilder { enabled, op_only });
+                        let start_address = optional_u16_attribute(&start, "StartAddress", path)?;
+                        let default_size = optional_u16_attribute(&start, "DefaultSize", path)?;
+                        let control_byte = optional_u8_attribute(&start, "ControlByte", path)?;
+                        sync_manager = Some(SyncManagerBuilder {
+                            enabled,
+                            op_only,
+                            start_address,
+                            default_size,
+                            control_byte,
+                        });
+                    }
+                    "CoE"
+                        if device.is_some()
+                            && pdo.is_none()
+                            && stack_ends_with(&stack, &["Mailbox", "CoE"]) =>
+                    {
+                        device.as_mut().expect("device exists").coe_supported = true;
                     }
                     "Entry" if pdo.is_some() => {
                         if entry.is_some() {
@@ -314,6 +434,13 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
             }
             Event::Empty(start) => {
                 let name = local_name(start.name().as_ref());
+                if name == "CoE"
+                    && pdo.is_none()
+                    && stack_ends_with(&stack, &["Device", "Mailbox"])
+                    && let Some(device) = device.as_mut()
+                {
+                    device.coe_supported = true;
+                }
                 if matches!(name.as_str(), "Device" | "RxPdo" | "TxPdo" | "Entry" | "Sm") {
                     return xml_error(path, format!("empty {name} elements are unsupported"));
                 }
@@ -599,6 +726,26 @@ fn optional_attribute(start: &BytesStart<'_>, name: &str, path: &Path) -> Result
     Ok(None)
 }
 
+fn optional_u16_attribute(start: &BytesStart<'_>, name: &str, path: &Path) -> Result<Option<u16>> {
+    optional_attribute(start, name, path)?
+        .map(|value| parse_u16(&value))
+        .transpose()
+        .map_err(|detail| GeneratorError::Xml {
+            path: path.to_owned(),
+            detail: format!("invalid Sm {name}: {detail}"),
+        })
+}
+
+fn optional_u8_attribute(start: &BytesStart<'_>, name: &str, path: &Path) -> Result<Option<u8>> {
+    optional_attribute(start, name, path)?
+        .map(|value| parse_u8(&value))
+        .transpose()
+        .map_err(|detail| GeneratorError::Xml {
+            path: path.to_owned(),
+            detail: format!("invalid Sm {name}: {detail}"),
+        })
+}
+
 fn parse_number(value: &str) -> std::result::Result<u64, String> {
     let value = value.trim();
     if let Some(digits) = value
@@ -724,8 +871,10 @@ mod tests {
     fn state_machine_timeouts_and_op_only_outputs_are_parsed() {
         let xml = r##"<EtherCATInfo><Vendor><Id>1</Id></Vendor><Descriptions><Devices><Device>
 <Type ProductCode="1" RevisionNo="1">Drive</Type><Name>Drive</Name>
-<Sm Enable="1">MBoxOut</Sm><Sm Enable="1">MBoxIn</Sm>
+<Sm StartAddress="#x1000" DefaultSize="64" ControlByte="#x26" Enable="1">MBoxOut</Sm>
+<Sm StartAddress="#x1100" DefaultSize="32" ControlByte="#x22" Enable="1">MBoxIn</Sm>
 <Sm Enable="true" OpOnly="1">Outputs</Sm><Sm Enable="1">Inputs</Sm>
+<Mailbox><CoE/></Mailbox>
 <StateMachine><Timeout><PreopTimeout>11</PreopTimeout><SafeopOpTimeout>22</SafeopOpTimeout>
 <BackToInitTimeout>33</BackToInitTimeout><BackToSafeopTimeout>44</BackToSafeopTimeout>
 </Timeout></StateMachine>
@@ -750,6 +899,89 @@ mod tests {
         assert!(device.sync_managers[2].is_output());
         assert!(device.sync_managers[2].op_only);
         assert_eq!(device.sync_managers[2].activation, 0x09);
+        assert!(device.coe_supported);
+        assert_eq!(
+            device.mailbox,
+            Some(EsiMailbox {
+                send_address: 0x1000,
+                send_capacity: 64,
+                send_control_byte: 0x26,
+                receive_address: 0x1100,
+                receive_capacity: 32,
+                receive_control_byte: 0x22,
+            })
+        );
+        assert_eq!(
+            device.mailbox.unwrap().mailbox_config(),
+            MailboxConfig::new(0x1000, 64, 0x1100, 32)
+        );
+    }
+
+    #[test]
+    fn incomplete_duplicate_disabled_or_overlapping_mailboxes_are_rejected() {
+        let base = r##"<EtherCATInfo><Vendor><Id>1</Id></Vendor><Descriptions><Devices><Device>
+<Type ProductCode="1" RevisionNo="1">Drive</Type><Name>Drive</Name>
+{mailboxes}<Mailbox><CoE/></Mailbox>
+<RxPdo Sm="2"><Index>#x1600</Index><Entry><Index>#x6040</Index><BitLen>16</BitLen>
+<DataType>UINT</DataType></Entry></RxPdo>
+</Device></Devices></Descriptions></EtherCATInfo>"##;
+
+        for (mailboxes, expected) in [
+            (
+                r##"<Sm StartAddress="#x1000" DefaultSize="32" ControlByte="#x26">MBoxOut</Sm>"##,
+                "MBoxIn is missing",
+            ),
+            (
+                r##"<Sm StartAddress="#x1000" DefaultSize="32" ControlByte="#x26">MBoxOut</Sm>
+<Sm StartAddress="#x1200" DefaultSize="32" ControlByte="#x26">MBoxOut</Sm>
+<Sm StartAddress="#x1100" DefaultSize="32" ControlByte="#x22">MBoxIn</Sm>"##,
+                "duplicate MBoxOut",
+            ),
+            (
+                r##"<Sm StartAddress="#x1000" DefaultSize="32" ControlByte="#x26" Enable="0">MBoxOut</Sm>
+<Sm StartAddress="#x1100" DefaultSize="32" ControlByte="#x22">MBoxIn</Sm>"##,
+                "must be enabled",
+            ),
+            (
+                r##"<Sm DefaultSize="32" ControlByte="#x26">MBoxOut</Sm>
+<Sm StartAddress="#x1100" DefaultSize="32" ControlByte="#x22">MBoxIn</Sm>"##,
+                "missing StartAddress",
+            ),
+            (
+                r##"<Sm StartAddress="#x1000" DefaultSize="32" ControlByte="#x26">MBoxOut</Sm>
+<Sm StartAddress="#x1010" DefaultSize="32" ControlByte="#x22">MBoxIn</Sm>"##,
+                "AddressRangeOverlap",
+            ),
+            (
+                r##"<Sm StartAddress="0" DefaultSize="32" ControlByte="#x26">MBoxOut</Sm>
+<Sm StartAddress="#x1100" DefaultSize="32" ControlByte="#x22">MBoxIn</Sm>"##,
+                "AddressZero(Send)",
+            ),
+            (
+                r##"<Sm StartAddress="#x1000" DefaultSize="5" ControlByte="#x26">MBoxOut</Sm>
+<Sm StartAddress="#x1100" DefaultSize="32" ControlByte="#x22">MBoxIn</Sm>"##,
+                "CapacityTooSmall(Send)",
+            ),
+            (
+                r##"<Sm StartAddress="#x1000" DefaultSize="129" ControlByte="#x26">MBoxOut</Sm>
+<Sm StartAddress="#x1100" DefaultSize="32" ControlByte="#x22">MBoxIn</Sm>"##,
+                "CapacityExceeded(Send)",
+            ),
+            (
+                r##"<Sm StartAddress="#xfff0" DefaultSize="32" ControlByte="#x26">MBoxOut</Sm>
+<Sm StartAddress="#x1100" DefaultSize="32" ControlByte="#x22">MBoxIn</Sm>"##,
+                "AddressRangeOverflow(Send)",
+            ),
+        ] {
+            let xml = base.replace("{mailboxes}", mailboxes);
+            assert!(
+                parse_text(Path::new("fixture.xml"), &xml)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected),
+                "expected {expected}"
+            );
+        }
     }
 
     #[test]

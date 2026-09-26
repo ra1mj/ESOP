@@ -36,6 +36,10 @@ pub fn StaticProductConfig::build_pdo_configuration_batch<
     const JOBS: usize,
     const OPS: usize,
 >(...) -> Result<PdoConfigBatchPlan<JOBS, OPS>, ProductPdoBatchError>;
+pub fn StaticProductConfig::build_generated_pdo_configuration_batch<
+    const JOBS: usize,
+    const OPS: usize,
+>() -> Result<PdoConfigBatchPlan<JOBS, OPS>, ProductPdoBatchError>;
 pub fn StaticProductConfig::startup_profiles(...) ->
     Result<[StartupSlaveProfile; SLAVES], ProductStartupError>;
 pub fn StaticProductConfig::start_startup(...) -> Result<(), ProductStartupError>;
@@ -73,12 +77,22 @@ schedule/frame plans, drive ownership, product policies, and selected-mode
 CiA 402 PDO maps.
 It returns the owning frozen result only after all checks pass.
 
-Each generated slave carries four ESM transition timeout classes and one
-bounded `OpOnlySyncManagerProfile`. ESI values are decimal milliseconds,
-converted to checked nanoseconds; missing values use the named
-`ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1`. Zero, malformed, overflowed, or
-non-output `OpOnly` declarations fail before publication. The profile and
-activation templates participate in semantic/configuration hashes.
+Each generated slave carries four ESM transition timeout classes, one validated
+CoE mailbox pair, and one bounded `OpOnlySyncManagerProfile`. ESI `MBoxOut`
+maps to master-send/slave-receive and `MBoxIn` maps to
+master-receive/slave-send. Both SyncManagers must be enabled and provide
+`StartAddress`, `DefaultSize`, and `ControlByte`, while the Device must declare
+`Mailbox/CoE`. Missing, duplicate, overlapping, overflowing, undersized, or
+oversized mailbox ranges fail before publication. Timeout values are decimal
+milliseconds converted to checked nanoseconds; missing values use the named
+`ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1`. Mailbox data, timeout profiles, and
+activation templates participate in ESI semantic and configuration hashes.
+
+The core SII parser accepts only the exact five-word standard mailbox header,
+checks CoE support and the same address/capacity rules, and performs the same
+slave-to-master direction conversion. It parses caller-owned words or a
+completed exact-range `SiiBlockReader`; live EEPROM acquisition and comparison
+with generated ESI data are separate activation work.
 
 `startup_profiles` validates timeout values, exact slave positions, OpOnly
 flags, and exclusive selected RxPDO ownership before returning fixed-array
@@ -93,24 +107,25 @@ generation, length, or timeout fault blocks Ready.
 Per-slave PDO startup-plan construction uses the same generated order and the
 shared 256-entry cfggen bound. For each SyncManager it clears assignment
 subindex zero, writes each mapping object, then publishes the ordered mapping
-indexes and final assignment count. Position-keyed `ProductMailboxBinding`
-values can then build one fixed-capacity batch covering every configured slave
-in frozen product order. The builder validates exact binding coverage,
-duplicate station addresses, job/operation capacities, and every per-slave
-plan before returning any batch.
+indexes and final assignment count. `build_generated_pdo_configuration_batch`
+builds one fixed-capacity batch from generated per-slave mailbox values in
+frozen product order. The position-keyed `ProductMailboxBinding` API remains an
+explicit override path. Both paths share mailbox range validation,
+duplicate-station checks, job/operation capacities, and every per-slave plan
+before returning any batch.
 
 `PdoConfigBatch` owns the existing `PdoConfigController` and
 `MailboxController`, derives one generation per job, and advances only after
 exact download/upload readback. Empty jobs are skipped with a loop bounded by
 the static job capacity; faults retain the exact job until explicit restart.
-The caller still owns batch start timing and supplies MailboxConfig values,
-while the production scheduler owns mailbox transport, retry policy, batch
+The caller still owns batch start timing, while the production scheduler owns
+mailbox transport, retry policy, batch
 advancement, and CONFIGURING lifecycle admission. The caller may opt
 `StartupConfig` into a PREOP barrier for PDO Configuration, Mapping, and/or DC
 Configuration. The scheduler releases Startup only after the whole PDO batch
 and other required controllers reach real Complete phases, then resumes the
-retained topology through SAFEOP/OP. MailboxConfig and mapping/DC descriptor
-discovery remain caller work.
+retained topology through SAFEOP/OP. Live SII/ESC cross-check and full
+mapping/DC descriptor discovery remain caller work.
 
 The configuration SHA-256 covers normalized product semantics and a sorted
 label-to-semantic-ESI-hash map. It excludes timestamps, host paths, compiler,
@@ -139,6 +154,7 @@ datagrams, FCS, and inter-packet gap respectively.
 | Absolute, parent-traversing, or symlink-escaping ESI path | Reject as invalid product input. |
 | Ambiguous ESI identity/PDO, duplicate object, wrong direction/width | Reject with identity/PDO/CiA 402 context. |
 | Zero/malformed/overflowing ESM timeout or non-output OpOnly SM | Reject before staging or hash publication. |
+| Missing CoE, partial/duplicate/disabled ESI mailbox SM, or invalid mailbox range | Reject before staging or hash publication. |
 | Duplicate Domain/slave/axis identity or overlapping range | Reject before registry mutation/publication. |
 | Capacity, schedule, raw policy, or ProcBuf layout overflow | Reject with the owning contract error. |
 | Generation failure with an existing output | Preserve the previous six-file directory byte-for-byte. |
@@ -147,7 +163,7 @@ datagrams, FCS, and inter-packet gap respectively.
 | Invalid/misaligned startup profile or OpOnly without exclusive RxPDO | Reject before Startup mutation or control emission. |
 | Runtime Domain/axis evidence or capacity mismatch | Reject with typed owning-contract evidence and return no partial configuration. |
 | PDO plan owner/SM/group/capacity mismatch | Reject before returning any startup plan. |
-| Missing/duplicate/unknown product mailbox binding | Reject before returning any batch. |
+| Invalid generated mailbox or invalid/missing/duplicate/unknown override binding | Reject before returning any batch. |
 | Duplicate batch station, insufficient jobs/operations, or generation overflow | Reject before replacing or starting a batch. |
 | PDO upload readback length or byte mismatch | Latch controller fault and keep the current operation index. |
 | PDO mailbox terminal failure | Latch the exact typed transport fault and keep the current operation index. |
@@ -185,16 +201,20 @@ datagrams, FCS, and inter-packet gap respectively.
 - Build exact per-slave drive/IO PDO plans from the checked-in generated module;
   cover assignment-disable ordering, mapping grouping, all typed rejection
   paths, exact/segmented readback, mismatches, stale actions and restart.
-- Build the checked-in drive/drive/IO batch from position-keyed mailbox
-  bindings; compare every station/config/plan with the individual plans and
-  cover missing, duplicate, unknown, station-duplicate and capacity failures.
+- Build the checked-in drive/drive/IO batch from generated mailbox data;
+  compare every station/config/plan with the individual plans, prove the
+  explicit override path, and cover invalid generated config, missing,
+  duplicate, unknown, station-duplicate and capacity failures.
+- Prove mailbox address/capacity changes alter ESI semantic and configuration
+  hashes while XML formatting-only changes remain byte-identical. Cover exact
+  SII fixed-header direction conversion and all shape/protocol/range failures.
 - Route a generated-style PDO action through `ScheduledPdoConfiguration`, the
   existing mailbox/DC/shared-RX path, exact upload readback, request rebuild,
   cross-generation waiting, timeout, lifecycle gating, fault blocking and
   explicit restart. Cover the opt-in PREOP Startup barrier, automatic release
   from actual Complete phases, retained topology and legal SAFEOP/OP
   progression. Cover two-job automatic advancement and whole-batch release;
-  keep MailboxConfig discovery and physical HIL outside this software claim.
+  keep live SII/ESC cross-check and physical HIL outside this software claim.
 - Validate both default and product-input build reports, including forged pass
   rejection and exact wire metric projection.
 - Run `make ci`, `make bpf`, and `make test-zenoh` before delivery.

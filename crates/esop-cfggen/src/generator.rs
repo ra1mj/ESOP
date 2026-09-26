@@ -1,5 +1,7 @@
 use crate::error::{GeneratorError, Result};
-use crate::esi::{self, EsiCatalog, EsiDevice, EsiEntry, EsiPdo, EsiTransitionTimeouts};
+use crate::esi::{
+    self, EsiCatalog, EsiDevice, EsiEntry, EsiMailbox, EsiPdo, EsiTransitionTimeouts,
+};
 use crate::model::{
     AxisMode, AxisPolicyManifest, DomainManifest, HexU16, HexU32, ProductManifest, SlaveKind,
     SlaveManifest,
@@ -129,6 +131,7 @@ struct GeneratedSlave {
     esi_type_name: String,
     esi_device_name: String,
     transition_timeouts: EsiTransitionTimeouts,
+    mailbox: EsiMailbox,
     op_only_outputs: Vec<GeneratedOpOnlySyncManager>,
     rx_pdos: Vec<HexU16>,
     tx_pdos: Vec<HexU16>,
@@ -164,6 +167,7 @@ struct CycleMetrics {
 struct ResolvedSlave {
     manifest: SlaveManifest,
     device: EsiDevice,
+    mailbox: EsiMailbox,
     rx_pdos: Vec<EsiPdo>,
     tx_pdos: Vec<EsiPdo>,
     semantic_sha256: String,
@@ -286,6 +290,7 @@ fn build_artifacts(input: &Path) -> Result<GeneratedArtifacts> {
             esi_type_name: slave.device.type_name.clone(),
             esi_device_name: slave.device.name.clone(),
             transition_timeouts: slave.device.transition_timeouts,
+            mailbox: slave.mailbox,
             op_only_outputs: slave
                 .device
                 .sync_managers
@@ -586,6 +591,7 @@ fn resolve_slaves(base: &Path, slaves: &[SlaveManifest]) -> Result<Vec<ResolvedS
         validate_selected_entries(&manifest.name, GeneratedDirection::Rx, &rx_pdos)?;
         validate_selected_entries(&manifest.name, GeneratedDirection::Tx, &tx_pdos)?;
         validate_op_only_outputs(&manifest.name, &device, &rx_pdos, &tx_pdos)?;
+        let mailbox = validate_product_mailbox(&manifest.name, &device)?;
         let semantic_sha256 = sha256_json(&json!({
             "vendor_id": catalog.vendor_id,
             "device": device,
@@ -603,12 +609,26 @@ fn resolve_slaves(base: &Path, slaves: &[SlaveManifest]) -> Result<Vec<ResolvedS
         resolved.push(ResolvedSlave {
             manifest: manifest.clone(),
             device,
+            mailbox,
             rx_pdos,
             tx_pdos,
             semantic_sha256,
         });
     }
     Ok(resolved)
+}
+
+fn validate_product_mailbox(slave: &str, device: &EsiDevice) -> Result<EsiMailbox> {
+    if !device.coe_supported {
+        return Err(GeneratorError::Invalid(format!(
+            "slave {slave} ESI does not declare Mailbox/CoE support"
+        )));
+    }
+    device.mailbox.ok_or_else(|| {
+        GeneratorError::Invalid(format!(
+            "slave {slave} ESI does not provide a complete MBoxOut/MBoxIn pair"
+        ))
+    })
 }
 
 fn validate_op_only_outputs(
@@ -1264,7 +1284,7 @@ fn render_header(
     let mut header = String::from(
         "#ifndef ESOP_PRODUCT_CONFIG_H\n#define ESOP_PRODUCT_CONFIG_H\n\n#include <stdint.h>\n\n",
     );
-    header.push_str("typedef struct { const char *name; uint16_t position; uint16_t station_address; uint8_t domain_id; uint8_t kind; uint32_t vendor_id; uint32_t product_code; uint32_t revision; uint32_t serial; uint8_t has_serial; } esop_slave_config_t;\n");
+    header.push_str("typedef struct { const char *name; uint16_t position; uint16_t station_address; uint8_t domain_id; uint8_t kind; uint32_t vendor_id; uint32_t product_code; uint32_t revision; uint32_t serial; uint8_t has_serial; uint16_t mailbox_send_address; uint16_t mailbox_send_capacity; uint16_t mailbox_receive_address; uint16_t mailbox_receive_capacity; } esop_slave_config_t;\n");
     header.push_str("typedef struct { const char *name; uint8_t id; uint32_t logical_address; uint32_t image_offset; uint32_t image_bytes; uint32_t output_bytes; uint32_t input_bytes; uint32_t period_ticks; uint32_t phase_ticks; uint16_t expected_wkc; } esop_domain_config_t;\n");
     header.push_str("typedef struct { uint8_t domain_id; uint16_t slave_position; uint16_t assignment_index; uint8_t sync_manager; uint16_t object_index; uint8_t subindex; uint8_t direction; uint32_t bit_offset; uint8_t bit_length; uint8_t is_signed; } esop_pdo_config_t;\n");
     header.push_str("typedef struct { uint8_t domain_id; uint8_t command; uint8_t index; uint32_t logical_address; uint32_t image_offset; uint16_t payload_len; uint16_t expected_wkc; uint8_t input; } esop_datagram_config_t;\n");
@@ -1296,7 +1316,7 @@ fn render_header(
     } else {
         for slave in slaves {
             header.push_str(&format!(
-                "  {{{}, {}u, UINT16_C(0x{:04x}), {}u, {}u, UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), {}u}},\n",
+                "  {{{}, {}u, UINT16_C(0x{:04x}), {}u, {}u, UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), {}u, UINT16_C(0x{:04x}), UINT16_C({}), UINT16_C(0x{:04x}), UINT16_C({})}},\n",
                 c_string(&slave.name),
                 slave.position,
                 slave.station_address.0,
@@ -1307,6 +1327,10 @@ fn render_header(
                 slave.revision.0,
                 slave.serial.map_or(0, |value| value.0),
                 u8::from(slave.serial.is_some()),
+                slave.mailbox.send_address,
+                slave.mailbox.send_capacity,
+                slave.mailbox.receive_address,
+                slave.mailbox.receive_capacity,
             ));
         }
     }
@@ -1393,7 +1417,7 @@ fn render_rust_module(
         "// @generated by esop-cfggen; do not edit.\n\
 use esop_product_config::{\n\
     AlTransitionTimeouts, Cia402AxisCommandPolicy, Command, DomainConfig, DomainDatagramSpec,\n\
-    OpOnlySyncManagerProfile, OperatingMode, PdoDirection, PdoRegistrationRequest,\n\
+    MailboxConfig, OpOnlySyncManagerProfile, OperatingMode, PdoDirection, PdoRegistrationRequest,\n\
     ProcBufDimensions, ProcBufLayoutDescriptor, ProductAxisConfig, ProductDatagramConfig,\n\
     ProductDomainConfig, ProductMetadata, ProductPdoConfig, ProductSlaveConfig,\n\
     ProductSlaveKind, SlaveIdentity, StaticProductConfig,\n\
@@ -1496,7 +1520,7 @@ use esop_product_config::{\n\
             .collect::<Vec<_>>()
             .join(", ");
         output.push_str(&format!(
-            "        ProductSlaveConfig {{ name: {}, position: {}, station_address: 0x{:04x}, domain_id: {}, kind: ProductSlaveKind::{}, identity: SlaveIdentity {{ vendor_id: 0x{:08x}, product_code: 0x{:08x}, revision: 0x{:08x}, serial: 0x{:08x} }}, transition_timeouts: AlTransitionTimeouts::new({}, {}, {}, {}), op_only_outputs: OpOnlySyncManagerProfile::from_raw(0x{:04x}, [{}]) }},\n",
+            "        ProductSlaveConfig {{ name: {}, position: {}, station_address: 0x{:04x}, domain_id: {}, kind: ProductSlaveKind::{}, identity: SlaveIdentity {{ vendor_id: 0x{:08x}, product_code: 0x{:08x}, revision: 0x{:08x}, serial: 0x{:08x} }}, transition_timeouts: AlTransitionTimeouts::new({}, {}, {}, {}), mailbox_config: MailboxConfig::new(0x{:04x}, {}, 0x{:04x}, {}), op_only_outputs: OpOnlySyncManagerProfile::from_raw(0x{:04x}, [{}]) }},\n",
             rust_string(&slave.name),
             slave.position,
             slave.station_address.0,
@@ -1510,6 +1534,10 @@ use esop_product_config::{\n\
             slave.transition_timeouts.safeop_to_op_ns,
             slave.transition_timeouts.back_to_init_ns,
             slave.transition_timeouts.back_to_safeop_ns,
+            slave.mailbox.send_address,
+            slave.mailbox.send_capacity,
+            slave.mailbox.receive_address,
+            slave.mailbox.receive_capacity,
             op_only_mask,
             activation,
         ));

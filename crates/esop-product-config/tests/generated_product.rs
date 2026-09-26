@@ -1,9 +1,9 @@
 use esop_product_config::{
     ActivatedProduct, AlTransitionTimeouts, Cia402AxisCommandPolicyError, DomainRegistryError,
-    ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, FramePlanSetError, MailboxConfig, OperatingMode,
-    PdoConfigBatchPlanError, PdoConfigPlanError, PdoSdoWrite, ProcBuf, ProcBufHeaderError,
-    ProductActivationError, ProductMailboxBinding, ProductPdoBatchError, ProductPdoPlanError,
-    ProductSlaveKind, SlaveRecord,
+    ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, FramePlanSetError, MailboxConfig, MailboxConfigError,
+    MailboxDirection, OperatingMode, PdoConfigBatchPlanError, PdoConfigPlanError, PdoSdoWrite,
+    ProcBuf, ProcBufHeaderError, ProductActivationError, ProductMailboxBinding,
+    ProductPdoBatchError, ProductPdoPlanError, ProductSlaveKind, SlaveRecord,
 };
 
 mod generated {
@@ -51,9 +51,9 @@ fn checked_in_product_activates_exact_generated_evidence() {
     assert_eq!(
         active.metadata().config_sha256,
         [
-            0x66, 0x07, 0xd7, 0x72, 0x24, 0x26, 0x3e, 0x1d, 0xe7, 0xb8, 0xc2, 0x5b, 0xc2, 0x15,
-            0x39, 0x6c, 0x13, 0xfd, 0x15, 0x93, 0x48, 0xf0, 0x32, 0x93, 0xbc, 0xe7, 0x69, 0x0a,
-            0xe2, 0xe0, 0xb1, 0x25,
+            0x71, 0x8e, 0xe3, 0x3a, 0xfe, 0xc4, 0x75, 0xdd, 0x94, 0xc4, 0x55, 0xf4, 0x71, 0xd7,
+            0x63, 0xf7, 0x39, 0x9b, 0x5b, 0x8e, 0xe0, 0xf7, 0x47, 0x09, 0x59, 0x43, 0x99, 0x63,
+            0x17, 0x2d, 0x9f, 0x50,
         ]
     );
 
@@ -143,25 +143,23 @@ fn checked_in_product_builds_exact_per_slave_pdo_startup_plans() {
 
 #[test]
 fn checked_in_product_builds_one_exact_ordered_pdo_batch() {
-    let left_mailbox = MailboxConfig::new(0x1000, 32, 0x1100, 32);
-    let right_mailbox = MailboxConfig::new(0x1200, 48, 0x1300, 48);
-    let io_mailbox = MailboxConfig::new(0x1400, 64, 0x1500, 64);
-    let bindings = [
-        ProductMailboxBinding::new(2, io_mailbox),
-        ProductMailboxBinding::new(0, left_mailbox),
-        ProductMailboxBinding::new(1, right_mailbox),
-    ];
     let batch = generated::PRODUCT_CONFIG
-        .build_pdo_configuration_batch::<3, 17>(&bindings)
+        .build_generated_pdo_configuration_batch::<3, 17>()
         .unwrap();
     let jobs = batch.jobs();
     assert_eq!(jobs.len(), 3);
     assert_eq!(jobs[0].station_address(), 0x1001);
     assert_eq!(jobs[1].station_address(), 0x1002);
     assert_eq!(jobs[2].station_address(), 0x1003);
-    assert_eq!(jobs[0].mailbox_config(), left_mailbox);
-    assert_eq!(jobs[1].mailbox_config(), right_mailbox);
-    assert_eq!(jobs[2].mailbox_config(), io_mailbox);
+    assert_eq!(
+        jobs[0].mailbox_config(),
+        MailboxConfig::new(0x1000, 64, 0x1100, 64)
+    );
+    assert_eq!(jobs[1].mailbox_config(), jobs[0].mailbox_config());
+    assert_eq!(
+        jobs[2].mailbox_config(),
+        MailboxConfig::new(0x1200, 32, 0x1300, 32)
+    );
 
     let left = generated::PRODUCT_CONFIG
         .build_pdo_startup_plan::<17>(0)
@@ -175,6 +173,22 @@ fn checked_in_product_builds_one_exact_ordered_pdo_batch() {
     assert_eq!(jobs[0].plan().writes(), left.plan().writes());
     assert_eq!(jobs[1].plan().writes(), right.plan().writes());
     assert_eq!(jobs[2].plan().writes(), io.plan().writes());
+
+    let override_mailbox = MailboxConfig::new(0x2000, 48, 0x2100, 48);
+    let bindings = [
+        ProductMailboxBinding::new(2, override_mailbox),
+        ProductMailboxBinding::new(0, override_mailbox),
+        ProductMailboxBinding::new(1, override_mailbox),
+    ];
+    let overridden = generated::PRODUCT_CONFIG
+        .build_pdo_configuration_batch::<3, 17>(&bindings)
+        .unwrap();
+    assert!(
+        overridden
+            .jobs()
+            .iter()
+            .all(|job| job.mailbox_config() == override_mailbox)
+    );
 }
 
 #[test]
@@ -228,6 +242,16 @@ fn product_pdo_batch_rejects_binding_and_capacity_mismatches_transactionally() {
                 station_address: 0x1001,
             }
         ))
+    );
+
+    let mut invalid_generated_mailbox = generated::PRODUCT_CONFIG;
+    invalid_generated_mailbox.slaves[0].mailbox_config = MailboxConfig::new(0, 32, 0x1100, 32);
+    assert_eq!(
+        invalid_generated_mailbox.build_generated_pdo_configuration_batch::<3, 17>(),
+        Err(ProductPdoBatchError::InvalidMailboxConfig {
+            position: 0,
+            error: MailboxConfigError::AddressZero(MailboxDirection::Send),
+        })
     );
 }
 

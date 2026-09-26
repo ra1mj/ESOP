@@ -83,6 +83,32 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert_eq!(build_input["process_data"]["copy_bytes_per_cycle"], 20);
     assert_eq!(build_input["process_data"]["wire_bytes_per_cycle"], 180);
 
+    let inventory: Value =
+        serde_json::from_slice(&fs::read(first.join("device_inventory.json")).unwrap()).unwrap();
+    assert_eq!(inventory["devices"][0]["mailbox"]["send_address"], 0x1000);
+    assert_eq!(inventory["devices"][0]["mailbox"]["send_capacity"], 64);
+    assert_eq!(
+        inventory["devices"][0]["mailbox"]["send_control_byte"],
+        0x26
+    );
+    assert_eq!(
+        inventory["devices"][2]["mailbox"]["receive_address"],
+        0x1300
+    );
+
+    let product: Value =
+        serde_json::from_slice(&fs::read(first.join("product_config.json")).unwrap()).unwrap();
+    assert_eq!(product["slaves"][0]["mailbox"]["receive_capacity"], 64);
+    assert_eq!(product["slaves"][2]["mailbox"]["send_capacity"], 32);
+
+    let header = fs::read_to_string(first.join("esop_product_config.h")).unwrap();
+    assert!(header.contains("uint16_t mailbox_send_address"));
+    assert!(header.contains("UINT16_C(0x1000), UINT16_C(64), UINT16_C(0x1100), UINT16_C(64)"));
+
+    let rust = fs::read_to_string(first.join("esop_product_config.rs")).unwrap();
+    assert!(rust.contains("MailboxConfig::new(0x1000, 64, 0x1100, 64)"));
+    assert!(rust.contains("MailboxConfig::new(0x1200, 32, 0x1300, 32)"));
+
     fixture.edit_product(|_| {});
     let xml = fs::read_to_string(&fixture.esi).unwrap();
     let compact = xml
@@ -95,6 +121,59 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
 
     assert_eq!(first_summary.config_sha256, second_summary.config_sha256);
     assert_eq!(artifact_bytes(&first), artifact_bytes(&second));
+}
+
+#[test]
+fn mailbox_metadata_changes_esi_semantic_and_configuration_hashes() {
+    fn hashes(fixture: &Fixture, name: &str) -> (String, String) {
+        let output = fixture.output(name);
+        let summary = generate(&fixture.product, &output).unwrap();
+        let inventory: Value =
+            serde_json::from_slice(&fs::read(output.join("device_inventory.json")).unwrap())
+                .unwrap();
+        (
+            summary.config_sha256,
+            inventory["devices"][0]["esi_semantic_sha256"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        )
+    }
+
+    let fixture = Fixture::new();
+    let baseline = hashes(&fixture, "baseline-address");
+    fixture.edit_esi(|xml| xml.replacen("StartAddress=\"#x1000\"", "StartAddress=\"#x1010\"", 1));
+    let changed = hashes(&fixture, "changed-address");
+    assert_ne!(baseline.0, changed.0);
+    assert_ne!(baseline.1, changed.1);
+
+    let fixture = Fixture::new();
+    let baseline = hashes(&fixture, "baseline-capacity");
+    fixture.edit_esi(|xml| xml.replacen("DefaultSize=\"64\"", "DefaultSize=\"48\"", 1));
+    let changed = hashes(&fixture, "changed-capacity");
+    assert_ne!(baseline.0, changed.0);
+    assert_ne!(baseline.1, changed.1);
+}
+
+#[test]
+fn missing_coe_or_incomplete_mailbox_fails_before_publication() {
+    let fixture = Fixture::new();
+    fixture.edit_esi(|xml| xml.replacen("<Mailbox><CoE/></Mailbox>", "", 1));
+    assert!(
+        generate(&fixture.product, &fixture.output("missing-coe"))
+            .unwrap_err()
+            .to_string()
+            .contains("does not declare Mailbox/CoE support")
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_esi(|xml| xml.replacen(" StartAddress=\"#x1000\"", "", 1));
+    assert!(
+        generate(&fixture.product, &fixture.output("incomplete-mailbox"))
+            .unwrap_err()
+            .to_string()
+            .contains("MBoxOut SyncManager is missing StartAddress")
+    );
 }
 
 #[test]

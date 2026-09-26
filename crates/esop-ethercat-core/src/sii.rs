@@ -5,6 +5,7 @@
 //! the PDO cycle.
 
 use crate::control::{ControlError, ControlRequestPool, RegisterOperation, RequestHandle};
+use crate::mailbox::{MailboxConfig, MailboxConfigError};
 use crate::registers::{ESC_EEPROM_ADDRESS, ESC_EEPROM_CONTROL, ESC_EEPROM_DATA, fixed_address};
 use crate::slave::SlaveIdentity;
 
@@ -15,6 +16,18 @@ pub const SII_VENDOR_ID_WORD: u16 = 0x0008;
 pub const SII_PRODUCT_CODE_WORD: u16 = 0x000A;
 pub const SII_REVISION_WORD: u16 = 0x000C;
 pub const SII_SERIAL_WORD: u16 = 0x000E;
+pub const SII_STANDARD_RECEIVE_MAILBOX_OFFSET_WORD: u16 = 0x001C;
+pub const SII_STANDARD_RECEIVE_MAILBOX_SIZE_WORD: u16 = 0x001D;
+pub const SII_STANDARD_SEND_MAILBOX_OFFSET_WORD: u16 = 0x001E;
+pub const SII_STANDARD_SEND_MAILBOX_SIZE_WORD: u16 = 0x001F;
+pub const SII_MAILBOX_PROTOCOLS_WORD: u16 = 0x0020;
+pub const SII_STANDARD_MAILBOX_WORD_COUNT: usize = 5;
+pub const SII_MAILBOX_PROTOCOL_AOE: u16 = 1 << 0;
+pub const SII_MAILBOX_PROTOCOL_EOE: u16 = 1 << 1;
+pub const SII_MAILBOX_PROTOCOL_COE: u16 = 1 << 2;
+pub const SII_MAILBOX_PROTOCOL_FOE: u16 = 1 << 3;
+pub const SII_MAILBOX_PROTOCOL_SOE: u16 = 1 << 4;
+pub const SII_MAILBOX_PROTOCOL_VOE: u16 = 1 << 5;
 pub const SII_CATEGORY_STRINGS: u16 = 0x000A;
 pub const SII_CATEGORY_GENERAL: u16 = 0x001E;
 pub const SII_CATEGORY_FMMU: u16 = 0x0028;
@@ -72,6 +85,92 @@ pub enum SiiCategoryError {
     InvalidPdoHeader,
     InvalidPdoEntry,
     EntryOutOfBounds,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SiiMailboxError {
+    Block(SiiBlockError),
+    UnexpectedStartWord { expected: u16, actual: u16 },
+    UnexpectedWordCount { expected: usize, actual: usize },
+    CoeUnsupported,
+    Config(MailboxConfigError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SiiMailboxProtocols(u16);
+
+impl SiiMailboxProtocols {
+    pub const fn from_bits(bits: u16) -> Self {
+        Self(bits)
+    }
+
+    pub const fn bits(self) -> u16 {
+        self.0
+    }
+
+    pub const fn supports(self, protocol: u16) -> bool {
+        self.0 & protocol != 0
+    }
+
+    pub const fn supports_coe(self) -> bool {
+        self.supports(SII_MAILBOX_PROTOCOL_COE)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SiiStandardMailbox {
+    pub slave_receive_address: u16,
+    pub slave_receive_capacity: u16,
+    pub slave_send_address: u16,
+    pub slave_send_capacity: u16,
+    pub protocols: SiiMailboxProtocols,
+}
+
+impl SiiStandardMailbox {
+    pub fn from_words(start_word: u16, words: &[u16]) -> Result<Self, SiiMailboxError> {
+        if start_word != SII_STANDARD_RECEIVE_MAILBOX_OFFSET_WORD {
+            return Err(SiiMailboxError::UnexpectedStartWord {
+                expected: SII_STANDARD_RECEIVE_MAILBOX_OFFSET_WORD,
+                actual: start_word,
+            });
+        }
+        if words.len() != SII_STANDARD_MAILBOX_WORD_COUNT {
+            return Err(SiiMailboxError::UnexpectedWordCount {
+                expected: SII_STANDARD_MAILBOX_WORD_COUNT,
+                actual: words.len(),
+            });
+        }
+        Ok(Self {
+            slave_receive_address: words[0],
+            slave_receive_capacity: words[1],
+            slave_send_address: words[2],
+            slave_send_capacity: words[3],
+            protocols: SiiMailboxProtocols::from_bits(words[4]),
+        })
+    }
+
+    pub fn from_completed_block<const WORDS: usize>(
+        reader: &SiiBlockReader<WORDS>,
+    ) -> Result<Self, SiiMailboxError> {
+        let words = reader
+            .words()
+            .ok_or(SiiMailboxError::Block(SiiBlockError::NotComplete))?;
+        Self::from_words(reader.start_word(), words)
+    }
+
+    pub fn coe_mailbox_config(self) -> Result<MailboxConfig, SiiMailboxError> {
+        if !self.protocols.supports_coe() {
+            return Err(SiiMailboxError::CoeUnsupported);
+        }
+        let config = MailboxConfig::new(
+            self.slave_receive_address,
+            self.slave_receive_capacity,
+            self.slave_send_address,
+            self.slave_send_capacity,
+        );
+        config.validate().map_err(SiiMailboxError::Config)?;
+        Ok(config)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -430,6 +529,10 @@ impl<const WORDS: usize> SiiBlockReader<WORDS> {
 
     pub const fn word_count(&self) -> usize {
         self.word_count
+    }
+
+    pub const fn start_word(&self) -> u16 {
+        self.start_word
     }
 
     pub const fn last_error(&self) -> Option<SiiBlockError> {
@@ -999,6 +1102,141 @@ mod tests {
                 now_ns + 9,
             )
             .unwrap();
+    }
+
+    fn complete_block<const WORDS: usize>(reader: &mut SiiBlockReader<WORDS>, values: &[u16]) {
+        for (index, value) in values.iter().copied().enumerate() {
+            let now_ns = 1 + index as u64 * 10;
+            let address = reader.next_action(now_ns).unwrap().unwrap();
+            reader
+                .accept(address.token, address.generation, &[], 1, now_ns + 1)
+                .unwrap();
+            let issue = reader.next_action(now_ns + 2).unwrap().unwrap();
+            reader
+                .accept(issue.token, issue.generation, &[], 1, now_ns + 3)
+                .unwrap();
+            let poll = reader.next_action(now_ns + 4).unwrap().unwrap();
+            reader
+                .accept(
+                    poll.token,
+                    poll.generation,
+                    &0u16.to_le_bytes(),
+                    1,
+                    now_ns + 5,
+                )
+                .unwrap();
+            let data = reader.next_action(now_ns + 6).unwrap().unwrap();
+            reader
+                .accept(
+                    data.token,
+                    data.generation,
+                    &value.to_le_bytes(),
+                    1,
+                    now_ns + 7,
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn standard_mailbox_words_map_slave_directions_to_master_config() {
+        let descriptor = SiiStandardMailbox::from_words(
+            SII_STANDARD_RECEIVE_MAILBOX_OFFSET_WORD,
+            &[
+                0x1000,
+                32,
+                0x1100,
+                64,
+                SII_MAILBOX_PROTOCOL_COE | SII_MAILBOX_PROTOCOL_FOE,
+            ],
+        )
+        .unwrap();
+        assert!(descriptor.protocols.supports_coe());
+        assert!(descriptor.protocols.supports(SII_MAILBOX_PROTOCOL_FOE));
+        assert_eq!(
+            descriptor.coe_mailbox_config(),
+            Ok(MailboxConfig::new(0x1000, 32, 0x1100, 64))
+        );
+    }
+
+    #[test]
+    fn standard_mailbox_parser_rejects_shape_protocol_and_ranges() {
+        assert_eq!(
+            SiiStandardMailbox::from_words(
+                SII_STANDARD_RECEIVE_MAILBOX_OFFSET_WORD + 1,
+                &[0x1000, 32, 0x1100, 32, SII_MAILBOX_PROTOCOL_COE],
+            ),
+            Err(SiiMailboxError::UnexpectedStartWord {
+                expected: SII_STANDARD_RECEIVE_MAILBOX_OFFSET_WORD,
+                actual: SII_STANDARD_RECEIVE_MAILBOX_OFFSET_WORD + 1,
+            })
+        );
+        assert_eq!(
+            SiiStandardMailbox::from_words(
+                SII_STANDARD_RECEIVE_MAILBOX_OFFSET_WORD,
+                &[0x1000, 32, 0x1100, 32],
+            ),
+            Err(SiiMailboxError::UnexpectedWordCount {
+                expected: SII_STANDARD_MAILBOX_WORD_COUNT,
+                actual: 4,
+            })
+        );
+
+        let no_coe = SiiStandardMailbox::from_words(
+            SII_STANDARD_RECEIVE_MAILBOX_OFFSET_WORD,
+            &[0x1000, 32, 0x1100, 32, SII_MAILBOX_PROTOCOL_FOE],
+        )
+        .unwrap();
+        assert_eq!(
+            no_coe.coe_mailbox_config(),
+            Err(SiiMailboxError::CoeUnsupported)
+        );
+
+        let overlapping = SiiStandardMailbox::from_words(
+            SII_STANDARD_RECEIVE_MAILBOX_OFFSET_WORD,
+            &[0x1000, 32, 0x1010, 32, SII_MAILBOX_PROTOCOL_COE],
+        )
+        .unwrap();
+        assert_eq!(
+            overlapping.coe_mailbox_config(),
+            Err(SiiMailboxError::Config(
+                MailboxConfigError::AddressRangeOverlap
+            ))
+        );
+    }
+
+    #[test]
+    fn standard_mailbox_parses_only_an_exact_completed_block() {
+        let mut reader = SiiBlockReader::<SII_STANDARD_MAILBOX_WORD_COUNT>::new();
+        assert_eq!(
+            SiiStandardMailbox::from_completed_block(&reader),
+            Err(SiiMailboxError::Block(SiiBlockError::NotComplete))
+        );
+        reader
+            .start(SiiBlockRequest {
+                station_address: 0x1000,
+                start_word: SII_STANDARD_RECEIVE_MAILBOX_OFFSET_WORD,
+                word_count: SII_STANDARD_MAILBOX_WORD_COUNT,
+                generation: 7,
+                now_ns: 0,
+                timeout_ns: 1_000,
+                request_timeout_ns: 100,
+            })
+            .unwrap();
+        complete_block(
+            &mut reader,
+            &[0x1000, 32, 0x1100, 64, SII_MAILBOX_PROTOCOL_COE],
+        );
+        assert_eq!(
+            reader.start_word(),
+            SII_STANDARD_RECEIVE_MAILBOX_OFFSET_WORD
+        );
+        assert_eq!(
+            SiiStandardMailbox::from_completed_block(&reader)
+                .unwrap()
+                .coe_mailbox_config(),
+            Ok(MailboxConfig::new(0x1000, 32, 0x1100, 64))
+        );
     }
 
     #[test]

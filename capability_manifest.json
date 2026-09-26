@@ -17,7 +17,7 @@
     {
       "id": "product_config_generator",
       "status": "implemented",
-      "scope": "Deterministic host-only esop.product.v1 and bounded ESI-subset compilation into static C/Rust, normalized Domain/PDO/Frame Plan, per-slave ESM timeout and OpOnly profiles, device inventory, exact ProcBuf v6 layout and fail-closed build input",
+      "scope": "Deterministic host-only esop.product.v1 and bounded ESI-subset compilation into static C/Rust, normalized Domain/PDO/Frame Plan, per-slave CoE mailbox, ESM timeout and OpOnly profiles, device inventory, exact ProcBuf v6 layout and fail-closed build input",
       "evidence": [
         "crates/esop-cfggen/src/lib.rs",
         "crates/esop-cfggen/src/generator.rs",
@@ -26,7 +26,24 @@
         "scripts/tests/test_robot_build_report.py",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "The supported ESI subset is byte-aligned and explicit; modular devices, bit-packed PDOs, vendor scaling/quirks, artifact signing/distribution, MailboxConfig and complete mapping/DC descriptor generation, physical slave interoperability, measured wire timing, target resource/WCET and safety qualification remain open"
+      "limitation": "The supported ESI subset is byte-aligned and explicit; modular devices, bit-packed PDOs, vendor scaling/quirks, artifact signing/distribution, live SII/ESC cross-check, complete mapping/DC descriptor generation, physical slave interoperability, measured wire timing, target resource/WCET and safety qualification remain open"
+    },
+    {
+      "id": "ethercat_product_mailbox_config",
+      "status": "implemented",
+      "scope": "Allocation-free strict ESI CoE mailbox-pair validation, exact SII standard mailbox fixed-header parsing, deterministic mailbox propagation through product artifacts and hashes, and generated all-slave PDO batch construction with an explicit override path",
+      "evidence": [
+        "crates/esop-ethercat-core/src/mailbox.rs",
+        "crates/esop-ethercat-core/src/sii.rs",
+        "crates/esop-cfggen/src/esi.rs",
+        "crates/esop-cfggen/src/generator.rs",
+        "crates/esop-cfggen/tests/generation.rs",
+        "crates/esop-product-config/src/lib.rs",
+        "crates/esop-product-config/tests/generated_product.rs",
+        "config/examples/sim-dual-axis/esi/esop-sim.xml",
+        "docs/esop-product-configuration.md"
+      ],
+      "limitation": "SII parsing consumes caller-owned completed words only; Startup-integrated EEPROM acquisition, generated-versus-live cross-check, Mailbox Status Bit discovery, full SM/FMMU/DC descriptors, physical response authenticity, target timing and HIL remain open"
     },
     {
       "id": "product_runtime_attachment",
@@ -40,7 +57,7 @@
         "Makefile",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Activation validates static expectations and builds a bounded ordered PDO batch from caller-supplied position-keyed MailboxConfig values for the scheduler-owned PREOP barrier; MailboxConfig and mapping/DC descriptor discovery, authentic physical readback, artifact signing/deployment policy, interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
+      "limitation": "Activation validates static expectations and builds a bounded ordered PDO batch from generated per-slave MailboxConfig values, with caller-supplied position-keyed values retained only as an override; live SII/ESC cross-check, mapping/DC descriptor discovery, authentic physical readback, artifact signing/deployment policy, interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
     },
     {
       "id": "pdo_configuration_readback",
@@ -55,7 +72,7 @@
         "crates/esop-product-config/tests/generated_product.rs",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Deterministic simulation proves ordered multi-job advancement, scheduler/mailbox ownership, exact response routing and whole-batch PREOP-barrier release only; MailboxConfig discovery, physical response authenticity, full-period WKC, device interoperability, target timing and HIL remain open"
+      "limitation": "Deterministic simulation proves ordered multi-job advancement, scheduler/mailbox ownership, exact response routing and whole-batch PREOP-barrier release only; live SII/ESC mailbox cross-check, physical response authenticity, full-period WKC, device interoperability, target timing and HIL remain open"
     },
     {
       "id": "ethercat_al_activation_barrier",
