@@ -146,7 +146,7 @@ existing SYNC0/SYNC1 controller contract.
       configuration and participates in Startup/lifecycle configuration gates.
 - [x] Public request/RX coverage proves 24-byte read and 12-byte write payloads
       end to end without adding register knowledge to generic control/RX code.
-- [ ] Focused tests, no-std checks, repository `make ci`, `make bpf`, and GitHub
+- [x] Focused tests, no-std checks, repository `make ci`, `make bpf`, and GitHub
       Actions pass on the exact pushed commit.
 
 ## Out Of Scope

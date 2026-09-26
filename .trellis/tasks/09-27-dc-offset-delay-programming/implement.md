@@ -67,8 +67,8 @@ make capability-manifest
 ## 5. Run repository quality gates and publish
 
 - [x] Run formatting, diff checks, focused/full tests, no-std, CI, and BPF.
-- [ ] Commit and push the implementation to `ra1mj/ESOP`.
-- [ ] Verify GitHub Actions against the exact pushed SHA; repair and repush on
+- [x] Commit and push the implementation to `ra1mj/ESOP`.
+- [x] Verify GitHub Actions against the exact pushed SHA; repair and repush on
       any failure.
 - [ ] Mark acceptance criteria, archive the task, update the developer journal,
       and push the completion metadata.
@@ -95,6 +95,8 @@ Validated locally on 2026-09-27:
 - `make no-std`
 - `make ci`
 - `make bpf`
+- GitHub Actions `quality` run `36279028999` passed for exact commit
+  `559ca25697cdb3f64326479f9ecb2e4870838288`.
 
 ## Review Gates
 
