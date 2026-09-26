@@ -17,7 +17,8 @@ use crate::mapping_config::{
     MappingConfigController, MappingConfigError, MappingConfigPhase, MappingConfigProgress,
 };
 use crate::pdo_config::{
-    PdoConfigAction, PdoConfigController, PdoConfigError, PdoConfigPhase, PdoConfigProgress,
+    PdoConfigAction, PdoConfigBatch, PdoConfigBatchError, PdoConfigBatchPhase,
+    PdoConfigBatchStatus, PdoConfigController, PdoConfigError, PdoConfigPhase, PdoConfigProgress,
 };
 use crate::port::EthercatPort;
 use crate::scheduled_domains::{
@@ -72,22 +73,114 @@ pub enum ScheduledProductionServiceRecovery {
     Faulted,
 }
 
-pub struct ScheduledPdoConfiguration<'a, const OPS: usize> {
-    controller: &'a mut PdoConfigController<OPS>,
-    mailbox: &'a mut MailboxController,
-    mailbox_config: MailboxConfig,
+enum ScheduledPdoConfigurationMode<'a, const OPS: usize, const JOBS: usize> {
+    Single {
+        controller: &'a mut PdoConfigController<OPS>,
+        mailbox: &'a mut MailboxController,
+        mailbox_config: MailboxConfig,
+    },
+    Batch(&'a mut PdoConfigBatch<JOBS, OPS>),
 }
 
-impl<'a, const OPS: usize> ScheduledPdoConfiguration<'a, OPS> {
+pub struct ScheduledPdoConfiguration<'a, const OPS: usize, const JOBS: usize = 1> {
+    mode: ScheduledPdoConfigurationMode<'a, OPS, JOBS>,
+}
+
+impl<'a, const OPS: usize> ScheduledPdoConfiguration<'a, OPS, 1> {
     pub const fn new(
         controller: &'a mut PdoConfigController<OPS>,
         mailbox: &'a mut MailboxController,
         mailbox_config: MailboxConfig,
     ) -> Self {
         Self {
-            controller,
-            mailbox,
-            mailbox_config,
+            mode: ScheduledPdoConfigurationMode::Single {
+                controller,
+                mailbox,
+                mailbox_config,
+            },
+        }
+    }
+}
+
+impl<'a, const OPS: usize, const JOBS: usize> ScheduledPdoConfiguration<'a, OPS, JOBS> {
+    pub const fn batch(batch: &'a mut PdoConfigBatch<JOBS, OPS>) -> Self {
+        Self {
+            mode: ScheduledPdoConfigurationMode::Batch(batch),
+        }
+    }
+
+    fn controller(&self) -> &PdoConfigController<OPS> {
+        match &self.mode {
+            ScheduledPdoConfigurationMode::Single { controller, .. } => controller,
+            ScheduledPdoConfigurationMode::Batch(batch) => batch.controller(),
+        }
+    }
+
+    fn controller_mut(&mut self) -> &mut PdoConfigController<OPS> {
+        match &mut self.mode {
+            ScheduledPdoConfigurationMode::Single { controller, .. } => controller,
+            ScheduledPdoConfigurationMode::Batch(batch) => batch.controller_mut(),
+        }
+    }
+
+    fn mailbox(&self) -> &MailboxController {
+        match &self.mode {
+            ScheduledPdoConfigurationMode::Single { mailbox, .. } => mailbox,
+            ScheduledPdoConfigurationMode::Batch(batch) => batch.mailbox(),
+        }
+    }
+
+    fn mailbox_mut(&mut self) -> &mut MailboxController {
+        match &mut self.mode {
+            ScheduledPdoConfigurationMode::Single { mailbox, .. } => mailbox,
+            ScheduledPdoConfigurationMode::Batch(batch) => batch.mailbox_mut(),
+        }
+    }
+
+    fn mailbox_config(&self) -> Option<MailboxConfig> {
+        match &self.mode {
+            ScheduledPdoConfigurationMode::Single { mailbox_config, .. } => Some(*mailbox_config),
+            ScheduledPdoConfigurationMode::Batch(batch) => batch.current_mailbox_config(),
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        match &self.mode {
+            ScheduledPdoConfigurationMode::Single { controller, .. } => {
+                controller.phase() == PdoConfigPhase::Complete
+            }
+            ScheduledPdoConfigurationMode::Batch(batch) => {
+                batch.phase() == PdoConfigBatchPhase::Complete
+            }
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        match &self.mode {
+            ScheduledPdoConfigurationMode::Single { controller, .. } => !matches!(
+                controller.phase(),
+                PdoConfigPhase::Idle | PdoConfigPhase::Complete
+            ),
+            ScheduledPdoConfigurationMode::Batch(batch) => !matches!(
+                batch.phase(),
+                PdoConfigBatchPhase::Idle | PdoConfigBatchPhase::Complete
+            ),
+        }
+    }
+
+    fn advance_completed(&mut self, now_ns: u64) -> Result<(), PdoConfigBatchError> {
+        if let ScheduledPdoConfigurationMode::Batch(batch) = &mut self.mode
+            && batch.controller().phase() == PdoConfigPhase::Complete
+        {
+            batch.advance(now_ns)?;
+        }
+        Ok(())
+    }
+
+    fn batch_status(&self) -> Option<PdoConfigBatchStatus> {
+        match &self.mode {
+            ScheduledPdoConfigurationMode::Single { .. } => None,
+            ScheduledPdoConfigurationMode::Batch(batch) => Some(batch.status()),
         }
     }
 }
@@ -98,16 +191,23 @@ pub struct ScheduledProductionServices<
     const SMS: usize,
     const FMMUS: usize,
     const PDO_OPS: usize = 0,
+    const PDO_JOBS: usize = 1,
 > {
     pub startup: Option<&'a mut StartupController<MAX_SLAVES>>,
-    pdo_configuration: Option<ScheduledPdoConfiguration<'a, PDO_OPS>>,
+    pdo_configuration: Option<ScheduledPdoConfiguration<'a, PDO_OPS, PDO_JOBS>>,
     pub mapping: Option<&'a mut MappingConfigController<SMS, FMMUS>>,
     pub dc_configuration: Option<&'a mut DcController>,
     pub mailbox: Option<&'a mut MailboxController>,
 }
 
-impl<'a, const MAX_SLAVES: usize, const SMS: usize, const FMMUS: usize, const PDO_OPS: usize>
-    ScheduledProductionServices<'a, MAX_SLAVES, SMS, FMMUS, PDO_OPS>
+impl<
+    'a,
+    const MAX_SLAVES: usize,
+    const SMS: usize,
+    const FMMUS: usize,
+    const PDO_OPS: usize,
+    const PDO_JOBS: usize,
+> ScheduledProductionServices<'a, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>
 {
     pub const fn new(
         startup: Option<&'a mut StartupController<MAX_SLAVES>>,
@@ -126,7 +226,7 @@ impl<'a, const MAX_SLAVES: usize, const SMS: usize, const FMMUS: usize, const PD
 
     pub fn with_pdo_configuration(
         mut self,
-        pdo_configuration: ScheduledPdoConfiguration<'a, PDO_OPS>,
+        pdo_configuration: ScheduledPdoConfiguration<'a, PDO_OPS, PDO_JOBS>,
     ) -> Self {
         self.pdo_configuration = Some(pdo_configuration);
         self
@@ -148,6 +248,7 @@ pub struct ScheduledProductionServiceCycleReport<E, const DOMAINS: usize> {
     request: Option<RequestHandle>,
     service_ready: bool,
     startup_phase: Option<StartupPhase>,
+    pdo_batch_status: Option<PdoConfigBatchStatus>,
     transport: ScheduledProductionServiceTransport<E, DOMAINS>,
 }
 
@@ -178,6 +279,10 @@ impl<E, const DOMAINS: usize> ScheduledProductionServiceCycleReport<E, DOMAINS> 
 
     pub const fn startup_phase(&self) -> Option<StartupPhase> {
         self.startup_phase
+    }
+
+    pub const fn pdo_batch_status(&self) -> Option<PdoConfigBatchStatus> {
+        self.pdo_batch_status
     }
 
     pub const fn received(&self) -> &ScheduledReceiveReport<E, DOMAINS> {
@@ -230,6 +335,7 @@ pub enum ScheduledProductionServiceCycleError<E, const DOMAINS: usize> {
     MissingController(ScheduledProductionServiceKind),
     RequestMismatch(ScheduledProductionServiceKind),
     Startup(StartupError),
+    PdoBatch(PdoConfigBatchError),
     Control(ControlError),
     ControlCycle(ScheduledControlCycleError<E, DOMAINS>),
     MailboxCycle(ScheduledMailboxCycleError<E>),
@@ -239,6 +345,7 @@ pub enum ScheduledProductionServiceCycleError<E, const DOMAINS: usize> {
 enum StartupBarrierReleaseError {
     MissingController(ScheduledProductionServiceKind),
     Startup(StartupError),
+    PdoBatch(PdoConfigBatchError),
 }
 
 pub struct ScheduledProductionServiceScheduler {
@@ -304,6 +411,7 @@ impl ScheduledProductionServiceScheduler {
         const SMS: usize,
         const FMMUS: usize,
         const PDO_OPS: usize,
+        const PDO_JOBS: usize,
     >(
         &mut self,
         bank: &mut ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
@@ -314,7 +422,7 @@ impl ScheduledProductionServiceScheduler {
         dc_image: &mut [u8],
         application_time_ns: u64,
         controls: &mut ControlRequestPool<REQUESTS>,
-        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
+        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
         generation: u16,
         rx_deadline_ns: u64,
         cycle_deadline_ns: u64,
@@ -329,6 +437,9 @@ impl ScheduledProductionServiceScheduler {
                 }
                 StartupBarrierReleaseError::Startup(error) => {
                     ScheduledProductionServiceCycleError::Startup(error)
+                }
+                StartupBarrierReleaseError::PdoBatch(error) => {
+                    ScheduledProductionServiceCycleError::PdoBatch(error)
                 }
             })?;
         self.refresh_selection(services);
@@ -361,7 +472,7 @@ impl ScheduledProductionServiceScheduler {
                 ScheduledProductionServiceKind::PdoConfiguration => services
                     .pdo_configuration
                     .as_mut()
-                    .map(|binding| &mut *binding.mailbox),
+                    .map(ScheduledPdoConfiguration::mailbox_mut),
                 ScheduledProductionServiceKind::Mailbox => services.mailbox.as_deref_mut(),
                 _ => None,
             }
@@ -405,7 +516,7 @@ impl ScheduledProductionServiceScheduler {
                             ScheduledProductionServiceCycleError::RequestMismatch(selected),
                         )?;
                         let mut response = [0; MAX_MAILBOX_BYTES];
-                        let response_len = match binding.mailbox.response() {
+                        let response_len = match binding.mailbox().response() {
                             Some((_, payload)) => {
                                 response[..payload.len()].copy_from_slice(payload);
                                 payload.len()
@@ -413,7 +524,7 @@ impl ScheduledProductionServiceScheduler {
                             None => {
                                 self.pdo_action = None;
                                 match binding
-                                    .controller
+                                    .controller_mut()
                                     .mailbox_failed(action, MailboxError::NoPendingAction)
                                 {
                                     Ok(value) => {
@@ -437,7 +548,7 @@ impl ScheduledProductionServiceScheduler {
                         };
                         if response_len != 0 {
                             self.pdo_action = None;
-                            match binding.controller.accept(
+                            match binding.controller_mut().accept(
                                 action,
                                 action.generation,
                                 &response[..response_len],
@@ -466,7 +577,7 @@ impl ScheduledProductionServiceScheduler {
                             ScheduledProductionServiceCycleError::RequestMismatch(selected),
                         )?;
                         self.pdo_action = None;
-                        match binding.controller.mailbox_failed(action, error) {
+                        match binding.controller_mut().mailbox_failed(action, error) {
                             Ok(value) => {
                                 progress = ScheduledProductionServiceProgress::PdoConfiguration(
                                     ScheduledPdoConfigurationProgress::Configuration(value),
@@ -480,17 +591,20 @@ impl ScheduledProductionServiceScheduler {
                     }
                     None => {}
                 }
+                binding
+                    .advance_completed(port.now_ns())
+                    .map_err(ScheduledProductionServiceCycleError::PdoBatch)?;
                 fault = fault.or_else(|| {
                     binding
-                        .controller
+                        .controller()
                         .last_error()
                         .map(ScheduledProductionServiceFault::PdoConfiguration)
                 });
                 let recovery = self.recovery(controls, progress, fault);
-                let service_ready = cycle.tx.service.failure.is_none()
-                    && fault.is_none()
-                    && binding.controller.phase() == PdoConfigPhase::Complete;
+                let service_ready =
+                    cycle.tx.service.failure.is_none() && fault.is_none() && binding.is_complete();
                 let startup_phase = services.startup.as_deref().map(StartupController::phase);
+                let pdo_batch_status = binding.batch_status();
                 return Ok(ScheduledProductionServiceCycleReport {
                     selected,
                     progress,
@@ -499,6 +613,7 @@ impl ScheduledProductionServiceScheduler {
                     request: self.request,
                     service_ready,
                     startup_phase,
+                    pdo_batch_status,
                     transport: ScheduledProductionServiceTransport::Mailbox(cycle),
                 });
             }
@@ -529,6 +644,10 @@ impl ScheduledProductionServiceScheduler {
                 )
                 && cycle.tx.service.failure.is_none();
             let startup_phase = services.startup.as_deref().map(StartupController::phase);
+            let pdo_batch_status = services
+                .pdo_configuration
+                .as_ref()
+                .and_then(ScheduledPdoConfiguration::batch_status);
             return Ok(ScheduledProductionServiceCycleReport {
                 selected,
                 progress,
@@ -537,6 +656,7 @@ impl ScheduledProductionServiceScheduler {
                 request: self.request,
                 service_ready,
                 startup_phase,
+                pdo_batch_status,
                 transport: ScheduledProductionServiceTransport::Mailbox(cycle),
             });
         }
@@ -594,6 +714,10 @@ impl ScheduledProductionServiceScheduler {
         let service_ready =
             cycle.service().failure.is_none() && fault.is_none() && self.controller_ready(services);
         let startup_phase = services.startup.as_deref().map(StartupController::phase);
+        let pdo_batch_status = services
+            .pdo_configuration
+            .as_ref()
+            .and_then(ScheduledPdoConfiguration::batch_status);
         Ok(ScheduledProductionServiceCycleReport {
             selected,
             progress,
@@ -602,6 +726,7 @@ impl ScheduledProductionServiceScheduler {
             request: self.request,
             service_ready,
             startup_phase,
+            pdo_batch_status,
             transport: ScheduledProductionServiceTransport::Control(cycle),
         })
     }
@@ -611,10 +736,11 @@ impl ScheduledProductionServiceScheduler {
         const SMS: usize,
         const FMMUS: usize,
         const PDO_OPS: usize,
+        const PDO_JOBS: usize,
     >(
         &mut self,
         now_ns: u64,
-        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
+        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
     ) -> Result<(), StartupBarrierReleaseError> {
         let requirements = match services.startup.as_deref() {
             Some(startup) if startup.phase() == StartupPhase::AwaitingConfiguration => {
@@ -642,11 +768,21 @@ impl ScheduledProductionServiceScheduler {
         if self.request.is_some() || self.pdo_action.is_some() {
             return Ok(());
         }
+        if requirements.requires_pdo_configuration() {
+            services
+                .pdo_configuration
+                .as_mut()
+                .ok_or(StartupBarrierReleaseError::MissingController(
+                    ScheduledProductionServiceKind::PdoConfiguration,
+                ))?
+                .advance_completed(now_ns)
+                .map_err(StartupBarrierReleaseError::PdoBatch)?;
+        }
         let pdo_complete = !requirements.requires_pdo_configuration()
             || services
                 .pdo_configuration
                 .as_ref()
-                .is_some_and(|binding| binding.controller.phase() == PdoConfigPhase::Complete);
+                .is_some_and(ScheduledPdoConfiguration::is_complete);
         let mapping_complete = !requirements.requires_mapping()
             || services
                 .mapping
@@ -677,9 +813,10 @@ impl ScheduledProductionServiceScheduler {
         const SMS: usize,
         const FMMUS: usize,
         const PDO_OPS: usize,
+        const PDO_JOBS: usize,
     >(
         &mut self,
-        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
+        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
     ) {
         if self.request.is_some()
             || self.pdo_action.is_some()
@@ -693,29 +830,30 @@ impl ScheduledProductionServiceScheduler {
             .filter(|controller| controller.phase() == StartupPhase::AwaitingConfiguration)
         {
             let requirements = startup.configuration_services();
-            self.active =
-                if requirements.requires_pdo_configuration()
-                    && !services.pdo_configuration.as_ref().is_some_and(|binding| {
-                        binding.controller.phase() == PdoConfigPhase::Complete
-                    })
-                {
-                    ScheduledProductionServiceKind::PdoConfiguration
-                } else if requirements.requires_mapping()
-                    && !services.mapping.as_deref().is_some_and(|controller| {
-                        controller.phase() == MappingConfigPhase::Complete
-                    })
-                {
-                    ScheduledProductionServiceKind::Mapping
-                } else if requirements.requires_dc_configuration()
-                    && !services
-                        .dc_configuration
-                        .as_deref()
-                        .is_some_and(|controller| controller.phase() == DcPhase::Complete)
-                {
-                    ScheduledProductionServiceKind::DcConfiguration
-                } else {
-                    ScheduledProductionServiceKind::Startup
-                };
+            self.active = if requirements.requires_pdo_configuration()
+                && !services
+                    .pdo_configuration
+                    .as_ref()
+                    .is_some_and(ScheduledPdoConfiguration::is_complete)
+            {
+                ScheduledProductionServiceKind::PdoConfiguration
+            } else if requirements.requires_mapping()
+                && !services
+                    .mapping
+                    .as_deref()
+                    .is_some_and(|controller| controller.phase() == MappingConfigPhase::Complete)
+            {
+                ScheduledProductionServiceKind::Mapping
+            } else if requirements.requires_dc_configuration()
+                && !services
+                    .dc_configuration
+                    .as_deref()
+                    .is_some_and(|controller| controller.phase() == DcPhase::Complete)
+            {
+                ScheduledProductionServiceKind::DcConfiguration
+            } else {
+                ScheduledProductionServiceKind::Startup
+            };
             return;
         }
         self.active = [
@@ -735,9 +873,10 @@ impl ScheduledProductionServiceScheduler {
         const SMS: usize,
         const FMMUS: usize,
         const PDO_OPS: usize,
+        const PDO_JOBS: usize,
     >(
         &self,
-        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
+        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
         kind: ScheduledProductionServiceKind,
     ) -> bool {
         match kind {
@@ -752,14 +891,10 @@ impl ScheduledProductionServiceScheduler {
                     )
                 })
             }
-            ScheduledProductionServiceKind::PdoConfiguration => {
-                services.pdo_configuration.as_ref().is_some_and(|binding| {
-                    !matches!(
-                        binding.controller.phase(),
-                        PdoConfigPhase::Idle | PdoConfigPhase::Complete
-                    )
-                })
-            }
+            ScheduledProductionServiceKind::PdoConfiguration => services
+                .pdo_configuration
+                .as_ref()
+                .is_some_and(ScheduledPdoConfiguration::is_active),
             ScheduledProductionServiceKind::Mapping => {
                 services.mapping.as_deref().is_some_and(|controller| {
                     !matches!(
@@ -791,24 +926,25 @@ impl ScheduledProductionServiceScheduler {
         const SMS: usize,
         const FMMUS: usize,
         const PDO_OPS: usize,
+        const PDO_JOBS: usize,
     >(
         &self,
         controls: &ControlRequestPool<REQUESTS>,
-        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
+        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
     ) -> Result<(), ScheduledProductionServiceKind> {
         if self.active == ScheduledProductionServiceKind::PdoConfiguration {
             let binding = services.pdo_configuration.as_ref().ok_or(self.active)?;
             let action_matches = match self.pdo_action {
                 Some(action) => {
-                    binding.controller.pending() == Some(action)
-                        && binding.mailbox.transaction_matches(
+                    binding.controller().pending() == Some(action)
+                        && binding.mailbox().transaction_matches(
                             action.station_address,
                             action.generation,
                             MailboxProtocol::CoE,
                             action.payload(),
                         )
                 }
-                None => binding.controller.pending().is_none(),
+                None => binding.controller().pending().is_none(),
             };
             if !action_matches {
                 return Err(self.active);
@@ -837,7 +973,7 @@ impl ScheduledProductionServiceScheduler {
             ScheduledProductionServiceKind::PdoConfiguration => services
                 .pdo_configuration
                 .as_ref()
-                .and_then(|binding| binding.mailbox.pending())
+                .and_then(|binding| binding.mailbox().pending())
                 .is_some_and(|action| {
                     request.matches_action(
                         action.datagram_index,
@@ -905,11 +1041,12 @@ impl ScheduledProductionServiceScheduler {
         const SMS: usize,
         const FMMUS: usize,
         const PDO_OPS: usize,
+        const PDO_JOBS: usize,
     >(
         &mut self,
         now_ns: u64,
         controls: &mut ControlRequestPool<REQUESTS>,
-        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
+        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
     ) -> Result<ScheduledProductionEnqueueOutcome, ControlError> {
         match self.active {
             ScheduledProductionServiceKind::Idle => Ok(ScheduledProductionEnqueueOutcome::EMPTY),
@@ -961,7 +1098,7 @@ impl ScheduledProductionServiceScheduler {
                     .as_mut()
                     .ok_or(ControlError::InvalidState)?;
                 if self.pdo_action.is_none() {
-                    let action = match binding.controller.next_action(now_ns) {
+                    let action = match binding.controller_mut().next_action(now_ns) {
                         Ok(action) => action,
                         Err(error) => {
                             return Ok(ScheduledProductionEnqueueOutcome {
@@ -976,7 +1113,7 @@ impl ScheduledProductionServiceScheduler {
                         return Ok(ScheduledProductionEnqueueOutcome::EMPTY);
                     };
                     if action.deadline_ns <= now_ns {
-                        return Ok(match binding.controller.timeout(action, now_ns) {
+                        return Ok(match binding.controller_mut().timeout(action, now_ns) {
                             Ok(progress) => ScheduledProductionEnqueueOutcome {
                                 progress: Some(
                                     ScheduledProductionServiceProgress::PdoConfiguration(
@@ -994,11 +1131,12 @@ impl ScheduledProductionServiceScheduler {
                         });
                     }
                     let remaining_ns = action.deadline_ns.saturating_sub(now_ns);
-                    let mut mailbox_config = binding.mailbox_config;
+                    let mut mailbox_config =
+                        binding.mailbox_config().ok_or(ControlError::InvalidState)?;
                     mailbox_config.timeout_ns = mailbox_config.timeout_ns.min(remaining_ns);
                     mailbox_config.request_timeout_ns =
                         mailbox_config.request_timeout_ns.min(remaining_ns);
-                    if let Err(error) = binding.mailbox.start(
+                    if let Err(error) = binding.mailbox_mut().start(
                         mailbox_config,
                         action.station_address,
                         action.generation,
@@ -1006,7 +1144,40 @@ impl ScheduledProductionServiceScheduler {
                         MailboxProtocol::CoE,
                         action.payload(),
                     ) {
-                        return Ok(match binding.controller.mailbox_failed(action, error) {
+                        return Ok(
+                            match binding.controller_mut().mailbox_failed(action, error) {
+                                Ok(progress) => ScheduledProductionEnqueueOutcome {
+                                    progress: Some(
+                                        ScheduledProductionServiceProgress::PdoConfiguration(
+                                            ScheduledPdoConfigurationProgress::Configuration(
+                                                progress,
+                                            ),
+                                        ),
+                                    ),
+                                    ..ScheduledProductionEnqueueOutcome::EMPTY
+                                },
+                                Err(error) => ScheduledProductionEnqueueOutcome {
+                                    fault: Some(ScheduledProductionServiceFault::PdoConfiguration(
+                                        error,
+                                    )),
+                                    ..ScheduledProductionEnqueueOutcome::EMPTY
+                                },
+                            },
+                        );
+                    }
+                    self.pdo_action = Some(action);
+                }
+
+                let outcome = enqueue_mailbox(now_ns, controls, binding.mailbox_mut())?;
+                if let Some(error) = outcome.fault.or_else(|| {
+                    (binding.mailbox().phase() == MailboxPhase::Faulted)
+                        .then(|| binding.mailbox().last_error())
+                        .flatten()
+                }) {
+                    let action = self.pdo_action.ok_or(ControlError::InvalidState)?;
+                    self.pdo_action = None;
+                    return Ok(
+                        match binding.controller_mut().mailbox_failed(action, error) {
                             Ok(progress) => ScheduledProductionEnqueueOutcome {
                                 progress: Some(
                                     ScheduledProductionServiceProgress::PdoConfiguration(
@@ -1021,31 +1192,8 @@ impl ScheduledProductionServiceScheduler {
                                 )),
                                 ..ScheduledProductionEnqueueOutcome::EMPTY
                             },
-                        });
-                    }
-                    self.pdo_action = Some(action);
-                }
-
-                let outcome = enqueue_mailbox(now_ns, controls, binding.mailbox)?;
-                if let Some(error) = outcome.fault.or_else(|| {
-                    (binding.mailbox.phase() == MailboxPhase::Faulted)
-                        .then(|| binding.mailbox.last_error())
-                        .flatten()
-                }) {
-                    let action = self.pdo_action.ok_or(ControlError::InvalidState)?;
-                    self.pdo_action = None;
-                    return Ok(match binding.controller.mailbox_failed(action, error) {
-                        Ok(progress) => ScheduledProductionEnqueueOutcome {
-                            progress: Some(ScheduledProductionServiceProgress::PdoConfiguration(
-                                ScheduledPdoConfigurationProgress::Configuration(progress),
-                            )),
-                            ..ScheduledProductionEnqueueOutcome::EMPTY
                         },
-                        Err(error) => ScheduledProductionEnqueueOutcome {
-                            fault: Some(ScheduledProductionServiceFault::PdoConfiguration(error)),
-                            ..ScheduledProductionEnqueueOutcome::EMPTY
-                        },
-                    });
+                    );
                 }
                 Ok(ScheduledProductionEnqueueOutcome {
                     request: outcome.request,
@@ -1167,10 +1315,11 @@ impl ScheduledProductionServiceScheduler {
         const SMS: usize,
         const FMMUS: usize,
         const PDO_OPS: usize,
+        const PDO_JOBS: usize,
     >(
         &mut self,
         controls: &mut ControlRequestPool<REQUESTS>,
-        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
+        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
         handle: RequestHandle,
         now_ns: u64,
     ) -> Result<ScheduledProductionServiceProgress, ScheduledProductionServiceFault> {
@@ -1215,9 +1364,10 @@ impl ScheduledProductionServiceScheduler {
         const SMS: usize,
         const FMMUS: usize,
         const PDO_OPS: usize,
+        const PDO_JOBS: usize,
     >(
         &self,
-        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
+        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
     ) -> Option<ScheduledProductionServiceFault> {
         match self.active {
             ScheduledProductionServiceKind::Idle => None,
@@ -1229,7 +1379,7 @@ impl ScheduledProductionServiceScheduler {
             ScheduledProductionServiceKind::PdoConfiguration => services
                 .pdo_configuration
                 .as_ref()
-                .and_then(|binding| binding.controller.last_error())
+                .and_then(|binding| binding.controller().last_error())
                 .map(ScheduledProductionServiceFault::PdoConfiguration),
             ScheduledProductionServiceKind::Mapping => services
                 .mapping
@@ -1254,9 +1404,10 @@ impl ScheduledProductionServiceScheduler {
         const SMS: usize,
         const FMMUS: usize,
         const PDO_OPS: usize,
+        const PDO_JOBS: usize,
     >(
         &self,
-        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
+        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
     ) -> bool {
         match self.active {
             ScheduledProductionServiceKind::Idle => true,
@@ -1267,7 +1418,7 @@ impl ScheduledProductionServiceScheduler {
             ScheduledProductionServiceKind::PdoConfiguration => services
                 .pdo_configuration
                 .as_ref()
-                .is_some_and(|binding| binding.controller.phase() == PdoConfigPhase::Complete),
+                .is_some_and(ScheduledPdoConfiguration::is_complete),
             ScheduledProductionServiceKind::Mapping => services
                 .mapping
                 .as_deref()
@@ -1353,8 +1504,9 @@ impl Default for ScheduledProductionServiceScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coe::{CoeHeader, CoeService};
     use crate::mapping::MappingTable;
-    use crate::pdo_config::{PdoConfigPlan, PdoSdoWrite};
+    use crate::pdo_config::{PdoConfigBatchPlan, PdoConfigJob, PdoConfigPlan, PdoSdoWrite};
     use crate::slave::{EthercatState, SlaveIdentity};
     use crate::startup::{
         ExpectedSlave, StartupAction, StartupConfig, StartupConfigurationServices,
@@ -1381,6 +1533,55 @@ mod tests {
             )
             .unwrap();
         startup
+    }
+
+    fn complete_current_batch_job<const JOBS: usize>(
+        batch: &mut PdoConfigBatch<JOBS, 1>,
+        now_ns: u64,
+    ) {
+        let download = batch.controller_mut().next_action(now_ns).unwrap().unwrap();
+        let mut download_response = [0; 6];
+        CoeHeader {
+            number: 0,
+            service: CoeService::SdoResponse,
+        }
+        .encode(&mut download_response)
+        .unwrap();
+        download_response[2] = 0x60;
+        download_response[3..5].copy_from_slice(&download.sdo_index.to_le_bytes());
+        download_response[5] = download.sdo_subindex;
+        batch
+            .controller_mut()
+            .accept(
+                download,
+                download.generation,
+                &download_response,
+                now_ns + 1,
+            )
+            .unwrap();
+
+        let upload = batch
+            .controller_mut()
+            .next_action(now_ns + 2)
+            .unwrap()
+            .unwrap();
+        let mut upload_response = [0; 10];
+        CoeHeader {
+            number: 0,
+            service: CoeService::SdoResponse,
+        }
+        .encode(&mut upload_response)
+        .unwrap();
+        upload_response[2] = 0x4F;
+        upload_response[3..5].copy_from_slice(&upload.sdo_index.to_le_bytes());
+        upload_response[5] = upload.sdo_subindex;
+        upload_response[6] = 0;
+        assert_eq!(
+            batch
+                .controller_mut()
+                .accept(upload, upload.generation, &upload_response, now_ns + 3,),
+            Ok(PdoConfigProgress::Complete)
+        );
     }
 
     #[test]
@@ -1602,6 +1803,70 @@ mod tests {
             startup.next_action(2),
             Ok(Some(StartupAction::Al(_)))
         ));
+    }
+
+    #[test]
+    fn startup_barrier_advances_the_whole_pdo_batch_before_release() {
+        let requirements = StartupConfigurationServices::new().with_pdo_configuration();
+        let mut startup = startup_at_barrier(requirements);
+        let mailbox_config = MailboxConfig::new(0x1000, 32, 0x1100, 32);
+        let mut first = PdoConfigPlan::<1>::new();
+        first
+            .push(PdoSdoWrite::new(0x1C12, 0, &[0]).unwrap())
+            .unwrap();
+        let mut second = PdoConfigPlan::<1>::new();
+        second
+            .push(PdoSdoWrite::new(0x1C13, 0, &[0]).unwrap())
+            .unwrap();
+        let mut plan = PdoConfigBatchPlan::<2, 1>::new();
+        plan.push(PdoConfigJob::new(0x1001, first, mailbox_config))
+            .unwrap();
+        plan.push(PdoConfigJob::new(0x1002, second, mailbox_config))
+            .unwrap();
+        let mut batch = PdoConfigBatch::new();
+        batch.start(plan, 41, 0, 1_000, 100).unwrap();
+        complete_current_batch_job(&mut batch, 1);
+
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+        {
+            let mut services = ScheduledProductionServices::<1, 0, 0, 1, 2>::new(
+                Some(&mut startup),
+                None,
+                None,
+                None,
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::batch(&mut batch));
+            assert_eq!(
+                scheduler.release_startup_configuration(10, &mut services),
+                Ok(())
+            );
+            scheduler.refresh_selection(&services);
+            assert_eq!(
+                scheduler.active(),
+                ScheduledProductionServiceKind::PdoConfiguration
+            );
+        }
+        assert_eq!(startup.phase(), StartupPhase::AwaitingConfiguration);
+        assert_eq!(batch.current_index(), 1);
+        assert_eq!(batch.status().station_address, Some(0x1002));
+        assert_eq!(batch.status().generation, Some(42));
+
+        complete_current_batch_job(&mut batch, 11);
+        {
+            let mut services = ScheduledProductionServices::<1, 0, 0, 1, 2>::new(
+                Some(&mut startup),
+                None,
+                None,
+                None,
+            )
+            .with_pdo_configuration(ScheduledPdoConfiguration::batch(&mut batch));
+            assert_eq!(
+                scheduler.release_startup_configuration(20, &mut services),
+                Ok(())
+            );
+        }
+        assert_eq!(batch.phase(), PdoConfigBatchPhase::Complete);
+        assert_eq!(startup.phase(), StartupPhase::TransitioningAl);
     }
 
     #[test]

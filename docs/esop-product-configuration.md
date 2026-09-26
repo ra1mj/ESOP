@@ -111,9 +111,17 @@ Startup、PDO Configuration、Mapping、DC Configuration、Mailbox 的固定顺�
 PDO Configuration、Mapping 和 DC Configuration 集合：所有期望从站先确认
 PREOP，Startup 进入 `AwaitingConfiguration` 后只向这些服务让出优先级；调度器
 仅在所有必需控制器真实进入 `Complete` 后释放屏障，并复用已验证从站表逐站经过
-SAFEOP 到最终 SAFEOP/OP，不重新扫描或读取 SII。调用方仍须按产品/从站启动每个
-配置控制器，并提供 `MailboxConfig`、SM/FMMU 与 DC 描述；当前不自动迭代多从站
-配置批次。
+SAFEOP 到最终 SAFEOP/OP，不重新扫描或读取 SII。
+
+产品调用方也可为每个 slave position 提供一个 `ProductMailboxBinding`，再调用
+`build_pdo_configuration_batch::<JOBS, OPS>`。构建器会先校验绑定与产品从站一一
+覆盖，再按冻结的产品顺序生成全部 job；缺失、重复或未知 position、重复站地址、
+job/operation 容量不足及任一逐站计划错误都会在返回批次前失败。`PdoConfigBatch`
+启动一次后复用同一 PDO/邮箱控制器，以 `base_generation + job_index` 自动推进；
+空计划有界跳过，故障保留当前 index/station，只有显式重启才替换计划和清除故障。
+`ScheduledPdoConfiguration::batch` 将当前 job 接入原有邮箱/DC/共享 RX 路径，报告
+公开批 phase、当前 index、总 job 数和当前站地址。调用方仍须提供静态
+`MailboxConfig`、SM/FMMU 与 DC 描述；本接口不发现这些硬件参数。
 
 ## 6. 构建报告接入
 

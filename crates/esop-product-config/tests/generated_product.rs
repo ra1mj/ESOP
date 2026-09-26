@@ -1,7 +1,8 @@
 use esop_product_config::{
     ActivatedProduct, Cia402AxisCommandPolicyError, DomainRegistryError, FramePlanSetError,
-    OperatingMode, PdoSdoWrite, ProcBuf, ProcBufHeaderError, ProductActivationError,
-    ProductSlaveKind, SlaveRecord,
+    MailboxConfig, OperatingMode, PdoConfigBatchPlanError, PdoConfigPlanError, PdoSdoWrite,
+    ProcBuf, ProcBufHeaderError, ProductActivationError, ProductMailboxBinding,
+    ProductPdoBatchError, ProductPdoPlanError, ProductSlaveKind, SlaveRecord,
 };
 
 mod generated {
@@ -122,6 +123,96 @@ fn checked_in_product_builds_exact_per_slave_pdo_startup_plans() {
         PdoSdoWrite::new(0x1A01, 1, &0x1001_6000u32.to_le_bytes()).unwrap()
     );
     assert_eq!(io_writes[11], PdoSdoWrite::new(0x1C13, 0, &[1]).unwrap());
+}
+
+#[test]
+fn checked_in_product_builds_one_exact_ordered_pdo_batch() {
+    let left_mailbox = MailboxConfig::new(0x1000, 32, 0x1100, 32);
+    let right_mailbox = MailboxConfig::new(0x1200, 48, 0x1300, 48);
+    let io_mailbox = MailboxConfig::new(0x1400, 64, 0x1500, 64);
+    let bindings = [
+        ProductMailboxBinding::new(2, io_mailbox),
+        ProductMailboxBinding::new(0, left_mailbox),
+        ProductMailboxBinding::new(1, right_mailbox),
+    ];
+    let batch = generated::PRODUCT_CONFIG
+        .build_pdo_configuration_batch::<3, 17>(&bindings)
+        .unwrap();
+    let jobs = batch.jobs();
+    assert_eq!(jobs.len(), 3);
+    assert_eq!(jobs[0].station_address(), 0x1001);
+    assert_eq!(jobs[1].station_address(), 0x1002);
+    assert_eq!(jobs[2].station_address(), 0x1003);
+    assert_eq!(jobs[0].mailbox_config(), left_mailbox);
+    assert_eq!(jobs[1].mailbox_config(), right_mailbox);
+    assert_eq!(jobs[2].mailbox_config(), io_mailbox);
+
+    let left = generated::PRODUCT_CONFIG
+        .build_pdo_startup_plan::<17>(0)
+        .unwrap();
+    let right = generated::PRODUCT_CONFIG
+        .build_pdo_startup_plan::<17>(1)
+        .unwrap();
+    let io = generated::PRODUCT_CONFIG
+        .build_pdo_startup_plan::<17>(2)
+        .unwrap();
+    assert_eq!(jobs[0].plan().writes(), left.plan().writes());
+    assert_eq!(jobs[1].plan().writes(), right.plan().writes());
+    assert_eq!(jobs[2].plan().writes(), io.plan().writes());
+}
+
+#[test]
+fn product_pdo_batch_rejects_binding_and_capacity_mismatches_transactionally() {
+    let mailbox = MailboxConfig::new(0x1000, 32, 0x1100, 32);
+    let complete = [
+        ProductMailboxBinding::new(0, mailbox),
+        ProductMailboxBinding::new(1, mailbox),
+        ProductMailboxBinding::new(2, mailbox),
+    ];
+    assert_eq!(
+        generated::PRODUCT_CONFIG.build_pdo_configuration_batch::<3, 17>(&complete[..2]),
+        Err(ProductPdoBatchError::MissingMailboxBinding { position: 2 })
+    );
+    assert_eq!(
+        generated::PRODUCT_CONFIG.build_pdo_configuration_batch::<3, 17>(&[
+            ProductMailboxBinding::new(0, mailbox),
+            ProductMailboxBinding::new(0, mailbox),
+            ProductMailboxBinding::new(2, mailbox),
+        ]),
+        Err(ProductPdoBatchError::DuplicateMailboxBinding { position: 0 })
+    );
+    assert_eq!(
+        generated::PRODUCT_CONFIG.build_pdo_configuration_batch::<3, 17>(&[
+            ProductMailboxBinding::new(0, mailbox),
+            ProductMailboxBinding::new(1, mailbox),
+            ProductMailboxBinding::new(99, mailbox),
+        ]),
+        Err(ProductPdoBatchError::UnknownMailboxBinding { position: 99 })
+    );
+    assert_eq!(
+        generated::PRODUCT_CONFIG.build_pdo_configuration_batch::<2, 17>(&complete),
+        Err(ProductPdoBatchError::Batch(
+            PdoConfigBatchPlanError::CapacityExceeded
+        ))
+    );
+    assert_eq!(
+        generated::PRODUCT_CONFIG.build_pdo_configuration_batch::<3, 16>(&complete),
+        Err(ProductPdoBatchError::SlavePlan {
+            position: 0,
+            error: ProductPdoPlanError::Plan(PdoConfigPlanError::CapacityExceeded),
+        })
+    );
+
+    let mut duplicate_station = generated::PRODUCT_CONFIG;
+    duplicate_station.slaves[1].station_address = duplicate_station.slaves[0].station_address;
+    assert_eq!(
+        duplicate_station.build_pdo_configuration_batch::<3, 17>(&complete),
+        Err(ProductPdoBatchError::Batch(
+            PdoConfigBatchPlanError::DuplicateStationAddress {
+                station_address: 0x1001,
+            }
+        ))
+    );
 }
 
 #[test]

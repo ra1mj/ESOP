@@ -32,6 +32,10 @@ pub fn StaticProductConfig::activate(...) ->
     Result<ActivatedProduct<...>, ProductActivationError>;
 pub fn StaticProductConfig::build_pdo_startup_plan<const OPS: usize>(...) ->
     Result<ProductPdoStartupPlan<OPS>, ProductPdoPlanError>;
+pub fn StaticProductConfig::build_pdo_configuration_batch<
+    const JOBS: usize,
+    const OPS: usize,
+>(...) -> Result<PdoConfigBatchPlan<JOBS, OPS>, ProductPdoBatchError>;
 ```
 
 ## 3. Contracts
@@ -69,15 +73,24 @@ It returns the owning frozen result only after all checks pass.
 Per-slave PDO startup-plan construction uses the same generated order and the
 shared 256-entry cfggen bound. For each SyncManager it clears assignment
 subindex zero, writes each mapping object, then publishes the ordered mapping
-indexes and final assignment count. `PdoConfigController` executes each plan
-write as download plus exact upload readback; operation progress is published
-only after length and bytes match. The caller still owns production scheduling,
-mailbox transport, retry policy, and CONFIGURING lifecycle admission. The
-caller may opt `StartupConfig` into a PREOP barrier for PDO Configuration,
-Mapping, and/or DC Configuration. The production scheduler then releases
-Startup only from the required controllers' real Complete phases and resumes
-the retained topology through SAFEOP/OP. Product-generated multi-slave job
-iteration and MailboxConfig/mapping/DC descriptor discovery remain caller work.
+indexes and final assignment count. Position-keyed `ProductMailboxBinding`
+values can then build one fixed-capacity batch covering every configured slave
+in frozen product order. The builder validates exact binding coverage,
+duplicate station addresses, job/operation capacities, and every per-slave
+plan before returning any batch.
+
+`PdoConfigBatch` owns the existing `PdoConfigController` and
+`MailboxController`, derives one generation per job, and advances only after
+exact download/upload readback. Empty jobs are skipped with a loop bounded by
+the static job capacity; faults retain the exact job until explicit restart.
+The caller still owns batch start timing and supplies MailboxConfig values,
+while the production scheduler owns mailbox transport, retry policy, batch
+advancement, and CONFIGURING lifecycle admission. The caller may opt
+`StartupConfig` into a PREOP barrier for PDO Configuration, Mapping, and/or DC
+Configuration. The scheduler releases Startup only after the whole PDO batch
+and other required controllers reach real Complete phases, then resumes the
+retained topology through SAFEOP/OP. MailboxConfig and mapping/DC descriptor
+discovery remain caller work.
 
 The configuration SHA-256 covers normalized product semantics and a sorted
 label-to-semantic-ESI-hash map. It excludes timestamps, host paths, compiler,
@@ -112,6 +125,8 @@ datagrams, FCS, and inter-packet gap respectively.
 | Runtime schema/hash/ProcBuf/topology mismatch | Reject before registry activation. |
 | Runtime Domain/axis evidence or capacity mismatch | Reject with typed owning-contract evidence and return no partial configuration. |
 | PDO plan owner/SM/group/capacity mismatch | Reject before returning any startup plan. |
+| Missing/duplicate/unknown product mailbox binding | Reject before returning any batch. |
+| Duplicate batch station, insufficient jobs/operations, or generation overflow | Reject before replacing or starting a batch. |
 | PDO upload readback length or byte mismatch | Latch controller fault and keep the current operation index. |
 | PDO mailbox terminal failure | Latch the exact typed transport fault and keep the current operation index. |
 | Substituted PDO mailbox/controller binding | Reject before TX without consuming or advancing the PDO action. |
@@ -144,13 +159,16 @@ datagrams, FCS, and inter-packet gap respectively.
 - Build exact per-slave drive/IO PDO plans from the checked-in generated module;
   cover assignment-disable ordering, mapping grouping, all typed rejection
   paths, exact/segmented readback, mismatches, stale actions and restart.
+- Build the checked-in drive/drive/IO batch from position-keyed mailbox
+  bindings; compare every station/config/plan with the individual plans and
+  cover missing, duplicate, unknown, station-duplicate and capacity failures.
 - Route a generated-style PDO action through `ScheduledPdoConfiguration`, the
   existing mailbox/DC/shared-RX path, exact upload readback, request rebuild,
   cross-generation waiting, timeout, lifecycle gating, fault blocking and
   explicit restart. Cover the opt-in PREOP Startup barrier, automatic release
   from actual Complete phases, retained topology and legal SAFEOP/OP
-  progression. Keep automatic multi-slave batch iteration and physical HIL
-  outside this software claim.
+  progression. Cover two-job automatic advancement and whole-batch release;
+  keep MailboxConfig discovery and physical HIL outside this software claim.
 - Validate both default and product-input build reports, including forged pass
   rejection and exact wire metric projection.
 - Run `make ci`, `make bpf`, and `make test-zenoh` before delivery.

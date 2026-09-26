@@ -7,7 +7,7 @@
 //! touching the cyclic PDO path.
 
 use crate::coe::{SdoError, SdoTransfer};
-use crate::mailbox::{MAX_MAILBOX_BYTES, MailboxError};
+use crate::mailbox::{MAX_MAILBOX_BYTES, MailboxConfig, MailboxController, MailboxError};
 
 pub const MAX_PDO_SDO_DATA: usize = 4;
 
@@ -59,6 +59,7 @@ impl PdoSdoWrite {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PdoConfigPlan<const OPS: usize> {
     writes: [PdoSdoWrite; OPS],
     count: usize,
@@ -175,6 +176,136 @@ pub enum PdoConfigPlanError {
     CountOutOfBounds,
     DataLengthOutOfBounds,
     InvalidBitLength,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PdoConfigJob<const OPS: usize> {
+    station_address: u16,
+    plan: PdoConfigPlan<OPS>,
+    mailbox_config: MailboxConfig,
+}
+
+impl<const OPS: usize> PdoConfigJob<OPS> {
+    pub const EMPTY: Self = Self {
+        station_address: 0,
+        plan: PdoConfigPlan::new(),
+        mailbox_config: MailboxConfig::new(0, 0, 0, 0),
+    };
+
+    pub const fn new(
+        station_address: u16,
+        plan: PdoConfigPlan<OPS>,
+        mailbox_config: MailboxConfig,
+    ) -> Self {
+        Self {
+            station_address,
+            plan,
+            mailbox_config,
+        }
+    }
+
+    pub const fn station_address(&self) -> u16 {
+        self.station_address
+    }
+
+    pub const fn plan(&self) -> &PdoConfigPlan<OPS> {
+        &self.plan
+    }
+
+    pub const fn mailbox_config(&self) -> MailboxConfig {
+        self.mailbox_config
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PdoConfigBatchPlan<const JOBS: usize, const OPS: usize> {
+    jobs: [PdoConfigJob<OPS>; JOBS],
+    count: usize,
+}
+
+impl<const JOBS: usize, const OPS: usize> PdoConfigBatchPlan<JOBS, OPS> {
+    pub const fn new() -> Self {
+        Self {
+            jobs: [PdoConfigJob::EMPTY; JOBS],
+            count: 0,
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn jobs(&self) -> &[PdoConfigJob<OPS>] {
+        &self.jobs[..self.count]
+    }
+
+    pub fn push(&mut self, job: PdoConfigJob<OPS>) -> Result<(), PdoConfigBatchPlanError> {
+        if self.count >= JOBS {
+            return Err(PdoConfigBatchPlanError::CapacityExceeded);
+        }
+        if self.jobs[..self.count]
+            .iter()
+            .any(|existing| existing.station_address == job.station_address)
+        {
+            return Err(PdoConfigBatchPlanError::DuplicateStationAddress {
+                station_address: job.station_address,
+            });
+        }
+        self.jobs[self.count] = job;
+        self.count += 1;
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<(), PdoConfigBatchPlanError> {
+        if self.is_empty() {
+            Err(PdoConfigBatchPlanError::Empty)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl<const JOBS: usize, const OPS: usize> Default for PdoConfigBatchPlan<JOBS, OPS> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PdoConfigBatchPlanError {
+    Empty,
+    CapacityExceeded,
+    DuplicateStationAddress { station_address: u16 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PdoConfigBatchPhase {
+    Idle,
+    Configuring,
+    Complete,
+    Faulted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PdoConfigBatchStatus {
+    pub phase: PdoConfigBatchPhase,
+    pub current_index: usize,
+    pub job_count: usize,
+    pub station_address: Option<u16>,
+    pub generation: Option<u16>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PdoConfigBatchError {
+    Busy,
+    NotStarted,
+    GenerationOutOfBounds,
+    Plan(PdoConfigBatchPlanError),
+    Configuration(PdoConfigError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -512,6 +643,190 @@ impl<const OPS: usize> PdoConfigController<OPS> {
 }
 
 impl<const OPS: usize> Default for PdoConfigController<OPS> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct PdoConfigBatch<const JOBS: usize, const OPS: usize> {
+    phase: PdoConfigBatchPhase,
+    plan: PdoConfigBatchPlan<JOBS, OPS>,
+    current_index: usize,
+    base_generation: u16,
+    timeout_ns: u64,
+    request_timeout_ns: u64,
+    controller: PdoConfigController<OPS>,
+    mailbox: MailboxController,
+    last_error: Option<PdoConfigBatchError>,
+}
+
+impl<const JOBS: usize, const OPS: usize> PdoConfigBatch<JOBS, OPS> {
+    pub const fn new() -> Self {
+        Self {
+            phase: PdoConfigBatchPhase::Idle,
+            plan: PdoConfigBatchPlan::new(),
+            current_index: 0,
+            base_generation: 0,
+            timeout_ns: 0,
+            request_timeout_ns: 0,
+            controller: PdoConfigController::new(),
+            mailbox: MailboxController::new(),
+            last_error: None,
+        }
+    }
+
+    pub fn phase(&self) -> PdoConfigBatchPhase {
+        if self.phase == PdoConfigBatchPhase::Configuring
+            && self.controller.phase() == PdoConfigPhase::Faulted
+        {
+            PdoConfigBatchPhase::Faulted
+        } else {
+            self.phase
+        }
+    }
+
+    pub const fn current_index(&self) -> usize {
+        self.current_index
+    }
+
+    pub const fn controller(&self) -> &PdoConfigController<OPS> {
+        &self.controller
+    }
+
+    pub fn controller_mut(&mut self) -> &mut PdoConfigController<OPS> {
+        &mut self.controller
+    }
+
+    pub const fn mailbox(&self) -> &MailboxController {
+        &self.mailbox
+    }
+
+    pub fn mailbox_mut(&mut self) -> &mut MailboxController {
+        &mut self.mailbox
+    }
+
+    pub const fn current_mailbox_config(&self) -> Option<MailboxConfig> {
+        if self.current_index < self.plan.count {
+            Some(self.plan.jobs[self.current_index].mailbox_config)
+        } else {
+            None
+        }
+    }
+
+    pub const fn last_error(&self) -> Option<PdoConfigBatchError> {
+        match self.last_error {
+            Some(error) => Some(error),
+            None => match self.controller.last_error() {
+                Some(error) => Some(PdoConfigBatchError::Configuration(error)),
+                None => None,
+            },
+        }
+    }
+
+    pub fn status(&self) -> PdoConfigBatchStatus {
+        let current = if self.current_index < self.plan.count {
+            Some(self.plan.jobs[self.current_index])
+        } else {
+            None
+        };
+        PdoConfigBatchStatus {
+            phase: self.phase(),
+            current_index: self.current_index,
+            job_count: self.plan.count,
+            station_address: current.map(|job| job.station_address),
+            generation: current
+                .map(|_| self.base_generation.wrapping_add(self.current_index as u16)),
+        }
+    }
+
+    pub fn start(
+        &mut self,
+        plan: PdoConfigBatchPlan<JOBS, OPS>,
+        base_generation: u16,
+        now_ns: u64,
+        timeout_ns: u64,
+        request_timeout_ns: u64,
+    ) -> Result<(), PdoConfigBatchError> {
+        if self.phase() == PdoConfigBatchPhase::Configuring {
+            return Err(PdoConfigBatchError::Busy);
+        }
+        plan.validate().map_err(PdoConfigBatchError::Plan)?;
+        let last_offset = u16::try_from(plan.count - 1)
+            .map_err(|_| PdoConfigBatchError::GenerationOutOfBounds)?;
+        base_generation
+            .checked_add(last_offset)
+            .ok_or(PdoConfigBatchError::GenerationOutOfBounds)?;
+
+        self.phase = PdoConfigBatchPhase::Configuring;
+        self.plan = plan;
+        self.current_index = 0;
+        self.base_generation = base_generation;
+        self.timeout_ns = timeout_ns;
+        self.request_timeout_ns = request_timeout_ns;
+        self.controller = PdoConfigController::new();
+        self.mailbox = MailboxController::new();
+        self.last_error = None;
+        self.start_current_or_finish(now_ns)
+    }
+
+    pub fn advance(&mut self, now_ns: u64) -> Result<PdoConfigBatchStatus, PdoConfigBatchError> {
+        match self.phase() {
+            PdoConfigBatchPhase::Idle => return Err(PdoConfigBatchError::NotStarted),
+            PdoConfigBatchPhase::Complete => return Ok(self.status()),
+            PdoConfigBatchPhase::Faulted => {
+                let error = self
+                    .last_error()
+                    .unwrap_or(PdoConfigBatchError::Configuration(
+                        PdoConfigError::NoPendingAction,
+                    ));
+                self.phase = PdoConfigBatchPhase::Faulted;
+                self.last_error = Some(error);
+                return Err(error);
+            }
+            PdoConfigBatchPhase::Configuring => {}
+        }
+        if self.controller.phase() != PdoConfigPhase::Complete {
+            return Ok(self.status());
+        }
+        self.current_index += 1;
+        self.start_current_or_finish(now_ns)?;
+        Ok(self.status())
+    }
+
+    fn start_current_or_finish(&mut self, now_ns: u64) -> Result<(), PdoConfigBatchError> {
+        let mut remaining = JOBS;
+        while self.current_index < self.plan.count && remaining != 0 {
+            let job = self.plan.jobs[self.current_index];
+            let generation = self
+                .base_generation
+                .checked_add(self.current_index as u16)
+                .ok_or(PdoConfigBatchError::GenerationOutOfBounds)?;
+            if let Err(error) = self.controller.start(
+                job.plan,
+                job.station_address,
+                generation,
+                now_ns,
+                self.timeout_ns,
+                self.request_timeout_ns,
+            ) {
+                let error = PdoConfigBatchError::Configuration(error);
+                self.phase = PdoConfigBatchPhase::Faulted;
+                self.last_error = Some(error);
+                return Err(error);
+            }
+            self.phase = PdoConfigBatchPhase::Configuring;
+            if self.controller.phase() != PdoConfigPhase::Complete {
+                return Ok(());
+            }
+            self.current_index += 1;
+            remaining -= 1;
+        }
+        self.phase = PdoConfigBatchPhase::Complete;
+        Ok(())
+    }
+}
+
+impl<const JOBS: usize, const OPS: usize> Default for PdoConfigBatch<JOBS, OPS> {
     fn default() -> Self {
         Self::new()
     }
@@ -892,5 +1207,188 @@ mod tests {
         assert_eq!(controller.phase(), PdoConfigPhase::Faulted);
         assert_eq!(controller.operation_index(), 0);
         assert_eq!(controller.pending(), None);
+    }
+
+    fn one_write_plan(index: u16, value: u8) -> PdoConfigPlan<1> {
+        let mut plan = PdoConfigPlan::new();
+        plan.push(PdoSdoWrite::new(index, 0, &[value]).unwrap())
+            .unwrap();
+        plan
+    }
+
+    fn complete_batch_job<const JOBS: usize>(
+        batch: &mut PdoConfigBatch<JOBS, 1>,
+        generation: u16,
+        value: u8,
+        now_ns: u64,
+    ) {
+        let download = batch.controller_mut().next_action(now_ns).unwrap().unwrap();
+        assert_eq!(download.generation, generation);
+        batch
+            .controller_mut()
+            .accept(
+                download,
+                generation,
+                &download_response(download),
+                now_ns + 1,
+            )
+            .unwrap();
+        let verify = batch
+            .controller_mut()
+            .next_action(now_ns + 2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(verify.generation, generation);
+        assert_eq!(
+            batch.controller_mut().accept(
+                verify,
+                generation,
+                &expedited_upload_response(verify, &[value]),
+                now_ns + 3,
+            ),
+            Ok(PdoConfigProgress::Complete)
+        );
+    }
+
+    #[test]
+    fn batch_plan_rejects_duplicate_stations_and_capacity_transactionally() {
+        let config = MailboxConfig::new(0x1000, 32, 0x1100, 32);
+        let mut plan = PdoConfigBatchPlan::<1, 1>::new();
+        assert_eq!(plan.validate(), Err(PdoConfigBatchPlanError::Empty));
+        plan.push(PdoConfigJob::new(0x1001, one_write_plan(0x1C12, 0), config))
+            .unwrap();
+        assert_eq!(
+            plan.push(PdoConfigJob::new(0x1001, one_write_plan(0x1C13, 0), config,)),
+            Err(PdoConfigBatchPlanError::CapacityExceeded)
+        );
+        assert_eq!(plan.len(), 1);
+
+        let mut duplicate = PdoConfigBatchPlan::<2, 1>::new();
+        duplicate
+            .push(PdoConfigJob::new(0x1001, PdoConfigPlan::new(), config))
+            .unwrap();
+        assert_eq!(
+            duplicate.push(PdoConfigJob::new(0x1001, PdoConfigPlan::new(), config)),
+            Err(PdoConfigBatchPlanError::DuplicateStationAddress {
+                station_address: 0x1001,
+            })
+        );
+        assert_eq!(duplicate.len(), 1);
+    }
+
+    #[test]
+    fn batch_advances_jobs_in_order_with_distinct_generations() {
+        let first_config = MailboxConfig::new(0x1000, 32, 0x1100, 32);
+        let second_config = MailboxConfig::new(0x1200, 32, 0x1300, 32);
+        let mut plan = PdoConfigBatchPlan::<2, 1>::new();
+        plan.push(PdoConfigJob::new(
+            0x1001,
+            one_write_plan(0x1C12, 1),
+            first_config,
+        ))
+        .unwrap();
+        plan.push(PdoConfigJob::new(
+            0x1002,
+            one_write_plan(0x1C13, 2),
+            second_config,
+        ))
+        .unwrap();
+        let mut batch = PdoConfigBatch::new();
+        batch.start(plan, 41, 0, 1_000, 100).unwrap();
+
+        assert_eq!(
+            batch.status(),
+            PdoConfigBatchStatus {
+                phase: PdoConfigBatchPhase::Configuring,
+                current_index: 0,
+                job_count: 2,
+                station_address: Some(0x1001),
+                generation: Some(41),
+            }
+        );
+        assert_eq!(batch.current_mailbox_config(), Some(first_config));
+        complete_batch_job(&mut batch, 41, 1, 1);
+        assert_eq!(batch.controller().phase(), PdoConfigPhase::Complete);
+
+        assert_eq!(
+            batch.advance(10).unwrap(),
+            PdoConfigBatchStatus {
+                phase: PdoConfigBatchPhase::Configuring,
+                current_index: 1,
+                job_count: 2,
+                station_address: Some(0x1002),
+                generation: Some(42),
+            }
+        );
+        assert_eq!(batch.current_mailbox_config(), Some(second_config));
+        complete_batch_job(&mut batch, 42, 2, 11);
+        assert_eq!(
+            batch.advance(20).unwrap().phase,
+            PdoConfigBatchPhase::Complete
+        );
+        assert_eq!(batch.current_index(), 2);
+        assert_eq!(batch.current_mailbox_config(), None);
+    }
+
+    #[test]
+    fn batch_skips_empty_jobs_and_rejects_generation_overflow() {
+        let config = MailboxConfig::new(0x1000, 32, 0x1100, 32);
+        let mut plan = PdoConfigBatchPlan::<2, 0>::new();
+        plan.push(PdoConfigJob::new(0x1001, PdoConfigPlan::new(), config))
+            .unwrap();
+        plan.push(PdoConfigJob::new(0x1002, PdoConfigPlan::new(), config))
+            .unwrap();
+        let mut batch = PdoConfigBatch::new();
+        batch.start(plan, 7, 0, 100, 10).unwrap();
+        assert_eq!(batch.phase(), PdoConfigBatchPhase::Complete);
+        assert_eq!(batch.current_index(), 2);
+        assert_eq!(batch.controller().pending(), None);
+
+        let mut overflow_plan = PdoConfigBatchPlan::<2, 0>::new();
+        overflow_plan
+            .push(PdoConfigJob::new(0x1001, PdoConfigPlan::new(), config))
+            .unwrap();
+        overflow_plan
+            .push(PdoConfigJob::new(0x1002, PdoConfigPlan::new(), config))
+            .unwrap();
+        assert_eq!(
+            batch.start(overflow_plan, u16::MAX, 0, 100, 10),
+            Err(PdoConfigBatchError::GenerationOutOfBounds)
+        );
+        assert_eq!(batch.phase(), PdoConfigBatchPhase::Complete);
+    }
+
+    #[test]
+    fn batch_fault_retains_the_exact_job_until_explicit_restart() {
+        let config = MailboxConfig::new(0x1000, 32, 0x1100, 32);
+        let mut plan = PdoConfigBatchPlan::<2, 1>::new();
+        plan.push(PdoConfigJob::new(0x1001, one_write_plan(0x1C12, 1), config))
+            .unwrap();
+        plan.push(PdoConfigJob::new(0x1002, one_write_plan(0x1C13, 2), config))
+            .unwrap();
+        let mut batch = PdoConfigBatch::new();
+        batch.start(plan, 20, 0, 10, 5).unwrap();
+        assert_eq!(
+            batch.controller_mut().next_action(10),
+            Err(PdoConfigError::Timeout)
+        );
+        assert_eq!(batch.phase(), PdoConfigBatchPhase::Faulted);
+        assert_eq!(batch.current_index(), 0);
+        assert_eq!(
+            batch.advance(11),
+            Err(PdoConfigBatchError::Configuration(PdoConfigError::Timeout))
+        );
+        assert_eq!(batch.current_index(), 0);
+
+        let mut restart = PdoConfigBatchPlan::<2, 1>::new();
+        restart
+            .push(PdoConfigJob::new(0x1002, one_write_plan(0x1C13, 3), config))
+            .unwrap();
+        batch.start(restart, 30, 12, 100, 10).unwrap();
+        assert_eq!(batch.phase(), PdoConfigBatchPhase::Configuring);
+        assert_eq!(batch.current_index(), 0);
+        assert_eq!(batch.status().station_address, Some(0x1002));
+        assert_eq!(batch.status().generation, Some(30));
+        assert_eq!(batch.last_error(), None);
     }
 }

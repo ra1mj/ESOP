@@ -9,8 +9,10 @@
 pub use esop_ethercat_core::wire::Command;
 pub use esop_ethercat_core::{
     DomainConfig, DomainDatagramSpec, DomainInfo, DomainRegistry, DomainRegistryError,
-    FramePlanSet, FramePlanSetError, PdoConfigPlan, PdoConfigPlanError, PdoDirection, PdoEntry,
-    PdoEntrySpec, PdoRegistrationRequest, PdoSdoWrite, ScheduleTable, SlaveIdentity, SlaveRecord,
+    FramePlanSet, FramePlanSetError, MailboxConfig, PdoConfigBatch, PdoConfigBatchError,
+    PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigBatchPlanError, PdoConfigBatchStatus,
+    PdoConfigJob, PdoConfigPlan, PdoConfigPlanError, PdoDirection, PdoEntry, PdoEntrySpec,
+    PdoRegistrationRequest, PdoSdoWrite, ScheduleTable, SlaveIdentity, SlaveRecord,
 };
 pub use esop_lifecycle_guard::procbuf::{Cia402AxisCommandPolicy, Cia402AxisCommandPolicyError};
 pub use esop_procbuf::{
@@ -71,6 +73,29 @@ pub struct ProductPdoConfig {
     pub request: PdoRegistrationRequest,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProductMailboxBinding {
+    slave_position: u16,
+    mailbox_config: MailboxConfig,
+}
+
+impl ProductMailboxBinding {
+    pub const fn new(slave_position: u16, mailbox_config: MailboxConfig) -> Self {
+        Self {
+            slave_position,
+            mailbox_config,
+        }
+    }
+
+    pub const fn slave_position(&self) -> u16 {
+        self.slave_position
+    }
+
+    pub const fn mailbox_config(&self) -> MailboxConfig {
+        self.mailbox_config
+    }
+}
+
 pub struct ProductPdoStartupPlan<const OPS: usize> {
     station_address: u16,
     plan: PdoConfigPlan<OPS>,
@@ -116,6 +141,24 @@ pub enum ProductPdoPlanError {
         position: u16,
     },
     Plan(PdoConfigPlanError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductPdoBatchError {
+    MissingMailboxBinding {
+        position: u16,
+    },
+    DuplicateMailboxBinding {
+        position: u16,
+    },
+    UnknownMailboxBinding {
+        position: u16,
+    },
+    SlavePlan {
+        position: u16,
+        error: ProductPdoPlanError,
+    },
+    Batch(PdoConfigBatchPlanError),
 }
 
 #[derive(Clone, Copy)]
@@ -314,6 +357,56 @@ type ActivatedAxes<const AXES: usize> = (
 impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
     StaticProductConfig<'a, SLAVES, DOMAINS, AXES>
 {
+    pub fn build_pdo_configuration_batch<const JOBS: usize, const OPS: usize>(
+        &self,
+        mailbox_bindings: &[ProductMailboxBinding],
+    ) -> Result<PdoConfigBatchPlan<JOBS, OPS>, ProductPdoBatchError> {
+        for (binding_index, binding) in mailbox_bindings.iter().enumerate() {
+            if !self
+                .slaves
+                .iter()
+                .any(|slave| slave.position == binding.slave_position)
+            {
+                return Err(ProductPdoBatchError::UnknownMailboxBinding {
+                    position: binding.slave_position,
+                });
+            }
+            if mailbox_bindings[..binding_index]
+                .iter()
+                .any(|existing| existing.slave_position == binding.slave_position)
+            {
+                return Err(ProductPdoBatchError::DuplicateMailboxBinding {
+                    position: binding.slave_position,
+                });
+            }
+        }
+
+        let mut batch = PdoConfigBatchPlan::new();
+        for slave in self.slaves {
+            let binding = mailbox_bindings
+                .iter()
+                .find(|binding| binding.slave_position == slave.position)
+                .ok_or(ProductPdoBatchError::MissingMailboxBinding {
+                    position: slave.position,
+                })?;
+            let startup = self
+                .build_pdo_startup_plan::<OPS>(slave.position)
+                .map_err(|error| ProductPdoBatchError::SlavePlan {
+                    position: slave.position,
+                    error,
+                })?;
+            batch
+                .push(PdoConfigJob::new(
+                    startup.station_address(),
+                    startup.into_plan(),
+                    binding.mailbox_config,
+                ))
+                .map_err(ProductPdoBatchError::Batch)?;
+        }
+        batch.validate().map_err(ProductPdoBatchError::Batch)?;
+        Ok(batch)
+    }
+
     pub fn build_pdo_startup_plan<const OPS: usize>(
         &self,
         slave_position: u16,

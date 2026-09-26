@@ -577,8 +577,9 @@ submit_prepared_active_frame(
 
 - Core entry: `ScheduledProductionServiceScheduler::run_cycle(...)`.
 - Service set:
-  `ScheduledProductionServices<MAX_SLAVES, SMS, FMMUS, PDO_OPS>`; the final
-  capacity defaults to zero for existing callers.
+  `ScheduledProductionServices<MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>`;
+  `PDO_OPS` defaults to zero and `PDO_JOBS` defaults to one for existing
+  callers.
 - Evidence: `ScheduledProductionServiceCycleReport<E, DOMAINS>`.
 - Lifecycle entries: `run_service_cycle_with_outputs_until`,
   `run_process_service_cycle_with_outputs_until`, and
@@ -598,10 +599,17 @@ submit_prepared_active_frame(
 - Barrier release resets only the Startup AL cursor/subcontroller. Preserve the
   verified `SlaveTable` and continue each slave through legal SAFEOP/OP steps;
   do not rescan, reread SII, skip SAFEOP, or accept a caller readiness boolean.
-- A PDO service binding owns one `PdoConfigController`, one
-  `MailboxController`, and one runtime `MailboxConfig`. The scheduler stores
-  the immutable PDO action while the mailbox FSM owns framing, counters,
-  polling, retries, and response extraction.
+- A PDO service binding either borrows one `PdoConfigController`, one
+  `MailboxController`, and one runtime `MailboxConfig`, or borrows one
+  `PdoConfigBatch` that owns those controllers and a fixed-capacity immutable
+  job plan. The scheduler stores the immutable current PDO action while the
+  mailbox FSM owns framing, counters, polling, retries, and response
+  extraction.
+- A batch assigns `base_generation + job_index` after validating the complete
+  generation range, skips empty jobs with at most `PDO_JOBS` iterations, and
+  advances only after the current controller reaches `Complete`. A current
+  controller's `Complete` phase is not whole-service readiness while another
+  job remains. Faults retain the current index/station until explicit restart.
 - While PDO is bound, verify the PDO controller pending action and the mailbox
   transaction's station, generation, CoE protocol, and raw payload even when
   no pool request exists. A substituted mailbox controller must fail before TX.
@@ -620,12 +628,12 @@ submit_prepared_active_frame(
   Only `ControlRxConsumer::accepts_prior_generation` may authorize this, and
   only for the same InFlight pool slot/index/generation. Domain and DC
   consumers keep the default current-generation-only rule.
-- Every production report carries the actual optional Startup phase even while
-  a configuration service is selected. Startup readiness owns the Topology
-  gate, so `AwaitingConfiguration` keeps Topology false while PDO
-  configuration, Mapping, DC configuration, and Mailbox readiness separately
-  own the Configuration gate. Callers do not override either mapping or supply
-  a replacement readiness boolean.
+- Every production report carries the actual optional Startup phase and
+  optional bounded PDO batch status even while another service is selected.
+  Startup readiness owns the Topology gate, so `AwaitingConfiguration` keeps
+  Topology false while PDO configuration, Mapping, DC configuration, and
+  Mailbox readiness separately own the Configuration gate. Callers do not
+  override either mapping or supply a replacement readiness boolean.
 - PDO readiness means the complete plan passed exact upload readback; one
   successful mailbox transaction is not sufficient. Terminal mailbox errors
   become typed PDO transport faults without advancing the operation index.
@@ -648,6 +656,8 @@ submit_prepared_active_frame(
   and no lower-priority service selection until explicit controller restart.
 - Required service absent at a Startup barrier ->
   `MissingController(required_service)` before Startup can resume.
+- Empty/capacity/duplicate-station/generation-invalid batch input -> typed
+  batch error before replacing an existing run.
 - Barrier release outside `AwaitingConfiguration` -> typed Startup error; do
   not mutate a scan/identity/AL run into a synthetic ready state.
 
@@ -694,13 +704,19 @@ submit_prepared_active_frame(
 - Public integration: a real PDO download/upload readback runs while Startup is
   at the barrier, the report keeps Topology false even when Configuration is
   complete, and the next cycle automatically resumes SAFEOP/OP to final Ready.
+- Core/public integration: a two-job PDO batch starts job two only after exact
+  readback of job one, reports index/station/generation, keeps the PREOP barrier
+  closed between jobs, and releases it only after whole-batch completion.
+- Product integration: position-keyed mailbox bindings build the checked-in
+  drive/drive/IO batch in product order and reject missing, duplicate, unknown,
+  station-duplicate, job-capacity, and operation-capacity inputs atomically.
 - Lifecycle integration: the unified report clears Topology or Configuration
   according to selected service and is accepted by the stable cycle owner only
   when `ScheduledDomainBank` confirms its underlying RX evidence.
-- Qualification boundary: callers still start each per-slave configuration
-  job and supply MailboxConfig/mapping/DC descriptors. Simulation does not
-  prove physical response authenticity, full-period WKC, device
-  interoperability, WCET, or HIL.
+- Qualification boundary: callers start one immutable batch and still supply
+  MailboxConfig plus mapping/DC descriptors. Simulation does not discover
+  those values or prove physical response authenticity, full-period WKC,
+  device interoperability, WCET, or HIL.
 
 ### 7. Wrong vs Correct
 

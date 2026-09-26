@@ -9,17 +9,18 @@ use esop_ethercat_core::{
     MAX_MAILBOX_BYTES, MailboxConfig, MailboxController, MailboxError, MailboxHeader, MailboxPhase,
     MailboxProgress, MailboxProtocol, MailboxRetryPolicy, MappingConfigController,
     MappingConfigPhase, MappingConfigProgress, MappingTable, MasterConfig, PdoConfigAction,
-    PdoConfigController, PdoConfigError, PdoConfigPhase, PdoConfigPlan, PdoConfigProgress,
-    PdoConfigStep, PdoSdoWrite, PortError, RegisterOperation, RequestHandle, RequestState, RxPoll,
-    RxSlotState, ScheduleDomain, ScheduleTable, ScheduledControlCycleError, ScheduledDomainBank,
-    ScheduledDomainEntry, ScheduledPdoConfiguration, ScheduledPdoConfigurationProgress,
-    ScheduledProcessInputEntry, ScheduledProcessInputs, ScheduledProductionServiceCycleError,
-    ScheduledProductionServiceFault, ScheduledProductionServiceKind,
-    ScheduledProductionServiceProgress, ScheduledProductionServiceRecovery,
-    ScheduledProductionServiceScheduler, ScheduledProductionServices, ScheduledReceiveError,
-    ScheduledServiceFrameError, ScheduledServiceTxError, ScheduledServiceTxFailure, SlaveIdentity,
-    StartupAction, StartupConfig, StartupConfigurationServices, StartupController, StartupPhase,
-    StartupProgress, SyncManagerConfig, fixed_address,
+    PdoConfigBatch, PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigController, PdoConfigError,
+    PdoConfigJob, PdoConfigPhase, PdoConfigPlan, PdoConfigProgress, PdoConfigStep, PdoSdoWrite,
+    PortError, RegisterOperation, RequestHandle, RequestState, RxPoll, RxSlotState, ScheduleDomain,
+    ScheduleTable, ScheduledControlCycleError, ScheduledDomainBank, ScheduledDomainEntry,
+    ScheduledPdoConfiguration, ScheduledPdoConfigurationProgress, ScheduledProcessInputEntry,
+    ScheduledProcessInputs, ScheduledProductionServiceCycleError, ScheduledProductionServiceFault,
+    ScheduledProductionServiceKind, ScheduledProductionServiceProgress,
+    ScheduledProductionServiceRecovery, ScheduledProductionServiceScheduler,
+    ScheduledProductionServices, ScheduledReceiveError, ScheduledServiceFrameError,
+    ScheduledServiceTxError, ScheduledServiceTxFailure, SlaveIdentity, StartupAction,
+    StartupConfig, StartupConfigurationServices, StartupController, StartupPhase, StartupProgress,
+    SyncManagerConfig, fixed_address,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::ethercat::{
@@ -1641,7 +1642,7 @@ fn drive_startup_to_pdo_barrier(startup: &mut StartupController<2>, expected: &[
 }
 
 #[test]
-fn production_scheduler_runs_pdo_then_releases_startup_through_safeop_to_op() {
+fn production_scheduler_runs_pdo_batch_then_releases_startup_through_safeop_to_op() {
     let schedule = ScheduleTable::<1, 1>::build(
         100_000,
         &[ScheduleDomain {
@@ -1689,14 +1690,26 @@ fn production_scheduler_runs_pdo_then_releases_startup_through_safeop_to_op() {
     }];
     let mut startup = StartupController::<2>::new(0x1000);
     drive_startup_to_pdo_barrier(&mut startup, &expected);
-    let mut plan = PdoConfigPlan::<1>::new();
-    plan.push(PdoSdoWrite::new(0x1C12, 0, &[0]).unwrap())
-        .unwrap();
-    let mut pdo = PdoConfigController::<1>::new();
-    pdo.start(plan, 0x1000, 41, 90_000, 1_000_000, 100_000)
-        .unwrap();
     let mailbox_config = MailboxConfig::new(0x1000, 32, 0x1100, 32);
-    let mut pdo_mailbox = MailboxController::new();
+    let mut first_plan = PdoConfigPlan::<1>::new();
+    first_plan
+        .push(PdoSdoWrite::new(0x1C12, 0, &[0]).unwrap())
+        .unwrap();
+    let mut second_plan = PdoConfigPlan::<1>::new();
+    second_plan
+        .push(PdoSdoWrite::new(0x1C13, 0, &[1]).unwrap())
+        .unwrap();
+    let mut batch_plan = PdoConfigBatchPlan::<2, 1>::new();
+    batch_plan
+        .push(PdoConfigJob::new(0x1000, first_plan, mailbox_config))
+        .unwrap();
+    batch_plan
+        .push(PdoConfigJob::new(0x1001, second_plan, mailbox_config))
+        .unwrap();
+    let mut pdo_batch = PdoConfigBatch::new();
+    pdo_batch
+        .start(batch_plan, 41, 90_000, 1_000_000, 100_000)
+        .unwrap();
     let mut scheduler = ScheduledProductionServiceScheduler::new();
     let mut controls = ControlRequestPool::<2>::new();
     let mut port = TwoFrameSimPort::new();
@@ -1717,17 +1730,13 @@ fn production_scheduler_runs_pdo_then_releases_startup_through_safeop_to_op() {
                     &mut dc_image,
                     $now_ns,
                     &mut controls,
-                    &mut ScheduledProductionServices::<2, 0, 0, 1>::new(
+                    &mut ScheduledProductionServices::<2, 0, 0, 1, 2>::new(
                         Some(&mut startup),
                         None,
                         None,
                         None,
                     )
-                    .with_pdo_configuration(ScheduledPdoConfiguration::new(
-                        &mut pdo,
-                        &mut pdo_mailbox,
-                        mailbox_config,
-                    )),
+                    .with_pdo_configuration(ScheduledPdoConfiguration::batch(&mut pdo_batch)),
                     $generation,
                     $now_ns + 50_000,
                     $now_ns + 50_000,
@@ -1745,11 +1754,17 @@ fn production_scheduler_runs_pdo_then_releases_startup_through_safeop_to_op() {
         first.startup_phase(),
         Some(StartupPhase::AwaitingConfiguration)
     );
+    let first_status = first.pdo_batch_status().unwrap();
+    assert_eq!(first_status.phase, PdoConfigBatchPhase::Configuring);
+    assert_eq!(first_status.current_index, 0);
+    assert_eq!(first_status.job_count, 2);
+    assert_eq!(first_status.station_address, Some(0x1000));
+    assert_eq!(first_status.generation, Some(41));
     let first_facts =
         other_cycle_facts_from_production_service_cycle(&first, ready_other_cycle_facts());
     assert!(!first_facts.coe_ready);
     assert!(!first_facts.topology_valid);
-    let download = pdo.pending().unwrap();
+    let download = pdo_batch.controller().pending().unwrap();
 
     port.set_next_mailbox_response(&pdo_download_response(download));
     let second = run_cycle!(110_000, 2);
@@ -1764,13 +1779,68 @@ fn production_scheduler_runs_pdo_then_releases_startup_through_safeop_to_op() {
         third.selected(),
         ScheduledProductionServiceKind::PdoConfiguration
     );
-    let upload = pdo.pending().unwrap();
+    let upload = pdo_batch.controller().pending().unwrap();
     assert_eq!(upload.step, PdoConfigStep::VerifyUpload);
 
     port.set_next_mailbox_response(&pdo_upload_response(upload, &[0]));
-    let configured = run_cycle!(130_000, 4);
-    assert_eq!(pdo.phase(), PdoConfigPhase::Complete);
+    let first_configured = run_cycle!(130_000, 4);
+    assert_eq!(pdo_batch.controller().phase(), PdoConfigPhase::Sending);
+    assert!(!first_configured.service_ready());
+    assert_eq!(
+        first_configured.startup_phase(),
+        Some(StartupPhase::AwaitingConfiguration)
+    );
+    let second_status = first_configured.pdo_batch_status().unwrap();
+    assert_eq!(second_status.phase, PdoConfigBatchPhase::Configuring);
+    assert_eq!(second_status.current_index, 1);
+    assert_eq!(second_status.job_count, 2);
+    assert_eq!(second_status.station_address, Some(0x1001));
+    assert_eq!(second_status.generation, Some(42));
+    let first_configured_facts = other_cycle_facts_from_production_service_cycle(
+        &first_configured,
+        ready_other_cycle_facts(),
+    );
+    assert!(!first_configured_facts.coe_ready);
+    assert!(!first_configured_facts.topology_valid);
+
+    port.configure_mailbox(0x1001, mailbox_config);
+    let second_download_send = run_cycle!(140_000, 5);
+    assert_eq!(
+        second_download_send.selected(),
+        ScheduledProductionServiceKind::PdoConfiguration
+    );
+    assert_eq!(startup.phase(), StartupPhase::AwaitingConfiguration);
+    let second_download = pdo_batch.controller().pending().unwrap();
+    assert_eq!(second_download.generation, 42);
+    assert_eq!(second_download.station_address, 0x1001);
+
+    port.set_next_mailbox_response(&pdo_download_response(second_download));
+    let second_download_complete = run_cycle!(150_000, 6);
+    assert_eq!(
+        second_download_complete.progress(),
+        ScheduledProductionServiceProgress::PdoConfiguration(
+            ScheduledPdoConfigurationProgress::Configuration(PdoConfigProgress::Advanced)
+        )
+    );
+    let second_upload_send = run_cycle!(160_000, 7);
+    assert_eq!(
+        second_upload_send.selected(),
+        ScheduledProductionServiceKind::PdoConfiguration
+    );
+    let second_upload = pdo_batch.controller().pending().unwrap();
+    assert_eq!(second_upload.step, PdoConfigStep::VerifyUpload);
+    assert_eq!(second_upload.generation, 42);
+
+    port.set_next_mailbox_response(&pdo_upload_response(second_upload, &[1]));
+    let configured = run_cycle!(170_000, 8);
+    assert_eq!(pdo_batch.phase(), PdoConfigBatchPhase::Complete);
     assert!(configured.service_ready());
+    let complete_status = configured.pdo_batch_status().unwrap();
+    assert_eq!(complete_status.phase, PdoConfigBatchPhase::Complete);
+    assert_eq!(complete_status.current_index, 2);
+    assert_eq!(complete_status.job_count, 2);
+    assert_eq!(complete_status.station_address, None);
+    assert_eq!(complete_status.generation, None);
     assert_eq!(
         configured.startup_phase(),
         Some(StartupPhase::AwaitingConfiguration)
@@ -1780,7 +1850,7 @@ fn production_scheduler_runs_pdo_then_releases_startup_through_safeop_to_op() {
     assert!(configured_facts.coe_ready);
     assert!(!configured_facts.topology_valid);
 
-    let safeop_write = run_cycle!(140_000, 5);
+    let safeop_write = run_cycle!(180_000, 9);
     assert_eq!(
         safeop_write.selected(),
         ScheduledProductionServiceKind::Startup
@@ -1796,20 +1866,20 @@ fn production_scheduler_runs_pdo_then_releases_startup_through_safeop_to_op() {
         fixed_address(0x1000, ESC_AL_STATUS),
         &startup_status(EthercatState::SafeOp),
     );
-    let safeop_read = run_cycle!(150_000, 6);
+    let safeop_read = run_cycle!(190_000, 10);
     assert_eq!(
         safeop_read.startup_phase(),
         Some(StartupPhase::TransitioningAl)
     );
     assert_eq!(startup.records()[0].al_status.state, EthercatState::SafeOp);
 
-    let op_write = run_cycle!(160_000, 7);
+    let op_write = run_cycle!(200_000, 11);
     assert_eq!(op_write.selected(), ScheduledProductionServiceKind::Startup);
     port.set_next_control_response(
         fixed_address(0x1000, ESC_AL_STATUS),
         &startup_status(EthercatState::Op),
     );
-    let ready = run_cycle!(170_000, 8);
+    let ready = run_cycle!(210_000, 12);
     assert_eq!(
         ready.progress(),
         ScheduledProductionServiceProgress::Startup(StartupProgress::Ready)
