@@ -149,7 +149,12 @@ SAFEOP 到最终 SAFEOP/OP，不重新扫描或读取 SII。
 核心另提供严格的 SII 标准邮箱五字固定头解析：只接受精确 word 起点/长度和已完成
 `SiiBlockReader`，检查 CoE 协议位，并把从站 receive/send 字段转换为主站
 send/receive `MailboxConfig`。Startup 已将该读取和生成 ESI 布局交叉验证接入身份与
-AL 之间的有界控制请求路径；完整 SM/FMMU/DC 描述仍待发现和接入。
+AL 之间的有界控制请求路径。独立 `SiiCategoryStreamReader` 现可从标准 `0x0040`
+开始，在一个绝对 deadline 内沿用同一 token/datagram 游标读取两字 header 和变长
+payload，直到 END 才公开完整镜像；`SiiStreamDiscoveryController` 使用调用方 scratch
+原子投影 SyncManager/RxPDO/TxPDO candidate，并保留显式 signedness。该 candidate
+尚未由 Startup 消费或与生成产品配置比对；FMMU/DC 描述语义、物理响应真实性和 HIL
+仍待完成。
 
 ## 6. 构建报告接入
 
@@ -173,7 +178,8 @@ make build-report \
 跨周期请求所有权、重试/超时、精确回读、故障阻断和生命周期门控，但该软件
 证据还覆盖全从站 PREOP 屏障、真实服务 phase 释放、保留拓扑、合法 SAFEOP/OP
 顺序、逐转换 deadline 选择、`OpOnly` 写入读回顺序，以及调用方交付 SII 响应的邮箱
-布局比对；它不证明该响应来自真实目标从站，也不等于真实从站 PDO
+布局比对和完整 category stream/candidate 投影；它不证明该响应来自真实目标从站，
+也不等于 Startup 已使用该 candidate，更不等于真实从站 PDO
 assignment/mapping、ESM timeout 或 SyncManager 响应证据，更不证明驱动
 接受映射、完整周期 WKC、实际线缆时间、WCET、DMA/cache 正确性、制动/机械适配、
 STO/FSoE 或功能安全。生成示例和构建报告必须保持

@@ -15,6 +15,19 @@
       "limitation": "Real slave interoperability, target MAC ports and long-duration HIL remain open"
     },
     {
+      "id": "ethercat_sii_category_stream",
+      "status": "implemented",
+      "scope": "Allocation-free bounded SII category acquisition from standard word 0x0040 through END with non-reset action ownership, one absolute deadline, typed fail-closed errors and atomic signedness-aware SyncManager/RxPDO/TxPDO candidate projection",
+      "evidence": [
+        "crates/esop-ethercat-core/src/sii.rs",
+        "crates/esop-ethercat-core/src/sii_stream.rs",
+        "crates/esop-ethercat-core/src/sii_config.rs",
+        "crates/esop-ethercat-core/src/sii_discovery.rs",
+        ".trellis/spec/backend/product-configuration.md"
+      ],
+      "limitation": "Software tests cover caller-delivered EEPROM responses only; Startup ownership, generated-product comparison, FMMU/DC category semantics, physical response authenticity, target timing, interoperability and hardware HIL remain open"
+    },
+    {
       "id": "product_config_generator",
       "status": "implemented",
       "scope": "Deterministic host-only esop.product.v1 and bounded ESI-subset compilation into static C/Rust, normalized Domain/PDO/Frame Plan, per-slave CoE mailbox, ESM timeout and OpOnly profiles, device inventory, exact ProcBuf v6 layout and fail-closed build input",

@@ -99,6 +99,20 @@ position-keyed verified evidence. Runtime poll, timeout, retry and status-bit
 policy are not SII layout fields. Profiles without an expected mailbox and the
 legacy `start` API retain the identity-to-AL path.
 
+The core also provides a separate fixed-capacity SII category stream contract.
+`SiiCategoryStreamReader<WORDS>` starts at standard word `0x0040` by default,
+reuses `SiiBlockReader` register transactions, and reads two-word headers plus
+their declared payloads until `SII_CATEGORY_END`. Internal continuations keep
+one absolute scan deadline and do not reset action-token or datagram-index
+cursors. The image, category count, and byte projection stay unavailable until
+END is accepted. Capacity, missing-END, address, WKC, generation, payload and
+timeout failures are typed and latch the first terminal error. The companion
+`SiiStreamDiscoveryController` publishes `SiiConfigurationCandidate` only
+after caller-owned scratch conversion and complete transactional SM/RxPDO/
+TxPDO projection; explicit PDO signedness is preserved. This contract is not
+yet owned by Startup and does not compare the candidate with generated product
+configuration.
+
 `startup_profiles` validates timeout values, exact slave positions, generated
 mailbox ranges, OpOnly flags, and exclusive selected RxPDO ownership before
 returning fixed-array profiles. `start_startup` supplies those profiles to
@@ -168,6 +182,7 @@ datagrams, FCS, and inter-packet gap respectively.
 | Runtime schema/hash/ProcBuf/topology mismatch | Reject before registry activation. |
 | Invalid/misaligned startup profile or OpOnly without exclusive RxPDO | Reject before Startup mutation or control emission. |
 | Invalid expected mailbox, live SII parse/CoE/layout mismatch, or SII request fault | Latch typed Startup fault before AL and publish no mailbox evidence. |
+| SII category image exceeds capacity, lacks END, overflows EEPROM addressing, or fails a response check | Latch the first stream fault and publish neither image nor configuration candidate. |
 | Runtime Domain/axis evidence or capacity mismatch | Reject with typed owning-contract evidence and return no partial configuration. |
 | PDO plan owner/SM/group/capacity mismatch | Reject before returning any startup plan. |
 | Invalid generated mailbox or invalid/missing/duplicate/unknown override binding | Reject before returning any batch. |
@@ -217,6 +232,10 @@ datagrams, FCS, and inter-packet gap respectively.
   SII fixed-header direction conversion, Startup exact-range acquisition,
   generated-versus-live layout comparison, action ownership, timeout,
   multi-slave order, legacy opt-out and all shape/protocol/range failures.
+- Cover bounded SII category-stream acquisition through END, unknown and
+  zero-length categories, capacity/missing-END/address failures, non-reset
+  action cursors, one absolute deadline, request-pool ownership, stale
+  responses, signed projection and candidate atomicity.
 - Route a generated-style PDO action through `ScheduledPdoConfiguration`, the
   existing mailbox/DC/shared-RX path, exact upload readback, request rebuild,
   cross-generation waiting, timeout, lifecycle gating, fault blocking and

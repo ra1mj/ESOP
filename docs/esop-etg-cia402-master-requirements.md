@@ -25,6 +25,11 @@
 
 **当前状态：仓库已包含 Rust `no_std` EtherCAT 核心、Linux AF_PACKET 开发/HIL 端口、固定 SPSC ring、固定诊断事件环、控制请求闭环、单 Domain PDO 接收提交路径、扫描/SII/AL 基础状态机、ESC `0x0141[0]` Device Emulation 识别、普通 ESC 的有界 AL Error Acknowledge、Device Emulation 禁止 ACK 与首故障诊断保留、ESI 四类 ESM timeout 与版本化 ETG.1020 默认值、严格 ESI CoE 邮箱对校验与生成配置传播、SII 标准邮箱固定头解析、SII/ESI `OpOnly` 输出校验及 OP 前后写入读回门控、SII SyncManager/RxPDO/TxPDO category 只读解析及事务式固定容量配置候选、SM/FMMU 写入读回配置 FSM、生成式固定容量 CoE PDO assignment/mapping 计划和逐写精确 SDO upload 回读、产品顺序的多从站 PDO 配置批次、PDO 配置到统一生产调度/邮箱/DC/共享 RX 与 Configuration 生命周期门的有界接入、可选全从站 PREOP 配置屏障、从实际整批 PDO/Mapping/DC Complete phase 自动释放并保留拓扑继续 SAFEOP/OP、独立生命周期守卫、Mailbox 轮询 FSM、有限预算重试与协议错帧恢复、可配置 Status Bit 轮询、CoE SDO expedited/segmented codec/事务 FSM、异步 CoE Emergency 固定事件环，以及 DC SYNC0/SYNC1 配置 FSM、FRMW reference-clock 周期同步槽和 offset/jitter 监测器。固定容量 `DomainRegistry` 已支持多 Domain/PDO/datagram、SII 字节对齐 segment 的 `LWR`/`LRD` 绑定、按 MTU 拆帧和原子激活。另有独立 `esop-profile-cia402` crate，已实现 Statusword FSA 解码、基础 Controlword 使能序列、生命周期拒绝、Fault reset 单脉冲、CSP/CSV/CST 模式监督、标准周期 PDO typed raw binding 和四项运动门槛。仍未形成完整主站；Startup 已完成实时 SII 标准邮箱布局的软件交叉验证，但完整 SM-FMMU/DC 描述符自动发现与批处理、完整周期 WKC 资格、完整 SII/ESI 自动发现、真实从站 ESM/PDO 互操作、DC 拓扑传播延迟/全从站运行时同步、厂商缩放/quirk、MCU DMA 端口和真实设备 HIL 仍未实现。**现有内容是架构与验收基线，不是 ETG 认证证据。
 
+SII 增量现已包含从标准 `0x0040` 到 END 的固定容量 category stream acquisition，
+内部续读保持动作游标和绝对 deadline，并在完整读取后原子投影 signedness-aware
+SM/RxPDO/TxPDO candidate。该 candidate 尚未接入 Startup 或生成配置比对，FMMU/DC
+语义、物理响应真实性和实物资格不在此软件证据内。
+
 ProcBuf 的固定 ABI、双页 Command/State 快照、Quality/Lifecycle/Runtime observation 和事件环已在 `esop-procbuf` crate 落地；它尚未替代 shared-memory/RPMsg/UDS IPC 或真实 MCU 端口。
 
 CiA 402 profile 已增加 CSP/CSV/CST 的模式切换监督、实际模式确认、Operation Enabled 门槛、周期设定值首目标/限幅守卫，以及复用核心 `PdoEntry` 的标准对象绑定/typed raw codec（通过 `ethercat` feature 启用）。完整 PDO 对象绑定的厂商 quirk、单位/缩放和真实驱动互操作仍需 HIL 证据，不能据此宣称三种模式已完成互操作资格。

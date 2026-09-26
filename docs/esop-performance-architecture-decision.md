@@ -17,9 +17,11 @@
 
 > 追加实现状态（2026-09-04）：`FramePlanSet` 可在固定帧槽内按 datagram 容量和 Ethernet MTU 拆分计划；字节对齐的 SII segment 可自动生成方向正确的 `LWR`/`LRD` datagram。多帧计划与 `DomainRegistry` phase 通过临时副本一起校验，失败不发布部分计划。
 
+> 追加实现状态（2026-09-27）：SII category stream 可从标准 `0x0040` 在固定容量内读取到 END，内部续读保持 token/datagram 游标和一个绝对 deadline；完整镜像可原子投影 signedness-aware SM/RxPDO/TxPDO candidate。Startup/产品比对、FMMU/DC 语义和物理响应资格仍未接入。
+
 ## 1. 决策摘要
 
-当前 SII 配置路径已包含固定容量的分块读取、类别投影和候选配置原子发布编排；它仍不是完整的 ESI/从站自动发现流程。
+当前 SII 配置路径已包含固定容量的精确 range 读取、自动 category stream 读取、类别投影和候选配置原子发布编排；它仍不是 Startup-owned 的完整 ESI/从站自动发现与比对流程。
 
 ESOP 采用 IgH 已验证的调用者驱动周期、Domain、外部过程数据内存、帧聚合、轮询收包、异步请求、DC 预分配和 acquire/release 状态交接思想，但不移植 IgH 的 Linux 内核架构、运行期链表调度、周期内线性数据报匹配、字符设备、`ioctl`、`mmap`、通用 socket 驱动或可能重新分配的请求缓冲。
 
