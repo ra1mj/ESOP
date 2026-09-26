@@ -1,8 +1,9 @@
 use esop_product_config::{
-    ActivatedProduct, Cia402AxisCommandPolicyError, DomainRegistryError, FramePlanSetError,
-    MailboxConfig, OperatingMode, PdoConfigBatchPlanError, PdoConfigPlanError, PdoSdoWrite,
-    ProcBuf, ProcBufHeaderError, ProductActivationError, ProductMailboxBinding,
-    ProductPdoBatchError, ProductPdoPlanError, ProductSlaveKind, SlaveRecord,
+    ActivatedProduct, AlTransitionTimeouts, Cia402AxisCommandPolicyError, DomainRegistryError,
+    ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, FramePlanSetError, MailboxConfig, OperatingMode,
+    PdoConfigBatchPlanError, PdoConfigPlanError, PdoSdoWrite, ProcBuf, ProcBufHeaderError,
+    ProductActivationError, ProductMailboxBinding, ProductPdoBatchError, ProductPdoPlanError,
+    ProductSlaveKind, SlaveRecord,
 };
 
 mod generated {
@@ -50,11 +51,26 @@ fn checked_in_product_activates_exact_generated_evidence() {
     assert_eq!(
         active.metadata().config_sha256,
         [
-            0x49, 0x26, 0x96, 0xaa, 0xb6, 0x8a, 0x69, 0x7d, 0xaf, 0xc5, 0xe1, 0xcf, 0xd6, 0xd0,
-            0xc6, 0x0b, 0x5d, 0x17, 0x1e, 0x7e, 0x74, 0x57, 0xa3, 0xa2, 0x2c, 0x65, 0x28, 0x93,
-            0x6a, 0xc0, 0x1c, 0x27,
+            0x66, 0x07, 0xd7, 0x72, 0x24, 0x26, 0x3e, 0x1d, 0xe7, 0xb8, 0xc2, 0x5b, 0xc2, 0x15,
+            0x39, 0x6c, 0x13, 0xfd, 0x15, 0x93, 0x48, 0xf0, 0x32, 0x93, 0xbc, 0xe7, 0x69, 0x0a,
+            0xe2, 0xe0, 0xb1, 0x25,
         ]
     );
+
+    let startup_profiles = generated::PRODUCT_CONFIG.startup_profiles().unwrap();
+    let drive_timeouts =
+        AlTransitionTimeouts::new(3_500_000_000, 12_000_000_000, 5_500_000_000, 250_000_000);
+    for profile in &startup_profiles[..2] {
+        assert_eq!(profile.transition_timeouts, drive_timeouts);
+        assert_eq!(profile.op_only_outputs.mask(), 1 << 2);
+        assert_eq!(profile.op_only_outputs.activation_template(2), Some(0x09));
+    }
+    assert_eq!(
+        startup_profiles[2].transition_timeouts,
+        ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1
+    );
+    assert!(startup_profiles[2].op_only_outputs.is_empty());
+
     assert_eq!(active.registry().domain_count(), 2);
     assert_eq!(active.registry().domain(0).unwrap().pdo_count, 14);
     assert_eq!(active.registry().domain(0).unwrap().expected_wkc, 4);

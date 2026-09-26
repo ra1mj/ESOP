@@ -34,6 +34,7 @@ pub enum SiiConfigurationError {
     FmmuCountMismatch,
     FmmuMappingMismatch,
     ProcessImageLengthOverflow,
+    OpOnlySyncManagerNotOutput(u8),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -259,6 +260,7 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
             };
             validate_segment_mapping(&self.mapping, *segment, fmmu, logical_base, domain_offset)?;
         }
+        self.validate_op_only_outputs()?;
 
         Ok(SiiDomainProjection {
             candidate: *self,
@@ -324,6 +326,7 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
                 applied += 1;
             }
         }
+        self.validate_op_only_outputs()?;
         Ok(applied)
     }
 
@@ -355,6 +358,7 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
         if self.mapping.fmmu_count() != 0 {
             return Err(SiiConfigurationError::FmmuAlreadyAllocated);
         }
+        self.validate_op_only_outputs()?;
 
         let mut next = *self;
         let mut fmmu_index = 0u8;
@@ -404,9 +408,13 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
                 length: item.length,
                 control: item.control,
                 status: item.status,
-                enable: item.enable != 0,
+                enable: item.is_enabled(),
             })
             .map_err(SiiConfigurationError::Mapping)?;
+            if item.is_op_only() {
+                next.mark_op_only_output(index as u8, item.enable)
+                    .map_err(SiiConfigurationError::Mapping)?;
+            }
         }
         self.mapping = next;
         Ok(SiiConfigurationProgress::SyncManagers(source.len()))
@@ -421,6 +429,11 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
         let source = category.pdo().map_err(SiiConfigurationError::Category)?;
         let pdo_index = source.index();
         let sync_manager = source.sync_manager();
+        if direction == PdoDirection::Tx && self.mapping.op_only_outputs().contains(sync_manager) {
+            return Err(SiiConfigurationError::OpOnlySyncManagerNotOutput(
+                sync_manager,
+            ));
+        }
         let result = match direction {
             PdoDirection::Rx => {
                 let mut next = self.rx_layout;
@@ -472,6 +485,29 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
             }
         };
         Ok(result)
+    }
+
+    fn validate_op_only_outputs(&self) -> Result<(), SiiConfigurationError> {
+        let profile = self.mapping.op_only_outputs();
+        for sync_manager in 0..crate::op_only::MAX_ESC_SYNC_MANAGERS as u8 {
+            if !profile.contains(sync_manager) {
+                continue;
+            }
+            let has_rx = self
+                .rx_segments()
+                .iter()
+                .any(|segment| segment.sync_manager == sync_manager);
+            let has_tx = self
+                .tx_segments()
+                .iter()
+                .any(|segment| segment.sync_manager == sync_manager);
+            if !has_rx || has_tx {
+                return Err(SiiConfigurationError::OpOnlySyncManagerNotOutput(
+                    sync_manager,
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -742,6 +778,49 @@ mod tests {
         assert_eq!(fmmu.length, 6);
         assert_eq!(fmmu.physical_start, 0x1000);
         assert_eq!(fmmu.fmmu_type, 2);
+    }
+
+    #[test]
+    fn sii_op_only_flag_is_separate_from_enable_and_requires_rxpdo() {
+        let mut bytes = std::vec::Vec::new();
+        append_category(
+            &mut bytes,
+            SII_CATEGORY_SYNC_MANAGER,
+            &[0x00, 0x10, 0x20, 0x00, 0x26, 0x64, 0x09, 0x00],
+        );
+        let mut rx_pdo = [0u8; 16];
+        rx_pdo[0..2].copy_from_slice(&0x1600u16.to_le_bytes());
+        rx_pdo[2] = 1;
+        rx_pdo[3] = 0;
+        rx_pdo[8..10].copy_from_slice(&0x6040u16.to_le_bytes());
+        rx_pdo[12] = 16;
+        append_category(&mut bytes, SII_CATEGORY_RX_PDO, &rx_pdo);
+        bytes.extend_from_slice(&SII_CATEGORY_END.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+
+        let mut candidate = SiiConfigurationCandidate::<1, 1, 1, 1>::new();
+        candidate.apply_bytes(&bytes).unwrap();
+        assert!(candidate.mapping().sync_manager(0).unwrap().enable);
+        assert!(candidate.mapping().op_only_outputs().contains(0));
+        assert_eq!(
+            candidate.mapping().op_only_outputs().activation_template(0),
+            Some(0x09)
+        );
+
+        let mut invalid = std::vec::Vec::new();
+        append_category(
+            &mut invalid,
+            SII_CATEGORY_SYNC_MANAGER,
+            &[0x00, 0x10, 0x20, 0x00, 0x26, 0x64, 0x09, 0x00],
+        );
+        append_category(&mut invalid, SII_CATEGORY_TX_PDO, &rx_pdo);
+        invalid.extend_from_slice(&SII_CATEGORY_END.to_le_bytes());
+        invalid.extend_from_slice(&0u16.to_le_bytes());
+        let mut candidate = SiiConfigurationCandidate::<1, 1, 1, 1>::new();
+        assert_eq!(
+            candidate.apply_bytes(&invalid),
+            Err(SiiConfigurationError::OpOnlySyncManagerNotOutput(0))
+        );
     }
 
     #[test]

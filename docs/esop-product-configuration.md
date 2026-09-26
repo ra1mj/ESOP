@@ -48,11 +48,14 @@ ESI/ENI 的兼容声明。
 ## 3. ESI 子集与校验
 
 当前解析器支持 namespace-qualified XML 中的 vendor ID、Device Type
-identity/name、SyncManager、RxPDO/TxPDO assignment，以及 byte-aligned
-PDO entry 的 index/subindex/bit length/DataType。它明确拒绝：
+identity/name、四类 `StateMachine/Timeout`、带 `Enable`/`OpOnly` 的有序
+SyncManager、RxPDO/TxPDO assignment，以及 byte-aligned PDO entry 的
+index/subindex/bit length/DataType。未提供 timeout 时使用版本化的 ETG.1020
+默认 profile。它明确拒绝：
 
 - 模块化设备和复杂 FMMU 规则；
 - bit-packed 或嵌套 PDO entry；
+- 零值、非法或纳秒换算溢出的 timeout，以及非 output SyncManager 的 `OpOnly`；
 - 未选择、重复、方向错误或宽度不匹配的对象；
 - vendor-specific scaling、替代对象和隐式默认映射。
 
@@ -72,7 +75,9 @@ PDO entry 的 index/subindex/bit length/DataType。它明确拒绝：
 | `procbuf_layout.json` | ProcBuf ABI v6、维度、精确字节数和 layout hash。 |
 | `robot_build_input.json` | 设备数、PDO/frame/wire/WKC/copy、周期和资源输入。 |
 
-配置 SHA-256 只依赖规范化产品语义和排序后的 ESI 语义内容，不依赖 JSON
+生成的 inventory、JSON 和 Rust product slave 均携带精确 timeout profile、
+`OpOnly` mask 及 activation template；这些字段参与 ESI semantic hash 和配置
+SHA-256。配置 SHA-256 只依赖规范化产品语义和排序后的 ESI 语义内容，不依赖 JSON
 键顺序、XML 排版、输入/输出路径、主机或当前时间。同一语义输入必须生成
 逐字节相同的六个文件。
 
@@ -92,6 +97,15 @@ ProcBuf。激活按以下顺序 fail-closed：
 4. 通过 `DomainRegistry` 重新登记 Domain/PDO/datagram，核对 PDO/datagram/WKC；
 5. 通过既有 API 生成多速率 schedule 与每 Domain `FramePlanSet`；
 6. 逐轴校验连续索引、驱动归属、冻结策略和选定模式的 `Cia402PdoMap`。
+
+`PRODUCT_CONFIG.startup_profiles()` 会在任何 Startup 动作发出前校验每个从站的
+timeout 非零、position 一一对应、`OpOnly` mask/flag 有效，并要求每个 `OpOnly`
+SyncManager 只关联所选 RxPDO。`start_startup()` 将这些 profile 与精确从站拓扑一起
+交给 `StartupController`。每个 ESM step 只建立一个绝对 deadline；相关 `OpOnly`
+准备和 AL 请求/读回共享该 deadline。`StartupConfig.transition_timeout_ns != 0` 是
+显式 legacy uniform override，并优先于生成 profile；零值选择逐转换 profile。
+非 OP 及离开 OP 前必须禁用并读回所有 `OpOnly` 输出，进入 OP 时仅在 AL OP 已观测
+后启用并读回，验证完成前不得进入 Ready。
 
 任何阶段失败都不会返回部分运行时配置；成功结果持有只读 registry、
 schedule、frame plan、轴模式、策略和 PDO map。每轴 PDO 临时映射上限固定为
@@ -143,8 +157,9 @@ make build-report \
 真实从站固件一致。运行时可生成 PDO 配置计划并对调用方交付的 SDO 响应做
 逐字节 read-back 校验；生产调度器已通过确定性模拟端口覆盖邮箱发送、轮询、
 跨周期请求所有权、重试/超时、精确回读、故障阻断和生命周期门控，但该软件
-证据还覆盖全从站 PREOP 屏障、真实服务 phase 释放、保留拓扑及合法 SAFEOP/OP
-顺序；它不等于真实从站 PDO assignment/mapping 或 AL 响应证据，也不证明驱动
+证据还覆盖全从站 PREOP 屏障、真实服务 phase 释放、保留拓扑、合法 SAFEOP/OP
+顺序、逐转换 deadline 选择和 `OpOnly` 写入读回顺序；它不等于真实从站 PDO
+assignment/mapping、ESM timeout 或 SyncManager 响应证据，也不证明驱动
 接受映射、完整周期 WKC、实际线缆时间、WCET、DMA/cache 正确性、制动/机械适配、
 STO/FSoE 或功能安全。生成示例和构建报告必须保持
 `passed: false`，直到独立的目标构建、HIL、周期测量和发布审核提供证据。

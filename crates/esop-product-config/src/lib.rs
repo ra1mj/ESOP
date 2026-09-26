@@ -8,11 +8,13 @@
 
 pub use esop_ethercat_core::wire::Command;
 pub use esop_ethercat_core::{
-    DomainConfig, DomainDatagramSpec, DomainInfo, DomainRegistry, DomainRegistryError,
-    FramePlanSet, FramePlanSetError, MailboxConfig, PdoConfigBatch, PdoConfigBatchError,
-    PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigBatchPlanError, PdoConfigBatchStatus,
-    PdoConfigJob, PdoConfigPlan, PdoConfigPlanError, PdoDirection, PdoEntry, PdoEntrySpec,
-    PdoRegistrationRequest, PdoSdoWrite, ScheduleTable, SlaveIdentity, SlaveRecord,
+    AlTransitionTimeouts, DomainConfig, DomainDatagramSpec, DomainInfo, DomainRegistry,
+    DomainRegistryError, ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, ExpectedSlave, FramePlanSet,
+    FramePlanSetError, MailboxConfig, OpOnlyProfileError, OpOnlySyncManagerProfile, PdoConfigBatch,
+    PdoConfigBatchError, PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigBatchPlanError,
+    PdoConfigBatchStatus, PdoConfigJob, PdoConfigPlan, PdoConfigPlanError, PdoDirection, PdoEntry,
+    PdoEntrySpec, PdoRegistrationRequest, PdoSdoWrite, ScheduleTable, SlaveIdentity, SlaveRecord,
+    StartupConfig, StartupController, StartupError, StartupSlaveProfile,
 };
 pub use esop_lifecycle_guard::procbuf::{Cia402AxisCommandPolicy, Cia402AxisCommandPolicyError};
 pub use esop_procbuf::{
@@ -52,6 +54,28 @@ pub struct ProductSlaveConfig {
     pub domain_id: u8,
     pub kind: ProductSlaveKind,
     pub identity: SlaveIdentity,
+    pub transition_timeouts: AlTransitionTimeouts,
+    pub op_only_outputs: OpOnlySyncManagerProfile,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductStartupError {
+    InvalidTransitionTimeoutProfile {
+        position: u16,
+    },
+    OpOnlyProfile {
+        position: u16,
+        error: OpOnlyProfileError,
+    },
+    OpOnlyOutputMissingRxPdo {
+        position: u16,
+        sync_manager: u8,
+    },
+    OpOnlyOutputHasTxPdo {
+        position: u16,
+        sync_manager: u8,
+    },
+    Startup(StartupError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -357,6 +381,80 @@ type ActivatedAxes<const AXES: usize> = (
 impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
     StaticProductConfig<'a, SLAVES, DOMAINS, AXES>
 {
+    pub fn startup_profiles(&self) -> Result<[StartupSlaveProfile; SLAVES], ProductStartupError> {
+        let mut profiles = [StartupSlaveProfile::EMPTY; SLAVES];
+        for (index, slave) in self.slaves.iter().copied().enumerate() {
+            if !slave.transition_timeouts.is_valid() {
+                return Err(ProductStartupError::InvalidTransitionTimeoutProfile {
+                    position: slave.position,
+                });
+            }
+            if let Err(error) = slave.op_only_outputs.validate() {
+                return Err(ProductStartupError::OpOnlyProfile {
+                    position: slave.position,
+                    error,
+                });
+            }
+            for sync_manager in 0..MAX_PRODUCT_SYNC_MANAGERS as u8 {
+                if !slave.op_only_outputs.contains(sync_manager) {
+                    continue;
+                }
+                let mut has_rx = false;
+                let mut has_tx = false;
+                for pdo in self.pdos.iter().filter(|pdo| {
+                    pdo.request.slave_position == slave.position && pdo.sync_manager == sync_manager
+                }) {
+                    match pdo.request.direction {
+                        PdoDirection::Rx => has_rx = true,
+                        PdoDirection::Tx => has_tx = true,
+                    }
+                }
+                if !has_rx {
+                    return Err(ProductStartupError::OpOnlyOutputMissingRxPdo {
+                        position: slave.position,
+                        sync_manager,
+                    });
+                }
+                if has_tx {
+                    return Err(ProductStartupError::OpOnlyOutputHasTxPdo {
+                        position: slave.position,
+                        sync_manager,
+                    });
+                }
+            }
+            profiles[index] = StartupSlaveProfile::new(slave.position)
+                .with_transition_timeouts(slave.transition_timeouts)
+                .with_op_only_outputs(slave.op_only_outputs);
+        }
+        Ok(profiles)
+    }
+
+    pub fn expected_slaves(&self) -> [ExpectedSlave; SLAVES] {
+        let mut expected = [ExpectedSlave::EMPTY; SLAVES];
+        for (index, slave) in self.slaves.iter().copied().enumerate() {
+            expected[index] = ExpectedSlave {
+                position: slave.position,
+                station_address: slave.station_address,
+                identity: slave.identity,
+            };
+        }
+        expected
+    }
+
+    pub fn start_startup(
+        &self,
+        startup: &mut StartupController<SLAVES>,
+        generation: u16,
+        now_ns: u64,
+        config: StartupConfig,
+    ) -> Result<(), ProductStartupError> {
+        let profiles = self.startup_profiles()?;
+        let expected = self.expected_slaves();
+        startup
+            .start_with_profiles(generation, now_ns, config, &expected, &profiles)
+            .map_err(ProductStartupError::Startup)
+    }
+
     pub fn build_pdo_configuration_batch<const JOBS: usize, const OPS: usize>(
         &self,
         mailbox_bindings: &[ProductMailboxBinding],
@@ -942,6 +1040,8 @@ mod tests {
                 domain_id: 0,
                 kind: ProductSlaveKind::Cia402Drive,
                 identity: IDENTITY,
+                transition_timeouts: ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
+                op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
             }],
             domains: [ProductDomainConfig {
                 name: "motion",
@@ -1005,6 +1105,59 @@ mod tests {
             active.axis_pdo_maps()[0]
                 .validate_for(OperatingMode::Csp)
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn product_profiles_drive_startup_without_heap_or_parallel_config() {
+        let mut config = config();
+        let timeouts = AlTransitionTimeouts::new(11, 22, 33, 44);
+        let mut op_only = OpOnlySyncManagerProfile::new();
+        op_only
+            .add(
+                2,
+                esop_ethercat_core::SYNC_MANAGER_OP_ONLY_FLAG
+                    | esop_ethercat_core::SYNC_MANAGER_ENABLE_FLAG,
+            )
+            .unwrap();
+        config.slaves[0].transition_timeouts = timeouts;
+        config.slaves[0].op_only_outputs = op_only;
+
+        let profiles = config.startup_profiles().unwrap();
+        assert_eq!(profiles[0].position, 0);
+        assert_eq!(profiles[0].transition_timeouts, timeouts);
+        assert_eq!(profiles[0].op_only_outputs, op_only);
+
+        let mut startup = StartupController::<1>::new(0x1000);
+        config
+            .start_startup(
+                &mut startup,
+                7,
+                0,
+                StartupConfig::new(esop_ethercat_core::EthercatState::Op),
+            )
+            .unwrap();
+        assert_eq!(startup.phase(), esop_ethercat_core::StartupPhase::Scanning);
+        assert!(matches!(
+            startup.next_action(1).unwrap(),
+            Some(esop_ethercat_core::StartupAction::Scan(_))
+        ));
+    }
+
+    #[test]
+    fn product_rejects_op_only_without_matching_rxpdo() {
+        let mut config = config();
+        let mut op_only = OpOnlySyncManagerProfile::new();
+        op_only
+            .add(4, esop_ethercat_core::SYNC_MANAGER_OP_ONLY_FLAG)
+            .unwrap();
+        config.slaves[0].op_only_outputs = op_only;
+        assert_eq!(
+            config.startup_profiles(),
+            Err(ProductStartupError::OpOnlyOutputMissingRxPdo {
+                position: 0,
+                sync_manager: 4,
+            })
         );
     }
 

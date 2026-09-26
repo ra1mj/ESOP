@@ -1,4 +1,8 @@
 use crate::error::{GeneratorError, Result};
+use esop_ethercat_core::{
+    ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, MAX_ESC_SYNC_MANAGERS, SYNC_MANAGER_ENABLE_FLAG,
+    SYNC_MANAGER_OP_ONLY_FLAG,
+};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 use serde::Serialize;
@@ -17,8 +21,44 @@ pub struct EsiDevice {
     pub name: String,
     pub product_code: u32,
     pub revision: u32,
+    pub transition_timeouts: EsiTransitionTimeouts,
+    pub sync_managers: Vec<EsiSyncManager>,
     pub rx_pdos: Vec<EsiPdo>,
     pub tx_pdos: Vec<EsiPdo>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct EsiTransitionTimeouts {
+    pub preop_ns: u64,
+    pub safeop_to_op_ns: u64,
+    pub back_to_init_ns: u64,
+    pub back_to_safeop_ns: u64,
+}
+
+impl Default for EsiTransitionTimeouts {
+    fn default() -> Self {
+        let value = ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1;
+        Self {
+            preop_ns: value.preop_ns,
+            safeop_to_op_ns: value.safeop_to_op_ns,
+            back_to_init_ns: value.back_to_init_ns,
+            back_to_safeop_ns: value.back_to_safeop_ns,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct EsiSyncManager {
+    pub index: u8,
+    pub direction: String,
+    pub activation: u8,
+    pub op_only: bool,
+}
+
+impl EsiSyncManager {
+    pub fn is_output(&self) -> bool {
+        self.direction.eq_ignore_ascii_case("Outputs")
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -43,6 +83,8 @@ struct DeviceBuilder {
     name: Option<String>,
     product_code: Option<u32>,
     revision: Option<u32>,
+    transition_timeouts: EsiTransitionTimeouts,
+    sync_managers: Vec<EsiSyncManager>,
     rx_pdos: Vec<EsiPdo>,
     tx_pdos: Vec<EsiPdo>,
 }
@@ -56,8 +98,48 @@ impl DeviceBuilder {
                 .product_code
                 .ok_or("Device Type ProductCode is missing")?,
             revision: self.revision.ok_or("Device Type RevisionNo is missing")?,
+            transition_timeouts: self.transition_timeouts,
+            sync_managers: self.sync_managers,
             rx_pdos: self.rx_pdos,
             tx_pdos: self.tx_pdos,
+        })
+    }
+}
+
+struct SyncManagerBuilder {
+    enabled: bool,
+    op_only: bool,
+}
+
+impl SyncManagerBuilder {
+    fn finish(self, index: usize, direction: &str) -> std::result::Result<EsiSyncManager, String> {
+        if direction.is_empty() {
+            return Err("Sm direction text is empty".to_owned());
+        }
+        if index >= MAX_ESC_SYNC_MANAGERS {
+            return Err(format!(
+                "Sm index {index} exceeds supported SyncManager capacity {MAX_ESC_SYNC_MANAGERS}"
+            ));
+        }
+        if self.op_only && !direction.eq_ignore_ascii_case("Outputs") {
+            return Err(format!(
+                "Sm {index} declares OpOnly for non-output direction {direction:?}"
+            ));
+        }
+        let activation = if self.enabled {
+            SYNC_MANAGER_ENABLE_FLAG
+        } else {
+            0
+        } | if self.op_only {
+            SYNC_MANAGER_OP_ONLY_FLAG
+        } else {
+            0
+        };
+        Ok(EsiSyncManager {
+            index: index as u8,
+            direction: direction.to_owned(),
+            activation,
+            op_only: self.op_only,
         })
     }
 }
@@ -141,6 +223,7 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
     let mut device = None::<DeviceBuilder>;
     let mut pdo = None::<PdoBuilder>;
     let mut entry = None::<EntryBuilder>;
+    let mut sync_manager = None::<SyncManagerBuilder>;
 
     loop {
         let event = reader
@@ -198,6 +281,28 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                             entries: Vec::new(),
                         });
                     }
+                    "Sm" if device.is_some() && pdo.is_none() => {
+                        if sync_manager.is_some() {
+                            return xml_error(path, "nested Sm elements are unsupported");
+                        }
+                        let enabled = optional_attribute(&start, "Enable", path)?
+                            .map(|value| parse_bool(&value))
+                            .transpose()
+                            .map_err(|detail| GeneratorError::Xml {
+                                path: path.to_owned(),
+                                detail: format!("invalid Sm Enable: {detail}"),
+                            })?
+                            .unwrap_or(true);
+                        let op_only = optional_attribute(&start, "OpOnly", path)?
+                            .map(|value| parse_bool(&value))
+                            .transpose()
+                            .map_err(|detail| GeneratorError::Xml {
+                                path: path.to_owned(),
+                                detail: format!("invalid Sm OpOnly: {detail}"),
+                            })?
+                            .unwrap_or(false);
+                        sync_manager = Some(SyncManagerBuilder { enabled, op_only });
+                    }
                     "Entry" if pdo.is_some() => {
                         if entry.is_some() {
                             return xml_error(path, "nested Entry elements are unsupported");
@@ -209,7 +314,7 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
             }
             Event::Empty(start) => {
                 let name = local_name(start.name().as_ref());
-                if matches!(name.as_str(), "Device" | "RxPdo" | "TxPdo" | "Entry") {
+                if matches!(name.as_str(), "Device" | "RxPdo" | "TxPdo" | "Entry" | "Sm") {
                     return xml_error(path, format!("empty {name} elements are unsupported"));
                 }
             }
@@ -289,6 +394,76 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                                 detail: format!("unsupported Entry DataType {value:?}"),
                             })?);
                     }
+                    "PreopTimeout"
+                        if device.is_some()
+                            && stack_ends_with(
+                                &stack,
+                                &["StateMachine", "Timeout", "PreopTimeout"],
+                            ) =>
+                    {
+                        device
+                            .as_mut()
+                            .expect("device exists")
+                            .transition_timeouts
+                            .preop_ns = parse_timeout_ns(value, "PreopTimeout", path)?;
+                    }
+                    "SafeopOpTimeout"
+                        if device.is_some()
+                            && stack_ends_with(
+                                &stack,
+                                &["StateMachine", "Timeout", "SafeopOpTimeout"],
+                            ) =>
+                    {
+                        device
+                            .as_mut()
+                            .expect("device exists")
+                            .transition_timeouts
+                            .safeop_to_op_ns = parse_timeout_ns(value, "SafeopOpTimeout", path)?;
+                    }
+                    "BackToInitTimeout"
+                        if device.is_some()
+                            && stack_ends_with(
+                                &stack,
+                                &["StateMachine", "Timeout", "BackToInitTimeout"],
+                            ) =>
+                    {
+                        device
+                            .as_mut()
+                            .expect("device exists")
+                            .transition_timeouts
+                            .back_to_init_ns = parse_timeout_ns(value, "BackToInitTimeout", path)?;
+                    }
+                    "BackToSafeopTimeout"
+                        if device.is_some()
+                            && stack_ends_with(
+                                &stack,
+                                &["StateMachine", "Timeout", "BackToSafeopTimeout"],
+                            ) =>
+                    {
+                        device
+                            .as_mut()
+                            .expect("device exists")
+                            .transition_timeouts
+                            .back_to_safeop_ns =
+                            parse_timeout_ns(value, "BackToSafeopTimeout", path)?;
+                    }
+                    "Sm" if sync_manager.is_some() => {
+                        let builder = sync_manager.take().ok_or_else(|| GeneratorError::Xml {
+                            path: path.to_owned(),
+                            detail: "Sm end without start".to_owned(),
+                        })?;
+                        let device = device.as_mut().ok_or_else(|| GeneratorError::Xml {
+                            path: path.to_owned(),
+                            detail: "Sm outside Device".to_owned(),
+                        })?;
+                        let finished = builder.finish(device.sync_managers.len(), value).map_err(
+                            |detail| GeneratorError::Xml {
+                                path: path.to_owned(),
+                                detail,
+                            },
+                        )?;
+                        device.sync_managers.push(finished);
+                    }
                     "Entry" => {
                         let finished = entry
                             .take()
@@ -363,7 +538,12 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
         buffer.clear();
     }
 
-    if device.is_some() || pdo.is_some() || entry.is_some() || !stack.is_empty() {
+    if device.is_some()
+        || pdo.is_some()
+        || entry.is_some()
+        || sync_manager.is_some()
+        || !stack.is_empty()
+    {
         return xml_error(path, "unterminated ESI element");
     }
     if devices.is_empty() {
@@ -444,6 +624,30 @@ fn parse_u8(value: &str) -> std::result::Result<u8, String> {
     u8::try_from(parse_number(value)?).map_err(|_| "value exceeds u8".to_owned())
 }
 
+fn parse_bool(value: &str) -> std::result::Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => Ok(true),
+        "0" | "false" => Ok(false),
+        _ => Err(format!("unsupported boolean {value:?}")),
+    }
+}
+
+fn parse_timeout_ns(value: &str, field: &str, path: &Path) -> Result<u64> {
+    let milliseconds = parse_number(value).map_err(|detail| GeneratorError::Xml {
+        path: path.to_owned(),
+        detail: format!("invalid {field}: {detail}"),
+    })?;
+    if milliseconds == 0 {
+        return xml_error(path, format!("{field} must be greater than zero"));
+    }
+    milliseconds
+        .checked_mul(1_000_000)
+        .ok_or_else(|| GeneratorError::Xml {
+            path: path.to_owned(),
+            detail: format!("{field} overflows nanoseconds"),
+        })
+}
+
 fn data_type_signed(value: &str) -> Option<bool> {
     let normalized = value.trim().to_ascii_uppercase();
     if matches!(
@@ -509,6 +713,72 @@ mod tests {
         assert_eq!(catalog.devices[0].product_code, 0x1001);
         assert_eq!(catalog.devices[0].rx_pdos[0].sync_manager, Some(2));
         assert!(!catalog.devices[0].rx_pdos[0].entries[0].signed);
+        assert_eq!(
+            catalog.devices[0].transition_timeouts,
+            EsiTransitionTimeouts::default()
+        );
+        assert!(catalog.devices[0].sync_managers.is_empty());
+    }
+
+    #[test]
+    fn state_machine_timeouts_and_op_only_outputs_are_parsed() {
+        let xml = r##"<EtherCATInfo><Vendor><Id>1</Id></Vendor><Descriptions><Devices><Device>
+<Type ProductCode="1" RevisionNo="1">Drive</Type><Name>Drive</Name>
+<Sm Enable="1">MBoxOut</Sm><Sm Enable="1">MBoxIn</Sm>
+<Sm Enable="true" OpOnly="1">Outputs</Sm><Sm Enable="1">Inputs</Sm>
+<StateMachine><Timeout><PreopTimeout>11</PreopTimeout><SafeopOpTimeout>22</SafeopOpTimeout>
+<BackToInitTimeout>33</BackToInitTimeout><BackToSafeopTimeout>44</BackToSafeopTimeout>
+</Timeout></StateMachine>
+<RxPdo Sm="2"><Index>#x1600</Index><Entry><Index>#x6040</Index><BitLen>16</BitLen>
+<DataType>UINT</DataType></Entry></RxPdo>
+<TxPdo Sm="3"><Index>#x1A00</Index><Entry><Index>#x6041</Index><BitLen>16</BitLen>
+<DataType>UINT</DataType></Entry></TxPdo>
+</Device></Devices></Descriptions></EtherCATInfo>"##;
+        let catalog = parse_text(Path::new("fixture.xml"), xml).unwrap();
+        let device = &catalog.devices[0];
+        assert_eq!(
+            device.transition_timeouts,
+            EsiTransitionTimeouts {
+                preop_ns: 11_000_000,
+                safeop_to_op_ns: 22_000_000,
+                back_to_init_ns: 33_000_000,
+                back_to_safeop_ns: 44_000_000,
+            }
+        );
+        assert_eq!(device.sync_managers.len(), 4);
+        assert_eq!(device.sync_managers[2].index, 2);
+        assert!(device.sync_managers[2].is_output());
+        assert!(device.sync_managers[2].op_only);
+        assert_eq!(device.sync_managers[2].activation, 0x09);
+    }
+
+    #[test]
+    fn invalid_timeout_or_non_output_op_only_is_rejected() {
+        let zero_timeout = r##"<EtherCATInfo><Vendor><Id>1</Id></Vendor><Descriptions><Devices><Device>
+<Type ProductCode="1" RevisionNo="1">IO</Type><Name>IO</Name>
+<StateMachine><Timeout><PreopTimeout>0</PreopTimeout></Timeout></StateMachine>
+<RxPdo Sm="2"><Index>#x1600</Index><Entry><Index>#x7000</Index><BitLen>16</BitLen>
+<DataType>UINT</DataType></Entry></RxPdo>
+</Device></Devices></Descriptions></EtherCATInfo>"##;
+        assert!(
+            parse_text(Path::new("fixture.xml"), zero_timeout)
+                .unwrap_err()
+                .to_string()
+                .contains("must be greater than zero")
+        );
+
+        let input_op_only = r##"<EtherCATInfo><Vendor><Id>1</Id></Vendor><Descriptions><Devices><Device>
+<Type ProductCode="1" RevisionNo="1">IO</Type><Name>IO</Name>
+<Sm Enable="1" OpOnly="true">Inputs</Sm>
+<TxPdo Sm="0"><Index>#x1A00</Index><Entry><Index>#x6000</Index><BitLen>16</BitLen>
+<DataType>UINT</DataType></Entry></TxPdo>
+</Device></Devices></Descriptions></EtherCATInfo>"##;
+        assert!(
+            parse_text(Path::new("fixture.xml"), input_op_only)
+                .unwrap_err()
+                .to_string()
+                .contains("non-output")
+        );
     }
 
     #[test]

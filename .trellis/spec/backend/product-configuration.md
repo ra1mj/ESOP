@@ -36,6 +36,9 @@ pub fn StaticProductConfig::build_pdo_configuration_batch<
     const JOBS: usize,
     const OPS: usize,
 >(...) -> Result<PdoConfigBatchPlan<JOBS, OPS>, ProductPdoBatchError>;
+pub fn StaticProductConfig::startup_profiles(...) ->
+    Result<[StartupSlaveProfile; SLAVES], ProductStartupError>;
+pub fn StaticProductConfig::start_startup(...) -> Result<(), ProductStartupError>;
 ```
 
 ## 3. Contracts
@@ -69,6 +72,23 @@ observed online/configured topology, rebuilt Domain/PDO/datagram/WKC evidence,
 schedule/frame plans, drive ownership, product policies, and selected-mode
 CiA 402 PDO maps.
 It returns the owning frozen result only after all checks pass.
+
+Each generated slave carries four ESM transition timeout classes and one
+bounded `OpOnlySyncManagerProfile`. ESI values are decimal milliseconds,
+converted to checked nanoseconds; missing values use the named
+`ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1`. Zero, malformed, overflowed, or
+non-output `OpOnly` declarations fail before publication. The profile and
+activation templates participate in semantic/configuration hashes.
+
+`startup_profiles` validates timeout values, exact slave positions, OpOnly
+flags, and exclusive selected RxPDO ownership before returning fixed-array
+profiles. `start_startup` supplies those profiles to Startup. A nonzero legacy
+`StartupConfig.transition_timeout_ns` is an explicit uniform override;
+otherwise each AL step selects its generated/default timeout. OpOnly and AL
+work for one step share one absolute deadline. Non-OP and leaving-OP paths
+disable/read back every OpOnly output before readiness or AL transition;
+entering OP enables/read backs only after OP is observed. Any mismatch, WKC,
+generation, length, or timeout fault blocks Ready.
 
 Per-slave PDO startup-plan construction uses the same generated order and the
 shared 256-entry cfggen bound. For each SyncManager it clears assignment
@@ -118,11 +138,13 @@ datagrams, FCS, and inter-packet gap respectively.
 | Unknown/missing JSON field or unsupported schema | Reject before staging. |
 | Absolute, parent-traversing, or symlink-escaping ESI path | Reject as invalid product input. |
 | Ambiguous ESI identity/PDO, duplicate object, wrong direction/width | Reject with identity/PDO/CiA 402 context. |
+| Zero/malformed/overflowing ESM timeout or non-output OpOnly SM | Reject before staging or hash publication. |
 | Duplicate Domain/slave/axis identity or overlapping range | Reject before registry mutation/publication. |
 | Capacity, schedule, raw policy, or ProcBuf layout overflow | Reject with the owning contract error. |
 | Generation failure with an existing output | Preserve the previous six-file directory byte-for-byte. |
 | Successful regeneration | Replace the directory and remove stale schema files. |
 | Runtime schema/hash/ProcBuf/topology mismatch | Reject before registry activation. |
+| Invalid/misaligned startup profile or OpOnly without exclusive RxPDO | Reject before Startup mutation or control emission. |
 | Runtime Domain/axis evidence or capacity mismatch | Reject with typed owning-contract evidence and return no partial configuration. |
 | PDO plan owner/SM/group/capacity mismatch | Reject before returning any startup plan. |
 | Missing/duplicate/unknown product mailbox binding | Reject before returning any batch. |
@@ -156,6 +178,10 @@ datagrams, FCS, and inter-packet gap respectively.
 - Compare the generated Rust module byte-for-byte with the checked-in example,
   activate it in integration tests, and check `esop-product-config` for
   `aarch64-unknown-none`.
+- Cover explicit/default ESM timeouts, invalid values, ESI/SII OpOnly flag
+  separation, PREOP-disabled mapping, enable-after-OP, disable-before-leaving,
+  shared deadlines, uniform-override precedence, exact readback failure and
+  generated startup-profile propagation.
 - Build exact per-slave drive/IO PDO plans from the checked-in generated module;
   cover assignment-disable ordering, mapping grouping, all typed rejection
   paths, exact/segmented readback, mismatches, stale actions and restart.

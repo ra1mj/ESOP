@@ -182,6 +182,16 @@ pub struct SiiSyncManager {
     pub enable: u8,
 }
 
+impl SiiSyncManager {
+    pub const fn is_enabled(self) -> bool {
+        self.enable & crate::op_only::SYNC_MANAGER_ENABLE_FLAG != 0
+    }
+
+    pub const fn is_op_only(self) -> bool {
+        self.enable & crate::op_only::SYNC_MANAGER_OP_ONLY_FLAG != 0
+    }
+}
+
 pub struct SiiSyncManagerCategory<'a> {
     data: &'a [u8],
 }
@@ -1163,6 +1173,8 @@ mod tests {
                 enable: 1,
             }
         );
+        assert!(sync.get(0).unwrap().is_enabled());
+        assert!(!sync.get(0).unwrap().is_op_only());
 
         let category = reader.next_category().unwrap().unwrap();
         let pdo = category.pdo().unwrap();

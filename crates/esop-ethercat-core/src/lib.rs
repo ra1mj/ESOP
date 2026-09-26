@@ -17,6 +17,7 @@ mod frame_pool;
 mod mailbox;
 mod mapping;
 mod mapping_config;
+mod op_only;
 mod pdo;
 mod pdo_config;
 mod plan;
@@ -38,7 +39,8 @@ pub mod wire;
 
 pub use al::{
     AlAction, AlError, AlErrorAcknowledgePolicy, AlErrorAcknowledgeStatus, AlFaultRecord, AlPhase,
-    AlProgress, AlTransitionController, AlTransitionRequest,
+    AlProgress, AlTransitionController, AlTransitionRequest, AlTransitionTimeouts,
+    ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
 };
 pub use arena::{Arena, ArenaError};
 pub use coe::{
@@ -87,6 +89,12 @@ pub use mapping::{
 pub use mapping_config::{
     MappingConfigAction, MappingConfigController, MappingConfigError, MappingConfigItem,
     MappingConfigPhase, MappingConfigProgress,
+};
+pub use op_only::{
+    MAX_ESC_SYNC_MANAGERS, OpOnlyProfileError, OpOnlySyncManagerAction,
+    OpOnlySyncManagerController, OpOnlySyncManagerError, OpOnlySyncManagerPhase,
+    OpOnlySyncManagerProfile, OpOnlySyncManagerProgress, SYNC_MANAGER_ACTIVATION_OFFSET,
+    SYNC_MANAGER_ENABLE_FLAG, SYNC_MANAGER_OP_ONLY_FLAG,
 };
 pub use pdo::{PdoDirection, PdoEntry, PdoError, PdoLayout};
 pub use pdo_config::{
@@ -152,5 +160,5 @@ pub use slave::{
 pub use slave_copy::{SlaveCopyError, SlaveCopyOutcome, SlaveCopyPlan, SlaveCopyStatus};
 pub use startup::{
     ExpectedSlave, StartupAction, StartupAlFault, StartupConfig, StartupConfigurationServices,
-    StartupController, StartupError, StartupPhase, StartupProgress,
+    StartupController, StartupError, StartupPhase, StartupProgress, StartupSlaveProfile,
 };

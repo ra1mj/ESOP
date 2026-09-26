@@ -11,6 +11,73 @@ use crate::slave::{AL_ERROR_FLAG, AlStatus, EthercatState, next_state};
 const ACTION_PAYLOAD_LEN: usize = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AlTransitionTimeouts {
+    pub preop_ns: u64,
+    pub safeop_to_op_ns: u64,
+    pub back_to_init_ns: u64,
+    pub back_to_safeop_ns: u64,
+}
+
+impl AlTransitionTimeouts {
+    pub const fn new(
+        preop_ns: u64,
+        safeop_to_op_ns: u64,
+        back_to_init_ns: u64,
+        back_to_safeop_ns: u64,
+    ) -> Self {
+        Self {
+            preop_ns,
+            safeop_to_op_ns,
+            back_to_init_ns,
+            back_to_safeop_ns,
+        }
+    }
+
+    pub const fn uniform(timeout_ns: u64) -> Self {
+        Self::new(timeout_ns, timeout_ns, timeout_ns, timeout_ns)
+    }
+
+    pub const fn is_valid(self) -> bool {
+        self.preop_ns != 0
+            && self.safeop_to_op_ns != 0
+            && self.back_to_init_ns != 0
+            && self.back_to_safeop_ns != 0
+    }
+
+    /// Select the ESI timeout class for one legal ESM step.
+    pub const fn for_step(
+        self,
+        current_state: EthercatState,
+        expected_state: EthercatState,
+    ) -> Option<u64> {
+        if matches!(current_state, EthercatState::Unknown)
+            || matches!(expected_state, EthercatState::Unknown)
+        {
+            return None;
+        }
+        if matches!(expected_state, EthercatState::Init) {
+            return Some(self.back_to_init_ns);
+        }
+        if matches!(expected_state, EthercatState::Op) {
+            return Some(self.safeop_to_op_ns);
+        }
+        if matches!(expected_state, EthercatState::SafeOp)
+            && matches!(current_state, EthercatState::Op)
+        {
+            return Some(self.back_to_safeop_ns);
+        }
+        Some(self.preop_ns)
+    }
+}
+
+/// Public ETG.1020 fallback profile used when ESI/SII provides no override.
+///
+/// The version suffix makes a future standard revision an explicit source and
+/// evidence change instead of silently changing startup timing.
+pub const ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1: AlTransitionTimeouts =
+    AlTransitionTimeouts::new(3_000_000_000, 10_000_000_000, 5_000_000_000, 200_000_000);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AlPhase {
     Idle,
     WritingControl,
@@ -441,6 +508,37 @@ impl Default for AlTransitionController {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transition_timeout_profile_selects_each_esi_class() {
+        let profile = AlTransitionTimeouts::new(3, 10, 5, 2);
+        assert_eq!(
+            profile.for_step(EthercatState::Init, EthercatState::PreOp),
+            Some(3)
+        );
+        assert_eq!(
+            profile.for_step(EthercatState::PreOp, EthercatState::SafeOp),
+            Some(3)
+        );
+        assert_eq!(
+            profile.for_step(EthercatState::SafeOp, EthercatState::Op),
+            Some(10)
+        );
+        assert_eq!(
+            profile.for_step(EthercatState::Op, EthercatState::SafeOp),
+            Some(2)
+        );
+        assert_eq!(
+            profile.for_step(EthercatState::SafeOp, EthercatState::Init),
+            Some(5)
+        );
+        assert_eq!(
+            profile.for_step(EthercatState::Unknown, EthercatState::PreOp),
+            None
+        );
+        assert!(profile.is_valid());
+        assert!(!AlTransitionTimeouts::uniform(0).is_valid());
+    }
 
     fn status(state: EthercatState, code: u16) -> [u8; 6] {
         let mut bytes = [0; 6];

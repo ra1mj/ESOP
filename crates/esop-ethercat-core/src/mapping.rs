@@ -4,6 +4,8 @@
 //! all address ranges and emits the exact ESC register images before a master
 //! is activated; the real-time path only uses the resulting frozen layout.
 
+use crate::op_only::{OpOnlyProfileError, OpOnlySyncManagerProfile};
+
 pub const ESC_FMMU_BASE: u16 = 0x0600;
 pub const ESC_FMMU_STRIDE: u16 = 16;
 pub const ESC_SYNC_MANAGER_BASE: u16 = 0x0800;
@@ -57,6 +59,7 @@ pub enum MappingError {
     BufferTooSmall,
     UnknownSyncManager,
     UnknownFmmu,
+    OpOnly(OpOnlyProfileError),
 }
 
 impl SyncManagerConfig {
@@ -142,6 +145,7 @@ pub struct MappingTable<const SMS: usize, const FMMUS: usize> {
     sync_manager_count: usize,
     fmmus: [FmmuConfig; FMMUS],
     fmmu_count: usize,
+    op_only_outputs: OpOnlySyncManagerProfile,
 }
 
 impl<const SMS: usize, const FMMUS: usize> MappingTable<SMS, FMMUS> {
@@ -168,6 +172,7 @@ impl<const SMS: usize, const FMMUS: usize> MappingTable<SMS, FMMUS> {
                 enable: false,
             }; FMMUS],
             fmmu_count: 0,
+            op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
         }
     }
 
@@ -185,6 +190,17 @@ impl<const SMS: usize, const FMMUS: usize> MappingTable<SMS, FMMUS> {
 
     pub fn fmmus(&self) -> &[FmmuConfig] {
         &self.fmmus[..self.fmmu_count]
+    }
+
+    pub const fn op_only_outputs(&self) -> OpOnlySyncManagerProfile {
+        self.op_only_outputs
+    }
+
+    pub fn mark_op_only_output(&mut self, index: u8, activation: u8) -> Result<(), MappingError> {
+        self.sync_manager(index)?;
+        self.op_only_outputs
+            .add(index, activation)
+            .map_err(MappingError::OpOnly)
     }
 
     pub fn add_sync_manager(&mut self, config: SyncManagerConfig) -> Result<(), MappingError> {

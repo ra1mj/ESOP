@@ -47,6 +47,11 @@ impl Fixture {
         edit(&mut value);
         fs::write(&self.product, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
     }
+
+    fn edit_esi(&self, edit: impl FnOnce(String) -> String) {
+        let source = fs::read_to_string(&self.esi).unwrap();
+        fs::write(&self.esi, edit(source)).unwrap();
+    }
 }
 
 impl Drop for Fixture {
@@ -174,6 +179,32 @@ fn identity_pdo_axis_policy_and_capacity_fail_closed() {
             .unwrap_err()
             .to_string()
             .contains("exceeds declared capacity")
+    );
+}
+
+#[test]
+fn invalid_esi_timeouts_and_op_only_directions_fail_closed() {
+    let fixture = Fixture::new();
+    fixture.edit_esi(|xml| xml.replace("<PreopTimeout>3500", "<PreopTimeout>0"));
+    assert!(
+        generate(&fixture.product, &fixture.output("zero-timeout"))
+            .unwrap_err()
+            .to_string()
+            .contains("PreopTimeout must be greater than zero")
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_esi(|xml| {
+        xml.replace(
+            "<Sm Enable=\"1\" OpOnly=\"true\">Outputs</Sm>",
+            "<Sm Enable=\"1\" OpOnly=\"true\">Inputs</Sm>",
+        )
+    });
+    assert!(
+        generate(&fixture.product, &fixture.output("invalid-op-only"))
+            .unwrap_err()
+            .to_string()
+            .contains("declares OpOnly for non-output direction")
     );
 }
 

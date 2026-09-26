@@ -17,7 +17,7 @@
     {
       "id": "product_config_generator",
       "status": "implemented",
-      "scope": "Deterministic host-only esop.product.v1 and bounded ESI-subset compilation into static C/Rust, normalized Domain/PDO/Frame Plan, device inventory, exact ProcBuf v6 layout and fail-closed build input",
+      "scope": "Deterministic host-only esop.product.v1 and bounded ESI-subset compilation into static C/Rust, normalized Domain/PDO/Frame Plan, per-slave ESM timeout and OpOnly profiles, device inventory, exact ProcBuf v6 layout and fail-closed build input",
       "evidence": [
         "crates/esop-cfggen/src/lib.rs",
         "crates/esop-cfggen/src/generator.rs",
@@ -26,12 +26,12 @@
         "scripts/tests/test_robot_build_report.py",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "The supported ESI subset is byte-aligned and explicit; modular devices, bit-packed PDOs, vendor scaling/quirks, artifact signing/distribution, MailboxConfig and mapping/DC descriptor generation, physical slave interoperability, measured wire timing, target resource/WCET and safety qualification remain open"
+      "limitation": "The supported ESI subset is byte-aligned and explicit; modular devices, bit-packed PDOs, vendor scaling/quirks, artifact signing/distribution, MailboxConfig and complete mapping/DC descriptor generation, physical slave interoperability, measured wire timing, target resource/WCET and safety qualification remain open"
     },
     {
       "id": "product_runtime_attachment",
       "status": "implemented",
-      "scope": "Allocation-free no_std activation of generated Rust product configuration with exact hash, ProcBuf v6, observed topology, Domain/PDO/datagram/WKC, schedule/frame-plan, CiA 402 map and axis-policy validation plus deterministic all-slave PDO batch construction",
+      "scope": "Allocation-free no_std activation of generated Rust product configuration with exact hash, ProcBuf v6, observed topology, Domain/PDO/datagram/WKC, schedule/frame-plan, per-slave ESM timeout and OpOnly startup profiles, CiA 402 map and axis-policy validation plus deterministic all-slave PDO batch construction",
       "evidence": [
         "crates/esop-product-config/src/lib.rs",
         "crates/esop-product-config/tests/generated_product.rs",
@@ -82,7 +82,24 @@
         "crates/esop-ethercat-linux-port/tests/scheduled_domains.rs",
         "docs/ethercat-master-requirements.md"
       ],
-      "limitation": "Software tests prove exact register sequencing, timeout/error retention and policy separation only; ESI/SII ESM timeout discovery, OpOnly handling, physical ESC response authenticity, interoperability, target WCET and HIL remain open"
+      "limitation": "Software tests prove exact register sequencing, timeout/error retention and policy separation only; physical ESC response authenticity, interoperability, target WCET and HIL remain open"
+    },
+    {
+      "id": "ethercat_esm_timeout_op_only",
+      "status": "implemented",
+      "scope": "Allocation-free per-transition ESM deadlines from explicit ESI or versioned ETG.1020 defaults, compatibility override precedence, SII/ESI OpOnly output validation, PREOP-disabled mapping and disable/enable readback gating around Operational state",
+      "evidence": [
+        "crates/esop-ethercat-core/src/al.rs",
+        "crates/esop-ethercat-core/src/op_only.rs",
+        "crates/esop-ethercat-core/src/startup.rs",
+        "crates/esop-ethercat-core/src/sii_config.rs",
+        "crates/esop-ethercat-core/src/mapping_config.rs",
+        "crates/esop-cfggen/src/esi.rs",
+        "crates/esop-cfggen/tests/generation.rs",
+        "crates/esop-product-config/tests/generated_product.rs",
+        "docs/ethercat-master-requirements.md"
+      ],
+      "limitation": "Deterministic software tests and generated fixtures prove profile selection, sequencing and exact readback handling only; authentic physical ESC behavior, vendor interoperability, measured transition timing, target WCET, long-duration HIL and conformance remain open"
     },
     {
       "id": "linux_raw_port",

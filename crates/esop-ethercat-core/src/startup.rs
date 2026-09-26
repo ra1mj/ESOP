@@ -6,7 +6,8 @@
 
 use crate::al::{
     AlAction, AlError, AlErrorAcknowledgePolicy, AlErrorAcknowledgeStatus, AlPhase, AlProgress,
-    AlTransitionController, AlTransitionRequest,
+    AlTransitionController, AlTransitionRequest, AlTransitionTimeouts,
+    ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
 };
 use crate::control::{
     ControlError, ControlRequestPool, MAX_CONTROL_PAYLOAD, RegisterOperation, RequestHandle,
@@ -14,7 +15,14 @@ use crate::control::{
 };
 use crate::scan::{ScanAction, ScanController, ScanError, ScanPhase, ScanProgress};
 use crate::sii::{SiiAction, SiiError, SiiIdentityReader, SiiPhase, SiiProgress};
-use crate::slave::{EthercatState, SlaveIdentity, SlaveRecord, SlaveTable, SlaveTableError};
+use crate::slave::{
+    EthercatState, SlaveIdentity, SlaveRecord, SlaveTable, SlaveTableError, next_state,
+};
+use crate::{
+    OpOnlyProfileError, OpOnlySyncManagerAction, OpOnlySyncManagerController,
+    OpOnlySyncManagerError, OpOnlySyncManagerPhase, OpOnlySyncManagerProfile,
+    OpOnlySyncManagerProgress,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExpectedSlave {
@@ -29,6 +37,41 @@ impl ExpectedSlave {
         station_address: 0,
         identity: SlaveIdentity::EMPTY,
     };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StartupSlaveProfile {
+    pub position: u16,
+    pub transition_timeouts: AlTransitionTimeouts,
+    pub op_only_outputs: OpOnlySyncManagerProfile,
+}
+
+impl StartupSlaveProfile {
+    pub const EMPTY: Self = Self {
+        position: 0,
+        transition_timeouts: ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
+        op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
+    };
+
+    pub const fn new(position: u16) -> Self {
+        Self {
+            position,
+            ..Self::EMPTY
+        }
+    }
+
+    pub const fn with_transition_timeouts(
+        mut self,
+        transition_timeouts: AlTransitionTimeouts,
+    ) -> Self {
+        self.transition_timeouts = transition_timeouts;
+        self
+    }
+
+    pub const fn with_op_only_outputs(mut self, op_only_outputs: OpOnlySyncManagerProfile) -> Self {
+        self.op_only_outputs = op_only_outputs;
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,7 +141,7 @@ impl StartupConfig {
         Self {
             scan_timeout_ns: 1_000_000_000,
             identity_timeout_ns: 1_000_000_000,
-            transition_timeout_ns: 1_000_000_000,
+            transition_timeout_ns: 0,
             request_timeout_ns: 1_000_000,
             target_state,
             configuration_services: StartupConfigurationServices::NONE,
@@ -130,6 +173,7 @@ pub enum StartupAction {
     Scan(ScanAction),
     Sii(SiiAction),
     Al(AlAction),
+    OpOnly(OpOnlySyncManagerAction),
 }
 
 impl StartupAction {
@@ -138,6 +182,7 @@ impl StartupAction {
             Self::Scan(action) => action.token,
             Self::Sii(action) => action.token,
             Self::Al(action) => action.token,
+            Self::OpOnly(action) => action.token,
         }
     }
 
@@ -146,6 +191,7 @@ impl StartupAction {
             Self::Scan(action) => action.datagram_index,
             Self::Sii(action) => action.datagram_index,
             Self::Al(action) => action.datagram_index,
+            Self::OpOnly(action) => action.datagram_index,
         }
     }
 
@@ -154,6 +200,7 @@ impl StartupAction {
             Self::Scan(action) => action.generation,
             Self::Sii(action) => action.generation,
             Self::Al(action) => action.generation,
+            Self::OpOnly(action) => action.generation,
         }
     }
 
@@ -162,6 +209,7 @@ impl StartupAction {
             Self::Scan(action) => action.address,
             Self::Sii(action) => action.address,
             Self::Al(action) => action.address,
+            Self::OpOnly(action) => action.address,
         }
     }
 
@@ -170,6 +218,7 @@ impl StartupAction {
             Self::Scan(action) => action.operation,
             Self::Sii(action) => action.operation,
             Self::Al(action) => action.operation,
+            Self::OpOnly(action) => action.operation,
         }
     }
 
@@ -178,6 +227,7 @@ impl StartupAction {
             Self::Scan(action) => action.payload(),
             Self::Sii(action) => action.payload(),
             Self::Al(action) => action.payload(),
+            Self::OpOnly(action) => action.payload(),
         }
     }
 
@@ -186,6 +236,7 @@ impl StartupAction {
             Self::Scan(action) => action.deadline_ns,
             Self::Sii(action) => action.deadline_ns,
             Self::Al(action) => action.deadline_ns,
+            Self::OpOnly(action) => action.deadline_ns,
         }
     }
 
@@ -194,6 +245,7 @@ impl StartupAction {
             Self::Scan(action) => action.expected_wkc,
             Self::Sii(action) => action.expected_wkc,
             Self::Al(action) => action.expected_wkc,
+            Self::OpOnly(action) => action.expected_wkc,
         }
     }
 
@@ -202,6 +254,7 @@ impl StartupAction {
             Self::Scan(action) => action.datagram_len(),
             Self::Sii(action) => action.datagram_len(),
             Self::Al(action) => action.datagram_len(),
+            Self::OpOnly(action) => action.datagram_len(),
         }
     }
 
@@ -210,6 +263,7 @@ impl StartupAction {
             Self::Scan(action) => action.read_len as usize,
             Self::Sii(action) => action.read_len as usize,
             Self::Al(action) => action.read_len as usize,
+            Self::OpOnly(action) => action.response_len(),
         }
     }
 }
@@ -234,6 +288,14 @@ pub enum StartupError {
     DuplicateExpectedPosition,
     ExpectedCountMismatch,
     MissingExpectedPosition,
+    ProfileCountMismatch,
+    DuplicateProfilePosition(u16),
+    MissingProfilePosition(u16),
+    InvalidTransitionTimeoutProfile(u16),
+    OpOnlyProfile {
+        position: u16,
+        error: OpOnlyProfileError,
+    },
     StationAddressMismatch,
     IdentityMismatch,
     ActionMismatch,
@@ -245,6 +307,7 @@ pub enum StartupError {
     Scan(ScanError),
     Sii(SiiError),
     Al(AlError),
+    OpOnly(OpOnlySyncManagerError),
     Table(SlaveTableError),
 }
 
@@ -259,21 +322,41 @@ pub struct StartupAlFault {
     pub acknowledgement: AlErrorAcknowledgeStatus,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartupTransitionStage {
+    Idle,
+    OpOnlyBeforeAl,
+    Al,
+    OpOnlyAfterAl,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpOnlyGateState {
+    Unknown,
+    DisabledVerified,
+    EnabledVerified,
+}
+
 pub struct StartupController<const MAX_SLAVES: usize> {
     phase: StartupPhase,
     config: StartupConfig,
     generation: u16,
     station_address_base: u16,
     expected: [ExpectedSlave; MAX_SLAVES],
+    profiles: [StartupSlaveProfile; MAX_SLAVES],
     expected_count: usize,
     scan: ScanController<MAX_SLAVES>,
     sii: SiiIdentityReader,
     al: AlTransitionController,
+    op_only: OpOnlySyncManagerController,
     table: SlaveTable<MAX_SLAVES>,
     device_emulation: [bool; MAX_SLAVES],
+    op_only_gate: [OpOnlyGateState; MAX_SLAVES],
     current_index: usize,
     stage_target: EthercatState,
     configuration_released: bool,
+    transition_stage: StartupTransitionStage,
+    step_deadline_ns: u64,
     last_error: Option<StartupError>,
     last_al_fault: Option<StartupAlFault>,
 }
@@ -286,15 +369,20 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             generation: 0,
             station_address_base,
             expected: [ExpectedSlave::EMPTY; MAX_SLAVES],
+            profiles: [StartupSlaveProfile::EMPTY; MAX_SLAVES],
             expected_count: 0,
             scan: ScanController::new(station_address_base),
             sii: SiiIdentityReader::new(),
             al: AlTransitionController::new(),
+            op_only: OpOnlySyncManagerController::new(),
             table: SlaveTable::new(),
             device_emulation: [false; MAX_SLAVES],
+            op_only_gate: [OpOnlyGateState::Unknown; MAX_SLAVES],
             current_index: 0,
             stage_target: EthercatState::Op,
             configuration_released: false,
+            transition_stage: StartupTransitionStage::Idle,
+            step_deadline_ns: 0,
             last_error: None,
             last_al_fault: None,
         }
@@ -344,7 +432,13 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         match self.phase {
             StartupPhase::Scanning => self.scan.pending().map(StartupAction::Scan),
             StartupPhase::ReadingIdentity => self.sii.pending().map(StartupAction::Sii),
-            StartupPhase::TransitioningAl => self.al.pending().map(StartupAction::Al),
+            StartupPhase::TransitioningAl => match self.transition_stage {
+                StartupTransitionStage::Al => self.al.pending().map(StartupAction::Al),
+                StartupTransitionStage::OpOnlyBeforeAl | StartupTransitionStage::OpOnlyAfterAl => {
+                    self.op_only.pending().map(StartupAction::OpOnly)
+                }
+                StartupTransitionStage::Idle => None,
+            },
             StartupPhase::Idle
             | StartupPhase::AwaitingConfiguration
             | StartupPhase::Ready
@@ -358,6 +452,28 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         now_ns: u64,
         config: StartupConfig,
         expected: &[ExpectedSlave],
+    ) -> Result<(), StartupError> {
+        self.start_inner(generation, now_ns, config, expected, None)
+    }
+
+    pub fn start_with_profiles(
+        &mut self,
+        generation: u16,
+        now_ns: u64,
+        config: StartupConfig,
+        expected: &[ExpectedSlave],
+        profiles: &[StartupSlaveProfile],
+    ) -> Result<(), StartupError> {
+        self.start_inner(generation, now_ns, config, expected, Some(profiles))
+    }
+
+    fn start_inner(
+        &mut self,
+        generation: u16,
+        now_ns: u64,
+        config: StartupConfig,
+        expected: &[ExpectedSlave],
+        profiles: Option<&[StartupSlaveProfile]>,
     ) -> Result<(), StartupError> {
         if !matches!(
             self.phase,
@@ -391,18 +507,67 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                 return Err(StartupError::DuplicateExpectedPosition);
             }
         }
+        if let Some(profiles) = profiles {
+            if profiles.len() != expected.len() {
+                return Err(StartupError::ProfileCountMismatch);
+            }
+            for (index, profile) in profiles.iter().copied().enumerate() {
+                if profiles[..index]
+                    .iter()
+                    .any(|existing| existing.position == profile.position)
+                {
+                    return Err(StartupError::DuplicateProfilePosition(profile.position));
+                }
+                if !expected
+                    .iter()
+                    .any(|item| item.position == profile.position)
+                {
+                    return Err(StartupError::MissingExpectedPosition);
+                }
+                if !profile.transition_timeouts.is_valid() {
+                    return Err(StartupError::InvalidTransitionTimeoutProfile(
+                        profile.position,
+                    ));
+                }
+                if let Err(error) = profile.op_only_outputs.validate() {
+                    return Err(StartupError::OpOnlyProfile {
+                        position: profile.position,
+                        error,
+                    });
+                }
+            }
+            for item in expected {
+                if !profiles
+                    .iter()
+                    .any(|profile| profile.position == item.position)
+                {
+                    return Err(StartupError::MissingProfilePosition(item.position));
+                }
+            }
+        }
 
         self.phase = StartupPhase::Scanning;
         self.config = config;
         self.generation = generation;
         self.expected = [ExpectedSlave::EMPTY; MAX_SLAVES];
         self.expected[..expected.len()].copy_from_slice(expected);
+        self.profiles = [StartupSlaveProfile::EMPTY; MAX_SLAVES];
+        match profiles {
+            Some(profiles) => self.profiles[..profiles.len()].copy_from_slice(profiles),
+            None => {
+                for (index, item) in expected.iter().enumerate() {
+                    self.profiles[index] = StartupSlaveProfile::new(item.position);
+                }
+            }
+        }
         self.expected_count = expected.len();
         self.scan = ScanController::new(self.station_address_base);
         self.sii = SiiIdentityReader::new();
         self.al = AlTransitionController::new();
+        self.op_only = OpOnlySyncManagerController::new();
         self.table = SlaveTable::new();
         self.device_emulation = [false; MAX_SLAVES];
+        self.op_only_gate = [OpOnlyGateState::Unknown; MAX_SLAVES];
         self.current_index = 0;
         self.stage_target = if config.configuration_services.is_empty() {
             config.target_state
@@ -410,6 +575,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             EthercatState::PreOp
         };
         self.configuration_released = false;
+        self.transition_stage = StartupTransitionStage::Idle;
+        self.step_deadline_ns = 0;
         self.last_error = None;
         self.last_al_fault = None;
         match self.scan.start(
@@ -442,13 +609,24 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                         Err(error) => return self.fail(StartupError::Sii(error)),
                     }
                 }
-                StartupPhase::TransitioningAl => match self.al.next_action(now_ns) {
-                    Ok(Some(action)) => return Ok(Some(StartupAction::Al(action))),
-                    Ok(None) => return Ok(None),
-                    Err(error) => {
-                        self.capture_al_fault();
-                        return self.fail(StartupError::Al(error));
+                StartupPhase::TransitioningAl => match self.transition_stage {
+                    StartupTransitionStage::Al => match self.al.next_action(now_ns) {
+                        Ok(Some(action)) => return Ok(Some(StartupAction::Al(action))),
+                        Ok(None) => return Ok(None),
+                        Err(error) => {
+                            self.capture_al_fault();
+                            return self.fail(StartupError::Al(error));
+                        }
+                    },
+                    StartupTransitionStage::OpOnlyBeforeAl
+                    | StartupTransitionStage::OpOnlyAfterAl => {
+                        match self.op_only.next_action(now_ns) {
+                            Ok(Some(action)) => return Ok(Some(StartupAction::OpOnly(action))),
+                            Ok(None) => return Ok(None),
+                            Err(error) => return self.fail(StartupError::OpOnly(error)),
+                        }
                     }
+                    StartupTransitionStage::Idle => return Ok(None),
                 },
                 StartupPhase::AwaitingConfiguration
                 | StartupPhase::Ready
@@ -552,6 +730,29 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                         Ok(StartupProgress::Advanced)
                     }
                 }
+            }
+            StartupAction::OpOnly(action) => {
+                if self.phase != StartupPhase::TransitioningAl
+                    || !matches!(
+                        self.transition_stage,
+                        StartupTransitionStage::OpOnlyBeforeAl
+                            | StartupTransitionStage::OpOnlyAfterAl
+                    )
+                {
+                    return self.fail(StartupError::NoPendingAction);
+                }
+                let progress =
+                    match self
+                        .op_only
+                        .accept(action, generation, payload, working_counter, now_ns)
+                    {
+                        Ok(progress) => progress,
+                        Err(error) => return self.fail(StartupError::OpOnly(error)),
+                    };
+                if progress == OpOnlySyncManagerProgress::Complete {
+                    return self.finish_op_only(now_ns);
+                }
+                Ok(StartupProgress::Advanced)
             }
         }
     }
@@ -682,6 +883,16 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                     }
                 }
             },
+            StartupAction::OpOnly(action) => match self.op_only.timeout(action, now_ns) {
+                Ok(_) => self.fail(StartupError::OpOnly(OpOnlySyncManagerError::Timeout)),
+                Err(error) => {
+                    if self.op_only.phase() == OpOnlySyncManagerPhase::Faulted {
+                        self.fail(StartupError::OpOnly(error))
+                    } else {
+                        Err(StartupError::OpOnly(error))
+                    }
+                }
+            },
         }
     }
 
@@ -696,6 +907,9 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.stage_target = self.config.target_state;
         self.current_index = 0;
         self.al = AlTransitionController::new();
+        self.op_only = OpOnlySyncManagerController::new();
+        self.transition_stage = StartupTransitionStage::Idle;
+        self.step_deadline_ns = 0;
         self.phase = StartupPhase::TransitioningAl;
         self.start_al_for_current(now_ns)?;
         Ok(StartupProgress::ConfigurationReleased)
@@ -722,13 +936,19 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.config = config;
         self.expected = [ExpectedSlave::EMPTY; MAX_SLAVES];
         self.expected[..expected.len()].copy_from_slice(expected);
+        self.profiles = [StartupSlaveProfile::EMPTY; MAX_SLAVES];
+        for (index, item) in expected.iter().enumerate() {
+            self.profiles[index] = StartupSlaveProfile::new(item.position);
+        }
         self.expected_count = expected.len();
         self.generation = generation;
         self.scan = ScanController::new(self.station_address_base);
         self.sii = SiiIdentityReader::new();
         self.al = AlTransitionController::new();
+        self.op_only = OpOnlySyncManagerController::new();
         self.table = SlaveTable::new();
         self.device_emulation = [false; MAX_SLAVES];
+        self.op_only_gate = [OpOnlyGateState::Unknown; MAX_SLAVES];
         for item in expected.iter().copied() {
             self.table
                 .add(item.position, item.station_address, item.identity)
@@ -747,6 +967,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.current_index = expected.len();
         self.stage_target = EthercatState::PreOp;
         self.configuration_released = false;
+        self.transition_stage = StartupTransitionStage::Idle;
+        self.step_deadline_ns = 0;
         self.last_error = None;
         self.last_al_fault = None;
         Ok(())
@@ -841,11 +1063,56 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             .get(self.current_index)
             .copied()
             .ok_or(StartupError::ExpectedCountMismatch)?;
+        let profile = self.profile_for_position(record.position)?;
+        let expected_state = if record.al_status.state == self.stage_target {
+            record.al_status.state
+        } else {
+            next_state(record.al_status.state, self.stage_target)
+                .ok_or(StartupError::Al(AlError::InvalidTransition))?
+        };
+        let timeout_ns = if self.config.transition_timeout_ns != 0 {
+            self.config.transition_timeout_ns
+        } else {
+            profile
+                .transition_timeouts
+                .for_step(record.al_status.state, expected_state)
+                .ok_or(StartupError::InvalidTransitionTimeoutProfile(
+                    record.position,
+                ))?
+        };
+        self.step_deadline_ns = now_ns.saturating_add(timeout_ns);
+
+        let needs_disabled =
+            record.al_status.state != EthercatState::Op || self.stage_target != EthercatState::Op;
+        if !profile.op_only_outputs.is_empty()
+            && needs_disabled
+            && self.op_only_gate[self.current_index] != OpOnlyGateState::DisabledVerified
+        {
+            return self.start_op_only(
+                record.station_address,
+                profile.op_only_outputs,
+                false,
+                StartupTransitionStage::OpOnlyBeforeAl,
+                now_ns,
+            );
+        }
+        self.start_al_transport(record, now_ns)
+    }
+
+    fn start_al_transport(
+        &mut self,
+        record: SlaveRecord,
+        now_ns: u64,
+    ) -> Result<StartupProgress, StartupError> {
+        if now_ns >= self.step_deadline_ns {
+            return self.fail(StartupError::Al(AlError::Timeout));
+        }
         let policy = if self.device_emulation[self.current_index] {
             AlErrorAcknowledgePolicy::Disabled
         } else {
             AlErrorAcknowledgePolicy::Enabled
         };
+        self.transition_stage = StartupTransitionStage::Al;
         if let Err(error) = self.al.start_with_status(
             AlTransitionRequest {
                 station_address: record.station_address,
@@ -853,7 +1120,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                 requested_state: self.stage_target,
                 generation: self.generation,
                 now_ns,
-                timeout_ns: self.config.transition_timeout_ns,
+                timeout_ns: self.step_deadline_ns.saturating_sub(now_ns),
                 request_timeout_ns: self.config.request_timeout_ns,
             },
             record.al_status,
@@ -866,6 +1133,53 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             self.finish_al_step(now_ns)
         } else {
             Ok(StartupProgress::IdentityVerified(self.current_index))
+        }
+    }
+
+    fn start_op_only(
+        &mut self,
+        station_address: u16,
+        profile: OpOnlySyncManagerProfile,
+        enabled: bool,
+        stage: StartupTransitionStage,
+        now_ns: u64,
+    ) -> Result<StartupProgress, StartupError> {
+        if now_ns >= self.step_deadline_ns {
+            return self.fail(StartupError::OpOnly(OpOnlySyncManagerError::Timeout));
+        }
+        if let Err(error) = self.op_only.start(
+            station_address,
+            self.generation,
+            self.step_deadline_ns,
+            self.config.request_timeout_ns,
+            profile,
+            enabled,
+        ) {
+            return self.fail(StartupError::OpOnly(error));
+        }
+        self.transition_stage = stage;
+        Ok(StartupProgress::Advanced)
+    }
+
+    fn finish_op_only(&mut self, now_ns: u64) -> Result<StartupProgress, StartupError> {
+        match self.transition_stage {
+            StartupTransitionStage::OpOnlyBeforeAl => {
+                self.op_only_gate[self.current_index] = OpOnlyGateState::DisabledVerified;
+                let record = self
+                    .table
+                    .records()
+                    .get(self.current_index)
+                    .copied()
+                    .ok_or(StartupError::ExpectedCountMismatch)?;
+                self.start_al_transport(record, now_ns)
+            }
+            StartupTransitionStage::OpOnlyAfterAl => {
+                self.op_only_gate[self.current_index] = OpOnlyGateState::EnabledVerified;
+                self.complete_current_slave(now_ns)
+            }
+            StartupTransitionStage::Idle | StartupTransitionStage::Al => {
+                self.fail(StartupError::NoPendingAction)
+            }
         }
     }
 
@@ -891,6 +1205,25 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             return self.start_al_for_current(now_ns);
         }
 
+        let profile = self.profile_for_position(position)?;
+        if status.state == EthercatState::Op
+            && !profile.op_only_outputs.is_empty()
+            && self.op_only_gate[self.current_index] != OpOnlyGateState::EnabledVerified
+        {
+            return self.start_op_only(
+                self.table.records()[self.current_index].station_address,
+                profile.op_only_outputs,
+                true,
+                StartupTransitionStage::OpOnlyAfterAl,
+                now_ns,
+            );
+        }
+        self.complete_current_slave(now_ns)
+    }
+
+    fn complete_current_slave(&mut self, now_ns: u64) -> Result<StartupProgress, StartupError> {
+        self.transition_stage = StartupTransitionStage::Idle;
+        self.step_deadline_ns = 0;
         let ready_index = self.current_index;
         self.current_index += 1;
         if self.current_index >= self.expected_count {
@@ -908,6 +1241,15 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             self.phase = StartupPhase::ReadingIdentity;
             Ok(StartupProgress::SlaveReady(ready_index))
         }
+    }
+
+    fn profile_for_position(&self, position: u16) -> Result<StartupSlaveProfile, StartupError> {
+        self.profiles
+            .iter()
+            .take(self.expected_count)
+            .find(|profile| profile.position == position)
+            .copied()
+            .ok_or(StartupError::MissingProfilePosition(position))
     }
 
     fn fail<T>(&mut self, error: StartupError) -> Result<T, StartupError> {
@@ -947,6 +1289,7 @@ impl<const MAX_SLAVES: usize> Default for StartupController<MAX_SLAVES> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::op_only::{SYNC_MANAGER_ENABLE_FLAG, SYNC_MANAGER_OP_ONLY_FLAG};
     use crate::registers::{
         ESC_AL_STATUS, ESC_CONFIGURATION, ESC_TYPE, auto_increment_address, fixed_address,
     };
@@ -965,6 +1308,84 @@ mod tests {
         }
         bytes[4..6].copy_from_slice(&code.to_le_bytes());
         bytes
+    }
+
+    fn op_only_profile(position: u16, timeouts: AlTransitionTimeouts) -> StartupSlaveProfile {
+        let mut outputs = OpOnlySyncManagerProfile::new();
+        outputs
+            .add(
+                2,
+                SYNC_MANAGER_OP_ONLY_FLAG | SYNC_MANAGER_ENABLE_FLAG | 0x20,
+            )
+            .unwrap();
+        StartupSlaveProfile::new(position)
+            .with_transition_timeouts(timeouts)
+            .with_op_only_outputs(outputs)
+    }
+
+    fn prepared_transition(
+        current: EthercatState,
+        target: EthercatState,
+        mut config: StartupConfig,
+        profile: StartupSlaveProfile,
+        now_ns: u64,
+    ) -> StartupController<1> {
+        let identity = SlaveIdentity {
+            vendor_id: 1,
+            product_code: 2,
+            revision: 3,
+            serial: 4,
+        };
+        let expected = ExpectedSlave {
+            position: 0,
+            station_address: 0x1000,
+            identity,
+        };
+        config.target_state = target;
+        let mut startup = StartupController::<1>::new(0x1000);
+        startup.phase = StartupPhase::TransitioningAl;
+        startup.config = config;
+        startup.generation = 7;
+        startup.expected[0] = expected;
+        startup.profiles[0] = profile;
+        startup.expected_count = 1;
+        startup
+            .table
+            .add(expected.position, expected.station_address, identity)
+            .unwrap();
+        startup
+            .table
+            .observe_status(
+                expected.position,
+                crate::slave::AlStatus::new(current as u16, 0),
+                0,
+            )
+            .unwrap();
+        startup
+            .table
+            .verify_identity(expected.position, identity)
+            .unwrap();
+        startup.current_index = 0;
+        startup.stage_target = target;
+        startup.start_al_for_current(now_ns).unwrap();
+        startup
+    }
+
+    fn accept_op_only<const MAX_SLAVES: usize>(
+        startup: &mut StartupController<MAX_SLAVES>,
+        activation: u8,
+        now_ns: u64,
+    ) -> StartupProgress {
+        let write = startup.next_action(now_ns).unwrap().unwrap();
+        assert!(matches!(write, StartupAction::OpOnly(_)));
+        assert_eq!(write.payload(), &[activation]);
+        assert_eq!(
+            accept_action(startup, write, &[], 1, now_ns + 1),
+            StartupProgress::Advanced
+        );
+        let read = startup.next_action(now_ns + 2).unwrap().unwrap();
+        assert!(matches!(read, StartupAction::OpOnly(_)));
+        accept_action(startup, read, &[activation], 1, now_ns + 3)
     }
 
     fn accept_action<const MAX_SLAVES: usize>(
@@ -1017,6 +1438,153 @@ mod tests {
             accept_action(startup, data, &word.to_le_bytes(), 1, *now_ns + 7);
             *now_ns += 8;
         }
+    }
+
+    #[test]
+    fn startup_uses_profile_deadline_and_uniform_override_precedence() {
+        let timeouts = AlTransitionTimeouts::new(300, 700, 500, 200);
+        let mut config = StartupConfig::new(EthercatState::Op);
+        config.request_timeout_ns = 10_000;
+        let mut startup = prepared_transition(
+            EthercatState::SafeOp,
+            EthercatState::Op,
+            config,
+            StartupSlaveProfile::new(0).with_transition_timeouts(timeouts),
+            100,
+        );
+        assert_eq!(
+            startup.next_action(101).unwrap().unwrap().deadline_ns(),
+            800
+        );
+
+        config.transition_timeout_ns = 33;
+        let mut startup = prepared_transition(
+            EthercatState::SafeOp,
+            EthercatState::Op,
+            config,
+            StartupSlaveProfile::new(0).with_transition_timeouts(timeouts),
+            100,
+        );
+        assert_eq!(
+            startup.next_action(101).unwrap().unwrap().deadline_ns(),
+            133
+        );
+    }
+
+    #[test]
+    fn startup_disables_op_only_before_non_op_and_enables_only_after_op() {
+        let timeouts = AlTransitionTimeouts::new(300, 700, 500, 200);
+        let mut config = StartupConfig::new(EthercatState::Op);
+        config.request_timeout_ns = 10_000;
+        let mut startup = prepared_transition(
+            EthercatState::SafeOp,
+            EthercatState::Op,
+            config,
+            op_only_profile(0, timeouts),
+            100,
+        );
+
+        let disable = startup.next_action(101).unwrap().unwrap();
+        assert!(matches!(disable, StartupAction::OpOnly(_)));
+        assert_eq!(disable.deadline_ns(), 800);
+        assert_eq!(disable.payload(), &[0x28]);
+        accept_action(&mut startup, disable, &[], 1, 102);
+        let verify = startup.next_action(103).unwrap().unwrap();
+        assert_eq!(verify.deadline_ns(), 800);
+        assert_eq!(
+            accept_action(&mut startup, verify, &[0x28], 1, 104),
+            StartupProgress::IdentityVerified(0)
+        );
+
+        let al_write = startup.next_action(105).unwrap().unwrap();
+        assert!(matches!(al_write, StartupAction::Al(_)));
+        assert_eq!(al_write.deadline_ns(), 800);
+        accept_action(&mut startup, al_write, &[], 1, 106);
+        let al_read = startup.next_action(107).unwrap().unwrap();
+        assert_eq!(
+            accept_action(&mut startup, al_read, &status(EthercatState::Op), 1, 108,),
+            StartupProgress::Advanced
+        );
+        assert_eq!(startup.phase(), StartupPhase::TransitioningAl);
+
+        assert_eq!(
+            accept_op_only(&mut startup, 0x29, 109),
+            StartupProgress::Ready
+        );
+        assert_eq!(startup.phase(), StartupPhase::Ready);
+    }
+
+    #[test]
+    fn startup_disables_op_only_before_leaving_operational() {
+        let timeouts = AlTransitionTimeouts::new(300, 700, 500, 200);
+        let mut config = StartupConfig::new(EthercatState::SafeOp);
+        config.request_timeout_ns = 10_000;
+        let mut startup = prepared_transition(
+            EthercatState::Op,
+            EthercatState::SafeOp,
+            config,
+            op_only_profile(0, timeouts),
+            50,
+        );
+        let first = startup.next_action(51).unwrap().unwrap();
+        assert!(matches!(first, StartupAction::OpOnly(_)));
+        assert_eq!(first.deadline_ns(), 250);
+        assert_eq!(first.payload(), &[0x28]);
+        accept_action(&mut startup, first, &[], 1, 52);
+        let verify = startup.next_action(53).unwrap().unwrap();
+        accept_action(&mut startup, verify, &[0x28], 1, 54);
+        assert!(matches!(
+            startup.next_action(55).unwrap().unwrap(),
+            StartupAction::Al(_)
+        ));
+    }
+
+    #[test]
+    fn op_only_readback_failure_never_releases_ready() {
+        let mut config = StartupConfig::new(EthercatState::Op);
+        config.request_timeout_ns = 10_000;
+        let mut startup = prepared_transition(
+            EthercatState::SafeOp,
+            EthercatState::Op,
+            config,
+            op_only_profile(0, AlTransitionTimeouts::uniform(1_000)),
+            0,
+        );
+        let write = startup.next_action(1).unwrap().unwrap();
+        accept_action(&mut startup, write, &[], 1, 2);
+        let read = startup.next_action(3).unwrap().unwrap();
+        assert_eq!(
+            startup.accept(read, read.generation(), &[0], 1, 4),
+            Err(StartupError::OpOnly(
+                OpOnlySyncManagerError::ReadbackMismatch
+            ))
+        );
+        assert_eq!(startup.phase(), StartupPhase::Faulted);
+        assert_eq!(startup.next_action(5), Ok(None));
+    }
+
+    #[test]
+    fn profile_validation_happens_before_startup_mutation() {
+        let expected = [ExpectedSlave {
+            position: 2,
+            station_address: 0x1002,
+            identity: SlaveIdentity::EMPTY,
+        }];
+        let invalid =
+            [StartupSlaveProfile::new(2)
+                .with_transition_timeouts(AlTransitionTimeouts::uniform(0))];
+        let mut startup = StartupController::<1>::new(0x1000);
+        assert_eq!(
+            startup.start_with_profiles(
+                1,
+                0,
+                StartupConfig::new(EthercatState::PreOp),
+                &expected,
+                &invalid,
+            ),
+            Err(StartupError::InvalidTransitionTimeoutProfile(2))
+        );
+        assert_eq!(startup.phase(), StartupPhase::Idle);
     }
 
     #[test]
@@ -1596,7 +2164,7 @@ mod tests {
     fn end_probe_deadline(action: StartupAction) -> u64 {
         match action {
             StartupAction::Scan(action) => action.deadline_ns,
-            StartupAction::Sii(_) | StartupAction::Al(_) => 0,
+            StartupAction::Sii(_) | StartupAction::Al(_) | StartupAction::OpOnly(_) => 0,
         }
     }
 

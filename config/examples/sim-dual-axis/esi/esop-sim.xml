@@ -9,6 +9,18 @@
       <Device>
         <Type ProductCode="#x00004020" RevisionNo="#x00000001">ESOP-SIM-402</Type>
         <Name>ESOP simulated CiA 402 drive</Name>
+        <Sm Enable="1">MBoxOut</Sm>
+        <Sm Enable="1">MBoxIn</Sm>
+        <Sm Enable="1" OpOnly="true">Outputs</Sm>
+        <Sm Enable="1">Inputs</Sm>
+        <StateMachine>
+          <Timeout>
+            <PreopTimeout>3500</PreopTimeout>
+            <SafeopOpTimeout>12000</SafeopOpTimeout>
+            <BackToInitTimeout>5500</BackToInitTimeout>
+            <BackToSafeopTimeout>250</BackToSafeopTimeout>
+          </Timeout>
+        </StateMachine>
         <RxPdo Sm="2">
           <Index>#x1600</Index>
           <Name>CSP outputs</Name>
@@ -49,6 +61,10 @@
       <Device>
         <Type ProductCode="#x00007010" RevisionNo="#x00000001">ESOP-SIM-IO</Type>
         <Name>ESOP simulated digital IO</Name>
+        <Sm Enable="1">MBoxOut</Sm>
+        <Sm Enable="1">MBoxIn</Sm>
+        <Sm Enable="1">Outputs</Sm>
+        <Sm Enable="1">Inputs</Sm>
         <RxPdo Sm="2">
           <Index>#x1601</Index>
           <Name>Digital outputs</Name>

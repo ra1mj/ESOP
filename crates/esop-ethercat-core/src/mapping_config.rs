@@ -12,6 +12,7 @@ use crate::mapping::{
     FMMU_IMAGE_LEN, FmmuConfig, MappingError, MappingTable, SYNC_MANAGER_IMAGE_LEN,
     SyncManagerConfig,
 };
+use crate::op_only::OpOnlySyncManagerProfile;
 use crate::registers::fixed_address;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,6 +100,7 @@ pub struct MappingConfigController<const SMS: usize, const FMMUS: usize> {
     sync_manager_count: usize,
     fmmus: [FmmuConfig; FMMUS],
     fmmu_count: usize,
+    op_only_outputs: OpOnlySyncManagerProfile,
     item_index: usize,
     pending: Option<MappingConfigAction>,
     next_token: u8,
@@ -135,6 +137,7 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
                 enable: false,
             }; FMMUS],
             fmmu_count: 0,
+            op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
             item_index: 0,
             pending: None,
             next_token: 1,
@@ -182,6 +185,7 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
         self.fmmu_count = table.fmmu_count();
         self.sync_managers[..self.sync_manager_count].copy_from_slice(table.sync_managers());
         self.fmmus[..self.fmmu_count].copy_from_slice(table.fmmus());
+        self.op_only_outputs = table.op_only_outputs();
         self.station_address = station_address;
         self.generation = generation;
         self.configuration_deadline_ns = now_ns.saturating_add(timeout_ns);
@@ -234,9 +238,7 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
                 }
                 let config = self.sync_managers[self.item_index];
                 let mut encoded = [0; FMMU_IMAGE_LEN];
-                config
-                    .encode(&mut encoded[..SYNC_MANAGER_IMAGE_LEN])
-                    .map_err(MappingConfigError::Mapping)?;
+                self.encode_sync_manager(config, &mut encoded[..SYNC_MANAGER_IMAGE_LEN])?;
                 (
                     MappingConfigItem::SyncManager(config.index),
                     RegisterOperation::Write,
@@ -361,9 +363,10 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
             }
             MappingConfigPhase::VerifyingSyncManager => {
                 let mut expected = [0; FMMU_IMAGE_LEN];
-                self.sync_managers[self.item_index]
-                    .encode(&mut expected[..SYNC_MANAGER_IMAGE_LEN])
-                    .map_err(MappingConfigError::Mapping)?;
+                self.encode_sync_manager(
+                    self.sync_managers[self.item_index],
+                    &mut expected[..SYNC_MANAGER_IMAGE_LEN],
+                )?;
                 if payload != &expected[..SYNC_MANAGER_IMAGE_LEN] {
                     return self.fail(MappingConfigError::ReadbackMismatch);
                 }
@@ -496,6 +499,18 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
         self.fail(MappingConfigError::Timeout)
     }
 
+    fn encode_sync_manager(
+        &self,
+        config: SyncManagerConfig,
+        dst: &mut [u8],
+    ) -> Result<(), MappingConfigError> {
+        config.encode(dst).map_err(MappingConfigError::Mapping)?;
+        if let Some(activation) = self.op_only_outputs.activation_for(config.index, false) {
+            dst[6] = activation;
+        }
+        Ok(())
+    }
+
     fn fail<T>(&mut self, error: MappingConfigError) -> Result<T, MappingConfigError> {
         self.last_error = Some(error);
         self.pending = None;
@@ -601,6 +616,26 @@ mod tests {
         assert_eq!(
             controller.last_error(),
             Some(MappingConfigError::ReadbackMismatch)
+        );
+    }
+
+    #[test]
+    fn op_only_sync_manager_is_configured_disabled_in_preop() {
+        let mut table = mapping_table();
+        table.mark_op_only_output(2, 0x09).unwrap();
+        let mut controller = MappingConfigController::<1, 1>::new();
+        controller.start(0x1000, 5, 0, 1_000, 100, &table).unwrap();
+
+        let write = controller.next_action(1).unwrap().unwrap();
+        assert_eq!(write.payload()[6], 0x08);
+        controller.accept(write, 5, &[], 1, 2).unwrap();
+        let read = controller.next_action(3).unwrap().unwrap();
+        let mut image = [0; SYNC_MANAGER_IMAGE_LEN];
+        table.sync_manager(2).unwrap().encode(&mut image).unwrap();
+        image[6] = 0x08;
+        assert_eq!(
+            controller.accept(read, 5, &image, 1, 4),
+            Ok(MappingConfigProgress::Advanced)
         );
     }
 
