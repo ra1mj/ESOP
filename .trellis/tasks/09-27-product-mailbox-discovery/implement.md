@@ -33,7 +33,7 @@
 - [x] Run `cargo fmt --all -- --check`, focused Clippy/tests, generated artifact checks,
       `make ci`, `make bpf`, `make test-hil`, and `make test-zenoh`.
 - [x] Run `git diff --check` and prepare the verified implementation commit.
-- [ ] Archive the Trellis task, record the journal, push `main`, and verify the matching
+- [x] Archive the Trellis task, record the journal, push `main`, and verify the matching
       GitHub Actions run.
 
 ## Risk and rollback points
