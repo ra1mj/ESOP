@@ -118,7 +118,7 @@ transactionally and fail before any product configuration becomes active.
       implemented runtime attachment and remaining physical qualification gaps.
 - [x] `make ci`, BPF build, Zenoh tests, formatting, Clippy, release/no_std
       checks, and `git diff --check` pass locally.
-- [ ] Changes are committed, pushed to `ra1mj/ESOP`, and the corresponding
+- [x] Changes are committed, pushed to `ra1mj/ESOP`, and the corresponding
       GitHub Actions run succeeds.
 
 ## Out of Scope

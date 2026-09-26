@@ -100,9 +100,9 @@ make ci
 
 - [x] Run formatting, workspace tests, Clippy, release/no_std checks, cfggen
       reproduction, BPF build, Zenoh tests, and `git diff --check`.
-- [ ] Complete task acceptance and record the Trellis journal.
-- [ ] Commit and push to `origin/main`.
-- [ ] Monitor GitHub Actions to success and repair any failure.
+- [x] Complete task acceptance and record the Trellis journal.
+- [x] Commit and push to `origin/main`.
+- [x] Monitor GitHub Actions to success and repair any failure.
 
 Validation:
 
