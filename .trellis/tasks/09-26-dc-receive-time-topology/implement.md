@@ -63,7 +63,7 @@ cargo test -p esop-ethercat-core --test cycle
       backend product/DC contract.
 - [x] Preserve limitations for register writes, synchronization, physical
       timing/authenticity, HIL, WCET, conformance, and functional safety.
-- [ ] Run formatting, focused tests, no-std, full CI, BPF, and exact pushed-SHA
+- [x] Run formatting, focused tests, no-std, full CI, BPF, and exact pushed-SHA
       GitHub Actions verification.
 
 Validation:

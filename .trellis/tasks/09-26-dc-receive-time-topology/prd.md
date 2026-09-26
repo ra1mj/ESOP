@@ -118,23 +118,23 @@ qualification.
 
 ## Acceptance Criteria
 
-- [ ] Scan emits exact `0x0900/16` receive-time and `0x0110/2` Data Link
+- [x] Scan emits exact `0x0900/16` receive-time and `0x0110/2` Data Link
       Status actions in the correct DC/non-DC sequences and publishes decoded
       evidence only after exact WKC/payload validation.
-- [ ] Delay-only DC slaves still publish receive times, while non-DC slaves
+- [x] Delay-only DC slaves still publish receive times, while non-DC slaves
       skip only the receive-time action.
-- [ ] Fixed-capacity topology tests prove linear and branched port adjacency
+- [x] Fixed-capacity topology tests prove linear and branched port adjacency
       in 3, 1, 2 traversal order and reject overrun, unreachable, duplicate,
       and capacity-invalid inputs transactionally.
-- [ ] Propagation tests prove measurable DC-link delay, timestamp wrap,
+- [x] Propagation tests prove measurable DC-link delay, timestamp wrap,
       checked underflow/overflow rejection, non-first reference traversal,
       mixed DC/non-DC handling, and explicit `None` for unmeasurable delay.
-- [ ] Startup publishes topology before identity only after complete policy
+- [x] Startup publishes topology before identity only after complete policy
       validation, rejects required unreachable DC, and clears all evidence on
       restart or fault.
-- [ ] Public request/RX integration coverage proves the new fixed-address
+- [x] Public request/RX integration coverage proves the new fixed-address
       reads retain exact working-counter ownership end to end.
-- [ ] Focused core tests, no-std checks, repository `make ci`, `make bpf`, and
+- [x] Focused core tests, no-std checks, repository `make ci`, `make bpf`, and
       GitHub Actions pass on the exact pushed commit.
 
 ## Out Of Scope
