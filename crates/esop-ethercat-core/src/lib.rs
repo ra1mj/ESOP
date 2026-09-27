@@ -25,6 +25,7 @@ mod pdo_config;
 mod plan;
 mod port;
 mod production_service;
+mod reconfigure;
 mod register_request;
 mod registers;
 mod rescan;
@@ -137,6 +138,12 @@ pub use production_service::{
     ScheduledProductionServiceFault, ScheduledProductionServiceKind,
     ScheduledProductionServiceProgress, ScheduledProductionServiceRecovery,
     ScheduledProductionServiceScheduler, ScheduledProductionServices,
+};
+pub use reconfigure::{
+    ReconfigureSlaveContext, ReconfigureSlaveControlAction, ReconfigureSlaveController,
+    ReconfigureSlaveError, ReconfigureSlaveHandle, ReconfigureSlavePhase, ReconfigureSlavePlan,
+    ReconfigureSlaveProgress, ReconfigureSlaveResult, ReconfigureSlaveStatus,
+    ReconfigureSlaveTransport,
 };
 pub use register_request::{
     EscRegisterAction, EscRegisterRequestController, EscRegisterRequestError,

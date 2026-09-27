@@ -230,6 +230,18 @@ impl<const MAX_SLAVES: usize> SlaveTable<MAX_SLAVES> {
         Ok(())
     }
 
+    pub fn set_configured(
+        &mut self,
+        position: u16,
+        configured: bool,
+    ) -> Result<(), SlaveTableError> {
+        let record = self
+            .get_mut(position)
+            .ok_or(SlaveTableError::UnknownPosition)?;
+        record.configured = configured;
+        Ok(())
+    }
+
     pub fn next_request(&self, position: u16) -> Result<Option<EthercatState>, SlaveTableError> {
         let record = self.get(position).ok_or(SlaveTableError::UnknownPosition)?;
         if record.al_status.error {
@@ -307,6 +319,24 @@ mod tests {
         table.observe_status(0, AlStatus::new(0x08, 0), 3).unwrap();
         assert_eq!(table.next_request(0), Ok(None));
         assert!(table.get(0).unwrap().configured);
+    }
+
+    #[test]
+    fn configured_evidence_can_be_revoked_for_one_slave_only() {
+        let mut table = SlaveTable::<2>::new();
+        table.add(0, 0x1001, IDENTITY).unwrap();
+        table.add(1, 0x1002, IDENTITY).unwrap();
+        table.verify_identity(0, IDENTITY).unwrap();
+        table.verify_identity(1, IDENTITY).unwrap();
+
+        table.set_configured(0, false).unwrap();
+
+        assert!(!table.get(0).unwrap().configured);
+        assert!(table.get(1).unwrap().configured);
+        assert_eq!(
+            table.set_configured(2, false),
+            Err(SlaveTableError::UnknownPosition)
+        );
     }
 
     #[test]

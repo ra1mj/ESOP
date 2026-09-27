@@ -47,6 +47,12 @@ pub fn ScheduledProductionCycleOwner::with_slave_copies(
 pub fn SlaveCopyProcessImage::published_image(&self) -> SlaveCopyPublishedImage<'_>;
 pub fn StaticProductConfig::build_pdo_startup_plan<const OPS: usize>(...) ->
     Result<ProductPdoStartupPlan<OPS>, ProductPdoPlanError>;
+pub fn StaticProductConfig::build_reconfigure_slave_plan<
+    const SMS: usize,
+    const FMMUS: usize,
+    const OPS: usize,
+>(position, retained_identity, frozen_mapping) ->
+    Result<ReconfigureSlavePlan<SLAVES, SMS, FMMUS, OPS>, ProductReconfigurePlanError>;
 pub fn StaticProductConfig::build_pdo_configuration_batch<
     const JOBS: usize,
     const OPS: usize,
@@ -536,6 +542,7 @@ datagrams, FCS, and inter-packet gap respectively.
 | Referenced source/target Domain is missing, or a plan fails address/image preflight | Return the plan-indexed typed error before staging mutation; preserve the published page and fault the owner. |
 | Shared auxiliary publication is absent, has the wrong cycle/length, or does not point to the exact safe image | Return `InvalidAuxiliaryOutputs` before frame acquisition, TX, State mutation, or event publication. |
 | PDO plan owner/SM/group/capacity mismatch | Reject before returning any startup plan. |
+| Reconfiguration target is unknown, retained identity or OpOnly mapping differs, mailbox/watchdog/DC evidence is invalid, or PDO capacity is insufficient | Reject before returning a reconfiguration plan or mutating Startup. |
 | Invalid generated mailbox or invalid/missing/duplicate/unknown override binding | Reject before returning any batch. |
 | Missing, duplicate, out-of-bounds or tampered mapped mailbox status, or inconsistent Domain/LRD/WKC coverage | Reject before product activation and publish no mapped binding. |
 | Mapped mailbox status input is inactive, invalid or stale | Suppress the input-mailbox read, report bounded progress, and never issue a direct status-register fallback. |
@@ -622,6 +629,10 @@ datagrams, FCS, and inter-packet gap respectively.
 - Build exact per-slave drive/IO PDO plans from the checked-in generated module;
   cover assignment-disable ordering, mapping grouping, all typed rejection
   paths, exact/segmented readback, mismatches, stale actions and restart.
+- Build a bounded single-slave reconfiguration plan from generated product
+  evidence plus retained identity and caller-frozen mapping; cover unknown
+  position, identity/OpOnly mismatch, mailbox/watchdog/DC validation, and PDO
+  operation-capacity rejection before Startup mutation.
 - Build the checked-in drive/drive/IO batch from generated mailbox data;
   compare every station/config/plan with the individual plans, prove the
   explicit override path, and cover invalid generated config, missing,

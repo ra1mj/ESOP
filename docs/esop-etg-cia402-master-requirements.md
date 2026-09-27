@@ -239,14 +239,16 @@ P0 诊断至少提供：
 
 恢复必须由应用策略明确允许。默认不在拓扑变化或 WKC 异常后自动恢复运动输出并返回 OP。
 
-当前受预算恢复 API 已完成显式 `request_state` 和 `rescan`。状态请求以固定容量控制器复用现有
+当前受预算恢复 API 已完成显式 `request_state`、`rescan` 和单从站 `reconfigure_slave`。状态请求以固定容量控制器复用现有
 AL 转换、ESI timeout、Device Emulation 与控制请求校验。重扫则在事务性校验 retained 产品计划
 和绝对 deadline 后，同步撤销旧拓扑/配置证据，并复用现有 Startup 扫描、身份、Requesting ID、
 邮箱、FMMU/SyncManager、SII、DC 拓扑和 AL authority；目标固定为 PREOP，不执行配置屏障、PDO/DC
-重配或隐式 SAFEOP/OP。两类操作都在 Domain/DC 周期工作之后逐周期执行；延迟响应保持唯一
+重配或隐式 SAFEOP/OP。单从站重配置在核对 retained/product 证据后只撤销目标 configured，按
+OpOnly 关闭、直接 PREOP、PDO、watchdog、SM/FMMU、目标 DC Clock/DC SYNC 顺序执行，并只向目标站
+写配置；非目标参考钟仅可读取。三类操作都在 Domain/DC 周期工作之后逐周期执行；延迟响应保持唯一
 `InFlight` 所有权且不重发，活动或故障时 Topology gate fail-closed。完成只发布经核验的 retained
-evidence，不自动重新使能运动、重试或返回 OP。运行时 `OpOnly` 输出顺序、单从站
-`reconfigure_slave`、统一恢复门面、混合负载、目标 WCET 和实物 HIL 仍是开放项。
+evidence，不自动重新使能运动、重试或返回 OP。普通运行时状态请求仍拒绝非空 `OpOnly` profile；
+统一恢复门面、混合负载、目标 WCET 和实物 HIL 仍是开放项。
 
 ## 5. ETG.1500 Class B 对照
 

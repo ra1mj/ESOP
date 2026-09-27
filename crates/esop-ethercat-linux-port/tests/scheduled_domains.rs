@@ -1,3 +1,4 @@
+use esop_ethercat_core::SII_CATEGORY_START_WORD;
 use esop_ethercat_core::wire::{
     Command, DATAGRAM_HEADER_LEN, DatagramHeader, ETHERCAT_FRAME_HEADER_LEN, ETHERNET_HEADER_LEN,
     MAX_ETHERNET_FRAME_LEN, WORKING_COUNTER_LEN,
@@ -8,31 +9,33 @@ use esop_ethercat_core::{
     DatagramPlan, DcClockConfig, DcClockController, DcClockProgress, DcCyclicConfig, DcCyclicError,
     DcCyclicSync, DcMonitor, DcSyncConfig, DcSyncController, DcSyncProgress, DcSyncWindowConfig,
     DcTopology, Domain, DomainSegment, ESC_AL_CONTROL, ESC_AL_STATUS, ESC_AL_STATUS_CODE,
-    ESC_CONFIGURATION, ESC_DC_SYSTEM_DIFF, ESC_DC_SYSTEM_TIME, ESC_FEATURE_DC_SUPPORTED,
-    ESC_PROCESS_DATA_WATCHDOG_TIME, ESC_WATCHDOG_DIVIDER, EscDcRange, EscRegisterRequestController,
-    EscRegisterRequestProgress, EscRegisterRequestState, EscWatchdogConfig, EthercatMaster,
-    EthercatPort, EthercatState, ExpectedSlave, FMMU_IMAGE_LEN, FmmuRegisterDiscoveryController,
-    FmmuRegisterDiscoveryProgress, FramePlan, FramePlanSet, LinkState, MAX_MAILBOX_BYTES,
-    MailboxConfig, MailboxController, MailboxError, MailboxHeader, MailboxPhase, MailboxProgress,
-    MailboxProtocol, MailboxRetryPolicy, MappingConfigController, MappingConfigPhase,
-    MappingConfigProgress, MappingTable, MasterConfig, PdoConfigAction, PdoConfigBatch,
-    PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigController, PdoConfigError, PdoConfigJob,
-    PdoConfigPhase, PdoConfigPlan, PdoConfigProgress, PdoConfigStep, PdoSdoWrite, PortError,
-    RegisterOperation, RequestHandle, RequestState, RxPoll, RxSlotState, SYNC_MANAGER_IMAGE_LEN,
-    ScanDcCapabilities, ScanPortLink, ScanRecord, ScheduleDomain, ScheduleTable,
-    ScheduledControlCycleError, ScheduledDomainBank, ScheduledDomainEntry,
-    ScheduledPdoConfiguration, ScheduledPdoConfigurationProgress, ScheduledProcessInputEntry,
-    ScheduledProcessInputs, ScheduledProductionServiceCycleError, ScheduledProductionServiceFault,
-    ScheduledProductionServiceKind, ScheduledProductionServiceProgress,
-    ScheduledProductionServiceRecovery, ScheduledProductionServiceScheduler,
-    ScheduledProductionServices, ScheduledReceiveError, ScheduledServiceFrameError,
-    ScheduledServiceTxError, ScheduledServiceTxFailure, SlaveIdentity, StartupAction,
-    StartupConfig, StartupConfigurationServices, StartupController, StartupError, StartupPhase,
-    StartupProgress, StartupSlaveProfile, StateRequestConfig, StateRequestController,
-    StateRequestPhase, StateRequestProgress, SyncManagerConfig,
-    SyncManagerRegisterDiscoveryController, SyncManagerRegisterDiscoveryProgress,
-    WatchdogController, WatchdogControllerConfig, WatchdogError, WatchdogField, WatchdogPhase,
-    WatchdogPlan, WatchdogPlanEntry, WatchdogProgress, fixed_address,
+    ESC_CONFIGURATION, ESC_DC_SYSTEM_DIFF, ESC_DC_SYSTEM_TIME, ESC_EEPROM_CONTROL, ESC_EEPROM_DATA,
+    ESC_FEATURE_DC_SUPPORTED, ESC_PROCESS_DATA_WATCHDOG_TIME, ESC_WATCHDOG_DIVIDER, EscDcRange,
+    EscRegisterRequestController, EscRegisterRequestProgress, EscRegisterRequestState,
+    EscWatchdogConfig, EthercatMaster, EthercatPort, EthercatState, ExpectedSlave, FMMU_IMAGE_LEN,
+    FmmuRegisterDiscoveryController, FmmuRegisterDiscoveryProgress, FramePlan, FramePlanSet,
+    LinkState, MAX_MAILBOX_BYTES, MailboxConfig, MailboxController, MailboxError, MailboxHeader,
+    MailboxPhase, MailboxProgress, MailboxProtocol, MailboxRetryPolicy, MappingConfigController,
+    MappingConfigPhase, MappingConfigProgress, MappingTable, MasterConfig, PdoConfigAction,
+    PdoConfigBatch, PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigController, PdoConfigError,
+    PdoConfigJob, PdoConfigPhase, PdoConfigPlan, PdoConfigProgress, PdoConfigStep, PdoSdoWrite,
+    PortError, ReconfigureSlaveController, ReconfigureSlavePhase, ReconfigureSlavePlan,
+    ReconfigureSlaveProgress, RegisterOperation, RequestHandle, RequestState, RxPoll, RxSlotState,
+    SII_CATEGORY_END, SYNC_MANAGER_IMAGE_LEN, ScanDcCapabilities, ScanPortLink, ScanRecord,
+    ScheduleDomain, ScheduleTable, ScheduledControlCycleError, ScheduledDomainBank,
+    ScheduledDomainEntry, ScheduledPdoConfiguration, ScheduledPdoConfigurationProgress,
+    ScheduledProcessInputEntry, ScheduledProcessInputs, ScheduledProductionServiceCycleError,
+    ScheduledProductionServiceFault, ScheduledProductionServiceKind,
+    ScheduledProductionServiceProgress, ScheduledProductionServiceRecovery,
+    ScheduledProductionServiceScheduler, ScheduledProductionServices, ScheduledReceiveError,
+    ScheduledServiceFrameError, ScheduledServiceTxError, ScheduledServiceTxFailure,
+    SiiConfigurationSignatureBuilder, SlaveIdentity, StartupAction, StartupConfig,
+    StartupConfigurationServices, StartupController, StartupError, StartupPhase, StartupProgress,
+    StartupSlaveProfile, StateRequestConfig, StateRequestController, StateRequestPhase,
+    StateRequestProgress, SyncManagerConfig, SyncManagerRegisterDiscoveryController,
+    SyncManagerRegisterDiscoveryProgress, WatchdogController, WatchdogControllerConfig,
+    WatchdogError, WatchdogField, WatchdogPhase, WatchdogPlan, WatchdogPlanEntry, WatchdogProgress,
+    fixed_address, register_from_address,
 };
 use esop_ethercat_core::{RescanPhase, RescanProgress};
 use esop_ethercat_linux_port::SimulatedPort;
@@ -1078,6 +1081,253 @@ fn explicit_rescan_preserves_cyclic_order_and_does_not_retransmit_in_flight_work
         other_cycle_facts_from_production_service_cycle(&second, ready_other_cycle_facts())
             .topology_valid
     );
+}
+
+#[test]
+fn explicit_reconfigure_preserves_cyclic_order_target_evidence_and_in_flight_ownership() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<3, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let mut process_plan = FramePlan::<1>::new();
+    process_plan
+        .push(DatagramPlan {
+            command: Command::Lrw,
+            index: 12,
+            address: 0x1000,
+            payload_offset: 0,
+            payload_len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut process_plans = FramePlanSet::<1, 1>::new();
+    process_plans.push(process_plan.datagrams()[0]).unwrap();
+    let process_image = [0x40, 0x00];
+    let process_inputs = ScheduledProcessInputs::new(
+        &bank,
+        &schedule,
+        [ScheduledProcessInputEntry {
+            id: 9,
+            image: &process_image,
+            plans: &process_plans,
+        }],
+    )
+    .unwrap();
+
+    let (mut startup, identities) = ready_two_slave_reconfigure_startup();
+    let target_before = startup.records()[0];
+    let unrelated_before = startup.records()[1];
+    assert!(target_before.configured);
+    assert_eq!(target_before.al_status.state, EthercatState::Op);
+    let mut reconfigure = ReconfigureSlaveController::<2, 0, 0, 0>::new();
+    let operation = startup
+        .start_reconfigure_slave(
+            &mut reconfigure,
+            ReconfigureSlavePlan::new(0, 0x1000, identities[0], MappingTable::new()),
+            41,
+            100_000,
+            900_000,
+            100_000,
+        )
+        .unwrap();
+    assert!(!startup.records()[0].configured);
+    assert_eq!(startup.records()[1], unrelated_before);
+
+    let mut lower_priority = StateRequestController::new();
+    lower_priority
+        .start(StateRequestConfig {
+            position: 1,
+            station_address: 0x1001,
+            observed_status: AlStatus::new(EthercatState::Op as u16, 0),
+            requested_state: EthercatState::SafeOp,
+            generation: 42,
+            now_ns: 100_000,
+            deadline_ns: 900_000,
+            request_timeout_ns: 200_000,
+            transition_timeouts: AlTransitionTimeouts::uniform(400_000),
+            error_acknowledge_policy: AlErrorAcknowledgePolicy::Enabled,
+        })
+        .unwrap();
+
+    let mut scheduler = ScheduledProductionServiceScheduler::new();
+    let mut controls = ControlRequestPool::<1>::new();
+    let mut port = TwoFrameSimPort::new();
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut dc_image = [0; 8];
+
+    port.set_now_ns(100_000);
+    port.pause_after_next_rx_frames(2);
+    bank.submit_due_process_inputs(&process_inputs, &mut master, &mut port, 1, 150_000, 150_000)
+        .unwrap();
+    let first = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            100_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<2, 0, 0>::new(Some(&mut startup), None, None, None)
+                .with_reconfigure_slave(&mut reconfigure)
+                .with_state_request(&mut lower_priority),
+            1,
+            150_000,
+            150_000,
+        )
+        .unwrap();
+    assert_eq!(
+        first.selected(),
+        ScheduledProductionServiceKind::ReconfigureSlave
+    );
+    assert_eq!(
+        first.progress(),
+        ScheduledProductionServiceProgress::Waiting
+    );
+    assert_eq!(
+        first.recovery(),
+        ScheduledProductionServiceRecovery::AwaitingResponse
+    );
+    assert!(first.request().is_some());
+    assert_eq!(controls.in_use(), 1);
+    assert_eq!(port.al_control_writes, 1);
+    assert_eq!(port.last_al_control, Some(EthercatState::PreOp as u16));
+    assert_eq!(
+        port.tx_commands[..3],
+        [Command::Lrw as u8, Command::Frmw as u8, Command::Fpwr as u8]
+    );
+    assert!(!startup.records()[0].configured);
+    assert_eq!(startup.records()[1], unrelated_before);
+    assert!(
+        !other_cycle_facts_from_production_service_cycle(&first, ready_other_cycle_facts())
+            .topology_valid
+    );
+
+    port.set_now_ns(200_000);
+    bank.submit_due_process_inputs(&process_inputs, &mut master, &mut port, 2, 250_000, 250_000)
+        .unwrap();
+    let second = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            200_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<2, 0, 0>::new(Some(&mut startup), None, None, None)
+                .with_reconfigure_slave(&mut reconfigure)
+                .with_state_request(&mut lower_priority),
+            2,
+            250_000,
+            250_000,
+        )
+        .unwrap();
+    assert_eq!(
+        second.progress(),
+        ScheduledProductionServiceProgress::ReconfigureSlave(ReconfigureSlaveProgress::Advanced(
+            ReconfigureSlavePhase::MovingToPreOp
+        ))
+    );
+    assert_eq!(second.request(), None);
+    assert_eq!(controls.in_use(), 0);
+    assert_eq!(port.al_control_writes, 1);
+    assert_eq!(port.tx_attempts, 5);
+    assert_eq!(
+        port.tx_commands[3..5],
+        [Command::Lrw as u8, Command::Frmw as u8]
+    );
+    assert!(!startup.records()[0].configured);
+    assert_eq!(startup.records()[1], unrelated_before);
+
+    port.set_next_control_response(
+        fixed_address(0x1000, ESC_AL_STATUS),
+        &startup_status(EthercatState::PreOp),
+    );
+    port.set_now_ns(300_000);
+    bank.submit_due_process_inputs(&process_inputs, &mut master, &mut port, 3, 350_000, 350_000)
+        .unwrap();
+    let third = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            300_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<2, 0, 0>::new(Some(&mut startup), None, None, None)
+                .with_reconfigure_slave(&mut reconfigure)
+                .with_state_request(&mut lower_priority),
+            3,
+            350_000,
+            350_000,
+        )
+        .unwrap();
+    let result = reconfigure.result(operation).unwrap();
+    assert_eq!(
+        third.progress(),
+        ScheduledProductionServiceProgress::ReconfigureSlave(ReconfigureSlaveProgress::Complete(
+            result
+        ))
+    );
+    assert!(third.service_ready());
+    assert_eq!(reconfigure.phase(), ReconfigureSlavePhase::Complete);
+    assert_eq!(result.observed_status.state, EthercatState::PreOp);
+    assert!(startup.records()[0].configured);
+    assert_eq!(startup.records()[0].al_status.state, EthercatState::PreOp);
+    assert_eq!(startup.records()[0].requested_state, EthercatState::PreOp);
+    assert_eq!(startup.records()[1], unrelated_before);
+    assert_eq!(controls.in_use(), 0);
+    assert_eq!(port.tx_attempts, 8);
+    assert_eq!(
+        port.tx_commands[5..8],
+        [Command::Lrw as u8, Command::Frmw as u8, Command::Fprd as u8]
+    );
+    let completed_facts = other_cycle_facts_from_production_service_cycle(
+        &third,
+        OtherCycleFacts {
+            drive_ready: false,
+            command_current: false,
+            ..ready_other_cycle_facts()
+        },
+    );
+    assert!(completed_facts.topology_valid);
+    assert!(!completed_facts.drive_ready);
+    assert!(!completed_facts.command_current);
 }
 
 #[test]
@@ -2846,6 +3096,203 @@ fn drive_startup_through_identity(
         now_ns += 8;
     }
     now_ns
+}
+
+fn ready_two_slave_reconfigure_startup() -> (StartupController<2>, [SlaveIdentity; 2]) {
+    let identities = [
+        SlaveIdentity {
+            vendor_id: 0x1122_3344,
+            product_code: 0x5566_7788,
+            revision: 0x99AA_BBCC,
+            serial: 0xDDEE_FF00,
+        },
+        SlaveIdentity {
+            vendor_id: 0x0102_0304,
+            product_code: 0x0506_0708,
+            revision: 0x090A_0B0C,
+            serial: 0x0D0E_0F10,
+        },
+    ];
+    let expected = [
+        ExpectedSlave {
+            position: 0,
+            station_address: 0x1000,
+            identity: identities[0],
+        },
+        ExpectedSlave {
+            position: 1,
+            station_address: 0x1001,
+            identity: identities[1],
+        },
+    ];
+    let signature = SiiConfigurationSignatureBuilder::new(0, 0, 0)
+        .unwrap()
+        .finish()
+        .unwrap();
+    let profiles = [
+        StartupSlaveProfile::new(0).with_expected_sii(signature),
+        StartupSlaveProfile::new(1),
+    ];
+    let mut startup = StartupController::<2>::new(0x1000);
+    startup
+        .start_with_profiles(
+            7,
+            0,
+            StartupConfig::new(EthercatState::Op),
+            &expected,
+            &profiles,
+        )
+        .unwrap();
+
+    let mut now_ns = 1;
+    drive_reconfigure_fixture_scan_slave(&mut startup, 0x1500, &mut now_ns);
+    drive_reconfigure_fixture_scan_slave(&mut startup, 0x5500, &mut now_ns);
+    if startup.phase() == StartupPhase::Scanning {
+        let next = startup.next_action(now_ns).unwrap().unwrap();
+        if matches!(next, StartupAction::Scan(_)) {
+            startup
+                .accept(next, next.generation(), &[], 0, now_ns + 1)
+                .unwrap();
+            now_ns += 2;
+        } else {
+            assert!(matches!(next, StartupAction::Sii(_)));
+        }
+    }
+    assert_eq!(startup.phase(), StartupPhase::ReadingIdentity);
+
+    drive_reconfigure_fixture_identity(&mut startup, identities[0], &mut now_ns);
+    drive_reconfigure_fixture_sii(&mut startup, &mut now_ns);
+    for state in [
+        EthercatState::PreOp,
+        EthercatState::SafeOp,
+        EthercatState::Op,
+    ] {
+        drive_reconfigure_fixture_al_state(&mut startup, state, &mut now_ns);
+    }
+    assert_eq!(startup.phase(), StartupPhase::ReadingIdentity);
+
+    drive_reconfigure_fixture_identity(&mut startup, identities[1], &mut now_ns);
+    for state in [
+        EthercatState::PreOp,
+        EthercatState::SafeOp,
+        EthercatState::Op,
+    ] {
+        drive_reconfigure_fixture_al_state(&mut startup, state, &mut now_ns);
+    }
+    assert_eq!(startup.phase(), StartupPhase::Ready);
+    assert!(startup.verified_fmmu_registers(0).is_some());
+    assert!(startup.verified_sync_manager_registers(0).is_some());
+    assert_eq!(startup.records().len(), 2);
+    assert!(startup.records().iter().all(|record| record.configured));
+    (startup, identities)
+}
+
+fn drive_reconfigure_fixture_scan_slave(
+    startup: &mut StartupController<2>,
+    dl_status: u16,
+    now_ns: &mut u64,
+) {
+    let probe = startup.next_action(*now_ns).unwrap().unwrap();
+    accept_startup_action(startup, probe, &[0x88, 0x02], *now_ns + 1);
+    let basic = startup.next_action(*now_ns + 2).unwrap().unwrap();
+    accept_startup_action(
+        startup,
+        basic,
+        &[0x88, 0x02, 3, 4, 0, 0, 0x20, 0xE4, 0, 0, 0, 0],
+        *now_ns + 3,
+    );
+    let assign = startup.next_action(*now_ns + 4).unwrap().unwrap();
+    accept_startup_action(startup, assign, &[], *now_ns + 5);
+    let link = startup.next_action(*now_ns + 6).unwrap().unwrap();
+    accept_startup_action(startup, link, &dl_status.to_le_bytes(), *now_ns + 7);
+    let configuration = startup.next_action(*now_ns + 8).unwrap().unwrap();
+    accept_startup_action(startup, configuration, &[0], *now_ns + 9);
+    let status = startup.next_action(*now_ns + 10).unwrap().unwrap();
+    accept_startup_action(
+        startup,
+        status,
+        &startup_status(EthercatState::Init),
+        *now_ns + 11,
+    );
+    *now_ns += 12;
+}
+
+fn drive_reconfigure_fixture_identity(
+    startup: &mut StartupController<2>,
+    identity: SlaveIdentity,
+    now_ns: &mut u64,
+) {
+    for word in [
+        identity.vendor_id as u16,
+        (identity.vendor_id >> 16) as u16,
+        identity.product_code as u16,
+        (identity.product_code >> 16) as u16,
+        identity.revision as u16,
+        (identity.revision >> 16) as u16,
+        identity.serial as u16,
+        (identity.serial >> 16) as u16,
+    ] {
+        let address = startup.next_action(*now_ns).unwrap().unwrap();
+        accept_startup_action(startup, address, &[], *now_ns + 1);
+        let issue = startup.next_action(*now_ns + 2).unwrap().unwrap();
+        accept_startup_action(startup, issue, &[], *now_ns + 3);
+        let poll = startup.next_action(*now_ns + 4).unwrap().unwrap();
+        accept_startup_action(startup, poll, &[0, 0], *now_ns + 5);
+        let data = startup.next_action(*now_ns + 6).unwrap().unwrap();
+        accept_startup_action(startup, data, &word.to_le_bytes(), *now_ns + 7);
+        *now_ns += 8;
+    }
+}
+
+fn drive_reconfigure_fixture_sii(startup: &mut StartupController<2>, now_ns: &mut u64) {
+    let mut image = [0u8; 64];
+    image[..2].copy_from_slice(&SII_CATEGORY_END.to_le_bytes());
+    while startup.phase() == StartupPhase::ReadingFmmuRegisters
+        || startup.phase() == StartupPhase::ReadingSyncManagerRegisters
+        || startup.phase() == StartupPhase::ReadingConfiguration
+    {
+        let action = startup.next_action(*now_ns).unwrap().unwrap();
+        let StartupAction::SiiConfiguration(inner) = action else {
+            panic!("zero-sized register banks must advance directly to SII configuration");
+        };
+        let payload = if inner.read_len == 0 {
+            Vec::new()
+        } else {
+            match register_from_address(inner.address) {
+                ESC_EEPROM_CONTROL => Vec::from([0, 0]),
+                ESC_EEPROM_DATA => {
+                    let offset = usize::from(inner.word_address - SII_CATEGORY_START_WORD) * 2;
+                    image[offset..offset + inner.read_len as usize].to_vec()
+                }
+                register => panic!("unexpected EEPROM register {register:#06x}"),
+            }
+        };
+        startup
+            .accept(
+                action,
+                action.generation(),
+                &payload,
+                inner.expected_wkc,
+                *now_ns + 1,
+            )
+            .unwrap();
+        *now_ns += 2;
+    }
+    assert_eq!(startup.phase(), StartupPhase::TransitioningAl);
+}
+
+fn drive_reconfigure_fixture_al_state(
+    startup: &mut StartupController<2>,
+    state: EthercatState,
+    now_ns: &mut u64,
+) {
+    let write = startup.next_action(*now_ns).unwrap().unwrap();
+    assert!(matches!(write, StartupAction::Al(_)));
+    accept_startup_action(startup, write, &[], *now_ns + 1);
+    let read = startup.next_action(*now_ns + 2).unwrap().unwrap();
+    assert!(matches!(read, StartupAction::Al(_)));
+    accept_startup_action(startup, read, &startup_status(state), *now_ns + 3);
+    *now_ns += 4;
 }
 
 #[test]

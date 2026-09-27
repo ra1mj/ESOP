@@ -14,13 +14,14 @@ pub use esop_ethercat_core::{
     EscWatchdogConfigError, ExpectedSlave, FmmuConfig, FramePlanSet, FramePlanSetError,
     MAX_SII_FMMU_USAGES, MailboxConfig, MailboxConfigError, MailboxDirection,
     MailboxMappedStatusBit, MailboxMappedStatusError, MailboxReceiveSyncManager,
-    MailboxReceiveSyncManagerError, MailboxStatusBit, OpOnlyProfileError, OpOnlySyncManagerProfile,
-    PdoConfigBatch, PdoConfigBatchError, PdoConfigBatchPhase, PdoConfigBatchPlan,
-    PdoConfigBatchPlanError, PdoConfigBatchStatus, PdoConfigJob, PdoConfigPlan, PdoConfigPlanError,
-    PdoDirection, PdoEntry, PdoEntrySpec, PdoRegistrationRequest, PdoSdoWrite, ScheduleTable,
-    SdoAccessPolicy, SdoInformationExpectation, SdoInformationPolicy, SdoInformationRequiredAccess,
-    SiiConfigurationSignature, SiiConfigurationSignatureBuilder, SiiConfigurationSignatureError,
-    SiiDcMode, SiiDcModeExpectation, SiiFmmuUsage, SlaveCopyError, SlaveCopyPlan, SlaveCopyPlanSet,
+    MailboxReceiveSyncManagerError, MailboxStatusBit, MappingTable, OpOnlyProfileError,
+    OpOnlySyncManagerProfile, PdoConfigBatch, PdoConfigBatchError, PdoConfigBatchPhase,
+    PdoConfigBatchPlan, PdoConfigBatchPlanError, PdoConfigBatchStatus, PdoConfigJob, PdoConfigPlan,
+    PdoConfigPlanError, PdoDirection, PdoEntry, PdoEntrySpec, PdoRegistrationRequest, PdoSdoWrite,
+    ReconfigureSlavePlan, ScheduleTable, SdoAccessPolicy, SdoInformationExpectation,
+    SdoInformationPolicy, SdoInformationRequiredAccess, SiiConfigurationSignature,
+    SiiConfigurationSignatureBuilder, SiiConfigurationSignatureError, SiiDcMode,
+    SiiDcModeExpectation, SiiFmmuUsage, SlaveCopyError, SlaveCopyPlan, SlaveCopyPlanSet,
     SlaveCopyPlanSetError, SlaveIdentity, SlaveRecord, StartupConfig, StartupController,
     StartupDcRequirement, StartupError, StartupSlaveProfile, WatchdogPlan, WatchdogPlanEntry,
     WatchdogPlanError,
@@ -469,6 +470,25 @@ pub enum ProductPdoPlanError {
         position: u16,
     },
     Plan(PdoConfigPlanError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductReconfigurePlanError {
+    UnknownSlave {
+        position: u16,
+    },
+    IdentityMismatch {
+        position: u16,
+    },
+    OpOnlyProfileMismatch {
+        position: u16,
+    },
+    Mailbox {
+        position: u16,
+        error: MailboxConfigError,
+    },
+    Pdo(ProductPdoPlanError),
+    Startup(ProductStartupError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1432,6 +1452,73 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
             station_address: slave.station_address,
             plan,
         })
+    }
+
+    pub fn build_reconfigure_slave_plan<const SMS: usize, const FMMUS: usize, const OPS: usize>(
+        &self,
+        slave_position: u16,
+        retained_identity: SlaveIdentity,
+        mapping: MappingTable<SMS, FMMUS>,
+    ) -> Result<ReconfigureSlavePlan<SLAVES, SMS, FMMUS, OPS>, ProductReconfigurePlanError> {
+        let slave = self
+            .slaves
+            .iter()
+            .copied()
+            .find(|slave| slave.position == slave_position)
+            .ok_or(ProductReconfigurePlanError::UnknownSlave {
+                position: slave_position,
+            })?;
+        if !retained_identity.matches(slave.identity) {
+            return Err(ProductReconfigurePlanError::IdentityMismatch {
+                position: slave_position,
+            });
+        }
+        if mapping.op_only_outputs() != slave.op_only_outputs {
+            return Err(ProductReconfigurePlanError::OpOnlyProfileMismatch {
+                position: slave_position,
+            });
+        }
+
+        let pdo = self
+            .build_pdo_startup_plan::<OPS>(slave_position)
+            .map_err(ProductReconfigurePlanError::Pdo)?
+            .into_plan();
+        let dc_sync = self
+            .dc_sync_plan()
+            .map_err(ProductReconfigurePlanError::Startup)?;
+        let mut plan = ReconfigureSlavePlan::new(
+            slave.position,
+            slave.station_address,
+            retained_identity,
+            mapping,
+        );
+        if !pdo.is_empty() {
+            slave.mailbox_config.validate().map_err(|error| {
+                ProductReconfigurePlanError::Mailbox {
+                    position: slave_position,
+                    error,
+                }
+            })?;
+            plan = plan.with_pdo(slave.mailbox_config, pdo);
+        }
+        if let Some(watchdog) = slave.watchdog {
+            watchdog.validate().map_err(|error| {
+                ProductReconfigurePlanError::Startup(ProductStartupError::InvalidWatchdogConfig {
+                    position: slave_position,
+                    error,
+                })
+            })?;
+            plan = plan.with_watchdog(watchdog);
+        }
+        if slave.dc_required || slave.dc_sync_timing.is_some() {
+            plan = plan.with_dc(
+                slave.dc_required,
+                slave.dc_sync_timing.is_some(),
+                dc_sync,
+                esop_ethercat_core::DC_SYNC_DELAY_NS,
+            );
+        }
+        Ok(plan)
     }
 
     fn validate_mapped_mailbox_status(
@@ -2929,6 +3016,56 @@ mod tests {
             PdoSdoWrite::new(0x1C13, 1, &0x1A00u16.to_le_bytes()).unwrap()
         );
         assert_eq!(writes[17], PdoSdoWrite::new(0x1C13, 0, &[1]).unwrap());
+    }
+
+    #[test]
+    fn product_builds_bounded_reconfigure_plan_from_retained_identity() {
+        let retained_identity = SlaveIdentity {
+            serial: 99,
+            ..IDENTITY
+        };
+        let plan = config()
+            .build_reconfigure_slave_plan::<0, 0, 18>(0, retained_identity, MappingTable::new())
+            .unwrap();
+        assert_eq!(plan.position, 0);
+        assert_eq!(plan.station_address, 0x1000);
+        assert_eq!(plan.identity, retained_identity);
+        assert_eq!(plan.mailbox, Some(config().slaves[0].mailbox_config));
+        assert_eq!(plan.pdo.writes().len(), 18);
+        assert_eq!(plan.watchdog, None);
+        assert!(!plan.dc_clock_required);
+        assert!(!plan.dc_sync_required);
+
+        let wrong_identity = SlaveIdentity {
+            product_code: 99,
+            ..retained_identity
+        };
+        assert_eq!(
+            config().build_reconfigure_slave_plan::<0, 0, 18>(
+                0,
+                wrong_identity,
+                MappingTable::new(),
+            ),
+            Err(ProductReconfigurePlanError::IdentityMismatch { position: 0 })
+        );
+        assert_eq!(
+            config().build_reconfigure_slave_plan::<0, 0, 18>(
+                99,
+                retained_identity,
+                MappingTable::new(),
+            ),
+            Err(ProductReconfigurePlanError::UnknownSlave { position: 99 })
+        );
+        assert!(matches!(
+            config().build_reconfigure_slave_plan::<0, 0, 17>(
+                0,
+                retained_identity,
+                MappingTable::new(),
+            ),
+            Err(ProductReconfigurePlanError::Pdo(ProductPdoPlanError::Plan(
+                PdoConfigPlanError::CapacityExceeded
+            )))
+        ));
     }
 
     #[test]

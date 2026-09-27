@@ -939,15 +939,29 @@ pub fn other_cycle_facts_from_production_service_cycle<E, const DOMAINS: usize>(
     if let Some(startup_phase) = cycle.startup_phase() {
         other.topology_valid &= startup_phase == esop_ethercat_core::StartupPhase::Ready;
     }
-    match cycle.selected() {
+    if cycle.selected() != ScheduledProductionServiceKind::Startup
+        || cycle.startup_phase().is_none()
+    {
+        apply_production_service_readiness(cycle.selected(), cycle.service_ready(), &mut other);
+    }
+    other.deadline_met &= cycle.post_receive_deadline_met();
+    other
+}
+
+fn apply_production_service_readiness(
+    selected: ScheduledProductionServiceKind,
+    service_ready: bool,
+    other: &mut OtherCycleFacts,
+) {
+    match selected {
         ScheduledProductionServiceKind::Idle => {}
         ScheduledProductionServiceKind::Startup => {
-            if cycle.startup_phase().is_none() {
-                other.topology_valid &= cycle.service_ready();
-            }
+            other.topology_valid &= service_ready;
         }
-        ScheduledProductionServiceKind::Rescan | ScheduledProductionServiceKind::StateRequest => {
-            other.topology_valid &= cycle.service_ready();
+        ScheduledProductionServiceKind::Rescan
+        | ScheduledProductionServiceKind::ReconfigureSlave
+        | ScheduledProductionServiceKind::StateRequest => {
+            other.topology_valid &= service_ready;
         }
         ScheduledProductionServiceKind::PdoConfiguration
         | ScheduledProductionServiceKind::WatchdogConfiguration
@@ -956,12 +970,10 @@ pub fn other_cycle_facts_from_production_service_cycle<E, const DOMAINS: usize>(
         | ScheduledProductionServiceKind::DcSyncConfiguration
         | ScheduledProductionServiceKind::DcConfiguration
         | ScheduledProductionServiceKind::Mailbox => {
-            other.coe_ready &= cycle.service_ready();
+            other.coe_ready &= service_ready;
         }
         ScheduledProductionServiceKind::RegisterRequest => {}
     }
-    other.deadline_met &= cycle.post_receive_deadline_met();
-    other
 }
 
 /// Bind process-Domain submission evidence to the cycle budget gate. Any
@@ -1204,6 +1216,36 @@ mod tests {
             external_safety_clear: true,
             deadline_met: true,
         }
+    }
+
+    #[test]
+    fn reconfigure_service_closes_only_its_topology_gate() {
+        let mut active = other();
+        apply_production_service_readiness(
+            ScheduledProductionServiceKind::ReconfigureSlave,
+            false,
+            &mut active,
+        );
+        assert!(!active.topology_valid);
+        assert!(active.coe_ready);
+        assert!(active.drive_ready);
+        assert!(active.command_current);
+
+        let mut complete = OtherCycleFacts {
+            coe_ready: false,
+            drive_ready: false,
+            command_current: false,
+            ..other()
+        };
+        apply_production_service_readiness(
+            ScheduledProductionServiceKind::ReconfigureSlave,
+            true,
+            &mut complete,
+        );
+        assert!(complete.topology_valid);
+        assert!(!complete.coe_ready);
+        assert!(!complete.drive_ready);
+        assert!(!complete.command_current);
     }
 
     #[test]

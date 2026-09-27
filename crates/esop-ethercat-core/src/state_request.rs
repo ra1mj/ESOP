@@ -220,6 +220,26 @@ impl StateRequestController {
         &mut self,
         config: StateRequestConfig,
     ) -> Result<StateRequestHandle, StateRequestError> {
+        self.start_inner(config, false)
+    }
+
+    /// Start a bounded request that lowers SAFEOP/OP directly to PREOP.
+    ///
+    /// All other state requests retain the normal stepwise AL transition
+    /// policy. This is intentionally narrow so callers cannot skip upward
+    /// startup transitions.
+    pub fn start_direct_preop(
+        &mut self,
+        config: StateRequestConfig,
+    ) -> Result<StateRequestHandle, StateRequestError> {
+        self.start_inner(config, true)
+    }
+
+    fn start_inner(
+        &mut self,
+        config: StateRequestConfig,
+        direct_preop: bool,
+    ) -> Result<StateRequestHandle, StateRequestError> {
         match self.phase {
             StateRequestPhase::Transitioning => return Err(StateRequestError::Busy),
             StateRequestPhase::Faulted => return Err(StateRequestError::FaultLatched),
@@ -230,7 +250,7 @@ impl StateRequestController {
         let handle = StateRequestHandle {
             sequence: self.next_sequence,
         };
-        let al = prepare_al(config, config.observed_status, config.now_ns)?;
+        let al = prepare_al(config, config.observed_status, config.now_ns, direct_preop)?;
         let immediate_complete = al.phase() == AlPhase::Complete;
 
         self.phase = if immediate_complete {
@@ -473,7 +493,7 @@ impl StateRequestController {
             transition_timeouts: self.transition_timeouts,
             error_acknowledge_policy: self.error_acknowledge_policy,
         };
-        match prepare_al(config, self.observed_status, now_ns) {
+        match prepare_al(config, self.observed_status, now_ns, false) {
             Ok(al) => {
                 self.al = al;
                 Ok(())
@@ -540,8 +560,19 @@ fn prepare_al(
     config: StateRequestConfig,
     observed_status: AlStatus,
     now_ns: u64,
+    direct_preop: bool,
 ) -> Result<AlTransitionController, StateRequestError> {
-    let expected_state = if observed_status.state == config.requested_state {
+    let expected_state = if direct_preop {
+        if config.requested_state != EthercatState::PreOp
+            || !matches!(
+                observed_status.state,
+                EthercatState::PreOp | EthercatState::SafeOp | EthercatState::Op
+            )
+        {
+            return Err(StateRequestError::InvalidTransition);
+        }
+        EthercatState::PreOp
+    } else if observed_status.state == config.requested_state {
         observed_status.state
     } else {
         next_state(observed_status.state, config.requested_state)
@@ -558,19 +589,20 @@ fn prepare_al(
         .ok_or(StateRequestError::InvalidTransitionTimeouts)?
         .min(remaining_ns);
     let mut al = AlTransitionController::new();
-    al.start_with_status(
-        AlTransitionRequest {
-            station_address: config.station_address,
-            current_state: observed_status.state,
-            requested_state: config.requested_state,
-            generation: config.generation,
-            now_ns,
-            timeout_ns: transition_timeout_ns,
-            request_timeout_ns: config.request_timeout_ns.min(transition_timeout_ns),
-        },
-        observed_status,
-        config.error_acknowledge_policy,
-    )
+    let request = AlTransitionRequest {
+        station_address: config.station_address,
+        current_state: observed_status.state,
+        requested_state: config.requested_state,
+        generation: config.generation,
+        now_ns,
+        timeout_ns: transition_timeout_ns,
+        request_timeout_ns: config.request_timeout_ns.min(transition_timeout_ns),
+    };
+    if direct_preop {
+        al.start_direct_preop_with_status(request, observed_status, config.error_acknowledge_policy)
+    } else {
+        al.start_with_status(request, observed_status, config.error_acknowledge_policy)
+    }
     .map_err(StateRequestError::Al)?;
     Ok(al)
 }

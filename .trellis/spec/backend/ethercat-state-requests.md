@@ -13,6 +13,7 @@ separate operations.
 ```rust
 StateRequestController::new()
 controller.start(StateRequestConfig { .. })
+controller.start_direct_preop(StateRequestConfig { requested_state: EthercatState::PreOp, .. })
 controller.status(handle)
 controller.result(handle)
 startup.start_state_request(&mut controller, position, target, generation, now_ns, deadline_ns)
@@ -29,6 +30,10 @@ transition-timeout profile, and the Device Emulation acknowledgement policy.
   `AlTransitionController`, and fixed-size progress/result/fault evidence.
 - Multi-step requests start exactly one legal `next_state` step at a time and
   publish the next step only after an exact verified AL status response.
+- `start_direct_preop` is reserved for the verified single-slave
+  reconfiguration coordinator. It may request PREOP directly from SAFEOP/OP;
+  ordinary runtime requests still use legal stepwise traversal and callers
+  must not use the direct path as a general ESM shortcut.
 - Each step uses the lesser of its ESI/ETG timeout and the remaining overall
   deadline. Each wire request uses the lesser of request timeout and step time.
 - `StartupController` is the verified context authority. It admits only Ready,

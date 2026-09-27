@@ -537,6 +537,8 @@ pub enum DcClockError {
     DeadlineOverflow,
     MissingReference,
     InvalidReference(u16),
+    UnknownPosition(u16),
+    UnsupportedClock(u16),
     MissingTransmissionDelay(u16),
     ActionMismatch,
     GenerationMismatch,
@@ -670,6 +672,44 @@ impl<const MAX_SLAVES: usize> DcClockController<MAX_SLAVES> {
         application_time_ns: u64,
         monotonic_now_ns: u64,
     ) -> Result<(), DcClockError> {
+        self.start_inner(
+            config,
+            topology,
+            None,
+            generation,
+            application_time_ns,
+            monotonic_now_ns,
+        )
+    }
+
+    pub fn start_target(
+        &mut self,
+        config: DcClockConfig,
+        topology: &DcTopology<MAX_SLAVES>,
+        position: u16,
+        generation: u16,
+        application_time_ns: u64,
+        monotonic_now_ns: u64,
+    ) -> Result<(), DcClockError> {
+        self.start_inner(
+            config,
+            topology,
+            Some(position),
+            generation,
+            application_time_ns,
+            monotonic_now_ns,
+        )
+    }
+
+    fn start_inner(
+        &mut self,
+        config: DcClockConfig,
+        topology: &DcTopology<MAX_SLAVES>,
+        target_position: Option<u16>,
+        generation: u16,
+        application_time_ns: u64,
+        monotonic_now_ns: u64,
+    ) -> Result<(), DcClockError> {
         if !matches!(
             self.phase,
             DcClockPhase::Idle | DcClockPhase::Complete | DcClockPhase::Faulted
@@ -701,10 +741,21 @@ impl<const MAX_SLAVES: usize> DcClockController<MAX_SLAVES> {
             }
         }
 
+        if let Some(position) = target_position {
+            let Some(target) = topology.slave(position) else {
+                return self.start_failed(DcClockError::UnknownPosition(position));
+            };
+            if !target.system_time_capable {
+                return self.start_failed(DcClockError::UnsupportedClock(position));
+            }
+        }
+
         let mut plan = [DcClockPlanEntry::EMPTY; MAX_SLAVES];
         let mut plan_len = 0usize;
         for slave in topology.slaves().iter().copied() {
-            if !slave.system_time_capable {
+            if !slave.system_time_capable
+                || target_position.is_some_and(|target| target != slave.position)
+            {
                 continue;
             }
             let transmission_delay_ns = match slave.transmission_delay_ns {
@@ -1375,6 +1426,7 @@ pub struct DcSyncController<const MAX_SLAVES: usize> {
     plan_len: usize,
     current_index: usize,
     reference_index: usize,
+    reference_entry: DcSyncPlanEntry,
     common_repeat_period_ns: u64,
     sampled_reference_time_ns: u64,
     effective_lead_ns: u64,
@@ -1399,6 +1451,7 @@ impl<const MAX_SLAVES: usize> DcSyncController<MAX_SLAVES> {
             plan_len: 0,
             current_index: 0,
             reference_index: 0,
+            reference_entry: DcSyncPlanEntry::EMPTY,
             common_repeat_period_ns: 0,
             sampled_reference_time_ns: 0,
             effective_lead_ns: 0,
@@ -1464,6 +1517,30 @@ impl<const MAX_SLAVES: usize> DcSyncController<MAX_SLAVES> {
         config: DcSyncConfig,
         plan: &DcSyncPlan<MAX_SLAVES>,
         topology: &DcTopology<MAX_SLAVES>,
+        generation: u16,
+        now_ns: u64,
+    ) -> Result<(), DcSyncError> {
+        self.start_inner(config, plan, topology, None, generation, now_ns)
+    }
+
+    pub fn start_target(
+        &mut self,
+        config: DcSyncConfig,
+        plan: &DcSyncPlan<MAX_SLAVES>,
+        topology: &DcTopology<MAX_SLAVES>,
+        position: u16,
+        generation: u16,
+        now_ns: u64,
+    ) -> Result<(), DcSyncError> {
+        self.start_inner(config, plan, topology, Some(position), generation, now_ns)
+    }
+
+    fn start_inner(
+        &mut self,
+        config: DcSyncConfig,
+        plan: &DcSyncPlan<MAX_SLAVES>,
+        topology: &DcTopology<MAX_SLAVES>,
+        target_position: Option<u16>,
         generation: u16,
         now_ns: u64,
     ) -> Result<(), DcSyncError> {
@@ -1537,11 +1614,33 @@ impl<const MAX_SLAVES: usize> DcSyncController<MAX_SLAVES> {
             return self.start_failed(DcSyncError::InvalidReference(reference_position));
         };
 
+        let reference_entry = copied_plan[reference_index];
+        if let Some(position) = target_position {
+            let Some(target) = copied_plan[..plan.len()]
+                .iter()
+                .copied()
+                .find(|entry| entry.position == position)
+            else {
+                return self.start_failed(DcSyncError::UnknownPosition(position));
+            };
+            copied_plan = [DcSyncPlanEntry::EMPTY; MAX_SLAVES];
+            copied_plan[0] = target;
+        }
+
         self.reset_for_start(config, generation, configuration_deadline_ns);
         self.phase = DcSyncPhase::DisablingSync;
         self.plan = copied_plan;
-        self.plan_len = plan.len();
-        self.reference_index = reference_index;
+        self.plan_len = if target_position.is_some() {
+            1
+        } else {
+            plan.len()
+        };
+        self.reference_index = if target_position.is_some() {
+            0
+        } else {
+            reference_index
+        };
+        self.reference_entry = reference_entry;
         self.common_repeat_period_ns = common_repeat_period_ns;
         Ok(())
     }
@@ -1564,12 +1663,11 @@ impl<const MAX_SLAVES: usize> DcSyncController<MAX_SLAVES> {
             None => return self.fail(DcSyncError::DeadlineOverflow),
         };
 
-        let entry_index = if self.phase == DcSyncPhase::ReadingReferenceTime {
-            self.reference_index
+        let entry = if self.phase == DcSyncPhase::ReadingReferenceTime {
+            self.reference_entry
         } else {
-            self.current_index
+            self.plan[self.current_index]
         };
-        let entry = self.plan[entry_index];
         let mut payload = [0; DC_SYNC_CYCLE_PAIR_LEN];
         let (kind, operation, register, read_len, write_len) = match self.phase {
             DcSyncPhase::DisablingSync => {
@@ -1829,6 +1927,7 @@ impl<const MAX_SLAVES: usize> DcSyncController<MAX_SLAVES> {
         self.plan_len = 0;
         self.current_index = 0;
         self.reference_index = 0;
+        self.reference_entry = DcSyncPlanEntry::EMPTY;
         self.common_repeat_period_ns = 0;
         self.sampled_reference_time_ns = 0;
         self.effective_lead_ns = 0;
@@ -1886,6 +1985,7 @@ impl<const MAX_SLAVES: usize> DcSyncController<MAX_SLAVES> {
         self.plan_len = 0;
         self.current_index = 0;
         self.reference_index = 0;
+        self.reference_entry = DcSyncPlanEntry::EMPTY;
         self.common_repeat_period_ns = 0;
         self.sampled_reference_time_ns = 0;
         self.effective_lead_ns = 0;
@@ -3684,6 +3784,59 @@ mod tests {
     }
 
     #[test]
+    fn dc_sync_target_reads_reference_but_writes_only_target() {
+        let (topology, plan) = two_slave_sync_fixture();
+        let mut controller = DcSyncController::new();
+        controller
+            .start_target(DcSyncConfig::new(), &plan, &topology, 1, 9, 0)
+            .unwrap();
+
+        let disable = controller.next_action(1).unwrap().unwrap();
+        assert_eq!(disable.kind, DcSyncActionKind::DisableSync);
+        assert_eq!(disable.position, 1);
+        controller
+            .accept(disable, disable.generation, &[], 1, 1)
+            .unwrap();
+
+        let cycles = controller.next_action(2).unwrap().unwrap();
+        assert_eq!(cycles.kind, DcSyncActionKind::WriteCycles);
+        assert_eq!(cycles.position, 1);
+        controller
+            .accept(cycles, cycles.generation, &[], 1, 2)
+            .unwrap();
+
+        let reference = controller.next_action(3).unwrap().unwrap();
+        assert_eq!(reference.kind, DcSyncActionKind::ReadReferenceTime);
+        assert_eq!(reference.position, 0);
+        assert_eq!(reference.operation, RegisterOperation::Read);
+        controller
+            .accept(
+                reference,
+                reference.generation,
+                &3_100_000u64.to_le_bytes(),
+                1,
+                3,
+            )
+            .unwrap();
+
+        for expected_kind in [
+            DcSyncActionKind::WriteStartTime,
+            DcSyncActionKind::AssignActivate,
+        ] {
+            let action = controller.next_action(4).unwrap().unwrap();
+            assert_eq!(action.kind, expected_kind);
+            assert_eq!(action.position, 1);
+            assert_eq!(action.operation, RegisterOperation::Write);
+            controller
+                .accept(action, action.generation, &[], 1, 4)
+                .unwrap();
+        }
+        assert_eq!(controller.phase(), DcSyncPhase::Complete);
+        assert_eq!(controller.programmed_slaves().len(), 1);
+        assert_eq!(controller.programmed_slaves()[0].position, 1);
+    }
+
+    #[test]
     fn dc_sync_controller_fails_closed_and_can_restart() {
         let (topology, plan) = two_slave_sync_fixture();
         let mut controller = DcSyncController::new();
@@ -4148,6 +4301,40 @@ mod tests {
                 transmission_delay_ns: 0,
             })
         );
+    }
+
+    #[test]
+    fn dc_clock_target_programs_only_selected_slave() {
+        let records = [
+            topology_record(0, &[3], true, true, [0, 0, 0, 200]),
+            topology_record(1, &[], true, true, [0; 4]),
+        ];
+        let topology = DcTopology::<2>::build(&records, Some(0)).unwrap();
+        let mut controller = DcClockController::new();
+        controller
+            .start_target(DcClockConfig::new(), &topology, 1, 7, 1_000, 0)
+            .unwrap();
+
+        assert_eq!(controller.planned_count(), 1);
+        let read = controller.next_action(1).unwrap().unwrap();
+        assert_eq!(read.kind, DcClockActionKind::ReadClock);
+        assert_eq!(read.position, 1);
+        assert_eq!(read.station_address, 0x1001);
+        controller
+            .accept(read, read.generation, &clock_payload(900, 5), 1, 1)
+            .unwrap();
+
+        let write = controller.next_action(2).unwrap().unwrap();
+        assert_eq!(write.kind, DcClockActionKind::WriteOffsetDelay);
+        assert_eq!(write.position, 1);
+        assert_eq!(write.station_address, 0x1001);
+        assert_eq!(write.operation, RegisterOperation::Write);
+        assert_eq!(
+            controller.accept(write, write.generation, &[], 1, 2),
+            Ok(DcClockProgress::Complete)
+        );
+        assert_eq!(controller.programmed_slaves().len(), 1);
+        assert_eq!(controller.programmed_slaves()[0].position, 1);
     }
 
     #[test]

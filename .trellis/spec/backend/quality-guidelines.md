@@ -68,6 +68,17 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   lifecycle gate. Never auto-trigger a rescan, resize the process image,
   reconfigure PDO/DC, return OP, or infer motion permission from completion.
   Follow [EtherCAT Explicit Rescan](./ethercat-rescan.md).
+- Route explicit one-slave repair through
+  `StartupController::start_reconfigure_slave`. Validate all retained and
+  product-plan evidence before clearing only the target's configured flag,
+  then reuse the shared OpOnly, direct-PREOP, PDO, watchdog, mapping, and
+  target-only DC authorities in that order. Keep the named Reconfigure Slave
+  service after Startup/Rescan and before ordinary configuration/state work,
+  retain one in-flight request without retransmission, and keep active/faulted
+  work fail-closed at the topology gate. Never step through SAFEOP, write a
+  non-target DC reference, restore OP, retry automatically, or infer motion
+  permission from PREOP completion. Follow
+  [EtherCAT Single-Slave Reconfiguration](./ethercat-reconfiguration.md).
 - Decode ESC base registers at their protocol widths from one exact bounded
   block. Type/revision are bytes, build is little-endian `u16`, RAM and port
   descriptor are separate bytes, and Features Supported is its own `u16`.
@@ -794,8 +805,10 @@ submit_prepared_active_frame(
 
 ### 3. Contracts
 
-- Selection priority is fixed: Startup, PDO Configuration, Mapping, DC
-  Configuration, Mailbox.
+- Selection priority is fixed: Startup, Rescan, Reconfigure Slave, PDO
+  Configuration, Watchdog Configuration, Mapping, DC Clock Configuration,
+  DC Sync Configuration, legacy DC Configuration, State Request, Mailbox,
+  Register Request.
 - `StartupConfig` may freeze a required PDO Configuration/Mapping/DC set. In
   that mode every expected slave must first confirm PREOP, then Startup enters
   `AwaitingConfiguration` and yields only to the required services in the same
@@ -822,6 +835,10 @@ submit_prepared_active_frame(
   no pool request exists. A substituted mailbox controller must fail before TX.
 - The scheduler owns at most one `RequestHandle`; a live request pins the
   selected service until terminal consumption.
+- Reconfigure Slave selects its transport from the current phase: PDO uses the
+  owned mailbox FSM; OpOnly, direct PREOP, watchdog, mapping, and targeted DC
+  use the common control pool. Both paths must match the frozen child action
+  before carrying or consuming the request.
 - A carried request must match the selected FSM's pending action in index,
   generation, address, operation, wire length, deadline, and prepared payload.
 - `Prepared` may transmit once. If it never reaches the wire, release it and
@@ -844,6 +861,9 @@ submit_prepared_active_frame(
 - PDO readiness means the complete plan passed exact upload readback; one
   successful mailbox transaction is not sufficient. Terminal mailbox errors
   become typed PDO transport faults without advancing the operation index.
+- Active/faulted Reconfigure Slave work clears topology readiness, and its
+  Complete result becomes ready only after Startup commits the same target as
+  configured PREOP. It never releases independent motion gates.
 
 ### 4. Validation & Error Matrix
 

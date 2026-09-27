@@ -26,10 +26,10 @@ make ci
 
 ## 3. Single-Slave Reconfiguration
 
-- [ ] Create and complete child task `ethercat-single-slave-reconfigure`.
-- [ ] Build a targeted verified configuration plan.
-- [ ] Reuse SM/FMMU/PDO/DC controllers without mutating unrelated slaves.
-- [ ] Stop before automatic OP entry and retain typed evidence.
+- [x] Create and complete child task `ethercat-single-slave-reconfigure`.
+- [x] Build a targeted verified configuration plan.
+- [x] Reuse SM/FMMU/PDO/DC controllers without mutating unrelated slaves.
+- [x] Stop before automatic OP entry and retain typed evidence.
 
 ## 4. Recovery Integration and Qualification
 

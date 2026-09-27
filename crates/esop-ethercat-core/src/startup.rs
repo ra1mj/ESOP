@@ -27,6 +27,10 @@ use crate::mailbox::{
 };
 use crate::mapping::{MappingTable, SyncManagerConfig};
 use crate::mapping_config::{MappingConfigController, MappingConfigError};
+use crate::reconfigure::{
+    ReconfigureSlaveContext, ReconfigureSlaveController, ReconfigureSlaveError,
+    ReconfigureSlaveHandle, ReconfigureSlavePlan, ReconfigureSlaveResult, ReconfigureSlaveStatus,
+};
 use crate::rescan::{
     RescanError, RescanHandle, RescanPhase, RescanProgress, RescanResult, RescanState, RescanStatus,
 };
@@ -931,6 +935,177 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
 
     pub fn records(&self) -> &[SlaveRecord] {
         self.table.records()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_reconfigure_slave<const SMS: usize, const FMMUS: usize, const PDO_OPS: usize>(
+        &mut self,
+        controller: &mut ReconfigureSlaveController<MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
+        plan: ReconfigureSlavePlan<MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
+        generation: u16,
+        now_ns: u64,
+        deadline_ns: u64,
+        application_time_ns: u64,
+    ) -> Result<ReconfigureSlaveHandle, ReconfigureSlaveError> {
+        if self.phase != StartupPhase::Ready {
+            return Err(ReconfigureSlaveError::StartupNotReady);
+        }
+        let index = self
+            .table
+            .records()
+            .iter()
+            .position(|record| record.position == plan.position)
+            .ok_or(ReconfigureSlaveError::UnknownPosition(plan.position))?;
+        let record = self.table.records()[index];
+        if !record.online {
+            return Err(ReconfigureSlaveError::SlaveOffline(plan.position));
+        }
+        if !record.configured {
+            return Err(ReconfigureSlaveError::SlaveUnconfigured(plan.position));
+        }
+        if record.station_address != plan.station_address {
+            return Err(ReconfigureSlaveError::StationMismatch);
+        }
+        if !record.identity.matches(plan.identity) {
+            return Err(ReconfigureSlaveError::IdentityMismatch);
+        }
+        if !plan.pdo.is_empty() && self.verified_mailboxes[index] != plan.mailbox {
+            return Err(ReconfigureSlaveError::MailboxMismatch);
+        }
+        let sync_manager_registers = self.verified_sync_manager_registers[index]
+            .ok_or(ReconfigureSlaveError::RetainedStateMismatch)?;
+        let fmmu_registers = self.verified_fmmu_registers[index]
+            .ok_or(ReconfigureSlaveError::RetainedStateMismatch)?;
+        if sync_manager_registers.position() != plan.position
+            || sync_manager_registers.station_address() != plan.station_address
+            || fmmu_registers.position() != plan.position
+            || fmmu_registers.station_address() != plan.station_address
+        {
+            return Err(ReconfigureSlaveError::RetainedStateMismatch);
+        }
+        let profile = self.profiles[index];
+        if profile.position != plan.position {
+            return Err(ReconfigureSlaveError::RetainedStateMismatch);
+        }
+        let error_acknowledge_policy = if self.device_emulation[index] {
+            AlErrorAcknowledgePolicy::Disabled
+        } else {
+            AlErrorAcknowledgePolicy::Enabled
+        };
+        let context = ReconfigureSlaveContext {
+            observed_status: record.al_status,
+            generation,
+            now_ns,
+            deadline_ns,
+            request_timeout_ns: self.config.request_timeout_ns,
+            transition_timeouts: profile.transition_timeouts,
+            error_acknowledge_policy,
+            op_only_outputs: profile.op_only_outputs,
+            sync_manager_registers,
+            fmmu_registers,
+            dc_topology: self.dc_topology,
+            application_time_ns,
+        };
+        let handle = controller.start(plan, context)?;
+        self.table
+            .set_configured(plan.position, false)
+            .map_err(|_| ReconfigureSlaveError::UnknownPosition(plan.position))?;
+        Ok(handle)
+    }
+
+    pub(crate) fn validate_reconfigure_slave_status(
+        &self,
+        status: ReconfigureSlaveStatus,
+    ) -> Result<(), ReconfigureSlaveError> {
+        if self.phase != StartupPhase::Ready {
+            return Err(ReconfigureSlaveError::StartupNotReady);
+        }
+        let record = self
+            .table
+            .get(status.position)
+            .copied()
+            .ok_or(ReconfigureSlaveError::UnknownPosition(status.position))?;
+        if !record.online {
+            return Err(ReconfigureSlaveError::SlaveOffline(status.position));
+        }
+        if record.configured {
+            return Err(ReconfigureSlaveError::RetainedStateMismatch);
+        }
+        if record.station_address != status.station_address {
+            return Err(ReconfigureSlaveError::StationMismatch);
+        }
+        if !record.identity.matches(status.identity) {
+            return Err(ReconfigureSlaveError::IdentityMismatch);
+        }
+        if record.al_status != status.observed_status {
+            return Err(ReconfigureSlaveError::RetainedStateMismatch);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reconcile_reconfigure_slave_observation(
+        &mut self,
+        observation: StateRequestObservation,
+        cycle: u64,
+    ) -> Result<(), ReconfigureSlaveError> {
+        if self.phase != StartupPhase::Ready {
+            return Err(ReconfigureSlaveError::StartupNotReady);
+        }
+        let record = self
+            .table
+            .get(observation.position)
+            .copied()
+            .ok_or(ReconfigureSlaveError::UnknownPosition(observation.position))?;
+        if record.station_address != observation.station_address {
+            return Err(ReconfigureSlaveError::StationMismatch);
+        }
+        if observation.requested_state != EthercatState::PreOp
+            || (observation.observed_status.state != record.al_status.state
+                && observation.observed_status.state != EthercatState::PreOp)
+        {
+            return Err(ReconfigureSlaveError::RetainedStateMismatch);
+        }
+        self.table
+            .request_state(
+                observation.position,
+                observation.requested_state,
+                observation.deadline_ns,
+            )
+            .map_err(|_| ReconfigureSlaveError::RetainedStateMismatch)?;
+        self.table
+            .observe_status(observation.position, observation.observed_status, cycle)
+            .map_err(|_| ReconfigureSlaveError::UnknownPosition(observation.position))
+    }
+
+    pub(crate) fn complete_reconfigure_slave(
+        &mut self,
+        result: ReconfigureSlaveResult,
+        cycle: u64,
+    ) -> Result<(), ReconfigureSlaveError> {
+        if self.phase != StartupPhase::Ready {
+            return Err(ReconfigureSlaveError::StartupNotReady);
+        }
+        if result.observed_status.state != EthercatState::PreOp || result.observed_status.error {
+            return Err(ReconfigureSlaveError::RetainedStateMismatch);
+        }
+        let record = self
+            .table
+            .get_mut(result.position)
+            .ok_or(ReconfigureSlaveError::UnknownPosition(result.position))?;
+        if !record.online || record.configured {
+            return Err(ReconfigureSlaveError::RetainedStateMismatch);
+        }
+        if record.station_address != result.station_address {
+            return Err(ReconfigureSlaveError::StationMismatch);
+        }
+        if !record.identity.matches(result.identity) || record.al_status != result.observed_status {
+            return Err(ReconfigureSlaveError::RetainedStateMismatch);
+        }
+        record.configured = true;
+        record.requested_state = EthercatState::PreOp;
+        record.transition_deadline_ns = 0;
+        record.last_seen_cycle = cycle;
+        Ok(())
     }
 
     pub fn start_state_request(
@@ -2856,6 +3031,7 @@ mod tests {
     use crate::fmmu_discovery::FmmuRegisterDescriptor;
     use crate::mapping::FmmuConfig;
     use crate::op_only::{SYNC_MANAGER_ENABLE_FLAG, SYNC_MANAGER_OP_ONLY_FLAG};
+    use crate::reconfigure::ReconfigureSlavePhase;
     use crate::registers::{
         AL_ID_LOADED_FLAG, ESC_AL_CONTROL, ESC_AL_STATUS, ESC_AL_STATUS_CODE, ESC_CONFIGURATION,
         ESC_EEPROM_CONTROL, ESC_EEPROM_DATA, ESC_TYPE, auto_increment_address, fixed_address,
@@ -2867,7 +3043,7 @@ mod tests {
     };
     use crate::sii_config::SiiConfigurationSignatureBuilder;
     use crate::sii_stream::SII_CATEGORY_START_WORD;
-    use crate::slave::AL_ERROR_FLAG;
+    use crate::slave::{AL_ERROR_FLAG, AlStatus};
     use crate::sync_manager_discovery::SyncManagerRegisterDescriptor;
 
     fn status(state: EthercatState) -> [u8; 6] {
@@ -5958,6 +6134,163 @@ mod tests {
         );
         assert_eq!(startup.phase(), StartupPhase::Ready);
         startup
+    }
+
+    fn prepared_reconfiguration_startup(state: EthercatState) -> StartupController<2> {
+        let identities = [
+            SlaveIdentity {
+                vendor_id: 1,
+                product_code: 2,
+                revision: 3,
+                serial: 4,
+            },
+            SlaveIdentity {
+                vendor_id: 5,
+                product_code: 6,
+                revision: 7,
+                serial: 8,
+            },
+        ];
+        let mut startup = StartupController::<2>::new(0x1000);
+        startup.phase = StartupPhase::Ready;
+        startup.config = StartupConfig::new(EthercatState::Op);
+        startup.expected_count = 2;
+        for (index, identity) in identities.iter().copied().enumerate() {
+            let position = index as u16;
+            let station_address = 0x1000 + position;
+            startup.expected[index] = ExpectedSlave {
+                position,
+                station_address,
+                identity,
+            };
+            startup.profiles[index] = StartupSlaveProfile::new(position);
+            startup
+                .table
+                .add(position, station_address, identity)
+                .unwrap();
+            startup
+                .table
+                .observe_status(position, AlStatus::new(state as u16, 0), 10)
+                .unwrap();
+            startup.table.verify_identity(position, identity).unwrap();
+            startup.verified_sync_manager_registers[index] =
+                Some(staged_sync_manager_bank(position, station_address, 0));
+            startup.verified_fmmu_registers[index] =
+                Some(staged_fmmu_bank(position, station_address, 0));
+        }
+        startup
+    }
+
+    fn empty_reconfigure_plan(
+        startup: &StartupController<2>,
+        position: u16,
+    ) -> ReconfigureSlavePlan<2, 0, 0, 0> {
+        let record = startup
+            .records()
+            .iter()
+            .find(|record| record.position == position)
+            .copied()
+            .unwrap();
+        ReconfigureSlavePlan::new(
+            record.position,
+            record.station_address,
+            record.identity,
+            MappingTable::new(),
+        )
+    }
+
+    #[test]
+    fn reconfigure_admission_is_transactional_and_invalidates_only_target() {
+        let mut invalid_startup = prepared_reconfiguration_startup(EthercatState::Op);
+        let invalid_plan = empty_reconfigure_plan(&invalid_startup, 0);
+        let before = invalid_startup.records();
+        let before_records = [before[0], before[1]];
+        let mut invalid_controller = ReconfigureSlaveController::new();
+        assert_eq!(
+            invalid_startup.start_reconfigure_slave(
+                &mut invalid_controller,
+                invalid_plan,
+                7,
+                100,
+                100,
+                0,
+            ),
+            Err(ReconfigureSlaveError::InvalidDeadline)
+        );
+        assert_eq!(invalid_startup.records(), before_records);
+        assert_eq!(invalid_controller.phase(), ReconfigureSlavePhase::Idle);
+
+        let unknown_plan =
+            ReconfigureSlavePlan::new(9, 0x1009, invalid_plan.identity, MappingTable::new());
+        assert_eq!(
+            invalid_startup.start_reconfigure_slave(
+                &mut invalid_controller,
+                unknown_plan,
+                7,
+                100,
+                10_000,
+                0,
+            ),
+            Err(ReconfigureSlaveError::UnknownPosition(9))
+        );
+        let mut inconsistent_plan = invalid_plan;
+        inconsistent_plan.station_address = 0x2000;
+        assert_eq!(
+            invalid_startup.start_reconfigure_slave(
+                &mut invalid_controller,
+                inconsistent_plan,
+                7,
+                100,
+                10_000,
+                0,
+            ),
+            Err(ReconfigureSlaveError::StationMismatch)
+        );
+        assert_eq!(invalid_startup.records(), before_records);
+        assert_eq!(invalid_controller.phase(), ReconfigureSlavePhase::Idle);
+
+        let mut startup = prepared_reconfiguration_startup(EthercatState::Op);
+        let target_plan = empty_reconfigure_plan(&startup, 0);
+        let other_plan = empty_reconfigure_plan(&startup, 1);
+        let unrelated_before = startup.records()[1];
+        let unrelated_sm = startup.verified_sync_manager_registers[1];
+        let unrelated_fmmu = startup.verified_fmmu_registers[1];
+        let mut controller = ReconfigureSlaveController::new();
+        startup
+            .start_reconfigure_slave(&mut controller, target_plan, 7, 100, 10_000, 0)
+            .unwrap();
+
+        assert!(!startup.records()[0].configured);
+        assert_eq!(startup.records()[1], unrelated_before);
+        assert_eq!(startup.verified_sync_manager_registers[1], unrelated_sm);
+        assert_eq!(startup.verified_fmmu_registers[1], unrelated_fmmu);
+        assert_eq!(
+            startup.start_reconfigure_slave(&mut controller, other_plan, 8, 101, 10_000, 0,),
+            Err(ReconfigureSlaveError::Busy)
+        );
+        assert!(startup.records()[1].configured);
+    }
+
+    #[test]
+    fn successful_reconfigure_commits_only_verified_preop_target() {
+        let mut startup = prepared_reconfiguration_startup(EthercatState::PreOp);
+        let plan = empty_reconfigure_plan(&startup, 0);
+        let unrelated_before = startup.records()[1];
+        let mut controller = ReconfigureSlaveController::new();
+        let handle = startup
+            .start_reconfigure_slave(&mut controller, plan, 7, 100, 10_000, 0)
+            .unwrap();
+        assert_eq!(controller.phase(), ReconfigureSlavePhase::Complete);
+        assert!(!startup.records()[0].configured);
+
+        startup
+            .complete_reconfigure_slave(controller.result(handle).unwrap(), 77)
+            .unwrap();
+        assert!(startup.records()[0].configured);
+        assert_eq!(startup.records()[0].al_status.state, EthercatState::PreOp);
+        assert_eq!(startup.records()[0].requested_state, EthercatState::PreOp);
+        assert_eq!(startup.records()[0].last_seen_cycle, 77);
+        assert_eq!(startup.records()[1], unrelated_before);
     }
 
     #[test]

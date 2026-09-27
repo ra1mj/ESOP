@@ -251,6 +251,30 @@ impl AlTransitionController {
         observed_status: AlStatus,
         error_acknowledge_policy: AlErrorAcknowledgePolicy,
     ) -> Result<(), AlError> {
+        self.start_inner(request, observed_status, error_acknowledge_policy, false)
+    }
+
+    /// Request PREOP directly while lowering from SAFEOP or OP.
+    ///
+    /// This narrow entry point is used by explicit reconfiguration, where the
+    /// wire contract must never publish an intermediate SAFEOP request. The
+    /// ordinary startup and runtime state-request paths remain stepwise.
+    pub fn start_direct_preop_with_status(
+        &mut self,
+        request: AlTransitionRequest,
+        observed_status: AlStatus,
+        error_acknowledge_policy: AlErrorAcknowledgePolicy,
+    ) -> Result<(), AlError> {
+        self.start_inner(request, observed_status, error_acknowledge_policy, true)
+    }
+
+    fn start_inner(
+        &mut self,
+        request: AlTransitionRequest,
+        observed_status: AlStatus,
+        error_acknowledge_policy: AlErrorAcknowledgePolicy,
+        direct_preop: bool,
+    ) -> Result<(), AlError> {
         if !matches!(
             self.phase,
             AlPhase::Idle | AlPhase::Complete | AlPhase::Faulted
@@ -264,7 +288,17 @@ impl AlTransitionController {
         {
             return Err(AlError::InvalidTransition);
         }
-        let expected_state = if request.current_state == request.requested_state {
+        let expected_state = if direct_preop {
+            if request.requested_state != EthercatState::PreOp
+                || !matches!(
+                    request.current_state,
+                    EthercatState::PreOp | EthercatState::SafeOp | EthercatState::Op
+                )
+            {
+                return Err(AlError::InvalidTransition);
+            }
+            EthercatState::PreOp
+        } else if request.current_state == request.requested_state {
             request.current_state
         } else {
             next_state(request.current_state, request.requested_state)

@@ -24,6 +24,10 @@ use crate::pdo_config::{
     PdoConfigBatchStatus, PdoConfigController, PdoConfigError, PdoConfigPhase, PdoConfigProgress,
 };
 use crate::port::EthercatPort;
+use crate::reconfigure::{
+    ReconfigureSlaveController, ReconfigureSlaveError, ReconfigureSlavePhase,
+    ReconfigureSlaveProgress, ReconfigureSlaveTransport,
+};
 use crate::register_request::{
     EscRegisterRequestController, EscRegisterRequestError, EscRegisterRequestProgress,
 };
@@ -44,6 +48,7 @@ pub enum ScheduledProductionServiceKind {
     Idle,
     Startup,
     Rescan,
+    ReconfigureSlave,
     PdoConfiguration,
     WatchdogConfiguration,
     Mapping,
@@ -67,6 +72,7 @@ pub enum ScheduledProductionServiceProgress {
     Waiting,
     Startup(StartupProgress),
     Rescan(RescanProgress),
+    ReconfigureSlave(ReconfigureSlaveProgress),
     PdoConfiguration(ScheduledPdoConfigurationProgress),
     WatchdogConfiguration(WatchdogProgress),
     Mapping(MappingConfigProgress),
@@ -83,6 +89,7 @@ pub enum ScheduledProductionServiceFault {
     Control(ControlError),
     Startup(StartupError),
     Rescan(RescanError),
+    ReconfigureSlave(ReconfigureSlaveError),
     PdoConfiguration(PdoConfigError),
     WatchdogConfiguration(WatchdogError),
     Mapping(MappingConfigError),
@@ -224,6 +231,7 @@ pub struct ScheduledProductionServices<
     const REGISTER_REQUESTS: usize = 0,
 > {
     pub startup: Option<&'a mut StartupController<MAX_SLAVES>>,
+    reconfigure_slave: Option<&'a mut ReconfigureSlaveController<MAX_SLAVES, SMS, FMMUS, PDO_OPS>>,
     pdo_configuration: Option<ScheduledPdoConfiguration<'a, PDO_OPS, PDO_JOBS>>,
     pub watchdog_configuration: Option<&'a mut WatchdogController<MAX_SLAVES>>,
     pub mapping: Option<&'a mut MappingConfigController<SMS, FMMUS>>,
@@ -253,6 +261,7 @@ impl<
     ) -> Self {
         Self {
             startup,
+            reconfigure_slave: None,
             pdo_configuration: None,
             watchdog_configuration: None,
             mapping,
@@ -273,6 +282,7 @@ impl<
     {
         ScheduledProductionServices {
             startup: self.startup,
+            reconfigure_slave: self.reconfigure_slave,
             pdo_configuration: self.pdo_configuration,
             watchdog_configuration: self.watchdog_configuration,
             mapping: self.mapping,
@@ -302,6 +312,14 @@ impl<
         pdo_configuration: ScheduledPdoConfiguration<'a, PDO_OPS, PDO_JOBS>,
     ) -> Self {
         self.pdo_configuration = Some(pdo_configuration);
+        self
+    }
+
+    pub fn with_reconfigure_slave(
+        mut self,
+        reconfigure_slave: &'a mut ReconfigureSlaveController<MAX_SLAVES, SMS, FMMUS, PDO_OPS>,
+    ) -> Self {
+        self.reconfigure_slave = Some(reconfigure_slave);
         self
     }
 
@@ -570,6 +588,13 @@ impl ScheduledProductionServiceScheduler {
                 selected,
             ));
         }
+        if selected == ScheduledProductionServiceKind::ReconfigureSlave
+            && (services.reconfigure_slave.is_none() || services.startup.is_none())
+        {
+            return Err(ScheduledProductionServiceCycleError::MissingController(
+                selected,
+            ));
+        }
         self.ensure_request_matches(controls, services)
             .map_err(ScheduledProductionServiceCycleError::RequestMismatch)?;
         let (mut pre_progress, mut pre_fault) =
@@ -586,6 +611,13 @@ impl ScheduledProductionServiceScheduler {
         if selected == ScheduledProductionServiceKind::Mailbox
             || (selected == ScheduledProductionServiceKind::PdoConfiguration
                 && self.pdo_action.is_some())
+            || (selected == ScheduledProductionServiceKind::ReconfigureSlave
+                && services
+                    .reconfigure_slave
+                    .as_deref()
+                    .is_some_and(|controller| {
+                        controller.transport() == ReconfigureSlaveTransport::Mailbox
+                    }))
         {
             let mailbox = match selected {
                 ScheduledProductionServiceKind::PdoConfiguration => services
@@ -593,6 +625,10 @@ impl ScheduledProductionServiceScheduler {
                     .as_mut()
                     .map(ScheduledPdoConfiguration::mailbox_mut),
                 ScheduledProductionServiceKind::Mailbox => services.mailbox.as_deref_mut(),
+                ScheduledProductionServiceKind::ReconfigureSlave => services
+                    .reconfigure_slave
+                    .as_deref_mut()
+                    .map(ReconfigureSlaveController::mailbox_mut),
                 _ => None,
             }
             .ok_or(ScheduledProductionServiceCycleError::MissingController(
@@ -736,6 +772,66 @@ impl ScheduledProductionServiceScheduler {
                     transport: ScheduledProductionServiceTransport::Mailbox(cycle),
                 });
             }
+            if selected == ScheduledProductionServiceKind::ReconfigureSlave {
+                let mailbox_progress = cycle.receive.mailbox_progress;
+                let mut progress =
+                    pre_progress.unwrap_or(ScheduledProductionServiceProgress::Waiting);
+                let mut fault = pre_fault;
+                if let Some(mailbox_progress) = mailbox_progress {
+                    let controller = services.reconfigure_slave.as_deref_mut().ok_or(
+                        ScheduledProductionServiceCycleError::MissingController(selected),
+                    )?;
+                    match controller.accept_mailbox_progress(mailbox_progress, port.now_ns()) {
+                        Ok(value) => {
+                            progress = ScheduledProductionServiceProgress::ReconfigureSlave(value)
+                        }
+                        Err(error) => {
+                            fault = Some(ScheduledProductionServiceFault::ReconfigureSlave(error))
+                        }
+                    }
+                }
+                if fault.is_none() {
+                    if let Err(error) = reconcile_reconfigure_progress(
+                        services,
+                        progress,
+                        cycle.receive.received.report.cycle,
+                    ) {
+                        fault = Some(error);
+                    }
+                }
+                fault = fault.or_else(|| {
+                    services
+                        .reconfigure_slave
+                        .as_deref()
+                        .and_then(ReconfigureSlaveController::last_error)
+                        .map(ScheduledProductionServiceFault::ReconfigureSlave)
+                });
+                let recovery = self.recovery(controls, progress, fault);
+                let service_ready = cycle.tx.service.failure.is_none()
+                    && fault.is_none()
+                    && services
+                        .reconfigure_slave
+                        .as_deref()
+                        .is_some_and(|controller| {
+                            controller.phase() == ReconfigureSlavePhase::Complete
+                        });
+                let startup_phase = services.startup.as_deref().map(StartupController::phase);
+                let pdo_batch_status = services
+                    .pdo_configuration
+                    .as_ref()
+                    .and_then(ScheduledPdoConfiguration::batch_status);
+                return Ok(ScheduledProductionServiceCycleReport {
+                    selected,
+                    progress,
+                    fault,
+                    recovery,
+                    request: self.request,
+                    service_ready,
+                    startup_phase,
+                    pdo_batch_status,
+                    transport: ScheduledProductionServiceTransport::Mailbox(cycle),
+                });
+            }
             let progress = cycle
                 .receive
                 .mailbox_progress
@@ -782,6 +878,7 @@ impl ScheduledProductionServiceScheduler {
             });
         }
 
+        let had_request = self.request.is_some();
         let cycle = match bank.run_dc_and_control_cycle(
             master,
             port,
@@ -835,6 +932,14 @@ impl ScheduledProductionServiceScheduler {
             }
         } else if selected == ScheduledProductionServiceKind::Idle {
             progress = ScheduledProductionServiceProgress::Idle;
+        }
+        if selected == ScheduledProductionServiceKind::ReconfigureSlave
+            && !had_request
+            && fault.is_none()
+            && let Err(error) =
+                reconcile_reconfigure_progress(services, progress, cycle.received().report.cycle)
+        {
+            fault = Some(error);
         }
         fault = fault.or_else(|| self.controller_fault(services));
         let recovery = self.recovery(controls, progress, fault);
@@ -1066,6 +1171,7 @@ impl ScheduledProductionServiceScheduler {
         self.active = [
             ScheduledProductionServiceKind::Startup,
             ScheduledProductionServiceKind::Rescan,
+            ScheduledProductionServiceKind::ReconfigureSlave,
             ScheduledProductionServiceKind::PdoConfiguration,
             ScheduledProductionServiceKind::WatchdogConfiguration,
             ScheduledProductionServiceKind::Mapping,
@@ -1118,6 +1224,24 @@ impl ScheduledProductionServiceScheduler {
                 .startup
                 .as_deref()
                 .is_some_and(StartupController::is_rescan_active_or_faulted),
+            ScheduledProductionServiceKind::ReconfigureSlave => services
+                .reconfigure_slave
+                .as_deref()
+                .is_some_and(|controller| {
+                    controller.is_active_or_faulted()
+                        || (controller.phase() == ReconfigureSlavePhase::Complete
+                            && controller.active_handle().is_some_and(|handle| {
+                                controller.status(handle).ok().is_some_and(|status| {
+                                    services.startup.as_deref().is_some_and(|startup| {
+                                        startup
+                                            .records()
+                                            .iter()
+                                            .find(|record| record.position == status.position)
+                                            .is_some_and(|record| !record.configured)
+                                    })
+                                })
+                            }))
+                }),
             ScheduledProductionServiceKind::PdoConfiguration => services
                 .pdo_configuration
                 .as_ref()
@@ -1247,6 +1371,38 @@ impl ScheduledProductionServiceScheduler {
                         )
                     })
             }
+            ScheduledProductionServiceKind::ReconfigureSlave => services
+                .reconfigure_slave
+                .as_deref()
+                .is_some_and(|controller| match controller.transport() {
+                    ReconfigureSlaveTransport::Control => {
+                        controller.pending_control_action().is_some_and(|action| {
+                            request.matches_action(
+                                action.datagram_index(),
+                                action.generation(),
+                                action.address(),
+                                action.operation(),
+                                action.payload(),
+                                action.datagram_len(),
+                                action.deadline_ns(),
+                            )
+                        })
+                    }
+                    ReconfigureSlaveTransport::Mailbox => {
+                        controller.mailbox().pending().is_some_and(|action| {
+                            request.matches_action(
+                                action.datagram_index,
+                                action.generation,
+                                action.address,
+                                action.operation,
+                                action.payload(),
+                                action.datagram_len(),
+                                action.deadline_ns,
+                            )
+                        })
+                    }
+                    ReconfigureSlaveTransport::None => false,
+                }),
             ScheduledProductionServiceKind::PdoConfiguration => services
                 .pdo_configuration
                 .as_ref()
@@ -1485,6 +1641,176 @@ impl ScheduledProductionServiceScheduler {
                     request: Some(controller.enqueue_pending(controls)?),
                     ..ScheduledProductionEnqueueOutcome::EMPTY
                 })
+            }
+            ScheduledProductionServiceKind::ReconfigureSlave => {
+                let status = {
+                    let controller = services
+                        .reconfigure_slave
+                        .as_deref()
+                        .ok_or(ControlError::InvalidState)?;
+                    let handle = controller
+                        .active_handle()
+                        .ok_or(ControlError::InvalidState)?;
+                    match controller.status(handle) {
+                        Ok(status) => status,
+                        Err(error) => {
+                            return Ok(ScheduledProductionEnqueueOutcome {
+                                fault: Some(ScheduledProductionServiceFault::ReconfigureSlave(
+                                    error,
+                                )),
+                                ..ScheduledProductionEnqueueOutcome::EMPTY
+                            });
+                        }
+                    }
+                };
+                let retained_status = services
+                    .startup
+                    .as_deref()
+                    .ok_or(ControlError::InvalidState)?
+                    .validate_reconfigure_slave_status(status);
+                if let Err(error) = retained_status {
+                    let error = services
+                        .reconfigure_slave
+                        .as_deref_mut()
+                        .ok_or(ControlError::InvalidState)?
+                        .abort(error);
+                    return Ok(ScheduledProductionEnqueueOutcome {
+                        fault: Some(ScheduledProductionServiceFault::ReconfigureSlave(error)),
+                        ..ScheduledProductionEnqueueOutcome::EMPTY
+                    });
+                }
+
+                let controller = services
+                    .reconfigure_slave
+                    .as_deref_mut()
+                    .ok_or(ControlError::InvalidState)?;
+                match controller.transport() {
+                    ReconfigureSlaveTransport::Control => {
+                        let action = match controller.next_control_action(now_ns) {
+                            Ok(action) => action,
+                            Err(error) => {
+                                return Ok(ScheduledProductionEnqueueOutcome {
+                                    fault: Some(ScheduledProductionServiceFault::ReconfigureSlave(
+                                        error,
+                                    )),
+                                    ..ScheduledProductionEnqueueOutcome::EMPTY
+                                });
+                            }
+                        };
+                        let Some(action) = action else {
+                            return Ok(ScheduledProductionEnqueueOutcome::EMPTY);
+                        };
+                        if action.deadline_ns() <= now_ns {
+                            return Ok(match controller.timeout_control_action(action, now_ns) {
+                                Ok(progress) => ScheduledProductionEnqueueOutcome {
+                                    progress: Some(
+                                        ScheduledProductionServiceProgress::ReconfigureSlave(
+                                            progress,
+                                        ),
+                                    ),
+                                    ..ScheduledProductionEnqueueOutcome::EMPTY
+                                },
+                                Err(error) => ScheduledProductionEnqueueOutcome {
+                                    fault: Some(ScheduledProductionServiceFault::ReconfigureSlave(
+                                        error,
+                                    )),
+                                    ..ScheduledProductionEnqueueOutcome::EMPTY
+                                },
+                            });
+                        }
+                        match controller.enqueue_control_pending(controls) {
+                            Ok(request) => Ok(ScheduledProductionEnqueueOutcome {
+                                request: Some(request),
+                                ..ScheduledProductionEnqueueOutcome::EMPTY
+                            }),
+                            Err(error) => Ok(ScheduledProductionEnqueueOutcome {
+                                fault: Some(ScheduledProductionServiceFault::ReconfigureSlave(
+                                    error,
+                                )),
+                                ..ScheduledProductionEnqueueOutcome::EMPTY
+                            }),
+                        }
+                    }
+                    ReconfigureSlaveTransport::Mailbox => {
+                        let prepared = match controller.prepare_mailbox(now_ns) {
+                            Ok(progress) => progress,
+                            Err(error) => {
+                                return Ok(ScheduledProductionEnqueueOutcome {
+                                    fault: Some(ScheduledProductionServiceFault::ReconfigureSlave(
+                                        error,
+                                    )),
+                                    ..ScheduledProductionEnqueueOutcome::EMPTY
+                                });
+                            }
+                        };
+                        let outcome = enqueue_mailbox(now_ns, controls, controller.mailbox_mut())?;
+                        if let Some(error) = outcome.fault {
+                            return Ok(
+                                match controller.accept_mailbox_progress(Err(error), now_ns) {
+                                    Ok(progress) => ScheduledProductionEnqueueOutcome {
+                                        progress: Some(
+                                            ScheduledProductionServiceProgress::ReconfigureSlave(
+                                                progress,
+                                            ),
+                                        ),
+                                        ..ScheduledProductionEnqueueOutcome::EMPTY
+                                    },
+                                    Err(error) => ScheduledProductionEnqueueOutcome {
+                                        fault: Some(
+                                            ScheduledProductionServiceFault::ReconfigureSlave(
+                                                error,
+                                            ),
+                                        ),
+                                        ..ScheduledProductionEnqueueOutcome::EMPTY
+                                    },
+                                },
+                            );
+                        }
+                        Ok(ScheduledProductionEnqueueOutcome {
+                            request: outcome.request,
+                            progress: prepared
+                                .map(ScheduledProductionServiceProgress::ReconfigureSlave)
+                                .or_else(|| {
+                                    outcome.progress.map(|_| {
+                                        ScheduledProductionServiceProgress::ReconfigureSlave(
+                                            ReconfigureSlaveProgress::Advanced(controller.phase()),
+                                        )
+                                    })
+                                }),
+                            fault: None,
+                        })
+                    }
+                    ReconfigureSlaveTransport::None => {
+                        if controller.phase() == ReconfigureSlavePhase::Complete {
+                            let handle = controller
+                                .active_handle()
+                                .ok_or(ControlError::InvalidState)?;
+                            match controller.result(handle) {
+                                Ok(result) => Ok(ScheduledProductionEnqueueOutcome {
+                                    progress: Some(
+                                        ScheduledProductionServiceProgress::ReconfigureSlave(
+                                            ReconfigureSlaveProgress::Complete(result),
+                                        ),
+                                    ),
+                                    ..ScheduledProductionEnqueueOutcome::EMPTY
+                                }),
+                                Err(error) => Ok(ScheduledProductionEnqueueOutcome {
+                                    fault: Some(ScheduledProductionServiceFault::ReconfigureSlave(
+                                        error,
+                                    )),
+                                    ..ScheduledProductionEnqueueOutcome::EMPTY
+                                }),
+                            }
+                        } else {
+                            Ok(ScheduledProductionEnqueueOutcome {
+                                fault: controller
+                                    .last_error()
+                                    .map(ScheduledProductionServiceFault::ReconfigureSlave),
+                                ..ScheduledProductionEnqueueOutcome::EMPTY
+                            })
+                        }
+                    }
+                }
             }
             ScheduledProductionServiceKind::PdoConfiguration => {
                 let binding = services
@@ -2042,6 +2368,19 @@ impl ScheduledProductionServiceScheduler {
                     Err(error) => Err(ScheduledProductionServiceFault::Startup(error)),
                 }
             }
+            ScheduledProductionServiceKind::ReconfigureSlave => {
+                let progress = services
+                    .reconfigure_slave
+                    .as_deref_mut()
+                    .ok_or(ScheduledProductionServiceFault::Control(
+                        ControlError::InvalidState,
+                    ))?
+                    .accept_control_completed(controls, handle, now_ns)
+                    .map_err(ScheduledProductionServiceFault::ReconfigureSlave)?;
+                let projected = ScheduledProductionServiceProgress::ReconfigureSlave(progress);
+                reconcile_reconfigure_progress(services, projected, cycle)?;
+                Ok(projected)
+            }
             ScheduledProductionServiceKind::WatchdogConfiguration => services
                 .watchdog_configuration
                 .as_deref_mut()
@@ -2165,6 +2504,11 @@ impl ScheduledProductionServiceScheduler {
                 .as_deref()
                 .and_then(StartupController::last_rescan_error)
                 .map(ScheduledProductionServiceFault::Rescan),
+            ScheduledProductionServiceKind::ReconfigureSlave => services
+                .reconfigure_slave
+                .as_deref()
+                .and_then(ReconfigureSlaveController::last_error)
+                .map(ScheduledProductionServiceFault::ReconfigureSlave),
             ScheduledProductionServiceKind::PdoConfiguration => services
                 .pdo_configuration
                 .as_ref()
@@ -2238,6 +2582,10 @@ impl ScheduledProductionServiceScheduler {
                 .startup
                 .as_deref()
                 .is_some_and(|controller| controller.rescan_phase() == RescanPhase::Complete),
+            ScheduledProductionServiceKind::ReconfigureSlave => services
+                .reconfigure_slave
+                .as_deref()
+                .is_some_and(|controller| controller.phase() == ReconfigureSlavePhase::Complete),
             ScheduledProductionServiceKind::PdoConfiguration => services
                 .pdo_configuration
                 .as_ref()
@@ -2339,6 +2687,74 @@ impl Default for ScheduledProductionServiceScheduler {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn reconcile_reconfigure_progress<
+    const MAX_SLAVES: usize,
+    const SMS: usize,
+    const FMMUS: usize,
+    const PDO_OPS: usize,
+    const PDO_JOBS: usize,
+    const REGISTER_REQUESTS: usize,
+>(
+    services: &mut ScheduledProductionServices<
+        '_,
+        MAX_SLAVES,
+        SMS,
+        FMMUS,
+        PDO_OPS,
+        PDO_JOBS,
+        REGISTER_REQUESTS,
+    >,
+    progress: ScheduledProductionServiceProgress,
+    cycle: u64,
+) -> Result<(), ScheduledProductionServiceFault> {
+    let observation = services
+        .reconfigure_slave
+        .as_deref_mut()
+        .and_then(ReconfigureSlaveController::take_observation);
+    if let Some(observation) = observation {
+        let result = services
+            .startup
+            .as_deref_mut()
+            .ok_or(ScheduledProductionServiceFault::Control(
+                ControlError::InvalidState,
+            ))?
+            .reconcile_reconfigure_slave_observation(observation, cycle);
+        if let Err(error) = result {
+            let error = services
+                .reconfigure_slave
+                .as_deref_mut()
+                .ok_or(ScheduledProductionServiceFault::Control(
+                    ControlError::InvalidState,
+                ))?
+                .abort(error);
+            return Err(ScheduledProductionServiceFault::ReconfigureSlave(error));
+        }
+    }
+    if let ScheduledProductionServiceProgress::ReconfigureSlave(
+        ReconfigureSlaveProgress::Complete(result),
+    ) = progress
+    {
+        let commit = services
+            .startup
+            .as_deref_mut()
+            .ok_or(ScheduledProductionServiceFault::Control(
+                ControlError::InvalidState,
+            ))?
+            .complete_reconfigure_slave(result, cycle);
+        if let Err(error) = commit {
+            let error = services
+                .reconfigure_slave
+                .as_deref_mut()
+                .ok_or(ScheduledProductionServiceFault::Control(
+                    ControlError::InvalidState,
+                ))?
+                .abort(error);
+            return Err(ScheduledProductionServiceFault::ReconfigureSlave(error));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

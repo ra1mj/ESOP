@@ -20,7 +20,8 @@
   "subtasks": [],
   "children": [
     "09-27-ethercat-runtime-state-requests",
-    "09-27-ethercat-explicit-rescan"
+    "09-27-ethercat-explicit-rescan",
+    "09-27-ethercat-single-slave-reconfigure"
   ],
   "parent": null,
   "relatedFiles": [],

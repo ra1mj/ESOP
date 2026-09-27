@@ -366,21 +366,27 @@ RxPDO/TxPDO 可映射性；任何 malformed、fragment 顺序、abort、身份�
 | REC-002 | P1 | 自动恢复必须是应用配置的策略，默认关闭；策略可规定安全输出、重试次数和是否允许回到 OP。 | 策略矩阵测试。 |
 | SAF-001 | P0 | 主站不替代功能安全系统；任何通信异常的安全输出和 STO 行为由应用/设备安全链路负责。 | API/文档审查无错误安全承诺。 |
 
-REC-001 当前完成了 `request_state` 与显式 `rescan` 两个软件增量。固定容量状态请求控制器使用
+REC-001 当前完成了 `request_state`、显式 `rescan` 与单从站 `reconfigure_slave` 三个软件增量。固定容量状态请求控制器使用
 稳定 handle，按合法 ESM 路径逐步复用现有 AL 状态机，并从 Ready Startup 中复制已验证站地址、
 当前 AL 状态、ESI/ETG timeout、request timeout 和 Device Emulation 错误确认策略。显式重扫
 同样使用稳定 handle 和调用方绝对 deadline，在返回成功前同步清除旧从站表、扫描、SII/寄存器、
 邮箱、DC 拓扑/参考钟、AL 与配置屏障证据，再以 retained expected/profile 计划复用完整 Startup
 协议链；目标固定为 PREOP，不进入外部配置服务、SAFEOP 或 OP。每个嵌套操作和线缆请求都取
-配置 timeout 与剩余总体预算的较小值。
+配置 timeout 与剩余总体预算的较小值。单从站重配置则在事务性核对 Ready/online/configured、
+站地址、身份、邮箱、FMMU/SyncManager bank、产品 PDO/watchdog/DC 计划和未来绝对 deadline 后，
+只撤销目标从站的 configured 证据；随后按 OpOnly 输出关闭/read-back、直接 PREOP、PDO download/
+upload 核对、watchdog、SM/FMMU clear/write/read-back、目标 DC Clock 与目标 DC SYNC 的固定顺序执行。
+目标 DC SYNC 可读取另一个参考钟，但所有配置写只允许目标站地址。成功只把目标记录提交为
+configured PREOP，故障保留首错且不自动重试。
 
-生产调度优先完成本周期 Domain/DC 后，以 Startup/Rescan、配置服务、状态请求、Mailbox、普通
+生产调度优先完成本周期 Domain/DC 后，以 Startup/Rescan、Reconfigure Slave、配置服务、状态请求、Mailbox、普通
 异步寄存器请求的固定顺序接纳最多一个控制数据报；`InFlight` 跨周期保留且不重发，终态再次
 核对 action/generation/address/length/deadline/WKC。状态请求或重扫活动/锁存故障都会清除
-Topology lifecycle gate；重扫完成只恢复新核验的 topology evidence，不会绕过 drive、DC、
+Topology lifecycle gate；重配置活动/锁存故障同样关闭该 gate。重扫完成只恢复新核验的 topology
+evidence，重配置完成只恢复目标 PREOP/configured evidence；两者都不会绕过 drive、DC、
 Domain、command age、CiA 402 或 motion permit 门槛，也不会自动重试、重扫或回到 OP。带非空
-`OpOnly` 输出规则的运行时状态变更继续拒绝，直至后续任务提取共享的有界 OpOnly 顺序。
-`reconfigure_slave`、统一恢复 API、混合恢复负载、目标 WCET 与实物 HIL 仍未完成，因此
+`OpOnly` 输出规则的普通运行时状态变更继续拒绝；有界 OpOnly 顺序当前只由重配置协调器拥有。
+统一恢复 API、混合恢复负载、目标 WCET 与实物 HIL 仍未完成，因此
 REC-001 保持部分实现。
 
 ### 5.9 能力声明与一致性边界
