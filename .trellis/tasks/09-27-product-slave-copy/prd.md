@@ -36,17 +36,17 @@ revalidate that exact intent before exposing an immutable plan set.
 
 ## Acceptance Criteria
 
-- [ ] The checked-in example regenerates deterministically and all six
+- [x] The checked-in example regenerates deterministically and all six
       artifacts contain the same copy-plan identity and new configuration hash.
-- [ ] Invalid source/target/quality references and target overlap fail before
+- [x] Invalid source/target/quality references and target overlap fail before
       artifact publication.
-- [ ] Runtime activation exposes exactly the generated plan count and rejects
+- [x] Runtime activation exposes exactly the generated plan count and rejects
       tampered indices or insufficient fixed capacity without partial output.
-- [ ] A public runtime test applies the generated cross-Domain plan, verifies
+- [x] A public runtime test applies the generated cross-Domain plan, verifies
       copied bytes plus quality in the target frame, and verifies fallback for
       invalid and stale source evidence.
-- [ ] Legacy empty-copy product tests remain valid.
-- [ ] `make ci` passes.
+- [x] Legacy empty-copy product tests remain valid.
+- [x] `make ci` passes.
 
 ## Notes
 

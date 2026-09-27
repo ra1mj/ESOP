@@ -34,3 +34,29 @@ make cfggen-example
 git diff --exit-code -- config/examples/sim-dual-axis/expected
 make ci
 ```
+
+## Implementation Result
+
+Accepted on 2026-09-27 in implementation commit
+`935a009281bdcb7201d9c99fa2e58b8fe71a209d`.
+
+- Added strict semantic `slave_copies` declarations and deterministic JSON,
+  C, Rust, hash, and build-report evidence.
+- Added fixed-capacity immutable plan ownership with transactional capacity and
+  target-overlap checks in the `no_std` core and runtime product activation.
+- Runtime activation retains only referenced source, target, and quality PDO
+  handles, preserving `PDOS` as a per-Domain capacity before rebuilding every
+  plan against the activated registry.
+- Added the simulator drive-position-to-IO mirror and public cross-Domain tests
+  for valid copy, target frame bytes, stale fallback, invalid-WKC fallback,
+  tampered indices, capacity, reference, direction, width, and overlap faults.
+- Regenerated all six checked-in artifacts with configuration hash
+  `e241ac19602f9adc68d206e726ed048fa3f915e34b04e6bd35a45af9774b6241`.
+- Passed focused crate suites, byte-for-byte generated-artifact comparison,
+  local `make ci`, and GitHub Actions `quality` run `36300420567` for the exact
+  implementation SHA.
+
+Acceptance is limited to generated and simulated software evidence. Physical
+slave mapping/readback, timing/WCET qualification, HIL, and functional-safety
+qualification remain out of scope. Automatic publication into a long-lived
+stable process image remains a later cycle-owner integration task.
