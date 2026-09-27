@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 61
+- **Total Sessions**: 62
 - **Last Active**: 2026-09-28
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~106 | Active |
+| `journal-2.md` | ~139 | Active |
 | `journal-1.md` | ~1969 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 62 | 2026-09-28 | EtherCAT single-slave reconfiguration | `13d1b01` | `main` |
 | 61 | 2026-09-28 | EtherCAT explicit rescan | `bd8fd8f` | `main` |
 | 60 | 2026-09-27 | EtherCAT runtime state requests | `637bce4` | `main` |
 | 59 | 2026-09-27 | EtherCAT asynchronous register requests | `dbb4422` | `main` |

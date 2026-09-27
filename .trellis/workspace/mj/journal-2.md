@@ -104,3 +104,36 @@ Implemented bounded PREOP-only EtherCAT rescan with synchronous evidence invalid
 ### Next Steps
 
 - None - task complete
+
+
+## Session 62: EtherCAT single-slave reconfiguration
+
+**Date**: 2026-09-28
+**Task**: EtherCAT single-slave reconfiguration
+**Branch**: `main`
+
+### Summary
+
+Implemented bounded target-isolated EtherCAT reconfiguration through direct PREOP, PDO/watchdog/SM-FMMU/target-DC sequencing, production scheduling, lifecycle gating, Linux coexistence tests, executable specs, and requirement/capability evidence.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `13d1b01` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
