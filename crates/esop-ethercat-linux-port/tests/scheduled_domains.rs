@@ -12,14 +12,16 @@ use esop_ethercat_core::{
     ESC_CONFIGURATION, ESC_DC_SYSTEM_DIFF, ESC_DC_SYSTEM_TIME, ESC_EEPROM_CONTROL, ESC_EEPROM_DATA,
     ESC_FEATURE_DC_SUPPORTED, ESC_PROCESS_DATA_WATCHDOG_TIME, ESC_WATCHDOG_DIVIDER, EscDcRange,
     EscRegisterRequestController, EscRegisterRequestProgress, EscRegisterRequestState,
-    EscWatchdogConfig, EthercatMaster, EthercatPort, EthercatState, ExpectedSlave, FMMU_IMAGE_LEN,
-    FmmuRegisterDiscoveryController, FmmuRegisterDiscoveryProgress, FramePlan, FramePlanSet,
-    LinkState, MAX_MAILBOX_BYTES, MailboxConfig, MailboxController, MailboxError, MailboxHeader,
-    MailboxPhase, MailboxProgress, MailboxProtocol, MailboxRetryPolicy, MappingConfigController,
-    MappingConfigPhase, MappingConfigProgress, MappingTable, MasterConfig, PdoConfigAction,
-    PdoConfigBatch, PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigController, PdoConfigError,
-    PdoConfigJob, PdoConfigPhase, PdoConfigPlan, PdoConfigProgress, PdoConfigStep, PdoSdoWrite,
-    PortError, ReconfigureSlaveController, ReconfigureSlavePhase, ReconfigureSlavePlan,
+    EscWatchdogConfig, EthercatMaster, EthercatPort, EthercatState, ExpectedSlave,
+    ExplicitRecoveryDiagnosticCode, ExplicitRecoveryDiagnostics, ExplicitRecoveryKind,
+    ExplicitRecoveryPhase, ExplicitRecoveryResult, FMMU_IMAGE_LEN, FmmuRegisterDiscoveryController,
+    FmmuRegisterDiscoveryProgress, FramePlan, FramePlanSet, LinkState, MAX_MAILBOX_BYTES,
+    MailboxConfig, MailboxController, MailboxError, MailboxHeader, MailboxPhase, MailboxProgress,
+    MailboxProtocol, MailboxRetryPolicy, MappingConfigController, MappingConfigPhase,
+    MappingConfigProgress, MappingTable, MasterConfig, PdoConfigAction, PdoConfigBatch,
+    PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigController, PdoConfigError, PdoConfigJob,
+    PdoConfigPhase, PdoConfigPlan, PdoConfigProgress, PdoConfigStep, PdoSdoWrite, PortError,
+    ReconfigureSlaveController, ReconfigureSlavePhase, ReconfigureSlavePlan,
     ReconfigureSlaveProgress, RegisterOperation, RequestHandle, RequestState, RxPoll, RxSlotState,
     SII_CATEGORY_END, SYNC_MANAGER_IMAGE_LEN, ScanDcCapabilities, ScanPortLink, ScanRecord,
     ScheduleDomain, ScheduleTable, ScheduledControlCycleError, ScheduledDomainBank,
@@ -785,6 +787,16 @@ fn runtime_state_request_preserves_cyclic_order_and_does_not_retransmit_in_fligh
             error_acknowledge_policy: AlErrorAcknowledgePolicy::Enabled,
         })
         .unwrap();
+    let mut recovery_diagnostics = ExplicitRecoveryDiagnostics::<4>::new();
+    assert!(recovery_diagnostics.observe(
+        0,
+        100_000,
+        state_request.status(request).unwrap().into(),
+    ));
+    let submitted = recovery_diagnostics.pop().unwrap();
+    assert_eq!(submitted.code, ExplicitRecoveryDiagnosticCode::Submitted);
+    assert_eq!(submitted.status.kind(), ExplicitRecoveryKind::StateRequest);
+    assert_eq!(submitted.status.phase(), ExplicitRecoveryPhase::Active);
     let mut scheduler = ScheduledProductionServiceScheduler::new();
     let mut controls = ControlRequestPool::<1>::new();
     let mut port = TwoFrameSimPort::new();
@@ -825,6 +837,7 @@ fn runtime_state_request_preserves_cyclic_order_and_does_not_retransmit_in_fligh
         ScheduledProductionServiceRecovery::AwaitingResponse
     );
     assert!(first.request().is_some());
+    assert!(first.post_receive_deadline_met());
     assert_eq!(controls.in_use(), 1);
     assert_eq!(state_request.phase(), StateRequestPhase::Transitioning);
     assert_eq!(port.al_control_writes, 1);
@@ -837,6 +850,11 @@ fn runtime_state_request_preserves_cyclic_order_and_does_not_retransmit_in_fligh
         !other_cycle_facts_from_production_service_cycle(&first, ready_other_cycle_facts())
             .topology_valid
     );
+    assert!(!recovery_diagnostics.observe(
+        1,
+        100_000,
+        state_request.status(request).unwrap().into(),
+    ));
 
     port.set_now_ns(200_000);
     bank.submit_due_process_inputs(&process_inputs, &mut master, &mut port, 2, 250_000, 250_000)
@@ -863,6 +881,7 @@ fn runtime_state_request_preserves_cyclic_order_and_does_not_retransmit_in_fligh
         ScheduledProductionServiceProgress::StateRequest(StateRequestProgress::ControlWritten)
     );
     assert_eq!(second.request(), None);
+    assert!(second.post_receive_deadline_met());
     assert_eq!(controls.in_use(), 0);
     assert_eq!(port.al_control_writes, 1);
     assert_eq!(port.tx_attempts, 5);
@@ -906,6 +925,7 @@ fn runtime_state_request_preserves_cyclic_order_and_does_not_retransmit_in_fligh
     assert_eq!(result.observation.observed_status.state, EthercatState::Op);
     assert_eq!(result.observation.observed_at_ns, 300_000);
     assert_eq!(third.request(), None);
+    assert!(third.post_receive_deadline_met());
     assert!(third.service_ready());
     assert_eq!(state_request.phase(), StateRequestPhase::Complete);
     assert_eq!(controls.in_use(), 0);
@@ -918,6 +938,19 @@ fn runtime_state_request_preserves_cyclic_order_and_does_not_retransmit_in_fligh
         other_cycle_facts_from_production_service_cycle(&third, ready_other_cycle_facts())
             .topology_valid
     );
+    assert!(recovery_diagnostics.observe(
+        3,
+        300_000,
+        state_request.status(request).unwrap().into(),
+    ));
+    let completed = recovery_diagnostics.pop().unwrap();
+    assert_eq!(completed.code, ExplicitRecoveryDiagnosticCode::Completed);
+    assert_eq!(completed.status.phase(), ExplicitRecoveryPhase::Complete);
+    let unified_result = ExplicitRecoveryResult::from(result);
+    assert_eq!(unified_result.kind(), ExplicitRecoveryKind::StateRequest);
+    assert_eq!(unified_result.sequence(), request.sequence());
+    assert_eq!(unified_result.generation(), Some(7));
+    assert_eq!(unified_result.deadline_ns(), Some(600_000));
 }
 
 #[test]
@@ -990,6 +1023,16 @@ fn explicit_rescan_preserves_cyclic_order_and_does_not_retransmit_in_flight_work
         .accept(initial_probe, initial_probe.generation(), &[], 0, 2)
         .unwrap();
     let operation = startup.start_rescan(7, 100_000, 600_000).unwrap();
+    let mut recovery_diagnostics = ExplicitRecoveryDiagnostics::<4>::new();
+    assert!(recovery_diagnostics.observe(
+        0,
+        100_000,
+        startup.rescan_status(operation).unwrap().into(),
+    ));
+    assert_eq!(
+        recovery_diagnostics.pop().unwrap().code,
+        ExplicitRecoveryDiagnosticCode::Submitted
+    );
 
     let mut scheduler = ScheduledProductionServiceScheduler::new();
     let mut controls = ControlRequestPool::<1>::new();
@@ -1028,6 +1071,7 @@ fn explicit_rescan_preserves_cyclic_order_and_does_not_retransmit_in_flight_work
         ScheduledProductionServiceRecovery::AwaitingResponse
     );
     assert!(first.request().is_some());
+    assert!(first.post_receive_deadline_met());
     assert_eq!(controls.in_use(), 1);
     assert_eq!(startup.rescan_phase(), RescanPhase::Active);
     assert_eq!(port.tx_attempts, 3);
@@ -1065,6 +1109,7 @@ fn explicit_rescan_preserves_cyclic_order_and_does_not_retransmit_in_flight_work
         ScheduledProductionServiceProgress::Rescan(RescanProgress::Complete(result))
     );
     assert_eq!(second.request(), None);
+    assert!(second.post_receive_deadline_met());
     assert!(second.service_ready());
     assert_eq!(startup.rescan_phase(), RescanPhase::Complete);
     assert_eq!(startup.phase(), StartupPhase::Ready);
@@ -1081,6 +1126,19 @@ fn explicit_rescan_preserves_cyclic_order_and_does_not_retransmit_in_flight_work
         other_cycle_facts_from_production_service_cycle(&second, ready_other_cycle_facts())
             .topology_valid
     );
+    assert!(recovery_diagnostics.observe(
+        2,
+        200_000,
+        startup.rescan_status(operation).unwrap().into(),
+    ));
+    let completed = recovery_diagnostics.pop().unwrap();
+    assert_eq!(completed.code, ExplicitRecoveryDiagnosticCode::Completed);
+    assert_eq!(completed.status.kind(), ExplicitRecoveryKind::Rescan);
+    let unified_result = ExplicitRecoveryResult::from(result);
+    assert_eq!(unified_result.kind(), ExplicitRecoveryKind::Rescan);
+    assert_eq!(unified_result.sequence(), operation.sequence());
+    assert_eq!(unified_result.generation(), Some(7));
+    assert_eq!(unified_result.deadline_ns(), Some(600_000));
 }
 
 #[test]
@@ -1160,6 +1218,18 @@ fn explicit_reconfigure_preserves_cyclic_order_target_evidence_and_in_flight_own
             100_000,
         )
         .unwrap();
+    let mut recovery_diagnostics = ExplicitRecoveryDiagnostics::<4>::new();
+    assert!(recovery_diagnostics.observe(
+        0,
+        100_000,
+        reconfigure.status(operation).unwrap().into(),
+    ));
+    let submitted = recovery_diagnostics.pop().unwrap();
+    assert_eq!(submitted.code, ExplicitRecoveryDiagnosticCode::Submitted);
+    assert_eq!(
+        submitted.status.kind(),
+        ExplicitRecoveryKind::ReconfigureSlave
+    );
     assert!(!startup.records()[0].configured);
     assert_eq!(startup.records()[1], unrelated_before);
 
@@ -1220,6 +1290,7 @@ fn explicit_reconfigure_preserves_cyclic_order_target_evidence_and_in_flight_own
         ScheduledProductionServiceRecovery::AwaitingResponse
     );
     assert!(first.request().is_some());
+    assert!(first.post_receive_deadline_met());
     assert_eq!(controls.in_use(), 1);
     assert_eq!(port.al_control_writes, 1);
     assert_eq!(port.last_al_control, Some(EthercatState::PreOp as u16));
@@ -1262,6 +1333,7 @@ fn explicit_reconfigure_preserves_cyclic_order_target_evidence_and_in_flight_own
         ))
     );
     assert_eq!(second.request(), None);
+    assert!(second.post_receive_deadline_met());
     assert_eq!(controls.in_use(), 0);
     assert_eq!(port.al_control_writes, 1);
     assert_eq!(port.tx_attempts, 5);
@@ -1305,6 +1377,7 @@ fn explicit_reconfigure_preserves_cyclic_order_target_evidence_and_in_flight_own
         ))
     );
     assert!(third.service_ready());
+    assert!(third.post_receive_deadline_met());
     assert_eq!(reconfigure.phase(), ReconfigureSlavePhase::Complete);
     assert_eq!(result.observed_status.state, EthercatState::PreOp);
     assert!(startup.records()[0].configured);
@@ -1328,6 +1401,23 @@ fn explicit_reconfigure_preserves_cyclic_order_target_evidence_and_in_flight_own
     assert!(completed_facts.topology_valid);
     assert!(!completed_facts.drive_ready);
     assert!(!completed_facts.command_current);
+    assert!(recovery_diagnostics.observe(
+        3,
+        300_000,
+        reconfigure.status(operation).unwrap().into(),
+    ));
+    let completed = recovery_diagnostics.pop().unwrap();
+    assert_eq!(completed.code, ExplicitRecoveryDiagnosticCode::Completed);
+    assert_eq!(completed.status.phase(), ExplicitRecoveryPhase::Complete);
+    let unified_result = ExplicitRecoveryResult::from(result);
+    assert_eq!(
+        unified_result.kind(),
+        ExplicitRecoveryKind::ReconfigureSlave
+    );
+    assert_eq!(unified_result.sequence(), operation.sequence());
+    assert_eq!(unified_result.position(), Some(0));
+    assert_eq!(unified_result.station_address(), Some(0x1000));
+    assert_eq!(unified_result.completed_at_ns(), Some(300_000));
 }
 
 #[test]

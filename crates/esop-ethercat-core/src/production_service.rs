@@ -2765,21 +2765,26 @@ mod tests {
         DcClockConfig, DcSyncConfig, DcSyncPlan, DcSyncPlanEntry, DcSyncTiming, DcTopology,
     };
     use crate::engine::RxDatagramConsumer;
+    use crate::fmmu_discovery::{FmmuRegisterBank, FmmuRegisterDescriptor};
     use crate::mapping::MappingTable;
+    use crate::op_only::OpOnlySyncManagerProfile;
     use crate::pdo_config::{PdoConfigBatchPlan, PdoConfigJob, PdoConfigPlan, PdoSdoWrite};
+    use crate::reconfigure::{ReconfigureSlaveContext, ReconfigureSlavePlan};
     use crate::scan::{EscDcRange, ScanDcCapabilities, ScanPortLink, ScanRecord};
     use crate::schedule::{ScheduleDomain, ScheduleTable};
     use crate::slave::{AlStatus, EthercatState, SlaveIdentity};
     use crate::startup::{
         ExpectedSlave, StartupAction, StartupConfig, StartupConfigurationServices,
     };
+    use crate::sync_manager_discovery::{SyncManagerRegisterBank, SyncManagerRegisterDescriptor};
     use crate::watchdog::{
         EscWatchdogConfig, WatchdogControllerConfig, WatchdogPlan, WatchdogPlanEntry,
     };
     use crate::wire::{Command, DatagramHeader};
     use crate::{
         AlErrorAcknowledgePolicy, AlTransitionTimeouts, Domain, DomainSegment, FmmuConfig,
-        MailboxMappedStatusBit, RegisterOperation, ScheduledDomainEntry, StateRequestConfig,
+        MAX_ESC_FMMUS, MAX_ESC_SYNC_MANAGERS, MailboxMappedStatusBit, RegisterOperation,
+        ScheduledDomainEntry, StateRequestConfig,
     };
 
     const EXPECTED: [ExpectedSlave; 1] = [ExpectedSlave {
@@ -3145,6 +3150,67 @@ mod tests {
             ScheduledProductionServiceKind::StateRequest
         );
         controls.release(state_request_handle).unwrap();
+    }
+
+    #[test]
+    fn explicit_recovery_priority_is_rescan_then_reconfigure_then_state_request() {
+        let mut startup = ready_empty_startup();
+        startup.start_rescan(7, 10, 1_000).unwrap();
+
+        let mut reconfigure = ReconfigureSlaveController::<1, 0, 0, 0>::new();
+        reconfigure
+            .start(
+                ReconfigureSlavePlan::new(0, 0x1000, EXPECTED[0].identity, MappingTable::new()),
+                ReconfigureSlaveContext {
+                    observed_status: AlStatus::new(EthercatState::Op as u16, 0),
+                    generation: 8,
+                    now_ns: 10,
+                    deadline_ns: 1_000,
+                    request_timeout_ns: 100,
+                    transition_timeouts: AlTransitionTimeouts::uniform(500),
+                    error_acknowledge_policy: AlErrorAcknowledgePolicy::Enabled,
+                    op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
+                    sync_manager_registers: SyncManagerRegisterBank::from_parts(
+                        0,
+                        0x1000,
+                        0,
+                        [SyncManagerRegisterDescriptor::RESET; MAX_ESC_SYNC_MANAGERS],
+                    ),
+                    fmmu_registers: FmmuRegisterBank::from_parts(
+                        0,
+                        0x1000,
+                        0,
+                        [FmmuRegisterDescriptor::RESET; MAX_ESC_FMMUS],
+                    ),
+                    dc_topology: None,
+                    application_time_ns: 10,
+                },
+            )
+            .unwrap();
+        let mut state_request = StateRequestController::new();
+        state_request.start(state_request_config(9)).unwrap();
+
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+        {
+            let services =
+                ScheduledProductionServices::<1, 0, 0>::new(Some(&mut startup), None, None, None)
+                    .with_reconfigure_slave(&mut reconfigure)
+                    .with_state_request(&mut state_request);
+            scheduler.refresh_selection(&services);
+        }
+        assert_eq!(scheduler.active(), ScheduledProductionServiceKind::Rescan);
+
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+        {
+            let services = ScheduledProductionServices::<1, 0, 0>::new(None, None, None, None)
+                .with_reconfigure_slave(&mut reconfigure)
+                .with_state_request(&mut state_request);
+            scheduler.refresh_selection(&services);
+        }
+        assert_eq!(
+            scheduler.active(),
+            ScheduledProductionServiceKind::ReconfigureSlave
+        );
     }
 
     #[test]

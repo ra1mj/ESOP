@@ -26,6 +26,7 @@ mod plan;
 mod port;
 mod production_service;
 mod reconfigure;
+mod recovery;
 mod register_request;
 mod registers;
 mod rescan;
@@ -144,6 +145,11 @@ pub use reconfigure::{
     ReconfigureSlaveError, ReconfigureSlaveHandle, ReconfigureSlavePhase, ReconfigureSlavePlan,
     ReconfigureSlaveProgress, ReconfigureSlaveResult, ReconfigureSlaveStatus,
     ReconfigureSlaveTransport,
+};
+pub use recovery::{
+    ExplicitRecoveryDiagnosticCode, ExplicitRecoveryDiagnosticEvent, ExplicitRecoveryDiagnostics,
+    ExplicitRecoveryFault, ExplicitRecoveryKind, ExplicitRecoveryPhase, ExplicitRecoveryResult,
+    ExplicitRecoveryStatus,
 };
 pub use register_request::{
     EscRegisterAction, EscRegisterRequestController, EscRegisterRequestError,

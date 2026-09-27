@@ -248,7 +248,10 @@ OpOnly 关闭、直接 PREOP、PDO、watchdog、SM/FMMU、目标 DC Clock/DC SYN
 写配置；非目标参考钟仅可读取。三类操作都在 Domain/DC 周期工作之后逐周期执行；延迟响应保持唯一
 `InFlight` 所有权且不重发，活动或故障时 Topology gate fail-closed。完成只发布经核验的 retained
 evidence，不自动重新使能运动、重试或返回 OP。普通运行时状态请求仍拒绝非空 `OpOnly` profile；
-统一恢复门面、混合负载、目标 WCET 和实物 HIL 仍是开放项。
+统一恢复观察层现无损包装三类状态、结果和错误，并用固定容量事件环对
+Submitted/Progress/Completed/Faulted 变化去重；Linux 仿真已覆盖恢复优先级、单控制槽、
+LRW/FRMW 先行、跨周期不重发和 deadline 报告。该观察层不提交线缆操作、重试或恢复 lifecycle
+gate。目标 WCET/jitter、真实响应来源、实物 HIL、互操作和 ETG 一致性仍是开放项。
 
 ## 5. ETG.1500 Class B 对照
 

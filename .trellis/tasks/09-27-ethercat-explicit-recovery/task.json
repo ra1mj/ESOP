@@ -21,7 +21,8 @@
   "children": [
     "09-27-ethercat-runtime-state-requests",
     "09-27-ethercat-explicit-rescan",
-    "09-27-ethercat-single-slave-reconfigure"
+    "09-27-ethercat-single-slave-reconfigure",
+    "09-28-ethercat-recovery-integration"
   ],
   "parent": null,
   "relatedFiles": [],

@@ -520,8 +520,8 @@ R2 显式状态请求增量：`StateRequestController` 以固定容量单槽和�
 request timeout、Device Emulation 策略和 profile timeout；每个成功 observation 按真实 master
 cycle 回写 retained table。调度器在 cyclic `LRW` 和 DC `FRMW` 后发送 `FPWR/FPRD`，延迟回包
 跨周期保持唯一请求且不重发，活动或锁存故障会清除 Topology gate。完成不恢复其他 lifecycle
-门、不自动重试或回 OP；普通状态请求仍拒绝非空 `OpOnly` 输出 profile，统一恢复接口、目标
-WCET 和实物 HIL 仍未完成。
+门、不自动重试或回 OP；普通状态请求仍拒绝非空 `OpOnly` 输出 profile。统一恢复观察接口已由后述
+集成增量完成；目标 WCET 和实物 HIL 仍未完成。
 
 R2 显式重扫增量：`StartupController::start_rescan(generation, now, deadline)` 从 Ready 或 Faulted
 retained plan 创建稳定 handle；无效状态或已过 deadline 在修改证据前拒绝。成功提交会在首个 APRD
@@ -542,6 +542,16 @@ Clock、目标 DC SYNC 顺序运行；非目标 DC 参考站只允许读取。�
 延迟响应不重发、单请求所有权、无关从站证据不变、目标最终 configured PREOP，以及 lifecycle 不
 恢复 OP/drive/DC/command/CiA 402 门。首错锁存且不自动重试；该软件证据不证明物理响应来源、
 真实从站互操作、目标 WCET、实物 HIL、ETG 一致性或功能安全。
+
+R2 显式恢复集成增量：`ExplicitRecoveryStatus`、`ExplicitRecoveryResult` 与
+`ExplicitRecoveryFault` 以固定大小枚举无损包装 `request_state`、`rescan` 和
+`reconfigure_slave` 的原始状态、结果和错误，并提供 kind、稳定 sequence、粗粒度 phase、generation、
+绝对 deadline、可选 position/station 与精确 fault 投影。`ExplicitRecoveryDiagnostics<N>` 使用固定
+SPSC 环和每类最后观察值，只在新操作或不同进度、完成、故障变化时记录事件；重复快照不重复发布，
+环满增加 lost counter 且不触碰协议状态。核心测试冻结 Rescan > Reconfigure Slave > State Request
+优先级，Linux 混合仿真继续证明 LRW/FRMW 先行、单控制槽、跨周期不重发、deadline 报告和 lifecycle
+不越权。该层只观察，不拥有请求、自动重试、重扫、重配置或返回 OP；目标 WCET/jitter、物理响应来源、
+真实从站互操作、长时间运行、实物 HIL、ETG 一致性与功能安全资格仍未完成。
 
 R2 ProcBuf 活动命令与反馈闭环增量：`Cia402AxisCommandPolicy` 由产品配置在激活前冻结每轴有符号位置/速度/转矩比例、位置偏置、SI 机械边界、速度/转矩上限和每周期位置步长。`prepare_cia402_command` 对 ABI-v7 Command page 重做结构、到期时间、轴掩码、模式和完整 permit 身份检查，在局部固定数组内完成最近整数目标量化与向下取整限幅；任何非有限值、错误策略、越界或 raw 溢出均在触碰 guard、Domain、帧池和端口前返回轴定位错误。`StopCycleContext` 的直接、调度和统一生产服务 ProcBuf 入口在执行边界重新比对当前周期 permit，握手阶段不写目标，Switched On 使能边沿写已验证实际反馈，Operation Enabled 后才写期望目标，并复用现有活动帧的可写覆盖、别名、限幅、构帧、TX 和同周期停机回退事务。完成 RX 后，`cia402_feedback_to_procbuf` 用同一轴策略事务化反向换算实际值，发布 Statusword、模式、PDS 状态、错误码和字段质量；无效输入保留旧值但清质量，Controlword 只跟随端口接受帧。Linux 模拟端口已覆盖 ProcBuf 发布/读取、permit rearm、双向 SI 换算、实际值保持、期望 PDO、WKC 失效保留、活动/回退/失败 TX Controlword 和拒绝不变性；该证据不提供产品策略生成、真实驱动响应、制动/机械适用性、目标 WCET 或安全资格。
 

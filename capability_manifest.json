@@ -31,11 +31,12 @@
     {
       "id": "ethercat_explicit_recovery",
       "status": "partial",
-      "scope": "REC-001 control-plane recovery with implemented allocation-free request_state, explicit rescan and single-slave reconfigure_slave operations: stable handles, legal multi-step runtime ESM traversal, transactional retained-plan PREOP rescanning, target-only evidence invalidation, bounded OpOnly disable plus direct PREOP, exact PDO/watchdog/SM-FMMU/target-DC configuration sequencing, operation-wide absolute deadlines, fixed-priority production scheduling after cyclic Domain/DC work, no in-flight retransmission, typed latched faults, and fail-closed topology lifecycle gating",
+      "scope": "REC-001 control-plane recovery with implemented allocation-free request_state, explicit rescan and single-slave reconfigure_slave operations: stable handles, legal multi-step runtime ESM traversal, transactional retained-plan PREOP rescanning, target-only evidence invalidation, bounded OpOnly disable plus direct PREOP, exact PDO/watchdog/SM-FMMU/target-DC configuration sequencing, operation-wide absolute deadlines, fixed-priority production scheduling after cyclic Domain/DC work, no in-flight retransmission, unified immutable status/result/fault projections, deduplicated fixed-capacity diagnostic events, typed latched faults, mixed recovery priority evidence, and fail-closed topology lifecycle gating",
       "evidence": [
         "crates/esop-ethercat-core/src/state_request.rs",
         "crates/esop-ethercat-core/src/rescan.rs",
         "crates/esop-ethercat-core/src/reconfigure.rs",
+        "crates/esop-ethercat-core/src/recovery.rs",
         "crates/esop-ethercat-core/src/startup.rs",
         "crates/esop-ethercat-core/src/production_service.rs",
         "crates/esop-product-config/src/lib.rs",
@@ -46,9 +47,10 @@
         "docs/esop-software-prd.md",
         ".trellis/spec/backend/ethercat-state-requests.md",
         ".trellis/spec/backend/ethercat-rescan.md",
-        ".trellis/spec/backend/ethercat-reconfiguration.md"
+        ".trellis/spec/backend/ethercat-reconfiguration.md",
+        ".trellis/spec/backend/ethercat-recovery-integration.md"
       ],
-      "limitation": "Explicit request_state, retained-plan PREOP rescan and target-isolated single-slave PREOP reconfiguration are implemented. A unified recovery API and mixed recovery-load qualification remain planned; ordinary runtime state changes still reject profiles with non-empty OpOnly output rules, while reconfiguration alone owns the bounded disable sequence. Rescan does not resize the process image or reconfigure PDO/DC, and reconfiguration does not resize it or return SAFEOP/OP. Deterministic software tests do not prove physical response provenance, real-slave interoperability, target WCET/jitter, long-duration behavior, HIL, ETG conformance, safe outputs, STO, or functional-safety qualification; automatic retry, automatic rescan and automatic OP return remain disabled"
+      "limitation": "Explicit request_state, retained-plan PREOP rescan, target-isolated single-slave PREOP reconfiguration, unified immutable observation, fixed-capacity diagnostic events and deterministic mixed-priority cyclic-load evidence are implemented. Ordinary runtime state changes still reject profiles with non-empty OpOnly output rules, while reconfiguration alone owns the bounded disable sequence. Rescan does not resize the process image or reconfigure PDO/DC, and reconfiguration does not resize it or return SAFEOP/OP. Deterministic software tests do not prove physical response provenance, real-slave interoperability, target WCET/jitter, long-duration behavior, HIL, ETG conformance, safe outputs, STO, or functional-safety qualification; automatic retry, automatic rescan and automatic OP return remain disabled"
     },
     {
       "id": "ethercat_domain_wkc_qualification",

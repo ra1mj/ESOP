@@ -79,6 +79,15 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   non-target DC reference, restore OP, retry automatically, or infer motion
   permission from PREOP completion. Follow
   [EtherCAT Single-Slave Reconfiguration](./ethercat-reconfiguration.md).
+- Project explicit recovery observation through `ExplicitRecoveryStatus`,
+  `ExplicitRecoveryResult`, and `ExplicitRecoveryFault` rather than defining a
+  second controller or locally flattening child errors. Feed immutable status
+  snapshots to `ExplicitRecoveryDiagnostics`; repeated snapshots must not
+  duplicate events, overflow must remain non-blocking and observable, and
+  diagnostics must never submit, retry, or complete protocol work. Preserve
+  Rescan, Reconfigure Slave, then State Request priority after cyclic Domain/DC
+  work and the single in-flight control owner. Follow
+  [EtherCAT Recovery Integration](./ethercat-recovery-integration.md).
 - Decode ESC base registers at their protocol widths from one exact bounded
   block. Type/revision are bytes, build is little-endian `u16`, RAM and port
   descriptor are separate bytes, and Features Supported is its own `u16`.

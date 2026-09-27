@@ -386,8 +386,13 @@ Topology lifecycle gate；重配置活动/锁存故障同样关闭该 gate。重
 evidence，重配置完成只恢复目标 PREOP/configured evidence；两者都不会绕过 drive、DC、
 Domain、command age、CiA 402 或 motion permit 门槛，也不会自动重试、重扫或回到 OP。带非空
 `OpOnly` 输出规则的普通运行时状态变更继续拒绝；有界 OpOnly 顺序当前只由重配置协调器拥有。
-统一恢复 API、混合恢复负载、目标 WCET 与实物 HIL 仍未完成，因此
-REC-001 保持部分实现。
+统一恢复观察层现以 `ExplicitRecoveryStatus`、`ExplicitRecoveryResult` 和
+`ExplicitRecoveryFault` 无损包装三类权威状态，并通过固定容量
+`ExplicitRecoveryDiagnostics` 对 Submitted/Progress/Completed/Faulted 变化去重记录，环满只增加
+丢失计数。核心优先级测试与 Linux 混合负载仿真覆盖 Rescan > Reconfigure Slave > State Request、
+LRW/FRMW 先行、单控制槽、跨周期不重发及周期 deadline 报告。该层仅观察，不提交请求、修改 retained
+证据或恢复 lifecycle gate。目标 WCET/jitter、物理响应来源、真实从站互操作、长时间运行、实物 HIL
+与 ETG 一致性仍未完成，因此 REC-001 保持部分实现。
 
 ### 5.9 能力声明与一致性边界
 
