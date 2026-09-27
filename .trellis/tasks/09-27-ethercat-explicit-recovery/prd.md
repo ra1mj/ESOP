@@ -80,22 +80,33 @@ instead of hiding failures behind automatic retries.
 
 ## Acceptance Criteria
 
-- [ ] All four child deliverables are completed and archived with focused unit
+- [x] All four child deliverables are completed and archived with focused unit
       and Linux simulation coverage.
-- [ ] `request_state`, `rescan`, and `reconfigure_slave` are explicit bounded
+- [x] `request_state`, `rescan`, and `reconfigure_slave` are explicit bounded
       control-plane operations with typed progress and terminal results.
-- [ ] Tests prove recovery work is scheduled after the cyclic Domain/DC path,
+- [x] Tests prove recovery work is scheduled after the cyclic Domain/DC path,
       consumes bounded control capacity, and does not restart or replace PDO
       processing implicitly.
-- [ ] Tests prove lifecycle/configuration evidence is revoked before recovery
+- [x] Tests prove lifecycle/configuration evidence is revoked before recovery
       can invalidate motion readiness and is restored only by existing verified
       gates.
-- [ ] Automatic recovery and automatic return to OP remain disabled by default.
-- [ ] Requirements, capability manifest, software PRD, and Trellis specs state
+- [x] Automatic recovery and automatic return to OP remain disabled by default.
+- [x] Requirements, capability manifest, software PRD, and Trellis specs state
       the implemented software boundary and remaining hardware qualification
       gaps consistently.
-- [ ] `make ci`, target/no_std checks, focused simulation tests, and exact
+- [x] `make ci`, target/no_std checks, focused simulation tests, and exact
       GitHub Actions for the delivered commit succeed.
+
+## Closeout Evidence
+
+- Archived child tasks cover runtime state requests, explicit rescans,
+  single-slave reconfiguration, and recovery integration/qualification.
+- Delivered software commit `bcb9c9e14bfeabbe32dfc07d0bf0a5a2ba0c7112`
+  passed exact GitHub Actions quality run `36340589505`, including Rust,
+  Zenoh, BPF build, and privileged eBPF runtime qualification jobs.
+- The capability remains `partial`: deterministic software evidence does not
+  claim target WCET/jitter, physical response provenance, real-slave/HIL
+  interoperability, ETG conformance, safe outputs, STO, or functional safety.
 
 ## Out of Scope
 

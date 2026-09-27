@@ -33,16 +33,16 @@ make ci
 
 ## 4. Recovery Integration and Qualification
 
-- [ ] Create and complete child task `ethercat-recovery-integration`.
-- [ ] Unify public status/result snapshots and diagnostic events.
-- [ ] Add mixed cyclic-load ordering and bounded-budget simulations.
-- [ ] Update requirement, capability, PRD, release-boundary, and Trellis spec
+- [x] Create and complete child task `ethercat-recovery-integration`.
+- [x] Unify public status/result snapshots and diagnostic events.
+- [x] Add mixed cyclic-load ordering and bounded-budget simulations.
+- [x] Update requirement, capability, PRD, release-boundary, and Trellis spec
       documentation consistently.
-- [ ] Re-run complete quality gates and exact GitHub Actions.
+- [x] Re-run complete quality gates and exact GitHub Actions.
 
 ## 5. Parent Closeout
 
-- [ ] Review all child acceptance evidence against `REC-001`.
-- [ ] Mark parent acceptance criteria complete without claiming physical timing,
+- [x] Review all child acceptance evidence against `REC-001`.
+- [x] Mark parent acceptance criteria complete without claiming physical timing,
       HIL, ETG conformance, or functional-safety qualification.
-- [ ] Archive the parent task and record final journal evidence.
+- [x] Archive the parent task and record final journal evidence.
