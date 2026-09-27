@@ -1701,3 +1701,37 @@ Added strict product-owned ESC watchdog intent, bounded register write/readback 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 51: Product-owned slave copy plans
+
+**Date**: 2026-09-27
+**Task**: Product-owned slave copy plans
+**Branch**: `main`
+
+### Summary
+
+Added strict generated slave-to-slave copy declarations, fixed-capacity runtime activation and overlap checks, simulator frame/fallback coverage, deterministic artifacts, executable specs, and exact local/remote quality evidence.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `935a009281bdcb7201d9c99fa2e58b8fe71a209d` | (see git log) |
+| `c6195fd4dfff5494e741e8d9e0eeb0eb055e23b9` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

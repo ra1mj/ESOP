@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 50
+- **Total Sessions**: 51
 - **Last Active**: 2026-09-27
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1703 | Active |
+| `journal-1.md` | ~1737 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 51 | 2026-09-27 | Product-owned slave copy plans | `935a009281bdcb7201d9c99fa2e58b8fe71a209d`, `c6195fd4dfff5494e741e8d9e0eeb0eb055e23b9` | `main` |
 | 50 | 2026-09-27 | ESC watchdog configuration and readback | `e7c8e8e7f1189ce273748afcc843f720926df713`, `52c5bc3df09269ffc84f821170b75596e19384ca` | `main` |
 | 49 | 2026-09-27 | SyncManager register bank discovery and clearing | `bacaa05`, `c6dfcaf` | `main` |
 | 48 | 2026-09-27 | FMMU register bank discovery and clearing | `3bba091`, `d866558` | `main` |
