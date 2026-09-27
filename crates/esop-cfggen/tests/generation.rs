@@ -87,6 +87,12 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
         serde_json::from_slice(&fs::read(first.join("device_inventory.json")).unwrap()).unwrap();
     assert_eq!(inventory["devices"][0]["mailbox"]["send_address"], 0x1000);
     assert_eq!(inventory["devices"][0]["mailbox"]["send_capacity"], 64);
+    assert_eq!(inventory["devices"][0]["watchdog"]["divider"], 2500);
+    assert_eq!(
+        inventory["devices"][0]["watchdog"]["process_data_intervals"],
+        100
+    );
+    assert!(inventory["devices"][2].get("watchdog").is_none());
     assert_eq!(
         inventory["devices"][0]["mailbox"]["send_control_byte"],
         0x26
@@ -114,6 +120,12 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
         16
     );
     assert_eq!(product["slaves"][0]["dc"]["required"], true);
+    assert_eq!(product["slaves"][0]["watchdog"]["divider"], 2500);
+    assert_eq!(
+        product["slaves"][0]["watchdog"]["process_data_intervals"],
+        100
+    );
+    assert!(product["slaves"][2].get("watchdog").is_none());
     assert_eq!(product["slaves"][0]["dc"]["reference_clock"], true);
     assert_eq!(product["slaves"][0]["dc"]["op_mode"], "DcSync");
     assert_eq!(product["slaves"][0]["sii_dc_mode"]["name"], "DcSync");
@@ -147,6 +159,11 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(header.contains("uint16_t dc_assign_activate"));
     assert!(header.contains("uint8_t has_dc_sync_timing"));
     assert!(header.contains("uint32_t dc_sync_cycle_time1_ns"));
+    assert!(header.contains("uint8_t has_watchdog"));
+    assert!(header.contains("uint8_t has_watchdog_divider"));
+    assert!(header.contains("uint16_t watchdog_divider"));
+    assert!(header.contains("uint8_t has_process_data_watchdog"));
+    assert!(header.contains("uint16_t process_data_watchdog_intervals"));
     assert!(header.contains("UINT16_C(0x1000), UINT16_C(64), UINT16_C(0x1100), UINT16_C(64)"));
     assert!(header.contains("4u, UINT16_C(0x000f)"));
     assert!(header.contains("2u, {1u, 2u, 0u, 0u"));
@@ -165,6 +182,8 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(rust.contains("assign_activate: 0x0300"));
     assert!(rust.contains("dc_sync_timing: Some(DcSyncTiming"));
     assert!(rust.contains("cycle_time1_ns: 0"));
+    assert!(rust.contains("watchdog: Some(EscWatchdogConfig::new(Some(2500), Some(100)))"));
+    assert!(rust.contains("watchdog: None"));
 
     fixture.edit_product(|_| {});
     let xml = fs::read_to_string(&fixture.esi).unwrap();
@@ -178,6 +197,68 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
 
     assert_eq!(first_summary.config_sha256, second_summary.config_sha256);
     assert_eq!(artifact_bytes(&first), artifact_bytes(&second));
+}
+
+#[test]
+fn watchdog_policy_hashes_and_invalid_declarations_are_strict() {
+    let fixture = Fixture::new();
+    let baseline = generate(&fixture.product, &fixture.output("watchdog-baseline")).unwrap();
+    fixture.edit_product(|product| {
+        product["slaves"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("watchdog");
+        product["slaves"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("watchdog");
+    });
+    let changed = generate(&fixture.product, &fixture.output("watchdog-absent")).unwrap();
+    assert_ne!(baseline.config_sha256, changed.config_sha256);
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        product["slaves"][0]["watchdog"] = serde_json::json!({});
+    });
+    assert!(
+        generate(&fixture.product, &fixture.output("watchdog-empty"))
+            .unwrap_err()
+            .to_string()
+            .contains("invalid watchdog configuration: Empty")
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        product["slaves"][0]["watchdog"] = serde_json::json!({ "divider": 0 });
+    });
+    assert!(
+        generate(&fixture.product, &fixture.output("watchdog-zero-divider"))
+            .unwrap_err()
+            .to_string()
+            .contains("ZeroDivider")
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        product["slaves"][0]["watchdog"] = serde_json::json!({ "process_data_intervals": 0 });
+    });
+    assert!(
+        generate(&fixture.product, &fixture.output("watchdog-zero-intervals"))
+            .unwrap_err()
+            .to_string()
+            .contains("ZeroProcessDataIntervals")
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        product["slaves"][0]["watchdog"]["unexpected"] = Value::Bool(true);
+    });
+    assert!(
+        generate(&fixture.product, &fixture.output("watchdog-unknown-field"))
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field")
+    );
 }
 
 #[test]

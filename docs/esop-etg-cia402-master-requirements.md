@@ -173,6 +173,11 @@ link up
 | Slave-to-Slave | 按配置由主站复制数据，携带源质量，最大路径不超过两个周期 |
 | Watchdog | 输出、SM 和应用命令时效联合管理；故障动作由产品安全策略决定 |
 
+当前软件配置边界为每从站可选原始 watchdog divider 与 process-data interval：
+按标准 `0x0400/2`、`0x0420/2` 依次写入并独立精确读回，要求 WKC 1，且只在
+完整计划成功后释放 PREOP 配置屏障。未配置字段保留 ESC 默认。原始寄存器值不在
+主站内换算成已资格化时间，真实 timeout 行为、驱动/输出安全动作和物理响应来源仍需 HIL。
+
 ### 4.6 Mailbox 与 CoE
 
 Mailbox 不属于硬实时 PDO，但属于 Class B P0：

@@ -7,7 +7,8 @@ use esop_ethercat_core::{
     DcClockConfig, DcClockController, DcClockProgress, DcCyclicConfig, DcCyclicError, DcCyclicSync,
     DcMonitor, DcSyncConfig, DcSyncController, DcSyncProgress, DcSyncWindowConfig, DcTopology,
     Domain, DomainSegment, ESC_AL_STATUS, ESC_CONFIGURATION, ESC_DC_SYSTEM_DIFF,
-    ESC_DC_SYSTEM_TIME, ESC_FEATURE_DC_SUPPORTED, EscDcRange, EthercatMaster, EthercatPort,
+    ESC_DC_SYSTEM_TIME, ESC_FEATURE_DC_SUPPORTED, ESC_PROCESS_DATA_WATCHDOG_TIME,
+    ESC_WATCHDOG_DIVIDER, EscDcRange, EscWatchdogConfig, EthercatMaster, EthercatPort,
     EthercatState, ExpectedSlave, FMMU_IMAGE_LEN, FmmuRegisterDiscoveryController,
     FmmuRegisterDiscoveryProgress, FramePlan, FramePlanSet, LinkState, MAX_MAILBOX_BYTES,
     MailboxConfig, MailboxController, MailboxError, MailboxHeader, MailboxPhase, MailboxProgress,
@@ -26,7 +27,9 @@ use esop_ethercat_core::{
     ScheduledServiceTxError, ScheduledServiceTxFailure, SlaveIdentity, StartupAction,
     StartupConfig, StartupConfigurationServices, StartupController, StartupPhase, StartupProgress,
     SyncManagerConfig, SyncManagerRegisterDiscoveryController,
-    SyncManagerRegisterDiscoveryProgress, fixed_address,
+    SyncManagerRegisterDiscoveryProgress, WatchdogController, WatchdogControllerConfig,
+    WatchdogError, WatchdogField, WatchdogPhase, WatchdogPlan, WatchdogPlanEntry, WatchdogProgress,
+    fixed_address,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::ethercat::{
@@ -2098,14 +2101,16 @@ fn accept_startup_action(
         .unwrap()
 }
 
-fn drive_startup_to_pdo_barrier(startup: &mut StartupController<2>, expected: &[ExpectedSlave; 1]) {
+fn drive_startup_to_configuration_barrier(
+    startup: &mut StartupController<2>,
+    expected: &[ExpectedSlave; 1],
+    requirements: StartupConfigurationServices,
+) {
     startup
         .start(
             7,
             0,
-            StartupConfig::new(EthercatState::Op).with_configuration_services(
-                StartupConfigurationServices::new().with_pdo_configuration(),
-            ),
+            StartupConfig::new(EthercatState::Op).with_configuration_services(requirements),
             expected,
         )
         .unwrap();
@@ -2167,6 +2172,273 @@ fn drive_startup_to_pdo_barrier(startup: &mut StartupController<2>, expected: &[
 }
 
 #[test]
+fn production_scheduler_programs_watchdog_before_releasing_startup_barrier() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<2, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let expected = [ExpectedSlave {
+        position: 0,
+        station_address: 0x1000,
+        identity: SlaveIdentity {
+            vendor_id: 0x1122_3344,
+            product_code: 0x5566_7788,
+            revision: 0x99AA_BBCC,
+            serial: 0xDDEE_FF00,
+        },
+    }];
+    let mut startup = StartupController::<2>::new(0x1000);
+    drive_startup_to_configuration_barrier(
+        &mut startup,
+        &expected,
+        StartupConfigurationServices::new().with_watchdog_configuration(),
+    );
+    let mut plan = WatchdogPlan::<2>::new();
+    plan.push(WatchdogPlanEntry {
+        position: 0,
+        station_address: 0x1000,
+        config: EscWatchdogConfig::new(Some(2500), Some(100)),
+    })
+    .unwrap();
+    let mut watchdog = WatchdogController::new();
+    watchdog
+        .start(
+            WatchdogControllerConfig {
+                timeout_ns: 1_000_000,
+                request_timeout_ns: 50_000,
+            },
+            &plan,
+            41,
+            90_000,
+        )
+        .unwrap();
+    let mut scheduler = ScheduledProductionServiceScheduler::new();
+    let mut controls = ControlRequestPool::<1>::new();
+    let mut port = TwoFrameSimPort::new();
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut dc_image = [0; 8];
+
+    for action_index in 0..4u16 {
+        let now_ns = 100_000 + u64::from(action_index) * 100_000;
+        port.set_now_ns(now_ns);
+        if action_index == 1 {
+            port.set_next_control_response(
+                fixed_address(0x1000, ESC_WATCHDOG_DIVIDER),
+                &2500u16.to_le_bytes(),
+            );
+        } else if action_index == 3 {
+            port.set_next_control_response(
+                fixed_address(0x1000, ESC_PROCESS_DATA_WATCHDOG_TIME),
+                &100u16.to_le_bytes(),
+            );
+        }
+        let report = scheduler
+            .run_cycle(
+                &mut bank,
+                &mut master,
+                &mut port,
+                &mut scratch,
+                &mut dc,
+                &mut dc_image,
+                now_ns,
+                &mut controls,
+                &mut ScheduledProductionServices::<2, 0, 0>::new(
+                    Some(&mut startup),
+                    None,
+                    None,
+                    None,
+                )
+                .with_watchdog_configuration(&mut watchdog),
+                action_index + 1,
+                now_ns + 50_000,
+                now_ns + 50_000,
+            )
+            .unwrap();
+        assert_eq!(
+            report.selected(),
+            ScheduledProductionServiceKind::WatchdogConfiguration
+        );
+        let expected_progress = if action_index == 3 {
+            WatchdogProgress::Complete
+        } else {
+            WatchdogProgress::Advanced
+        };
+        assert_eq!(
+            report.progress(),
+            ScheduledProductionServiceProgress::WatchdogConfiguration(expected_progress)
+        );
+        assert_eq!(report.service_ready(), action_index == 3);
+        assert_eq!(
+            report.startup_phase(),
+            Some(StartupPhase::AwaitingConfiguration)
+        );
+        assert_eq!(
+            watchdog.programmed_slaves().len(),
+            usize::from(action_index == 3)
+        );
+        assert_eq!(controls.in_use(), 0);
+    }
+
+    port.set_now_ns(500_000);
+    let released = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            500_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<2, 0, 0>::new(Some(&mut startup), None, None, None)
+                .with_watchdog_configuration(&mut watchdog),
+            5,
+            550_000,
+            550_000,
+        )
+        .unwrap();
+    assert_eq!(released.selected(), ScheduledProductionServiceKind::Startup);
+    assert_eq!(startup.phase(), StartupPhase::TransitioningAl);
+    assert_eq!(watchdog.phase(), WatchdogPhase::Complete);
+    assert_eq!(watchdog.completed_action_count(), 4);
+}
+
+#[test]
+fn production_scheduler_latches_watchdog_readback_fault() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<1, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 1,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<1, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let mut plan = WatchdogPlan::<1>::new();
+    plan.push(WatchdogPlanEntry {
+        position: 0,
+        station_address: 0x1000,
+        config: EscWatchdogConfig::new(Some(2500), None),
+    })
+    .unwrap();
+    let mut watchdog = WatchdogController::new();
+    watchdog
+        .start(
+            WatchdogControllerConfig {
+                timeout_ns: 1_000_000,
+                request_timeout_ns: 50_000,
+            },
+            &plan,
+            41,
+            90_000,
+        )
+        .unwrap();
+    let mut scheduler = ScheduledProductionServiceScheduler::new();
+    let mut controls = ControlRequestPool::<1>::new();
+    let mut port = TwoFrameSimPort::new();
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut dc_image = [0; 8];
+
+    for (cycle, response) in [None, Some(2501u16.to_le_bytes())].into_iter().enumerate() {
+        let now_ns = 100_000 + cycle as u64 * 100_000;
+        port.set_now_ns(now_ns);
+        if let Some(response) = response {
+            port.set_next_control_response(fixed_address(0x1000, ESC_WATCHDOG_DIVIDER), &response);
+        }
+        let report = scheduler
+            .run_cycle(
+                &mut bank,
+                &mut master,
+                &mut port,
+                &mut scratch,
+                &mut dc,
+                &mut dc_image,
+                now_ns,
+                &mut controls,
+                &mut ScheduledProductionServices::<1, 0, 0>::new(None, None, None, None)
+                    .with_watchdog_configuration(&mut watchdog),
+                cycle as u16 + 1,
+                now_ns + 50_000,
+                now_ns + 50_000,
+            )
+            .unwrap();
+        if cycle == 1 {
+            assert_eq!(
+                report.fault(),
+                Some(ScheduledProductionServiceFault::WatchdogConfiguration(
+                    WatchdogError::ReadbackMismatch {
+                        position: 0,
+                        field: WatchdogField::Divider,
+                        expected: 2500,
+                        actual: 2501,
+                    }
+                ))
+            );
+            assert!(!report.service_ready());
+        }
+    }
+
+    assert_eq!(watchdog.phase(), WatchdogPhase::Faulted);
+    assert!(watchdog.programmed_slaves().is_empty());
+    assert_eq!(controls.in_use(), 0);
+}
+
+#[test]
 fn production_scheduler_runs_pdo_batch_then_releases_startup_through_safeop_to_op() {
     let schedule = ScheduleTable::<1, 1>::build(
         100_000,
@@ -2214,7 +2486,11 @@ fn production_scheduler_runs_pdo_batch_then_releases_startup_through_safeop_to_o
         identity,
     }];
     let mut startup = StartupController::<2>::new(0x1000);
-    drive_startup_to_pdo_barrier(&mut startup, &expected);
+    drive_startup_to_configuration_barrier(
+        &mut startup,
+        &expected,
+        StartupConfigurationServices::new().with_pdo_configuration(),
+    );
     let mailbox_config = MailboxConfig::new(0x1000, 32, 0x1100, 32);
     let mut first_plan = PdoConfigPlan::<1>::new();
     first_plan

@@ -1,0 +1,629 @@
+{
+  "axes": [
+    {
+      "index": 0,
+      "mode": "csp",
+      "mode_raw": 8,
+      "name": "left_joint",
+      "policy": {
+        "max_position_radians": 3.141592653589793,
+        "max_position_step_radians": 0.02,
+        "max_torque_newton_metres": 100.0,
+        "max_velocity_radians_per_second": 10.0,
+        "min_position_radians": -3.141592653589793,
+        "position_offset": 0,
+        "position_units_per_radian": 100000.0,
+        "torque_units_per_newton_metre": 100.0,
+        "velocity_units_per_radian_per_second": 1000.0
+      },
+      "slave": "drive_left",
+      "slave_position": 0
+    },
+    {
+      "index": 1,
+      "mode": "csp",
+      "mode_raw": 8,
+      "name": "right_joint",
+      "policy": {
+        "max_position_radians": 3.141592653589793,
+        "max_position_step_radians": 0.02,
+        "max_torque_newton_metres": 100.0,
+        "max_velocity_radians_per_second": 10.0,
+        "min_position_radians": -3.141592653589793,
+        "position_offset": 0,
+        "position_units_per_radian": -100000.0,
+        "torque_units_per_newton_metre": -100.0,
+        "velocity_units_per_radian_per_second": -1000.0
+      },
+      "slave": "drive_right",
+      "slave_position": 1
+    }
+  ],
+  "capacities": {
+    "max_datagrams_per_domain": 2,
+    "max_frames_per_domain": 2,
+    "max_pdo_entries_per_domain": 64,
+    "max_process_image_bytes": 128,
+    "max_schedule_slots": 16
+  },
+  "config_sha256": "b95690490cc4f8e5a6ac769bd5f65e677f3d509abcfa70e8019a2c046e834514",
+  "cycle": {
+    "base_period_ns": 1000000,
+    "deadline_ns": 800000
+  },
+  "cycle_metrics": {
+    "copy_bytes_per_cycle": 20,
+    "expected_wkc": 6,
+    "frame_count": 2,
+    "pdo_bytes_per_cycle": 36,
+    "wire_bytes_per_cycle": 180
+  },
+  "datagrams": [
+    {
+      "command": "lwr",
+      "command_code": 11,
+      "domain_id": 0,
+      "domain_offset": 0,
+      "expected_wkc": 2,
+      "index": 0,
+      "input": false,
+      "logical_address": "0x00001000",
+      "payload_len": 14,
+      "process_image_offset": 0
+    },
+    {
+      "command": "lrd",
+      "command_code": 10,
+      "domain_id": 0,
+      "domain_offset": 14,
+      "expected_wkc": 2,
+      "index": 1,
+      "input": true,
+      "logical_address": "0x0000100e",
+      "payload_len": 18,
+      "process_image_offset": 14
+    },
+    {
+      "command": "lwr",
+      "command_code": 11,
+      "domain_id": 1,
+      "domain_offset": 0,
+      "expected_wkc": 1,
+      "index": 2,
+      "input": false,
+      "logical_address": "0x00001100",
+      "payload_len": 2,
+      "process_image_offset": 64
+    },
+    {
+      "command": "lrd",
+      "command_code": 10,
+      "domain_id": 1,
+      "domain_offset": 2,
+      "expected_wkc": 1,
+      "index": 3,
+      "input": true,
+      "logical_address": "0x00001102",
+      "payload_len": 2,
+      "process_image_offset": 66
+    }
+  ],
+  "domains": [
+    {
+      "datagram_count": 2,
+      "expected_wkc": 4,
+      "frames": [
+        {
+          "datagram_indices": [
+            0,
+            1
+          ],
+          "index": 0,
+          "wire_bytes": 96
+        }
+      ],
+      "id": 0,
+      "input_bytes": 18,
+      "input_expected_wkc": 2,
+      "logical_address": "0x00001000",
+      "name": "motion",
+      "output_bytes": 14,
+      "pdo_count": 14,
+      "period_ticks": 1,
+      "phase_ticks": 0,
+      "process_image_bytes": 32,
+      "process_image_offset": 0
+    },
+    {
+      "datagram_count": 2,
+      "expected_wkc": 2,
+      "frames": [
+        {
+          "datagram_indices": [
+            2,
+            3
+          ],
+          "index": 0,
+          "wire_bytes": 84
+        }
+      ],
+      "id": 1,
+      "input_bytes": 2,
+      "input_expected_wkc": 1,
+      "logical_address": "0x00001100",
+      "name": "io",
+      "output_bytes": 2,
+      "pdo_count": 2,
+      "period_ticks": 4,
+      "phase_ticks": 0,
+      "process_image_bytes": 4,
+      "process_image_offset": 64
+    }
+  ],
+  "pdo_entries": [
+    {
+      "assignment_index": "0x1600",
+      "bit_length": 16,
+      "bit_offset": 0,
+      "direction": "rx",
+      "domain_id": 0,
+      "name": "Controlword",
+      "object_index": "0x6040",
+      "signed": false,
+      "slave_position": 0,
+      "subindex": 0,
+      "sync_manager": 2
+    },
+    {
+      "assignment_index": "0x1600",
+      "bit_length": 8,
+      "bit_offset": 16,
+      "direction": "rx",
+      "domain_id": 0,
+      "name": "Mode of operation",
+      "object_index": "0x6060",
+      "signed": true,
+      "slave_position": 0,
+      "subindex": 0,
+      "sync_manager": 2
+    },
+    {
+      "assignment_index": "0x1600",
+      "bit_length": 32,
+      "bit_offset": 24,
+      "direction": "rx",
+      "domain_id": 0,
+      "name": "Target position",
+      "object_index": "0x607a",
+      "signed": true,
+      "slave_position": 0,
+      "subindex": 0,
+      "sync_manager": 2
+    },
+    {
+      "assignment_index": "0x1600",
+      "bit_length": 16,
+      "bit_offset": 56,
+      "direction": "rx",
+      "domain_id": 0,
+      "name": "Controlword",
+      "object_index": "0x6040",
+      "signed": false,
+      "slave_position": 1,
+      "subindex": 0,
+      "sync_manager": 2
+    },
+    {
+      "assignment_index": "0x1600",
+      "bit_length": 8,
+      "bit_offset": 72,
+      "direction": "rx",
+      "domain_id": 0,
+      "name": "Mode of operation",
+      "object_index": "0x6060",
+      "signed": true,
+      "slave_position": 1,
+      "subindex": 0,
+      "sync_manager": 2
+    },
+    {
+      "assignment_index": "0x1600",
+      "bit_length": 32,
+      "bit_offset": 80,
+      "direction": "rx",
+      "domain_id": 0,
+      "name": "Target position",
+      "object_index": "0x607a",
+      "signed": true,
+      "slave_position": 1,
+      "subindex": 0,
+      "sync_manager": 2
+    },
+    {
+      "assignment_index": "0x1a00",
+      "bit_length": 16,
+      "bit_offset": 112,
+      "direction": "tx",
+      "domain_id": 0,
+      "name": "Statusword",
+      "object_index": "0x6041",
+      "signed": false,
+      "slave_position": 0,
+      "subindex": 0,
+      "sync_manager": 3
+    },
+    {
+      "assignment_index": "0x1a00",
+      "bit_length": 8,
+      "bit_offset": 128,
+      "direction": "tx",
+      "domain_id": 0,
+      "name": "Mode display",
+      "object_index": "0x6061",
+      "signed": true,
+      "slave_position": 0,
+      "subindex": 0,
+      "sync_manager": 3
+    },
+    {
+      "assignment_index": "0x1a00",
+      "bit_length": 16,
+      "bit_offset": 136,
+      "direction": "tx",
+      "domain_id": 0,
+      "name": "Error code",
+      "object_index": "0x603f",
+      "signed": false,
+      "slave_position": 0,
+      "subindex": 0,
+      "sync_manager": 3
+    },
+    {
+      "assignment_index": "0x1a00",
+      "bit_length": 32,
+      "bit_offset": 152,
+      "direction": "tx",
+      "domain_id": 0,
+      "name": "Actual position",
+      "object_index": "0x6064",
+      "signed": true,
+      "slave_position": 0,
+      "subindex": 0,
+      "sync_manager": 3
+    },
+    {
+      "assignment_index": "0x1a00",
+      "bit_length": 16,
+      "bit_offset": 184,
+      "direction": "tx",
+      "domain_id": 0,
+      "name": "Statusword",
+      "object_index": "0x6041",
+      "signed": false,
+      "slave_position": 1,
+      "subindex": 0,
+      "sync_manager": 3
+    },
+    {
+      "assignment_index": "0x1a00",
+      "bit_length": 8,
+      "bit_offset": 200,
+      "direction": "tx",
+      "domain_id": 0,
+      "name": "Mode display",
+      "object_index": "0x6061",
+      "signed": true,
+      "slave_position": 1,
+      "subindex": 0,
+      "sync_manager": 3
+    },
+    {
+      "assignment_index": "0x1a00",
+      "bit_length": 16,
+      "bit_offset": 208,
+      "direction": "tx",
+      "domain_id": 0,
+      "name": "Error code",
+      "object_index": "0x603f",
+      "signed": false,
+      "slave_position": 1,
+      "subindex": 0,
+      "sync_manager": 3
+    },
+    {
+      "assignment_index": "0x1a00",
+      "bit_length": 32,
+      "bit_offset": 224,
+      "direction": "tx",
+      "domain_id": 0,
+      "name": "Actual position",
+      "object_index": "0x6064",
+      "signed": true,
+      "slave_position": 1,
+      "subindex": 0,
+      "sync_manager": 3
+    },
+    {
+      "assignment_index": "0x1601",
+      "bit_length": 16,
+      "bit_offset": 0,
+      "direction": "rx",
+      "domain_id": 1,
+      "name": "Outputs",
+      "object_index": "0x7000",
+      "signed": false,
+      "slave_position": 2,
+      "subindex": 1,
+      "sync_manager": 2
+    },
+    {
+      "assignment_index": "0x1a01",
+      "bit_length": 16,
+      "bit_offset": 16,
+      "direction": "tx",
+      "domain_id": 1,
+      "name": "Inputs",
+      "object_index": "0x6000",
+      "signed": false,
+      "slave_position": 2,
+      "subindex": 1,
+      "sync_manager": 3
+    }
+  ],
+  "product": {
+    "name": "ESOP dual-axis simulator",
+    "policy_version": 1,
+    "robot_id": "0x000000000000e502"
+  },
+  "schedule": {
+    "base_tick_ns": 1000000,
+    "due_masks": [
+      "0x0000000000000003",
+      "0x0000000000000001",
+      "0x0000000000000001",
+      "0x0000000000000001"
+    ],
+    "hyperperiod_ticks": 4
+  },
+  "schema_version": "esop.product-config.v1",
+  "slaves": [
+    {
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": true,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP simulated CiA 402 drive",
+      "esi_label": "esop-sim-drive-v1",
+      "esi_semantic_sha256": "a5c7fc9893a2ea944640a5a72d6107a3dd9e5aa886a9de6a3524658db6718f05",
+      "esi_type_name": "ESOP-SIM-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38
+      },
+      "name": "drive_left",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 0,
+      "product_code": "0x00004020",
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "serial": "0x00000001",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "description": "One millisecond distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 2,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1001",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": false,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP simulated CiA 402 drive",
+      "esi_label": "esop-sim-drive-v1",
+      "esi_semantic_sha256": "a5c7fc9893a2ea944640a5a72d6107a3dd9e5aa886a9de6a3524658db6718f05",
+      "esi_type_name": "ESOP-SIM-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38
+      },
+      "name": "drive_right",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 1,
+      "product_code": "0x00004020",
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "serial": "0x00000002",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "description": "One millisecond distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 2,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1002",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "dc": {
+        "op_mode": null,
+        "reference_clock": false,
+        "required": false
+      },
+      "dc_sync_timing": null,
+      "domain_id": 1,
+      "esi_device_name": "ESOP simulated digital IO",
+      "esi_label": "esop-sim-io-v1",
+      "esi_semantic_sha256": "21cccfa968e3997b5bf29cfa65c229300a767033ab0719c3626eddd5e4125c40",
+      "esi_type_name": "ESOP-SIM-IO",
+      "kind": "ethercat_io",
+      "mailbox": {
+        "receive_address": 4864,
+        "receive_capacity": 32,
+        "receive_control_byte": 34,
+        "send_address": 4608,
+        "send_capacity": 32,
+        "send_control_byte": 38
+      },
+      "name": "io_block",
+      "op_only_outputs": [],
+      "position": 2,
+      "product_code": "0x00007010",
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1601"
+      ],
+      "serial": null,
+      "sii_dc_mode": null,
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 2,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1003",
+      "transition_timeouts": {
+        "back_to_init_ns": 5000000000,
+        "back_to_safeop_ns": 200000000,
+        "preop_ns": 3000000000,
+        "safeop_to_op_ns": 10000000000
+      },
+      "tx_pdos": [
+        "0x1a01"
+      ],
+      "vendor_id": "0x0000e500"
+    }
+  ]
+}

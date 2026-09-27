@@ -38,6 +38,7 @@ mod slave;
 mod slave_copy;
 mod startup;
 mod sync_manager_discovery;
+mod watchdog;
 pub mod wire;
 
 pub use al::{
@@ -199,4 +200,10 @@ pub use sync_manager_discovery::{
     SyncManagerRegisterBank, SyncManagerRegisterDescriptor, SyncManagerRegisterDiscoveryAction,
     SyncManagerRegisterDiscoveryController, SyncManagerRegisterDiscoveryError,
     SyncManagerRegisterDiscoveryPhase, SyncManagerRegisterDiscoveryProgress,
+};
+pub use watchdog::{
+    ESC_PROCESS_DATA_WATCHDOG_TIME, ESC_WATCHDOG_DIVIDER, ESC_WATCHDOG_REGISTER_LEN,
+    EscWatchdogConfig, EscWatchdogConfigError, WatchdogAction, WatchdogController,
+    WatchdogControllerConfig, WatchdogError, WatchdogField, WatchdogPhase, WatchdogPlan,
+    WatchdogPlanEntry, WatchdogPlanError, WatchdogProgrammedSlave, WatchdogProgress,
 };

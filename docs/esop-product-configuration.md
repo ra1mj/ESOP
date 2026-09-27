@@ -41,6 +41,9 @@ CI 重新生成相同示例、校验产品化构建报告，并上传六个生�
 - 每从站可选严格 `dc` 对象：`required` 表示必须确认 System Time 能力，
   `reference_clock` 表示该从站是唯一参考钟且隐含 `required=true`，`op_mode`
   为 DC-required 从站显式选择一个 ESI `Device/Dc/OpMode`；非 DC 从站不得选择模式；
+- 每从站可选严格 `watchdog` 对象：`divider` 和 `process_data_intervals` 为
+  独立可选的非零原始 `u16`；对象至少包含一项，缺失对象或字段表示保留对应
+  ESC 默认值且不发写请求；
 - CiA 402 轴、CSP/CSV/CST 模式、带方向的 SI/raw 缩放、机械范围和每周期限幅。
 
 十六进制身份字段必须使用 `0x` 前缀。进入生成 C 字符串的名称/label 最长
@@ -91,7 +94,9 @@ index/subindex/bit length/DataType。未提供 timeout 时使用版本化的 ETG
 16 项有序数组，以及 SyncManager 数量与 enabled mask，
 ESI inventory 保留两侧 control byte。ESI mailbox、timeout profile、`OpOnly` mask 及
 activation template、FMMU usage 顺序参与 ESI semantic hash 和配置 SHA-256；显式 DC policy 属于产品
-语义，只参与配置 SHA-256，不反向改写 ESI 内容 hash。配置 SHA-256 只依赖规范化产品语义和排序后的 ESI 语义内容，不依赖 JSON
+语义，只参与配置 SHA-256，不反向改写 ESI 内容 hash。可选 watchdog 原始值同样属于
+产品语义，并在 normalized JSON、inventory、C presence/value 字段和 Rust
+`Option<EscWatchdogConfig>` 中保持精确一致。配置 SHA-256 只依赖规范化产品语义和排序后的 ESI 语义内容，不依赖 JSON
 键顺序、XML 排版、输入/输出路径、主机或当前时间。同一语义输入必须生成
 逐字节相同的六个文件。
 
@@ -112,7 +117,9 @@ ProcBuf。激活按以下顺序 fail-closed：
 5. 通过既有 API 生成多速率 schedule 与每 Domain `FramePlanSet`；
 6. 逐轴校验连续索引、驱动归属、冻结策略和选定模式的 `Cia402PdoMap`。
 
-`PRODUCT_CONFIG.dc_sync_plan()` 和 `startup_profiles()` 会在任何 Startup 动作发出前校验每个从站的
+`PRODUCT_CONFIG.watchdog_plan()`、`dc_sync_plan()` 和 `startup_profiles()` 会在任何 Startup 动作发出前校验每个从站的
+watchdog 对象非空、所有已配置值非零，并按生成从站顺序冻结 position、station address 和原始值；
+完全未配置的产品得到空计划，不产生 ESC 请求。随后运行时校验每个从站的
 DC reference 必须同时 required、全产品最多一个 reference、DC-required 从站必须且只有一个模式期望、非 DC 从站不得携带模式期望、timeout 非零、position 一一对应、生成邮箱范围有效、SII FMMU count 不超过 16、SyncManager count/enabled
 mask 有界、`OpOnly` mask/flag 有效，并要求每个 `OpOnly` SyncManager 只关联所选
 RxPDO、每个 PDO 分组连续。运行时还按所有 RxPDO group 后所有 TxPDO group 的确定性顺序
@@ -155,13 +162,20 @@ count，并返回固定站地址。核心 `PdoConfigController` 对每个写值�
 动作、超时和 mismatch 均沿类型化故障路径 fail-closed。调用方可通过
 `ScheduledPdoConfiguration` 把该控制器、`MailboxController` 和运行期
 `MailboxConfig` 绑定到 `ScheduledProductionServiceScheduler`；配置屏障内调度器按
-PDO Configuration、Mapping、DC Clock Configuration、DC SYNC Configuration、legacy DC Configuration、Startup 的固定顺序，
+PDO Configuration、Watchdog Configuration、Mapping、DC Clock Configuration、DC SYNC Configuration、legacy DC Configuration、Startup 的固定顺序，
 把每笔 CoE 请求交给现有邮箱/DC/共享 RX 路径，并在精确 upload 回读完成后才
 放行 Configuration/CoE 生命周期门。调用方可在 `StartupConfig` 中冻结所需的
-PDO Configuration、Mapping、DC Clock Configuration、DC SYNC Configuration 和 legacy DC Configuration 集合：所有期望从站先确认
+PDO Configuration、Watchdog Configuration、Mapping、DC Clock Configuration、DC SYNC Configuration 和 legacy DC Configuration 集合：所有期望从站先确认
 PREOP，Startup 进入 `AwaitingConfiguration` 后只向这些服务让出优先级；调度器
 仅在所有必需控制器真实进入 `Complete` 后释放屏障，并复用已验证从站表逐站经过
 SAFEOP 到最终 SAFEOP/OP，不重新扫描或读取 SII。
+
+`WatchdogController` 对计划中每个已配置字段先执行固定地址两字节小端写入，
+再独立读取同一标准寄存器并精确比较：divider 使用 `0x0400/2`，process-data
+intervals 使用 `0x0420/2`。每个动作要求 WKC 1、精确长度、generation/action/
+control-pool 所有权和同一绝对配置 deadline；任一失败锁存首个类型化错误，
+清空公开证据并阻止 PREOP 屏障释放。已被 ESC 接受的早期写入不声明回滚，
+恢复必须显式重启控制器。
 
 产品默认调用 `build_generated_pdo_configuration_batch::<JOBS, OPS>()`，直接使用每个
 `ProductSlaveConfig` 中由 ESI 生成并校验的 `MailboxConfig`。原有 position-keyed
@@ -213,7 +227,7 @@ make build-report \
 ## 7. 资格边界
 
 配置生成证明的是输入合同、静态布局和软件规划的一致性，不证明 ESI 与
-真实从站固件一致。运行时可生成 PDO 配置计划并对调用方交付的 SDO 响应做
+真实从站固件一致。运行时可生成 PDO 和 ESC watchdog 配置计划，并分别对调用方交付的 SDO/寄存器响应做
 逐字节 read-back 校验；生产调度器已通过确定性模拟端口覆盖邮箱发送、轮询、
 跨周期请求所有权、重试/超时、精确回读、故障阻断和生命周期门控，但该软件
 证据还覆盖全从站 PREOP 屏障、真实服务 phase 释放、保留拓扑、合法 SAFEOP/OP
@@ -223,7 +237,7 @@ make build-report \
 交付 ESC/System Time 响应的能力判断和参考时钟选择；它不证明
 该响应来自真实目标从站，也不等于真实从站 PDO
 assignment/mapping、ESM timeout、SyncManager/FMMU 寄存器或 DC 时钟响应证据；模拟端口覆盖生成
-双驱动计划的完整 DC SYNC 请求/RX/屏障路径，但不证明真实 ESC 定时行为。该证据更不证明驱动
+双驱动计划的完整 watchdog 写入/读回和 DC SYNC 请求/RX/屏障路径，但不证明真实 ESC 定时行为、watchdog 实际周期或超时动作。该证据更不证明驱动
 接受映射、完整周期 WKC、实际线缆时间、WCET、DMA/cache 正确性、制动/机械适配、
 STO/FSoE 或功能安全。生成示例和构建报告必须保持
 `passed: false`，直到独立的目标构建、HIL、周期测量和发布审核提供证据。

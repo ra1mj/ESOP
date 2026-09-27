@@ -42,6 +42,8 @@ pub fn StaticProductConfig::build_generated_pdo_configuration_batch<
 >() -> Result<PdoConfigBatchPlan<JOBS, OPS>, ProductPdoBatchError>;
 pub fn StaticProductConfig::startup_profiles(...) ->
     Result<[StartupSlaveProfile; SLAVES], ProductStartupError>;
+pub fn StaticProductConfig::watchdog_plan() ->
+    Result<WatchdogPlan<SLAVES>, ProductStartupError>;
 pub fn StaticProductConfig::start_startup(...) -> Result<(), ProductStartupError>;
 pub enum StartupDcRequirement { None, SystemTime, ReferenceClock }
 pub fn StartupController::selected_reference_clock(...) ->
@@ -103,6 +105,15 @@ pub fn ScheduledProductionServices::with_dc_clock_configuration(
 pub fn ScheduledProductionServices::with_dc_sync_configuration(
     controller: &mut DcSyncController<MAX_SLAVES>,
 ) -> ScheduledProductionServices<...>;
+pub fn WatchdogController::<MAX_SLAVES>::start(
+    config: WatchdogControllerConfig,
+    plan: &WatchdogPlan<MAX_SLAVES>,
+    generation: u16,
+    monotonic_now_ns: u64,
+) -> Result<(), WatchdogError>;
+pub fn ScheduledProductionServices::with_watchdog_configuration(
+    controller: &mut WatchdogController<MAX_SLAVES>,
+) -> ScheduledProductionServices<...>;
 ```
 
 ## 3. Contracts
@@ -117,6 +128,10 @@ Input schema `esop.product.v1` is strict (`deny_unknown_fields`) and owns:
   `reference_clock` booleans default false, where reference implies required,
   at most one slave may select reference, every required slave selects one
   exact ESI `Dc/OpMode` by `op_mode`, and a non-required slave selects none.
+- an optional strict per-slave `watchdog` object whose `divider` and
+  `process_data_intervals` raw `u16` values are independently optional, where
+  the object contains at least one field and every present value is nonzero;
+  absence preserves the corresponding ESC default and emits no action.
 
 ESI paths are confined relative paths and their canonical targets must remain
 under the product directory. Names/labels rendered into C are nonempty,
@@ -283,6 +298,17 @@ Public per-slave evidence remains empty until every final activation succeeds;
 restart clears all staged and public evidence without claiming accepted
 hardware writes were rolled back.
 
+`StaticProductConfig::watchdog_plan()` revalidates every generated watchdog
+value before Startup mutation, preserves generated slave order and binds the
+exact position/station address. `WatchdogController` programs each present
+field as a two-byte little-endian fixed-address write followed by an exact
+two-byte readback: divider at `0x0400/2`, then process-data intervals at
+`0x0420/2`. Every action requires WKC 1, exact length, generation/action/pool
+ownership, one absolute configuration deadline and bounded request deadlines.
+Programmed evidence stays private until the whole plan completes; any fault
+latches the first typed error and clears the published slice. An empty plan is
+an immediate successful no-op.
+
 Runtime sync-window monitoring is an activation-time attachment, not another
 product artifact. Build `DcSyncWindowConfig` only after Startup has published
 the immutable `DcTopology`; the topology helper derives the exact nonzero BRD
@@ -312,10 +338,11 @@ the static job capacity; faults retain the exact job until explicit restart.
 The caller still owns batch start timing, while the production scheduler owns
 mailbox transport, retry policy, batch
 advancement, and CONFIGURING lifecycle admission. The caller may opt
-`StartupConfig` into a PREOP barrier for PDO Configuration, Mapping, DC Clock
+`StartupConfig` into a PREOP barrier for PDO Configuration, Watchdog
+Configuration, Mapping, DC Clock
 Configuration, topology-wide DC SYNC Configuration, and/or legacy DC
-Configuration. The scheduler orders these services as PDO, Mapping, DC Clock,
-DC SYNC, legacy DC, then Startup. It releases Startup only after the whole PDO
+Configuration. The scheduler orders these services as PDO, Watchdog, Mapping,
+DC Clock, DC SYNC, legacy DC, then Startup. It releases Startup only after the whole PDO
 batch and other required controllers reach real Complete phases, then resumes
 the retained topology through SAFEOP/OP. Logical addresses remain master-owned.
 The full verified-bank mapping path rejects position/station/count/index drift
@@ -351,6 +378,7 @@ datagrams, FCS, and inter-packet gap respectively.
 | Condition | Required result |
 | --- | --- |
 | Unknown/missing JSON field or unsupported schema | Reject before staging. |
+| Empty watchdog object, explicit zero, unknown watchdog field, duplicate plan position/station, or plan overflow | Reject before artifact publication or controller mutation. |
 | Absolute, parent-traversing, or symlink-escaping ESI path | Reject as invalid product input. |
 | Ambiguous ESI identity/PDO, duplicate object, wrong direction/width | Reject with identity/PDO/CiA 402 context. |
 | Unknown, misplaced, empty, or over-capacity ESI FMMU declaration | Reject before staging or hash publication. |
@@ -377,6 +405,7 @@ datagrams, FCS, and inter-packet gap respectively.
 | Duplicate/unreachable/overrun topology, missing DC receive times, invalid reference, delay underflow, or aggregate overflow | Latch typed topology failure before identity and publish neither reference nor topology. |
 | Product-required DC slave has no measurable reference-relative delay | Latch `DcPropagationDelayRequired` before identity and publish neither reference nor topology. |
 | Generated/raw DC timing mismatch, invalid factor/activation, plan/topology/reference mismatch, or common-epoch overflow | Reject before the first SYNC action or latch the first typed controller fault; publish no programmed evidence. |
+| Watchdog action/generation/length/WKC/readback/deadline/control-pool mismatch | Latch the first typed Watchdog fault, publish no programmed evidence, and keep the PREOP barrier closed. |
 | Runtime Domain/axis evidence or capacity mismatch | Reject with typed owning-contract evidence and return no partial configuration. |
 | PDO plan owner/SM/group/capacity mismatch | Reject before returning any startup plan. |
 | Invalid generated mailbox or invalid/missing/duplicate/unknown override binding | Reject before returning any batch. |
@@ -394,15 +423,19 @@ datagrams, FCS, and inter-packet gap respectively.
   frames, WKC 6, 20 copy bytes, 180 wire bytes, a 4144-byte ProcBuf region,
   two DC-required drives, one explicit left-drive reference, Startup-owned
   measurable propagation-delay evidence for both required drives, and a
-  two-entry 1 ms DC SYNC plan with exact `AssignActivate=0x0300`.
+  two-entry 1 ms DC SYNC plan with exact `AssignActivate=0x0300`; both drives
+  also carry divider 2500 and process-data interval 100 while the IO slave
+  preserves ESC watchdog defaults.
 - Base: no `PRODUCT_INPUT` produces the existing unqualified host build
   report; an omitted slave `dc` object produces no Startup DC requirement, and
-  optional unmeasurable DC evidence remains explicitly `None`.
+  optional unmeasurable DC evidence remains explicitly `None`; an omitted
+  `watchdog` object produces an empty watchdog plan and no ESC requests.
 - Bad: a selected RxPDO moved to TxPDO, a malformed Controlword width, a
   duplicate object, a path escape, zero product limit, reference-without-
   required, duplicate reference, wrapped/misplaced DC mode field, malformed
-  port tree, required unmeasurable DC, or forged qualification fails without
-  partial publication.
+  port tree, required unmeasurable DC, empty/zero watchdog declaration,
+  watchdog readback mismatch, or forged qualification fails without partial
+  publication.
 
 ## 6. Tests Required
 
@@ -435,6 +468,13 @@ datagrams, FCS, and inter-packet gap respectively.
   all-slave controller uses one reference read, one LCM-aligned common epoch,
   exact register ordering, request ownership, complete-only publication,
   restart clearing and PREOP/lifecycle gating through the simulated Linux path.
+- Cover omitted, divider-only, interval-only and dual-field watchdog input;
+  unknown/empty/zero declarations; deterministic JSON/inventory/C/Rust/hash
+  output; runtime product-order plan reconstruction; exact `0x0400/2` then
+  `0x0420/2` write/read ordering; little-endian payloads; WKC/length/readback/
+  action/generation/deadline/pool failures; complete-only publication,
+  explicit restart, scheduler priority between PDO and Mapping, Linux simulated
+  request/RX routing and PREOP/lifecycle gating.
 - Cover explicit/default ESM timeouts, invalid values, ESI/SII OpOnly flag
   separation, PREOP-disabled mapping, enable-after-OP, disable-before-leaving,
   shared deadlines, uniform-override precedence, exact readback failure and

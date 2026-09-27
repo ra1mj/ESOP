@@ -73,6 +73,10 @@
         "reference_clock": true,
         "op_mode": "DcSync"
       },
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      },
       "domain_id": 0,
       "rx_pdos": ["0x1600"],
       "tx_pdos": ["0x1a00"]
@@ -94,6 +98,10 @@
         "required": true,
         "reference_clock": false,
         "op_mode": "DcSync"
+      },
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
       },
       "domain_id": 0,
       "rx_pdos": ["0x1600"],

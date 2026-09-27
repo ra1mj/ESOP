@@ -946,6 +946,7 @@ pub fn other_cycle_facts_from_production_service_cycle<E, const DOMAINS: usize>(
             }
         }
         ScheduledProductionServiceKind::PdoConfiguration
+        | ScheduledProductionServiceKind::WatchdogConfiguration
         | ScheduledProductionServiceKind::Mapping
         | ScheduledProductionServiceKind::DcClockConfiguration
         | ScheduledProductionServiceKind::DcSyncConfiguration

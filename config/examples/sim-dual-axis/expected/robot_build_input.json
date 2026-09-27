@@ -1,0 +1,43 @@
+{
+  "config_sha256": "b95690490cc4f8e5a6ac769bd5f65e677f3d509abcfa70e8019a2c046e834514",
+  "cycle_budget": {
+    "deadline_ns": 800000,
+    "period_ns": 1000000,
+    "qualification": "generated_not_measured"
+  },
+  "devices": {
+    "declared_axes": 2,
+    "declared_io_channels": 16,
+    "declared_slaves": 3,
+    "source": "esop-cfggen validated product manifest and ESI subset"
+  },
+  "platform": {
+    "board": "host-simulator",
+    "cache_policy": "host managed; target cache qualification pending",
+    "port": "deterministic-linux-simulator",
+    "rtos_or_kernel": "host Linux; not target qualified",
+    "soc": "generic-x86_64"
+  },
+  "process_data": {
+    "copy_bytes_per_cycle": 20,
+    "expected_wkc": 6,
+    "frame_count": 2,
+    "pdo_bytes_per_cycle": 36,
+    "wire_bytes_per_cycle": 180
+  },
+  "qualification": {
+    "failures": [
+      "generated topology is not physical HIL evidence",
+      "cycle deadline and target resource use are not measured"
+    ],
+    "passed": false,
+    "scenario": "generated-simulator-product"
+  },
+  "resources": {
+    "dma_bytes": null,
+    "procbuf_bytes": 4144,
+    "rt_stack_peak_bytes": null,
+    "text_rodata_bytes": null
+  },
+  "schema_version": "esop.product-build-input.v1"
+}

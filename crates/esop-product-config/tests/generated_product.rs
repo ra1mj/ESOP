@@ -1,10 +1,10 @@
 use esop_product_config::{
     ActivatedProduct, AlTransitionTimeouts, Cia402AxisCommandPolicyError, DomainRegistryError,
-    ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, FramePlanSetError, MailboxConfig, MailboxConfigError,
-    MailboxDirection, OperatingMode, PdoConfigBatchPlanError, PdoConfigPlanError, PdoSdoWrite,
-    ProcBuf, ProcBufHeaderError, ProductActivationError, ProductMailboxBinding,
-    ProductPdoBatchError, ProductPdoPlanError, ProductSlaveKind, ProductStartupError, SiiFmmuUsage,
-    SlaveRecord, StartupDcRequirement,
+    ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, EscWatchdogConfig, FramePlanSetError, MailboxConfig,
+    MailboxConfigError, MailboxDirection, OperatingMode, PdoConfigBatchPlanError,
+    PdoConfigPlanError, PdoSdoWrite, ProcBuf, ProcBufHeaderError, ProductActivationError,
+    ProductMailboxBinding, ProductPdoBatchError, ProductPdoPlanError, ProductSlaveKind,
+    ProductStartupError, SiiFmmuUsage, SlaveRecord, StartupDcRequirement,
 };
 
 mod generated {
@@ -52,9 +52,9 @@ fn checked_in_product_activates_exact_generated_evidence() {
     assert_eq!(
         active.metadata().config_sha256,
         [
-            0xe1, 0x52, 0xc1, 0xb4, 0xb0, 0xd4, 0xae, 0x48, 0x99, 0x39, 0x48, 0x96, 0x2c, 0x10,
-            0x70, 0x57, 0x74, 0x67, 0x87, 0xfa, 0x4a, 0x5a, 0x53, 0xcf, 0xbf, 0x21, 0x46, 0x1f,
-            0x8e, 0x62, 0xe4, 0x3a,
+            0xb9, 0x56, 0x90, 0x49, 0x0c, 0xc4, 0xf8, 0xe5, 0xa6, 0xac, 0x76, 0x9b, 0xd5, 0xf6,
+            0x5e, 0x67, 0x7f, 0x3d, 0x50, 0x9a, 0xbc, 0xfa, 0x70, 0xe8, 0x01, 0x9a, 0x2c, 0x04,
+            0x6e, 0x83, 0x45, 0x14,
         ]
     );
 
@@ -131,6 +131,22 @@ fn checked_in_product_activates_exact_generated_evidence() {
     for map in active.axis_pdo_maps() {
         map.validate_for(OperatingMode::Csp).unwrap();
     }
+}
+
+#[test]
+fn checked_in_product_builds_ordered_watchdog_plan() {
+    let plan = generated::PRODUCT_CONFIG.watchdog_plan().unwrap();
+    assert_eq!(plan.entries().len(), 2);
+    assert_eq!(plan.entries()[0].position, 0);
+    assert_eq!(plan.entries()[0].station_address, 0x1001);
+    assert_eq!(
+        plan.entries()[0].config,
+        EscWatchdogConfig::new(Some(2500), Some(100))
+    );
+    assert_eq!(plan.entries()[1].position, 1);
+    assert_eq!(plan.entries()[1].station_address, 0x1002);
+    assert_eq!(plan.entries()[1].config, plan.entries()[0].config);
+    assert_eq!(generated::PRODUCT_CONFIG.slaves[2].watchdog, None);
 }
 
 #[test]

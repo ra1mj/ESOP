@@ -1,0 +1,244 @@
+{
+  "config_sha256": "b95690490cc4f8e5a6ac769bd5f65e677f3d509abcfa70e8019a2c046e834514",
+  "devices": [
+    {
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": true,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP simulated CiA 402 drive",
+      "esi_label": "esop-sim-drive-v1",
+      "esi_semantic_sha256": "a5c7fc9893a2ea944640a5a72d6107a3dd9e5aa886a9de6a3524658db6718f05",
+      "esi_type_name": "ESOP-SIM-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38
+      },
+      "name": "drive_left",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 0,
+      "product_code": "0x00004020",
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "serial": "0x00000001",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "description": "One millisecond distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 2,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1001",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": false,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP simulated CiA 402 drive",
+      "esi_label": "esop-sim-drive-v1",
+      "esi_semantic_sha256": "a5c7fc9893a2ea944640a5a72d6107a3dd9e5aa886a9de6a3524658db6718f05",
+      "esi_type_name": "ESOP-SIM-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38
+      },
+      "name": "drive_right",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 1,
+      "product_code": "0x00004020",
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "serial": "0x00000002",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "description": "One millisecond distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 2,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1002",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "dc": {
+        "op_mode": null,
+        "reference_clock": false,
+        "required": false
+      },
+      "dc_sync_timing": null,
+      "domain_id": 1,
+      "esi_device_name": "ESOP simulated digital IO",
+      "esi_label": "esop-sim-io-v1",
+      "esi_semantic_sha256": "21cccfa968e3997b5bf29cfa65c229300a767033ab0719c3626eddd5e4125c40",
+      "esi_type_name": "ESOP-SIM-IO",
+      "kind": "ethercat_io",
+      "mailbox": {
+        "receive_address": 4864,
+        "receive_capacity": 32,
+        "receive_control_byte": 34,
+        "send_address": 4608,
+        "send_capacity": 32,
+        "send_control_byte": 38
+      },
+      "name": "io_block",
+      "op_only_outputs": [],
+      "position": 2,
+      "product_code": "0x00007010",
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1601"
+      ],
+      "serial": null,
+      "sii_dc_mode": null,
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 2,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1003",
+      "transition_timeouts": {
+        "back_to_init_ns": 5000000000,
+        "back_to_safeop_ns": 200000000,
+        "preop_ns": 3000000000,
+        "safeop_to_op_ns": 10000000000
+      },
+      "tx_pdos": [
+        "0x1a01"
+      ],
+      "vendor_id": "0x0000e500"
+    }
+  ],
+  "schema_version": "esop.device-inventory.v1"
+}

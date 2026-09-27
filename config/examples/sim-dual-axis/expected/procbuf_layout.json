@@ -1,0 +1,18 @@
+{
+  "abi_version": 6,
+  "command_page_bytes": 272,
+  "config_sha256": "b95690490cc4f8e5a6ac769bd5f65e677f3d509abcfa70e8019a2c046e834514",
+  "dimensions": {
+    "axes": 2,
+    "domains": 2,
+    "event_capacity": 64,
+    "io_channels": 16
+  },
+  "event_record_bytes": 32,
+  "event_ring_bytes": 2064,
+  "header_bytes": 48,
+  "layout_hash": "0x9f41a7c67a7a6376",
+  "region_bytes": 4144,
+  "schema_version": "esop.procbuf-layout.v1",
+  "state_page_bytes": 728
+}

@@ -138,9 +138,29 @@
       "limitation": "Deterministic software tests prove bounded ownership, exact register shape/WKC checks, atomic complete-only publication, full discovered-bank clearing and scheduler compatibility for caller-delivered responses. Observed pages are evidence and reset bounds rather than desired product mappings; vendor extensions, physical response provenance, real-device interoperability, target timing/WCET, long-duration operation, ETG conformance, hardware HIL and functional-safety qualification remain open"
     },
     {
+      "id": "ethercat_watchdog_configuration",
+      "status": "implemented",
+      "scope": "Allocation-free strict per-slave ESC watchdog intent in deterministic product artifacts, fixed-capacity product-order plans, exact 0x0400/2 divider and 0x0420/2 process-data interval write/readback, complete-only evidence publication, fixed-priority production scheduling and opt-in PREOP lifecycle gating",
+      "evidence": [
+        "crates/esop-ethercat-core/src/watchdog.rs",
+        "crates/esop-ethercat-core/src/production_service.rs",
+        "crates/esop-ethercat-core/src/startup.rs",
+        "crates/esop-cfggen/src/generator.rs",
+        "crates/esop-cfggen/tests/generation.rs",
+        "crates/esop-product-config/src/lib.rs",
+        "crates/esop-product-config/tests/generated_product.rs",
+        "crates/esop-ethercat-linux-port/tests/scheduled_domains.rs",
+        "crates/esop-lifecycle-guard/src/ethercat.rs",
+        "config/examples/sim-dual-axis/product.json",
+        "docs/esop-product-configuration.md",
+        ".trellis/spec/backend/product-configuration.md"
+      ],
+      "limitation": "Deterministic software tests prove strict generation, bounded ownership, exact register shape/WKC/readback checks, scheduler ordering, fail-closed gating and complete-only publication for caller-delivered responses. Raw register values are not converted into a qualified real-time duration; physical response provenance, actual watchdog expiration behavior, device interoperability, target timing/WCET, long-duration operation, ETG conformance, hardware HIL and functional-safety qualification remain open"
+    },
+    {
       "id": "product_config_generator",
       "status": "implemented",
-      "scope": "Deterministic host-only esop.product.v1 and bounded ESI-subset compilation into static C/Rust, normalized Domain/PDO/Frame Plan, per-slave CoE mailbox, fixed-capacity ordered ESI FMMU usage plus structural SII SM evidence, ESM timeout, OpOnly, explicit DC System Time/reference-clock policy, selected ESI DC OpMode descriptors and resolved absolute DC SYNC timing, device inventory, exact ProcBuf v6 layout and fail-closed build input",
+      "scope": "Deterministic host-only esop.product.v1 and bounded ESI-subset compilation into static C/Rust, normalized Domain/PDO/Frame Plan, per-slave CoE mailbox and optional raw ESC watchdog intent, fixed-capacity ordered ESI FMMU usage plus structural SII SM evidence, ESM timeout, OpOnly, explicit DC System Time/reference-clock policy, selected ESI DC OpMode descriptors and resolved absolute DC SYNC timing, device inventory, exact ProcBuf v6 layout and fail-closed build input",
       "evidence": [
         "crates/esop-cfggen/src/lib.rs",
         "crates/esop-cfggen/src/generator.rs",
@@ -172,7 +192,7 @@
     {
       "id": "product_runtime_attachment",
       "status": "implemented",
-      "scope": "Allocation-free no_std activation of generated Rust product configuration with exact hash, ProcBuf v6, observed topology, Domain/PDO/datagram/WKC, schedule/frame-plan, per-slave ESM timeout, OpOnly, mailbox, ordered FMMU usage, schema-v2 structural SII and selected DC mode startup profiles, ordered resolved DC SYNC plan, CiA 402 map and axis-policy validation plus deterministic all-slave PDO batch construction",
+      "scope": "Allocation-free no_std activation of generated Rust product configuration with exact hash, ProcBuf v6, observed topology, Domain/PDO/datagram/WKC, schedule/frame-plan, per-slave ESM timeout, OpOnly, mailbox, optional ESC watchdog, ordered FMMU usage, schema-v2 structural SII and selected DC mode startup profiles, ordered watchdog and resolved DC SYNC plans, CiA 402 map and axis-policy validation plus deterministic all-slave PDO batch construction",
       "evidence": [
         "crates/esop-product-config/src/lib.rs",
         "crates/esop-product-config/tests/generated_product.rs",
@@ -201,7 +221,7 @@
     {
       "id": "ethercat_al_activation_barrier",
       "status": "implemented",
-      "scope": "Allocation-free optional all-slave PREOP barrier with scheduler-owned PDO/Mapping/DC clock/DC SYNC completion checks, retained verified topology, legal SAFEOP/OP continuation and fail-closed Topology projection",
+      "scope": "Allocation-free optional all-slave PREOP barrier with scheduler-owned PDO/Watchdog/Mapping/DC clock/DC SYNC completion checks, retained verified topology, legal SAFEOP/OP continuation and fail-closed Topology projection",
       "evidence": [
         "crates/esop-ethercat-core/src/startup.rs",
         "crates/esop-ethercat-core/src/production_service.rs",

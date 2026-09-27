@@ -10,15 +10,16 @@ pub use esop_ethercat_core::wire::Command;
 pub use esop_ethercat_core::{
     AlTransitionTimeouts, DcSyncPlan, DcSyncPlanEntry, DcSyncPlanError, DcSyncTiming,
     DcSyncTimingError, DomainConfig, DomainDatagramSpec, DomainInfo, DomainRegistry,
-    DomainRegistryError, ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, ExpectedSlave, FramePlanSet,
-    FramePlanSetError, MAX_SII_FMMU_USAGES, MailboxConfig, MailboxConfigError, MailboxDirection,
-    OpOnlyProfileError, OpOnlySyncManagerProfile, PdoConfigBatch, PdoConfigBatchError,
-    PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigBatchPlanError, PdoConfigBatchStatus,
-    PdoConfigJob, PdoConfigPlan, PdoConfigPlanError, PdoDirection, PdoEntry, PdoEntrySpec,
-    PdoRegistrationRequest, PdoSdoWrite, ScheduleTable, SiiConfigurationSignature,
-    SiiConfigurationSignatureBuilder, SiiConfigurationSignatureError, SiiDcMode,
-    SiiDcModeExpectation, SiiFmmuUsage, SlaveIdentity, SlaveRecord, StartupConfig,
-    StartupController, StartupDcRequirement, StartupError, StartupSlaveProfile,
+    DomainRegistryError, ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, EscWatchdogConfig,
+    EscWatchdogConfigError, ExpectedSlave, FramePlanSet, FramePlanSetError, MAX_SII_FMMU_USAGES,
+    MailboxConfig, MailboxConfigError, MailboxDirection, OpOnlyProfileError,
+    OpOnlySyncManagerProfile, PdoConfigBatch, PdoConfigBatchError, PdoConfigBatchPhase,
+    PdoConfigBatchPlan, PdoConfigBatchPlanError, PdoConfigBatchStatus, PdoConfigJob, PdoConfigPlan,
+    PdoConfigPlanError, PdoDirection, PdoEntry, PdoEntrySpec, PdoRegistrationRequest, PdoSdoWrite,
+    ScheduleTable, SiiConfigurationSignature, SiiConfigurationSignatureBuilder,
+    SiiConfigurationSignatureError, SiiDcMode, SiiDcModeExpectation, SiiFmmuUsage, SlaveIdentity,
+    SlaveRecord, StartupConfig, StartupController, StartupDcRequirement, StartupError,
+    StartupSlaveProfile, WatchdogPlan, WatchdogPlanEntry, WatchdogPlanError,
 };
 pub use esop_lifecycle_guard::procbuf::{Cia402AxisCommandPolicy, Cia402AxisCommandPolicyError};
 pub use esop_procbuf::{
@@ -62,6 +63,7 @@ pub struct ProductSlaveConfig {
     pub dc_reference_clock: bool,
     pub sii_dc_mode: Option<SiiDcModeExpectation>,
     pub dc_sync_timing: Option<DcSyncTiming>,
+    pub watchdog: Option<EscWatchdogConfig>,
     pub transition_timeouts: AlTransitionTimeouts,
     pub mailbox_config: MailboxConfig,
     pub op_only_outputs: OpOnlySyncManagerProfile,
@@ -101,6 +103,11 @@ pub enum ProductStartupError {
     },
     DcSyncReferenceRequired,
     DcSyncPlan(DcSyncPlanError),
+    InvalidWatchdogConfig {
+        position: u16,
+        error: EscWatchdogConfigError,
+    },
+    WatchdogPlan(WatchdogPlanError),
     InvalidTransitionTimeoutProfile {
         position: u16,
     },
@@ -453,6 +460,28 @@ type ActivatedAxes<const AXES: usize> = (
 impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
     StaticProductConfig<'a, SLAVES, DOMAINS, AXES>
 {
+    pub fn watchdog_plan(&self) -> Result<WatchdogPlan<SLAVES>, ProductStartupError> {
+        let mut plan = WatchdogPlan::new();
+        for slave in self.slaves.iter().copied() {
+            let Some(config) = slave.watchdog else {
+                continue;
+            };
+            config
+                .validate()
+                .map_err(|error| ProductStartupError::InvalidWatchdogConfig {
+                    position: slave.position,
+                    error,
+                })?;
+            plan.push(WatchdogPlanEntry {
+                position: slave.position,
+                station_address: slave.station_address,
+                config,
+            })
+            .map_err(ProductStartupError::WatchdogPlan)?;
+        }
+        Ok(plan)
+    }
+
     pub fn dc_sync_plan(&self) -> Result<DcSyncPlan<SLAVES>, ProductStartupError> {
         let mut reference_position = None;
         for slave in self.slaves.iter().copied() {
@@ -523,6 +552,7 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
     }
 
     pub fn startup_profiles(&self) -> Result<[StartupSlaveProfile; SLAVES], ProductStartupError> {
+        let _ = self.watchdog_plan()?;
         let _ = self.dc_sync_plan()?;
         let mut reference_position = None;
         for slave in self.slaves.iter().copied() {
@@ -1382,6 +1412,7 @@ mod tests {
                 dc_reference_clock: false,
                 sii_dc_mode: None,
                 dc_sync_timing: None,
+                watchdog: None,
                 transition_timeouts: ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
                 mailbox_config: MailboxConfig::new(0x1000, 32, 0x1100, 32),
                 op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
@@ -1543,6 +1574,34 @@ mod tests {
             startup.next_action(1).unwrap(),
             Some(esop_ethercat_core::StartupAction::Scan(_))
         ));
+    }
+
+    #[test]
+    fn product_builds_watchdog_plan_and_rejects_invalid_static_values() {
+        let product = config();
+        assert!(product.watchdog_plan().unwrap().is_empty());
+
+        let mut configured = config();
+        configured.slaves[0].watchdog = Some(EscWatchdogConfig::new(Some(2500), Some(100)));
+        let plan = configured.watchdog_plan().unwrap();
+        assert_eq!(plan.entries().len(), 1);
+        assert_eq!(
+            plan.entries()[0],
+            WatchdogPlanEntry {
+                position: 0,
+                station_address: 0x1000,
+                config: EscWatchdogConfig::new(Some(2500), Some(100)),
+            }
+        );
+
+        configured.slaves[0].watchdog = Some(EscWatchdogConfig::new(Some(0), None));
+        assert_eq!(
+            configured.startup_profiles(),
+            Err(ProductStartupError::InvalidWatchdogConfig {
+                position: 0,
+                error: EscWatchdogConfigError::ZeroDivider,
+            })
+        );
     }
 
     #[test]

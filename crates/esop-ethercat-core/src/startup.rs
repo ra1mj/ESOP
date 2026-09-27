@@ -163,6 +163,7 @@ impl StartupConfigurationServices {
     const DC_CONFIGURATION: u8 = 1 << 2;
     const DC_CLOCK_CONFIGURATION: u8 = 1 << 3;
     const DC_SYNC_CONFIGURATION: u8 = 1 << 4;
+    const WATCHDOG_CONFIGURATION: u8 = 1 << 5;
 
     pub const NONE: Self = Self(0);
 
@@ -177,6 +178,11 @@ impl StartupConfigurationServices {
 
     pub const fn with_mapping(mut self) -> Self {
         self.0 |= Self::MAPPING;
+        self
+    }
+
+    pub const fn with_watchdog_configuration(mut self) -> Self {
+        self.0 |= Self::WATCHDOG_CONFIGURATION;
         self
     }
 
@@ -201,6 +207,10 @@ impl StartupConfigurationServices {
 
     pub const fn requires_mapping(self) -> bool {
         self.0 & Self::MAPPING != 0
+    }
+
+    pub const fn requires_watchdog_configuration(self) -> bool {
+        self.0 & Self::WATCHDOG_CONFIGURATION != 0
     }
 
     pub const fn requires_dc_configuration(self) -> bool {

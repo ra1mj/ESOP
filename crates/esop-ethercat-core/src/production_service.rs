@@ -29,6 +29,7 @@ use crate::scheduled_domains::{
     ScheduledMailboxCycleError, ScheduledMailboxCycleReport, ScheduledReceiveReport,
 };
 use crate::startup::{StartupController, StartupError, StartupPhase, StartupProgress};
+use crate::watchdog::{WatchdogController, WatchdogError, WatchdogPhase, WatchdogProgress};
 use crate::wire::MAX_ETHERNET_FRAME_LEN;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -36,6 +37,7 @@ pub enum ScheduledProductionServiceKind {
     Idle,
     Startup,
     PdoConfiguration,
+    WatchdogConfiguration,
     Mapping,
     DcClockConfiguration,
     DcSyncConfiguration,
@@ -55,6 +57,7 @@ pub enum ScheduledProductionServiceProgress {
     Waiting,
     Startup(StartupProgress),
     PdoConfiguration(ScheduledPdoConfigurationProgress),
+    WatchdogConfiguration(WatchdogProgress),
     Mapping(MappingConfigProgress),
     DcClockConfiguration(DcClockProgress),
     DcSyncConfiguration(DcSyncProgress),
@@ -67,6 +70,7 @@ pub enum ScheduledProductionServiceFault {
     Control(ControlError),
     Startup(StartupError),
     PdoConfiguration(PdoConfigError),
+    WatchdogConfiguration(WatchdogError),
     Mapping(MappingConfigError),
     DcClockConfiguration(DcClockError),
     DcSyncConfiguration(DcSyncError),
@@ -204,6 +208,7 @@ pub struct ScheduledProductionServices<
 > {
     pub startup: Option<&'a mut StartupController<MAX_SLAVES>>,
     pdo_configuration: Option<ScheduledPdoConfiguration<'a, PDO_OPS, PDO_JOBS>>,
+    pub watchdog_configuration: Option<&'a mut WatchdogController<MAX_SLAVES>>,
     pub mapping: Option<&'a mut MappingConfigController<SMS, FMMUS>>,
     pub dc_clock_configuration: Option<&'a mut DcClockController<MAX_SLAVES>>,
     pub dc_sync_configuration: Option<&'a mut DcSyncController<MAX_SLAVES>>,
@@ -229,6 +234,7 @@ impl<
         Self {
             startup,
             pdo_configuration: None,
+            watchdog_configuration: None,
             mapping,
             dc_clock_configuration: None,
             dc_sync_configuration: None,
@@ -242,6 +248,14 @@ impl<
         pdo_configuration: ScheduledPdoConfiguration<'a, PDO_OPS, PDO_JOBS>,
     ) -> Self {
         self.pdo_configuration = Some(pdo_configuration);
+        self
+    }
+
+    pub fn with_watchdog_configuration(
+        mut self,
+        watchdog_configuration: &'a mut WatchdogController<MAX_SLAVES>,
+    ) -> Self {
+        self.watchdog_configuration = Some(watchdog_configuration);
         self
     }
 
@@ -783,6 +797,13 @@ impl ScheduledProductionServiceScheduler {
                 ScheduledProductionServiceKind::PdoConfiguration,
             ));
         }
+        if requirements.requires_watchdog_configuration()
+            && services.watchdog_configuration.is_none()
+        {
+            return Err(StartupBarrierReleaseError::MissingController(
+                ScheduledProductionServiceKind::WatchdogConfiguration,
+            ));
+        }
         if requirements.requires_mapping() && services.mapping.is_none() {
             return Err(StartupBarrierReleaseError::MissingController(
                 ScheduledProductionServiceKind::Mapping,
@@ -825,6 +846,11 @@ impl ScheduledProductionServiceScheduler {
                 .pdo_configuration
                 .as_ref()
                 .is_some_and(ScheduledPdoConfiguration::is_complete);
+        let watchdog_complete = !requirements.requires_watchdog_configuration()
+            || services
+                .watchdog_configuration
+                .as_deref()
+                .is_some_and(|controller| controller.phase() == WatchdogPhase::Complete);
         let mapping_complete = !requirements.requires_mapping()
             || services
                 .mapping
@@ -846,6 +872,7 @@ impl ScheduledProductionServiceScheduler {
                 .as_deref()
                 .is_some_and(|controller| controller.phase() == DcPhase::Complete);
         if !(pdo_complete
+            && watchdog_complete
             && mapping_complete
             && dc_clock_complete
             && dc_sync_complete
@@ -894,6 +921,13 @@ impl ScheduledProductionServiceScheduler {
                     .is_some_and(ScheduledPdoConfiguration::is_complete)
             {
                 ScheduledProductionServiceKind::PdoConfiguration
+            } else if requirements.requires_watchdog_configuration()
+                && !services
+                    .watchdog_configuration
+                    .as_deref()
+                    .is_some_and(|controller| controller.phase() == WatchdogPhase::Complete)
+            {
+                ScheduledProductionServiceKind::WatchdogConfiguration
             } else if requirements.requires_mapping()
                 && !services
                     .mapping
@@ -930,6 +964,7 @@ impl ScheduledProductionServiceScheduler {
         self.active = [
             ScheduledProductionServiceKind::Startup,
             ScheduledProductionServiceKind::PdoConfiguration,
+            ScheduledProductionServiceKind::WatchdogConfiguration,
             ScheduledProductionServiceKind::Mapping,
             ScheduledProductionServiceKind::DcClockConfiguration,
             ScheduledProductionServiceKind::DcSyncConfiguration,
@@ -968,6 +1003,15 @@ impl ScheduledProductionServiceScheduler {
                 .pdo_configuration
                 .as_ref()
                 .is_some_and(ScheduledPdoConfiguration::is_active),
+            ScheduledProductionServiceKind::WatchdogConfiguration => services
+                .watchdog_configuration
+                .as_deref()
+                .is_some_and(|controller| {
+                    !matches!(
+                        controller.phase(),
+                        WatchdogPhase::Idle | WatchdogPhase::Complete
+                    )
+                }),
             ScheduledProductionServiceKind::Mapping => {
                 services.mapping.as_deref().is_some_and(|controller| {
                     !matches!(
@@ -1065,6 +1109,21 @@ impl ScheduledProductionServiceScheduler {
                 .pdo_configuration
                 .as_ref()
                 .and_then(|binding| binding.mailbox().pending())
+                .is_some_and(|action| {
+                    request.matches_action(
+                        action.datagram_index,
+                        action.generation,
+                        action.address,
+                        action.operation,
+                        action.payload(),
+                        action.datagram_len(),
+                        action.deadline_ns,
+                    )
+                }),
+            ScheduledProductionServiceKind::WatchdogConfiguration => services
+                .watchdog_configuration
+                .as_deref()
+                .and_then(WatchdogController::pending)
                 .is_some_and(|action| {
                     request.matches_action(
                         action.datagram_index,
@@ -1326,6 +1385,46 @@ impl ScheduledProductionServiceScheduler {
                     fault: None,
                 })
             }
+            ScheduledProductionServiceKind::WatchdogConfiguration => {
+                let controller = services
+                    .watchdog_configuration
+                    .as_deref_mut()
+                    .ok_or(ControlError::InvalidState)?;
+                let action = match controller.next_action(now_ns) {
+                    Ok(action) => action,
+                    Err(error) => {
+                        return Ok(ScheduledProductionEnqueueOutcome {
+                            fault: Some(ScheduledProductionServiceFault::WatchdogConfiguration(
+                                error,
+                            )),
+                            ..ScheduledProductionEnqueueOutcome::EMPTY
+                        });
+                    }
+                };
+                let Some(action) = action else {
+                    return Ok(ScheduledProductionEnqueueOutcome::EMPTY);
+                };
+                if action.deadline_ns <= now_ns {
+                    return Ok(match controller.timeout(action, now_ns) {
+                        Ok(progress) => ScheduledProductionEnqueueOutcome {
+                            progress: Some(
+                                ScheduledProductionServiceProgress::WatchdogConfiguration(progress),
+                            ),
+                            ..ScheduledProductionEnqueueOutcome::EMPTY
+                        },
+                        Err(error) => ScheduledProductionEnqueueOutcome {
+                            fault: Some(ScheduledProductionServiceFault::WatchdogConfiguration(
+                                error,
+                            )),
+                            ..ScheduledProductionEnqueueOutcome::EMPTY
+                        },
+                    });
+                }
+                Ok(ScheduledProductionEnqueueOutcome {
+                    request: Some(controller.enqueue_pending(controls)?),
+                    ..ScheduledProductionEnqueueOutcome::EMPTY
+                })
+            }
             ScheduledProductionServiceKind::Mapping => {
                 let controller = services
                     .mapping
@@ -1534,6 +1633,15 @@ impl ScheduledProductionServiceScheduler {
                 .accept_completed(controls, handle, now_ns)
                 .map(ScheduledProductionServiceProgress::Startup)
                 .map_err(ScheduledProductionServiceFault::Startup),
+            ScheduledProductionServiceKind::WatchdogConfiguration => services
+                .watchdog_configuration
+                .as_deref_mut()
+                .ok_or(ScheduledProductionServiceFault::Control(
+                    ControlError::InvalidState,
+                ))?
+                .accept_completed(controls, handle, now_ns)
+                .map(ScheduledProductionServiceProgress::WatchdogConfiguration)
+                .map_err(ScheduledProductionServiceFault::WatchdogConfiguration),
             ScheduledProductionServiceKind::Mapping => services
                 .mapping
                 .as_deref_mut()
@@ -1600,6 +1708,11 @@ impl ScheduledProductionServiceScheduler {
                 .as_ref()
                 .and_then(|binding| binding.controller().last_error())
                 .map(ScheduledProductionServiceFault::PdoConfiguration),
+            ScheduledProductionServiceKind::WatchdogConfiguration => services
+                .watchdog_configuration
+                .as_deref()
+                .and_then(WatchdogController::last_error)
+                .map(ScheduledProductionServiceFault::WatchdogConfiguration),
             ScheduledProductionServiceKind::Mapping => services
                 .mapping
                 .as_deref()
@@ -1648,6 +1761,10 @@ impl ScheduledProductionServiceScheduler {
                 .pdo_configuration
                 .as_ref()
                 .is_some_and(ScheduledPdoConfiguration::is_complete),
+            ScheduledProductionServiceKind::WatchdogConfiguration => services
+                .watchdog_configuration
+                .as_deref()
+                .is_some_and(|controller| controller.phase() == WatchdogPhase::Complete),
             ScheduledProductionServiceKind::Mapping => services
                 .mapping
                 .as_deref()
@@ -1741,6 +1858,7 @@ impl Default for ScheduledProductionServiceScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RegisterOperation;
     use crate::coe::{CoeHeader, CoeService};
     use crate::dc::{
         DcClockConfig, DcSyncConfig, DcSyncPlan, DcSyncPlanEntry, DcSyncTiming, DcTopology,
@@ -1751,6 +1869,9 @@ mod tests {
     use crate::slave::{AlStatus, EthercatState, SlaveIdentity};
     use crate::startup::{
         ExpectedSlave, StartupAction, StartupConfig, StartupConfigurationServices,
+    };
+    use crate::watchdog::{
+        EscWatchdogConfig, WatchdogControllerConfig, WatchdogPlan, WatchdogPlanEntry,
     };
 
     const EXPECTED: [ExpectedSlave; 1] = [ExpectedSlave {
@@ -1820,6 +1941,17 @@ mod tests {
                 shift_time0_ns: 0,
                 assign_activate: 0x0300,
             },
+        })
+        .unwrap();
+        plan
+    }
+
+    fn watchdog_plan() -> WatchdogPlan<1> {
+        let mut plan = WatchdogPlan::new();
+        plan.push(WatchdogPlanEntry {
+            position: 0,
+            station_address: 0x1000,
+            config: EscWatchdogConfig::new(Some(2500), Some(100)),
         })
         .unwrap();
         plan
@@ -1989,9 +2121,27 @@ mod tests {
     }
 
     #[test]
+    fn startup_barrier_reports_missing_required_watchdog_binding() {
+        let mut startup =
+            startup_at_barrier(StartupConfigurationServices::new().with_watchdog_configuration());
+        let mut services =
+            ScheduledProductionServices::<1, 0, 0, 0>::new(Some(&mut startup), None, None, None);
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+
+        assert_eq!(
+            scheduler.release_startup_configuration(1, &mut services),
+            Err(StartupBarrierReleaseError::MissingController(
+                ScheduledProductionServiceKind::WatchdogConfiguration
+            ))
+        );
+        assert_eq!(startup.phase(), StartupPhase::AwaitingConfiguration);
+    }
+
+    #[test]
     fn startup_barrier_selects_idle_required_services_in_fixed_order() {
         let requirements = StartupConfigurationServices::new()
             .with_pdo_configuration()
+            .with_watchdog_configuration()
             .with_mapping()
             .with_dc_clock_configuration()
             .with_dc_sync_configuration()
@@ -2001,6 +2151,7 @@ mod tests {
         let mut startup = startup_at_barrier(requirements);
         let mut pdo = PdoConfigController::<0>::new();
         let mut pdo_mailbox = MailboxController::new();
+        let mut watchdog = WatchdogController::<1>::new();
         let mut mapping = MappingConfigController::<0, 0>::new();
         let mut dc_clock = DcClockController::<1>::new();
         let mut dc_sync = DcSyncController::<1>::new();
@@ -2013,6 +2164,7 @@ mod tests {
                 Some(&mut dc),
                 None,
             )
+            .with_watchdog_configuration(&mut watchdog)
             .with_dc_clock_configuration(&mut dc_clock)
             .with_dc_sync_configuration(&mut dc_sync)
             .with_pdo_configuration(ScheduledPdoConfiguration::new(
@@ -2033,6 +2185,7 @@ mod tests {
                 Some(&mut dc),
                 None,
             )
+            .with_watchdog_configuration(&mut watchdog)
             .with_dc_clock_configuration(&mut dc_clock)
             .with_dc_sync_configuration(&mut dc_sync)
             .with_pdo_configuration(ScheduledPdoConfiguration::new(
@@ -2062,6 +2215,7 @@ mod tests {
                 Some(&mut dc),
                 None,
             )
+            .with_watchdog_configuration(&mut watchdog)
             .with_dc_clock_configuration(&mut dc_clock)
             .with_dc_sync_configuration(&mut dc_sync)
             .with_pdo_configuration(ScheduledPdoConfiguration::new(
@@ -2070,8 +2224,15 @@ mod tests {
                 mailbox_config,
             ));
             scheduler.refresh_selection(&services);
-            assert_eq!(scheduler.active(), ScheduledProductionServiceKind::Mapping);
+            assert_eq!(
+                scheduler.active(),
+                ScheduledProductionServiceKind::WatchdogConfiguration
+            );
         }
+
+        watchdog
+            .start(WatchdogControllerConfig::new(), &WatchdogPlan::new(), 7, 0)
+            .unwrap();
 
         mapping
             .start(0x1000, 7, 0, 100, 10, &MappingTable::new())
@@ -2083,6 +2244,7 @@ mod tests {
                 Some(&mut dc),
                 None,
             )
+            .with_watchdog_configuration(&mut watchdog)
             .with_dc_clock_configuration(&mut dc_clock)
             .with_dc_sync_configuration(&mut dc_sync)
             .with_pdo_configuration(ScheduledPdoConfiguration::new(
@@ -2107,6 +2269,7 @@ mod tests {
                 Some(&mut dc),
                 None,
             )
+            .with_watchdog_configuration(&mut watchdog)
             .with_dc_clock_configuration(&mut dc_clock)
             .with_pdo_configuration(ScheduledPdoConfiguration::new(
                 &mut pdo,
@@ -2136,6 +2299,7 @@ mod tests {
                 Some(&mut dc),
                 None,
             )
+            .with_watchdog_configuration(&mut watchdog)
             .with_dc_clock_configuration(&mut dc_clock)
             .with_dc_sync_configuration(&mut dc_sync)
             .with_pdo_configuration(ScheduledPdoConfiguration::new(
@@ -2276,6 +2440,93 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_consumes_complete_watchdog_sequence() {
+        let plan = watchdog_plan();
+        let mut watchdog = WatchdogController::new();
+        watchdog
+            .start(
+                WatchdogControllerConfig {
+                    timeout_ns: 100,
+                    request_timeout_ns: 10,
+                },
+                &plan,
+                17,
+                0,
+            )
+            .unwrap();
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+        let mut controls = ControlRequestPool::<1>::new();
+        let mut frame = [0; MAX_ETHERNET_FRAME_LEN];
+        let mut now_ns = 1u64;
+
+        loop {
+            let handle = {
+                let mut services =
+                    ScheduledProductionServices::<1, 0, 0, 0>::new(None, None, None, None)
+                        .with_watchdog_configuration(&mut watchdog);
+                scheduler.refresh_selection(&services);
+                assert_eq!(
+                    scheduler.active(),
+                    ScheduledProductionServiceKind::WatchdogConfiguration
+                );
+                scheduler
+                    .enqueue_due(now_ns, &mut controls, &mut services)
+                    .unwrap()
+                    .request
+                    .unwrap()
+            };
+            let action = watchdog.pending().unwrap();
+            controls
+                .get_mut(handle)
+                .unwrap()
+                .build_frame(&mut frame, [0xFF; 6], [1, 2, 3, 4, 5, 6])
+                .unwrap();
+            let readback = match action.field {
+                crate::WatchdogField::Divider => 2500u16.to_le_bytes(),
+                crate::WatchdogField::ProcessDataIntervals => 100u16.to_le_bytes(),
+            };
+            let response = if action.operation == RegisterOperation::Write {
+                action.payload()
+            } else {
+                &readback
+            };
+            controls
+                .complete(handle, action.generation, action.address, response, 1)
+                .unwrap();
+            let progress = {
+                let mut services =
+                    ScheduledProductionServices::<1, 0, 0, 0>::new(None, None, None, None)
+                        .with_watchdog_configuration(&mut watchdog);
+                scheduler.consume_terminal(&mut controls, &mut services, handle, now_ns + 1)
+            };
+            scheduler.request = None;
+            now_ns += 2;
+            if progress
+                == Ok(ScheduledProductionServiceProgress::WatchdogConfiguration(
+                    WatchdogProgress::Complete,
+                ))
+            {
+                break;
+            }
+            assert_eq!(
+                progress,
+                Ok(ScheduledProductionServiceProgress::WatchdogConfiguration(
+                    WatchdogProgress::Advanced,
+                ),)
+            );
+        }
+
+        assert_eq!(watchdog.phase(), WatchdogPhase::Complete);
+        assert_eq!(watchdog.completed_action_count(), 4);
+        assert_eq!(watchdog.programmed_slaves().len(), 1);
+        assert_eq!(
+            watchdog.programmed_slaves()[0].config,
+            plan.entries()[0].config
+        );
+        assert_eq!(controls.in_use(), 0);
+    }
+
+    #[test]
     fn scheduler_consumes_complete_dc_sync_sequence() {
         let topology = dc_clock_topology();
         let plan = dc_sync_plan();
@@ -2357,12 +2608,17 @@ mod tests {
     fn startup_barrier_releases_only_after_all_required_controllers_complete() {
         let requirements = StartupConfigurationServices::new()
             .with_pdo_configuration()
+            .with_watchdog_configuration()
             .with_mapping();
         let mut startup = startup_at_barrier(requirements);
         let mut pdo = PdoConfigController::<0>::new();
         pdo.start(PdoConfigPlan::new(), 0x1000, 7, 0, 100, 10)
             .unwrap();
         let mut pdo_mailbox = MailboxController::new();
+        let mut watchdog = WatchdogController::<1>::new();
+        watchdog
+            .start(WatchdogControllerConfig::new(), &WatchdogPlan::new(), 7, 0)
+            .unwrap();
         let mut mapping = MappingConfigController::<0, 0>::new();
         mapping
             .start(0x1000, 7, 0, 100, 10, &MappingTable::new())
@@ -2376,6 +2632,7 @@ mod tests {
                 None,
                 None,
             )
+            .with_watchdog_configuration(&mut watchdog)
             .with_pdo_configuration(ScheduledPdoConfiguration::new(
                 &mut pdo,
                 &mut pdo_mailbox,
