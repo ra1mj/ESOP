@@ -11,6 +11,7 @@
         <Name>ESOP simulated CiA 402 drive</Name>
         <Fmmu>Outputs</Fmmu>
         <Fmmu>Inputs</Fmmu>
+        <Fmmu>MBoxState</Fmmu>
         <Sm Enable="1" StartAddress="#x1000" DefaultSize="64" ControlByte="#x26">MBoxOut</Sm>
         <Sm Enable="1" StartAddress="#x1100" DefaultSize="64" ControlByte="#x22">MBoxIn</Sm>
         <Sm Enable="1" OpOnly="true">Outputs</Sm>

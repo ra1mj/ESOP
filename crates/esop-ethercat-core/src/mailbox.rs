@@ -10,10 +10,13 @@ use crate::control::{
     RequestState,
 };
 use crate::diag::{CoeEmergencyEvent, EmergencySink};
+use crate::mapping::{ESC_SYNC_MANAGER_BASE, ESC_SYNC_MANAGER_STRIDE, SYNC_MANAGER_STATUS_OFFSET};
+use crate::op_only::MAX_ESC_SYNC_MANAGERS;
 use crate::registers::fixed_address;
 
 pub const MAILBOX_HEADER_LEN: usize = 6;
 pub const MAX_MAILBOX_BYTES: usize = MAX_CONTROL_PAYLOAD;
+pub const MAILBOX_FULL_STATUS_MASK: u8 = 0x08;
 const MAILBOX_LENGTH_MASK: u16 = 0x07FF;
 const MAILBOX_COUNTER_MASK: u8 = 0x07;
 
@@ -140,6 +143,13 @@ pub enum MailboxConfigError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MailboxReceiveSyncManagerError {
+    IndexOutOfBounds(u8),
+    AddressMismatch { expected: u16, actual: u16 },
+    CapacityMismatch { expected: u16, actual: u16 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MailboxStatusBit {
     pub address: u16,
     pub mask: u8,
@@ -153,6 +163,61 @@ impl MailboxStatusBit {
             mask,
             active_high,
         }
+    }
+
+    pub const fn sync_manager_mailbox_full(sync_manager: u8) -> Self {
+        Self::new(
+            ESC_SYNC_MANAGER_BASE
+                + sync_manager as u16 * ESC_SYNC_MANAGER_STRIDE
+                + SYNC_MANAGER_STATUS_OFFSET,
+            MAILBOX_FULL_STATUS_MASK,
+            true,
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MailboxReceiveSyncManager {
+    pub index: u8,
+    pub physical_start: u16,
+    pub length: u16,
+    pub control: u8,
+}
+
+impl MailboxReceiveSyncManager {
+    pub const fn new(index: u8, physical_start: u16, length: u16, control: u8) -> Self {
+        Self {
+            index,
+            physical_start,
+            length,
+            control,
+        }
+    }
+
+    pub const fn status_bit(self) -> MailboxStatusBit {
+        MailboxStatusBit::sync_manager_mailbox_full(self.index)
+    }
+
+    pub fn validate_for(
+        self,
+        mailbox: MailboxConfig,
+    ) -> Result<(), MailboxReceiveSyncManagerError> {
+        if usize::from(self.index) >= MAX_ESC_SYNC_MANAGERS {
+            return Err(MailboxReceiveSyncManagerError::IndexOutOfBounds(self.index));
+        }
+        if self.physical_start != mailbox.receive_address {
+            return Err(MailboxReceiveSyncManagerError::AddressMismatch {
+                expected: mailbox.receive_address,
+                actual: self.physical_start,
+            });
+        }
+        if self.length != mailbox.receive_capacity {
+            return Err(MailboxReceiveSyncManagerError::CapacityMismatch {
+                expected: mailbox.receive_capacity,
+                actual: self.length,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -1174,6 +1239,35 @@ mod tests {
         assert_eq!(
             controller.start(config, 0x1000, 7, 0, MailboxProtocol::CoE, &[1]),
             Err(MailboxError::InvalidConfiguration)
+        );
+    }
+
+    #[test]
+    fn receive_sync_manager_derives_and_validates_the_canonical_status_bit() {
+        let mailbox = MailboxConfig::new(0x1000, 32, 0x1100, 64);
+        let receive = MailboxReceiveSyncManager::new(1, 0x1100, 64, 0x22);
+        assert_eq!(
+            receive.status_bit(),
+            MailboxStatusBit::new(0x080d, MAILBOX_FULL_STATUS_MASK, true)
+        );
+        assert_eq!(receive.validate_for(mailbox), Ok(()));
+        assert_eq!(
+            MailboxReceiveSyncManager::new(16, 0x1100, 64, 0x22).validate_for(mailbox),
+            Err(MailboxReceiveSyncManagerError::IndexOutOfBounds(16))
+        );
+        assert_eq!(
+            MailboxReceiveSyncManager::new(1, 0x1200, 64, 0x22).validate_for(mailbox),
+            Err(MailboxReceiveSyncManagerError::AddressMismatch {
+                expected: 0x1100,
+                actual: 0x1200,
+            })
+        );
+        assert_eq!(
+            MailboxReceiveSyncManager::new(1, 0x1100, 32, 0x22).validate_for(mailbox),
+            Err(MailboxReceiveSyncManagerError::CapacityMismatch {
+                expected: 64,
+                actual: 32,
+            })
         );
     }
 

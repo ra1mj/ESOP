@@ -18,8 +18,10 @@ use crate::fmmu_discovery::{
     FmmuRegisterBank, FmmuRegisterDiscoveryAction, FmmuRegisterDiscoveryController,
     FmmuRegisterDiscoveryError, FmmuRegisterDiscoveryPhase, FmmuRegisterDiscoveryProgress,
 };
-use crate::mailbox::{MailboxConfig, MailboxConfigError};
-use crate::mapping::MappingTable;
+use crate::mailbox::{
+    MailboxConfig, MailboxConfigError, MailboxReceiveSyncManager, MailboxReceiveSyncManagerError,
+};
+use crate::mapping::{MappingTable, SyncManagerConfig};
 use crate::mapping_config::{MappingConfigController, MappingConfigError};
 use crate::rx_index::RxWorkingCounterPolicy;
 use crate::scan::{
@@ -84,6 +86,7 @@ pub struct StartupSlaveProfile {
     pub transition_timeouts: AlTransitionTimeouts,
     pub op_only_outputs: OpOnlySyncManagerProfile,
     pub expected_mailbox: Option<MailboxConfig>,
+    pub expected_mailbox_receive_sync_manager: Option<MailboxReceiveSyncManager>,
     pub expected_sii: Option<SiiConfigurationSignature>,
     pub expected_dc_mode: Option<SiiDcModeExpectation>,
 }
@@ -95,6 +98,7 @@ impl StartupSlaveProfile {
         transition_timeouts: ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
         op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
         expected_mailbox: None,
+        expected_mailbox_receive_sync_manager: None,
         expected_sii: None,
         expected_dc_mode: None,
     };
@@ -126,6 +130,14 @@ impl StartupSlaveProfile {
 
     pub const fn with_expected_mailbox(mut self, expected_mailbox: MailboxConfig) -> Self {
         self.expected_mailbox = Some(expected_mailbox);
+        self
+    }
+
+    pub const fn with_expected_mailbox_receive_sync_manager(
+        mut self,
+        expected: MailboxReceiveSyncManager,
+    ) -> Self {
+        self.expected_mailbox_receive_sync_manager = Some(expected);
         self
     }
 
@@ -487,6 +499,11 @@ pub enum StartupError {
         position: u16,
         error: MailboxConfigError,
     },
+    MissingMailboxProfileForReceiveSyncManager(u16),
+    InvalidMailboxReceiveSyncManagerProfile {
+        position: u16,
+        error: MailboxReceiveSyncManagerError,
+    },
     InvalidDcModeProfile(u16),
     OpOnlyProfile {
         position: u16,
@@ -555,6 +572,11 @@ pub enum StartupError {
         expected: MailboxConfig,
         observed: MailboxConfig,
     },
+    MailboxReceiveSyncManagerMismatch {
+        position: u16,
+        expected: MailboxReceiveSyncManager,
+        observed: Option<SyncManagerConfig>,
+    },
     Al(AlError),
     OpOnly(OpOnlySyncManagerError),
     Table(SlaveTableError),
@@ -609,6 +631,7 @@ pub struct StartupController<const MAX_SLAVES: usize> {
     device_emulation: [bool; MAX_SLAVES],
     esc_fmmu_counts: [u8; MAX_SLAVES],
     esc_sync_manager_counts: [u8; MAX_SLAVES],
+    staged_mailbox: Option<MailboxConfig>,
     verified_mailboxes: [Option<MailboxConfig>; MAX_SLAVES],
     verified_fmmu_registers: [Option<FmmuRegisterBank>; MAX_SLAVES],
     verified_sync_manager_registers: [Option<SyncManagerRegisterBank>; MAX_SLAVES],
@@ -651,6 +674,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             device_emulation: [false; MAX_SLAVES],
             esc_fmmu_counts: [0; MAX_SLAVES],
             esc_sync_manager_counts: [0; MAX_SLAVES],
+            staged_mailbox: None,
             verified_mailboxes: [None; MAX_SLAVES],
             verified_fmmu_registers: [None; MAX_SLAVES],
             verified_sync_manager_registers: [None; MAX_SLAVES],
@@ -958,6 +982,19 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                         });
                     }
                 }
+                if let Some(receive_sync_manager) = profile.expected_mailbox_receive_sync_manager {
+                    let mailbox = profile.expected_mailbox.ok_or(
+                        StartupError::MissingMailboxProfileForReceiveSyncManager(profile.position),
+                    )?;
+                    receive_sync_manager
+                        .validate_for(mailbox)
+                        .map_err(
+                            |error| StartupError::InvalidMailboxReceiveSyncManagerProfile {
+                                position: profile.position,
+                                error,
+                            },
+                        )?;
+                }
                 if profile
                     .expected_dc_mode
                     .is_some_and(|mode| mode.name.is_empty())
@@ -1005,6 +1042,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.device_emulation = [false; MAX_SLAVES];
         self.esc_fmmu_counts = [0; MAX_SLAVES];
         self.esc_sync_manager_counts = [0; MAX_SLAVES];
+        self.staged_mailbox = None;
         self.verified_mailboxes = [None; MAX_SLAVES];
         self.verified_fmmu_registers = [None; MAX_SLAVES];
         self.verified_sync_manager_registers = [None; MAX_SLAVES];
@@ -1580,6 +1618,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.device_emulation = [false; MAX_SLAVES];
         self.esc_fmmu_counts = [0; MAX_SLAVES];
         self.esc_sync_manager_counts = [0; MAX_SLAVES];
+        self.staged_mailbox = None;
         self.verified_mailboxes = [None; MAX_SLAVES];
         self.verified_fmmu_registers = [None; MAX_SLAVES];
         self.verified_sync_manager_registers = [None; MAX_SLAVES];
@@ -1920,9 +1959,10 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                 observed,
             });
         }
-        self.verified_mailboxes[self.current_index] = Some(observed);
+        self.staged_mailbox = Some(expected);
         let profile = self.profile_for_position(record.position)?;
-        if profile.expected_sii.is_some() {
+        if profile.expected_sii.is_some() || profile.expected_mailbox_receive_sync_manager.is_some()
+        {
             self.phase = StartupPhase::ReadingFmmuRegisters;
             return Ok(StartupProgress::MailboxVerified(self.current_index));
         }
@@ -1930,6 +1970,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             self.phase = StartupPhase::ReadingConfiguration;
             return Ok(StartupProgress::MailboxVerified(self.current_index));
         }
+        self.verified_mailboxes[self.current_index] = self.staged_mailbox.take();
         self.phase = StartupPhase::TransitioningAl;
         match self.start_al_for_current(now_ns)? {
             StartupProgress::IdentityVerified(index) => Ok(StartupProgress::MailboxVerified(index)),
@@ -2084,6 +2125,23 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         } else {
             None
         };
+        if let Some(expected) = profile.expected_mailbox_receive_sync_manager {
+            let observed = candidate.mapping().sync_manager(expected.index).ok();
+            let matches = observed.is_some_and(|observed| {
+                observed.physical_start == expected.physical_start
+                    && observed.length == expected.length
+                    && observed.control == expected.control
+                    && observed.enable
+            });
+            if !matches {
+                return self.fail(StartupError::MailboxReceiveSyncManagerMismatch {
+                    position: record.position,
+                    expected,
+                    observed,
+                });
+            }
+        }
+        self.verified_mailboxes[self.current_index] = self.staged_mailbox.take();
         self.verified_sii[self.current_index] = observed_sii;
         self.verified_dc_modes[self.current_index] = observed_dc_mode;
         self.verified_fmmu_registers[self.current_index] = observed_fmmu_registers;
@@ -2299,6 +2357,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.last_error = Some(error);
         self.selected_reference_clock = None;
         self.dc_topology = None;
+        self.staged_mailbox = None;
         self.staged_fmmu_registers = None;
         self.staged_sync_manager_registers = None;
         self.phase = StartupPhase::Faulted;
@@ -2756,6 +2815,24 @@ mod tests {
         )
     }
 
+    fn startup_sii_image_with_receive_mailbox(
+        rx_object: u16,
+        start_address: u16,
+        length: u16,
+        control: u8,
+        enabled: bool,
+    ) -> std::vec::Vec<u8> {
+        let mut image = startup_sii_image(rx_object);
+        let receive_sync_manager_offset = 18;
+        image[receive_sync_manager_offset..receive_sync_manager_offset + 2]
+            .copy_from_slice(&start_address.to_le_bytes());
+        image[receive_sync_manager_offset + 2..receive_sync_manager_offset + 4]
+            .copy_from_slice(&length.to_le_bytes());
+        image[receive_sync_manager_offset + 4] = control;
+        image[receive_sync_manager_offset + 6] = u8::from(enabled);
+        image
+    }
+
     fn startup_sii_image_with_dc(rx_object: u16, mode: SiiDcMode) -> std::vec::Vec<u8> {
         let mut image = startup_sii_image(rx_object);
         image.truncate(image.len() - 4);
@@ -2781,8 +2858,10 @@ mod tests {
     fn startup_sii_signature_with_fmmu(
         rx_object: u16,
         usages: [SiiFmmuUsage; 2],
+        enabled_sync_managers: u16,
     ) -> SiiConfigurationSignature {
-        let mut builder = SiiConfigurationSignatureBuilder::new(2, 0b11, 0).unwrap();
+        let mut builder =
+            SiiConfigurationSignatureBuilder::new(2, enabled_sync_managers, 0).unwrap();
         for usage in usages {
             builder.fmmu_usage(usage).unwrap();
         }
@@ -2800,7 +2879,11 @@ mod tests {
     }
 
     fn startup_sii_signature(rx_object: u16) -> SiiConfigurationSignature {
-        startup_sii_signature_with_fmmu(rx_object, [SiiFmmuUsage::Outputs, SiiFmmuUsage::Inputs])
+        startup_sii_signature_with_fmmu(
+            rx_object,
+            [SiiFmmuUsage::Outputs, SiiFmmuUsage::Inputs],
+            0b11,
+        )
     }
 
     fn staged_fmmu_bank(
@@ -3049,6 +3132,115 @@ mod tests {
     }
 
     #[test]
+    fn startup_publishes_mailbox_policy_only_after_receive_sync_manager_verification() {
+        let expected_sii = startup_sii_signature(0x6040);
+        let mailbox = MailboxConfig::new(0x1000, 64, 0x1100, 64)
+            .with_status_bit(crate::MailboxStatusBit::sync_manager_mailbox_full(1));
+        let receive_sync_manager = MailboxReceiveSyncManager::new(1, 0x1100, 64, 0x22);
+
+        let mut matching = prepared_sii_verification(expected_sii);
+        matching.profiles[0] = matching.profiles[0]
+            .with_expected_mailbox(mailbox)
+            .with_expected_mailbox_receive_sync_manager(receive_sync_manager);
+        matching.staged_mailbox = Some(mailbox);
+        let mut now_ns = 1;
+        assert_eq!(matching.verified_mailbox(0), None);
+        assert_eq!(
+            drive_sii_configuration(
+                &mut matching,
+                &startup_sii_image_with_receive_mailbox(0x6040, 0x1100, 64, 0x22, true),
+                &mut now_ns,
+            ),
+            Ok(StartupProgress::SiiConfigurationVerified(0))
+        );
+        assert_eq!(matching.verified_mailbox(0), Some(mailbox));
+
+        let mut mismatch = prepared_sii_verification(expected_sii);
+        mismatch.profiles[0] = mismatch.profiles[0]
+            .with_expected_mailbox(mailbox)
+            .with_expected_mailbox_receive_sync_manager(receive_sync_manager);
+        mismatch.staged_mailbox = Some(mailbox);
+        let mut now_ns = 1;
+        let observed = SyncManagerConfig {
+            index: 1,
+            physical_start: 0x1100,
+            length: 64,
+            control: 0x20,
+            status: 0,
+            enable: true,
+        };
+        assert_eq!(
+            drive_sii_configuration(
+                &mut mismatch,
+                &startup_sii_image_with_receive_mailbox(0x6040, 0x1100, 64, 0x20, true),
+                &mut now_ns,
+            ),
+            Err(StartupError::MailboxReceiveSyncManagerMismatch {
+                position: 0,
+                expected: receive_sync_manager,
+                observed: Some(observed),
+            })
+        );
+        assert_eq!(mismatch.verified_mailbox(0), None);
+        assert_eq!(mismatch.staged_mailbox, None);
+        assert_eq!(mismatch.phase(), StartupPhase::Faulted);
+
+        let missing_receive_sync_manager = MailboxReceiveSyncManager::new(2, 0x1100, 64, 0x22);
+        let mut missing = prepared_sii_verification(expected_sii);
+        missing.profiles[0] = missing.profiles[0]
+            .with_expected_mailbox(mailbox)
+            .with_expected_mailbox_receive_sync_manager(missing_receive_sync_manager);
+        missing.staged_mailbox = Some(mailbox);
+        let mut now_ns = 1;
+        assert_eq!(
+            drive_sii_configuration(
+                &mut missing,
+                &startup_sii_image_with_receive_mailbox(0x6040, 0x1100, 64, 0x22, true),
+                &mut now_ns,
+            ),
+            Err(StartupError::MailboxReceiveSyncManagerMismatch {
+                position: 0,
+                expected: missing_receive_sync_manager,
+                observed: None,
+            })
+        );
+        assert_eq!(missing.verified_mailbox(0), None);
+
+        let disabled_sii = startup_sii_signature_with_fmmu(
+            0x6040,
+            [SiiFmmuUsage::Outputs, SiiFmmuUsage::Inputs],
+            0b01,
+        );
+        let mut disabled = prepared_sii_verification(disabled_sii);
+        disabled.profiles[0] = disabled.profiles[0]
+            .with_expected_mailbox(mailbox)
+            .with_expected_mailbox_receive_sync_manager(receive_sync_manager);
+        disabled.staged_mailbox = Some(mailbox);
+        let mut now_ns = 1;
+        let observed = SyncManagerConfig {
+            index: 1,
+            physical_start: 0x1100,
+            length: 64,
+            control: 0x22,
+            status: 0,
+            enable: false,
+        };
+        assert_eq!(
+            drive_sii_configuration(
+                &mut disabled,
+                &startup_sii_image_with_receive_mailbox(0x6040, 0x1100, 64, 0x22, false),
+                &mut now_ns,
+            ),
+            Err(StartupError::MailboxReceiveSyncManagerMismatch {
+                position: 0,
+                expected: receive_sync_manager,
+                observed: Some(observed),
+            })
+        );
+        assert_eq!(disabled.verified_mailbox(0), None);
+    }
+
+    #[test]
     fn startup_discovers_register_banks_then_publishes_and_bridges_atomically() {
         let expected = startup_sii_signature(0x6040);
         let mut startup = prepared_fmmu_register_discovery(expected);
@@ -3233,8 +3425,11 @@ mod tests {
     #[test]
     fn startup_fails_closed_on_sii_fmmu_usage_mismatch() {
         let expected = startup_sii_signature(0x6040);
-        let observed =
-            startup_sii_signature_with_fmmu(0x6040, [SiiFmmuUsage::Inputs, SiiFmmuUsage::Outputs]);
+        let observed = startup_sii_signature_with_fmmu(
+            0x6040,
+            [SiiFmmuUsage::Inputs, SiiFmmuUsage::Outputs],
+            0b11,
+        );
         let mut startup = prepared_sii_verification(expected);
         let mut now_ns = 1;
 
@@ -4070,10 +4265,7 @@ mod tests {
             ),
             Ok(StartupProgress::MailboxVerified(0))
         );
-        assert_eq!(
-            startup.verified_mailbox(0),
-            Some(MailboxConfig::new(0x1000, 64, 0x1100, 64))
-        );
+        assert_eq!(startup.verified_mailbox(0), Some(policy_expected));
         assert!(matches!(
             startup.next_action(now_ns),
             Ok(Some(StartupAction::Al(_)))

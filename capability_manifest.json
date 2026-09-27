@@ -174,7 +174,7 @@
     {
       "id": "ethercat_product_mailbox_config",
       "status": "implemented",
-      "scope": "Allocation-free strict ESI CoE mailbox-pair validation, generated mailbox propagation, Startup-owned exact SII 0x001C..0x0020 acquisition and pre-AL physical-layout verification, position-keyed verified evidence, and generated all-slave PDO batch construction with an explicit override path",
+      "scope": "Allocation-free strict ESI CoE mailbox-pair validation, generated MBoxIn/MBoxOut SyncManager evidence, canonical direct MBoxIn Status Bit derivation with PollTime fallback, Startup-owned exact SII 0x001C..0x0020 acquisition plus pre-AL indexed SyncManager/FMMU-usage verification, complete position-keyed policy publication, and generated all-slave PDO batch construction with an explicit override path",
       "evidence": [
         "crates/esop-ethercat-core/src/mailbox.rs",
         "crates/esop-ethercat-core/src/sii.rs",
@@ -184,10 +184,11 @@
         "crates/esop-cfggen/tests/generation.rs",
         "crates/esop-product-config/src/lib.rs",
         "crates/esop-product-config/tests/generated_product.rs",
+        "crates/esop-ethercat-linux-port/tests/scheduled_domains.rs",
         "config/examples/sim-dual-axis/esi/esop-sim.xml",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Software tests prove bounded generated-versus-live layout comparison for caller-delivered SII responses only; Mailbox Status Bit discovery, full live DC register descriptors, physical response authenticity, target timing, interoperability and HIL remain open"
+      "limitation": "Deterministic software tests prove canonical direct SyncManager-register Status Bit generation, PollTime fallback, tamper rejection, caller-delivered SII descriptor verification and production-scheduler suppression of input-mailbox reads while inactive. FMMU-mapped mailbox status in cyclic process data, physical response authenticity, target timing/WCET, device interoperability and hardware HIL remain open"
     },
     {
       "id": "product_runtime_attachment",

@@ -46,7 +46,7 @@
     "max_process_image_bytes": 128,
     "max_schedule_slots": 16
   },
-  "config_sha256": "e241ac19602f9adc68d206e726ed048fa3f915e34b04e6bd35a45af9774b6241",
+  "config_sha256": "88db861d4c7d43ce20f4a8ce764dd6716a9e406b578df87a265ee5dba579c607",
   "cycle": {
     "base_period_ns": 1000000,
     "deadline_ns": 800000
@@ -454,16 +454,23 @@
       "domain_id": 0,
       "esi_device_name": "ESOP simulated CiA 402 drive",
       "esi_label": "esop-sim-drive-v1",
-      "esi_semantic_sha256": "a5c7fc9893a2ea944640a5a72d6107a3dd9e5aa886a9de6a3524658db6718f05",
+      "esi_semantic_sha256": "0d8ab30c5af41e9b7a56cc547df921bbd85786b614d07c3df1b17eee8909eb9c",
       "esi_type_name": "ESOP-SIM-402",
       "kind": "cia402_drive",
       "mailbox": {
         "receive_address": 4352,
         "receive_capacity": 64,
         "receive_control_byte": 34,
+        "receive_sync_manager": 1,
         "send_address": 4096,
         "send_capacity": 64,
-        "send_control_byte": 38
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
       },
       "name": "drive_left",
       "op_only_outputs": [
@@ -490,11 +497,11 @@
         "sync1_cycle_factor": 0
       },
       "sii_enabled_sync_managers": 15,
-      "sii_fmmu_count": 2,
+      "sii_fmmu_count": 3,
       "sii_fmmu_usages": [
         "outputs",
         "inputs",
-        "unused",
+        "sync_manager_status",
         "unused",
         "unused",
         "unused",
@@ -541,16 +548,23 @@
       "domain_id": 0,
       "esi_device_name": "ESOP simulated CiA 402 drive",
       "esi_label": "esop-sim-drive-v1",
-      "esi_semantic_sha256": "a5c7fc9893a2ea944640a5a72d6107a3dd9e5aa886a9de6a3524658db6718f05",
+      "esi_semantic_sha256": "0d8ab30c5af41e9b7a56cc547df921bbd85786b614d07c3df1b17eee8909eb9c",
       "esi_type_name": "ESOP-SIM-402",
       "kind": "cia402_drive",
       "mailbox": {
         "receive_address": 4352,
         "receive_capacity": 64,
         "receive_control_byte": 34,
+        "receive_sync_manager": 1,
         "send_address": 4096,
         "send_capacity": 64,
-        "send_control_byte": 38
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
       },
       "name": "drive_right",
       "op_only_outputs": [
@@ -577,11 +591,11 @@
         "sync1_cycle_factor": 0
       },
       "sii_enabled_sync_managers": 15,
-      "sii_fmmu_count": 2,
+      "sii_fmmu_count": 3,
       "sii_fmmu_usages": [
         "outputs",
         "inputs",
-        "unused",
+        "sync_manager_status",
         "unused",
         "unused",
         "unused",
@@ -623,16 +637,18 @@
       "domain_id": 1,
       "esi_device_name": "ESOP simulated digital IO",
       "esi_label": "esop-sim-io-v1",
-      "esi_semantic_sha256": "f2a181dbebb5cacae40862bfc89f156b1132e879c073a3f7474208cec814d08b",
+      "esi_semantic_sha256": "adae8c7f5cfe2befef05adc20329d09b860275440564f63b163551072d976cb3",
       "esi_type_name": "ESOP-SIM-IO",
       "kind": "ethercat_io",
       "mailbox": {
         "receive_address": 4864,
         "receive_capacity": 32,
         "receive_control_byte": 34,
+        "receive_sync_manager": 1,
         "send_address": 4608,
         "send_capacity": 32,
-        "send_control_byte": 38
+        "send_control_byte": 38,
+        "send_sync_manager": 0
       },
       "name": "io_block",
       "op_only_outputs": [],

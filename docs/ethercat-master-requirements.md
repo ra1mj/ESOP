@@ -310,7 +310,7 @@ AssignActivate，并在运行时重算后形成产品顺序固定容量计划。
 | COE-002 | P0 | 可在 PREOP/SAFEOP 配置阶段执行 SDO 写入以设置 PDO assignment/mapping。 | 已知 CoE 从站启动后 PDO 映射与期望一致。 |
 | MBX-002 | P1 | 支持 Complete Access 的 SDO 传输，但必须允许设备配置禁用。 | CA 支持/拒绝两类设备的兼容测试。 |
 | MBX-003 | P0 | 实现与上层邮箱协议无关的 Mailbox Resilient Layer，恢复丢失、重复或状态不一致的邮箱帧。 | 丢帧、重复帧、计数器回绕和重试故障注入。 |
-| MBX-004 | P0 | 按 ESI/SII/静态配置支持周期轮询输入邮箱或映射 Mailbox Status Bit；轮询严格受控制面预算限制。 | PollTime 与 StatusBit 两种设备模型 HIL。 |
+| MBX-004 | P0 | 按 ESI/SII/静态配置支持 PollTime、直接读取 MBoxIn SyncManager Status Bit，或后续通过 FMMU 映射 Mailbox Status Bit；轮询严格受控制面预算限制。 | 软件测试覆盖 PollTime、生成式直接 SM Status Bit、在线 SII SM/FMMU usage 交叉验证和篡改拒绝；直接与 FMMU-mapped 两种设备模型仍需 HIL。 |
 | COE-003 | P0 | 接收 CoE Emergency 消息并以固定事件记录交给应用；应用未及时消费不得阻塞邮箱 FSM。 | 多驱动并发 Emergency、事件环满和顺序测试。 |
 | COE-004 | P1 | 支持 SDO Information service，用于读取对象、类型、访问权和 PDO 可映射属性；可在产品构建中关闭。 | 与已知对象字典及 ESI 描述交叉验证。 |
 | REG-001 | P1 | 提供异步 ESC 寄存器请求 API，仅在控制面预算中执行。 | 寄存器读写不会推迟指定 PDO 周期。 |

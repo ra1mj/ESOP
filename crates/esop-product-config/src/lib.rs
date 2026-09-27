@@ -12,15 +12,16 @@ pub use esop_ethercat_core::{
     DcSyncTimingError, DomainConfig, DomainDatagramSpec, DomainInfo, DomainRegistry,
     DomainRegistryError, ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, EscWatchdogConfig,
     EscWatchdogConfigError, ExpectedSlave, FramePlanSet, FramePlanSetError, MAX_SII_FMMU_USAGES,
-    MailboxConfig, MailboxConfigError, MailboxDirection, OpOnlyProfileError,
-    OpOnlySyncManagerProfile, PdoConfigBatch, PdoConfigBatchError, PdoConfigBatchPhase,
-    PdoConfigBatchPlan, PdoConfigBatchPlanError, PdoConfigBatchStatus, PdoConfigJob, PdoConfigPlan,
-    PdoConfigPlanError, PdoDirection, PdoEntry, PdoEntrySpec, PdoRegistrationRequest, PdoSdoWrite,
-    ScheduleTable, SiiConfigurationSignature, SiiConfigurationSignatureBuilder,
-    SiiConfigurationSignatureError, SiiDcMode, SiiDcModeExpectation, SiiFmmuUsage, SlaveCopyError,
-    SlaveCopyPlan, SlaveCopyPlanSet, SlaveCopyPlanSetError, SlaveIdentity, SlaveRecord,
-    StartupConfig, StartupController, StartupDcRequirement, StartupError, StartupSlaveProfile,
-    WatchdogPlan, WatchdogPlanEntry, WatchdogPlanError,
+    MailboxConfig, MailboxConfigError, MailboxDirection, MailboxReceiveSyncManager,
+    MailboxReceiveSyncManagerError, MailboxStatusBit, OpOnlyProfileError, OpOnlySyncManagerProfile,
+    PdoConfigBatch, PdoConfigBatchError, PdoConfigBatchPhase, PdoConfigBatchPlan,
+    PdoConfigBatchPlanError, PdoConfigBatchStatus, PdoConfigJob, PdoConfigPlan, PdoConfigPlanError,
+    PdoDirection, PdoEntry, PdoEntrySpec, PdoRegistrationRequest, PdoSdoWrite, ScheduleTable,
+    SiiConfigurationSignature, SiiConfigurationSignatureBuilder, SiiConfigurationSignatureError,
+    SiiDcMode, SiiDcModeExpectation, SiiFmmuUsage, SlaveCopyError, SlaveCopyPlan, SlaveCopyPlanSet,
+    SlaveCopyPlanSetError, SlaveIdentity, SlaveRecord, StartupConfig, StartupController,
+    StartupDcRequirement, StartupError, StartupSlaveProfile, WatchdogPlan, WatchdogPlanEntry,
+    WatchdogPlanError,
 };
 pub use esop_lifecycle_guard::procbuf::{Cia402AxisCommandPolicy, Cia402AxisCommandPolicyError};
 pub use esop_procbuf::{
@@ -68,11 +69,36 @@ pub struct ProductSlaveConfig {
     pub watchdog: Option<EscWatchdogConfig>,
     pub transition_timeouts: AlTransitionTimeouts,
     pub mailbox_config: MailboxConfig,
+    pub mailbox_send_sync_manager: u8,
+    pub mailbox_send_control_byte: u8,
+    pub mailbox_receive_sync_manager: MailboxReceiveSyncManager,
     pub op_only_outputs: OpOnlySyncManagerProfile,
     pub sii_sync_manager_count: u8,
     pub sii_enabled_sync_managers: u16,
     pub sii_fmmu_count: u8,
     pub sii_fmmu_usages: [SiiFmmuUsage; MAX_SII_FMMU_USAGES],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductMailboxPolicyError {
+    ReceiveSyncManager(MailboxReceiveSyncManagerError),
+    InvalidFmmuCount(u8),
+    InvalidSyncManagerCount(u8),
+    DuplicateMailboxSyncManager(u8),
+    SendSyncManagerNotDeclared {
+        index: u8,
+        count: u8,
+    },
+    SendSyncManagerDisabled(u8),
+    ReceiveSyncManagerNotDeclared {
+        index: u8,
+        count: u8,
+    },
+    ReceiveSyncManagerDisabled(u8),
+    StatusBitMismatch {
+        expected: Option<MailboxStatusBit>,
+        actual: Option<MailboxStatusBit>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,6 +142,10 @@ pub enum ProductStartupError {
     InvalidMailboxConfig {
         position: u16,
         error: MailboxConfigError,
+    },
+    MailboxPolicy {
+        position: u16,
+        error: ProductMailboxPolicyError,
     },
     OpOnlyProfile {
         position: u16,
@@ -259,6 +289,10 @@ pub enum ProductPdoBatchError {
         position: u16,
         error: MailboxConfigError,
     },
+    MailboxPolicy {
+        position: u16,
+        error: ProductMailboxPolicyError,
+    },
     MissingMailboxBinding {
         position: u16,
     },
@@ -288,6 +322,66 @@ impl ProductPdoMappingGroup {
         sync_manager: 0,
         direction: PdoDirection::Rx,
     };
+}
+
+fn validate_generated_mailbox_policy(
+    slave: ProductSlaveConfig,
+) -> Result<(), ProductMailboxPolicyError> {
+    slave
+        .mailbox_receive_sync_manager
+        .validate_for(slave.mailbox_config)
+        .map_err(ProductMailboxPolicyError::ReceiveSyncManager)?;
+
+    let fmmu_count = usize::from(slave.sii_fmmu_count);
+    if fmmu_count > MAX_SII_FMMU_USAGES {
+        return Err(ProductMailboxPolicyError::InvalidFmmuCount(
+            slave.sii_fmmu_count,
+        ));
+    }
+    let sync_manager_count = usize::from(slave.sii_sync_manager_count);
+    if sync_manager_count > MAX_PRODUCT_SYNC_MANAGERS {
+        return Err(ProductMailboxPolicyError::InvalidSyncManagerCount(
+            slave.sii_sync_manager_count,
+        ));
+    }
+    let send_index = slave.mailbox_send_sync_manager;
+    let receive_index = slave.mailbox_receive_sync_manager.index;
+    if send_index == receive_index {
+        return Err(ProductMailboxPolicyError::DuplicateMailboxSyncManager(
+            send_index,
+        ));
+    }
+    if send_index >= slave.sii_sync_manager_count {
+        return Err(ProductMailboxPolicyError::SendSyncManagerNotDeclared {
+            index: send_index,
+            count: slave.sii_sync_manager_count,
+        });
+    }
+    if slave.sii_enabled_sync_managers & (1u16 << send_index) == 0 {
+        return Err(ProductMailboxPolicyError::SendSyncManagerDisabled(
+            send_index,
+        ));
+    }
+    if receive_index >= slave.sii_sync_manager_count {
+        return Err(ProductMailboxPolicyError::ReceiveSyncManagerNotDeclared {
+            index: receive_index,
+            count: slave.sii_sync_manager_count,
+        });
+    }
+    if slave.sii_enabled_sync_managers & (1u16 << receive_index) == 0 {
+        return Err(ProductMailboxPolicyError::ReceiveSyncManagerDisabled(
+            receive_index,
+        ));
+    }
+
+    let status_declared =
+        slave.sii_fmmu_usages[..fmmu_count].contains(&SiiFmmuUsage::SyncManagerStatus);
+    let expected = status_declared.then(|| slave.mailbox_receive_sync_manager.status_bit());
+    let actual = slave.mailbox_config.status_bit;
+    if actual != expected {
+        return Err(ProductMailboxPolicyError::StatusBitMismatch { expected, actual });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -661,6 +755,12 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                 }
             }
             let expected_sii = self.sii_configuration_signature(slave)?;
+            validate_generated_mailbox_policy(slave).map_err(|error| {
+                ProductStartupError::MailboxPolicy {
+                    position: slave.position,
+                    error,
+                }
+            })?;
             let dc_requirement = if slave.dc_reference_clock {
                 StartupDcRequirement::ReferenceClock
             } else if slave.dc_required {
@@ -673,6 +773,7 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                 .with_transition_timeouts(slave.transition_timeouts)
                 .with_op_only_outputs(slave.op_only_outputs)
                 .with_expected_mailbox(slave.mailbox_config)
+                .with_expected_mailbox_receive_sync_manager(slave.mailbox_receive_sync_manager)
                 .with_expected_sii(expected_sii);
             if let Some(expected_dc_mode) = slave.sii_dc_mode {
                 profile = profile.with_expected_dc_mode(expected_dc_mode);
@@ -868,6 +969,20 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
     pub fn build_generated_pdo_configuration_batch<const JOBS: usize, const OPS: usize>(
         &self,
     ) -> Result<PdoConfigBatchPlan<JOBS, OPS>, ProductPdoBatchError> {
+        for slave in self.slaves.iter().copied() {
+            slave.mailbox_config.validate().map_err(|error| {
+                ProductPdoBatchError::InvalidMailboxConfig {
+                    position: slave.position,
+                    error,
+                }
+            })?;
+            validate_generated_mailbox_policy(slave).map_err(|error| {
+                ProductPdoBatchError::MailboxPolicy {
+                    position: slave.position,
+                    error,
+                }
+            })?;
+        }
         self.build_pdo_configuration_batch_with(|slave| Ok(slave.mailbox_config))
     }
 
@@ -1499,6 +1614,9 @@ mod tests {
                 watchdog: None,
                 transition_timeouts: ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
                 mailbox_config: MailboxConfig::new(0x1000, 32, 0x1100, 32),
+                mailbox_send_sync_manager: 0,
+                mailbox_send_control_byte: 0x26,
+                mailbox_receive_sync_manager: MailboxReceiveSyncManager::new(1, 0x1100, 32, 0x22),
                 op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
                 sii_sync_manager_count: 4,
                 sii_enabled_sync_managers: 0x000f,

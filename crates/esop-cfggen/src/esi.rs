@@ -1,7 +1,7 @@
 use crate::error::{GeneratorError, Result};
 use esop_ethercat_core::{
     ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, MAX_ESC_SYNC_MANAGERS, MAX_SII_FMMU_USAGES,
-    MailboxConfig, SYNC_MANAGER_ENABLE_FLAG, SYNC_MANAGER_OP_ONLY_FLAG,
+    MailboxConfig, MailboxReceiveSyncManager, SYNC_MANAGER_ENABLE_FLAG, SYNC_MANAGER_OP_ONLY_FLAG,
 };
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
@@ -126,9 +126,11 @@ impl EsiSyncManager {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct EsiMailbox {
+    pub send_sync_manager: u8,
     pub send_address: u16,
     pub send_capacity: u16,
     pub send_control_byte: u8,
+    pub receive_sync_manager: u8,
     pub receive_address: u16,
     pub receive_capacity: u16,
     pub receive_control_byte: u8,
@@ -141,6 +143,15 @@ impl EsiMailbox {
             self.send_capacity,
             self.receive_address,
             self.receive_capacity,
+        )
+    }
+
+    pub const fn receive_sync_manager(self) -> MailboxReceiveSyncManager {
+        MailboxReceiveSyncManager::new(
+            self.receive_sync_manager,
+            self.receive_address,
+            self.receive_capacity,
+            self.receive_control_byte,
         )
     }
 }
@@ -319,9 +330,11 @@ fn mailbox_from_sync_managers(
         return Err("mailbox SyncManagers must be enabled".to_owned());
     }
     let mailbox = EsiMailbox {
+        send_sync_manager: mailbox_out.index,
         send_address: mailbox_attribute(mailbox_out, mailbox_out.start_address, "StartAddress")?,
         send_capacity: mailbox_attribute(mailbox_out, mailbox_out.default_size, "DefaultSize")?,
         send_control_byte: mailbox_attribute(mailbox_out, mailbox_out.control_byte, "ControlByte")?,
+        receive_sync_manager: mailbox_in.index,
         receive_address: mailbox_attribute(mailbox_in, mailbox_in.start_address, "StartAddress")?,
         receive_capacity: mailbox_attribute(mailbox_in, mailbox_in.default_size, "DefaultSize")?,
         receive_control_byte: mailbox_attribute(
@@ -1229,9 +1242,11 @@ mod tests {
         assert_eq!(
             device.mailbox,
             Some(EsiMailbox {
+                send_sync_manager: 0,
                 send_address: 0x1000,
                 send_capacity: 64,
                 send_control_byte: 0x26,
+                receive_sync_manager: 1,
                 receive_address: 0x1100,
                 receive_capacity: 32,
                 receive_control_byte: 0x22,
@@ -1240,6 +1255,10 @@ mod tests {
         assert_eq!(
             device.mailbox.unwrap().mailbox_config(),
             MailboxConfig::new(0x1000, 64, 0x1100, 32)
+        );
+        assert_eq!(
+            device.mailbox.unwrap().receive_sync_manager(),
+            MailboxReceiveSyncManager::new(1, 0x1100, 32, 0x22)
         );
     }
 

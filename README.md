@@ -42,6 +42,14 @@ Linux 观测适配器位于 `crates/esop-ebpf-runtime/`：它使用 Rust/Aya 加
 
 2026-09-27 的 SyncManager register 增量补齐了 FMMU bank 之后的 live SM 证据：携带 expected SII 的 profile 会按 ESC 基础信息报告数量依次读取全部 `0x0600 + index * 16` FMMU page 和 `0x0800 + index * 8` SyncManager page，随后才读取 SII category stream。Startup 仅在 FMMU bank、SyncManager bank、SII 结构签名和可选 DC 描述全部成功时按 position 原子发布，并同时限制 SII 描述的 FMMU/SM 数量不超过 ESC 报告值。typed mapping bridge 在任何期望映射写入前先逐页清零并精确回读完整 SM bank，再处理完整 FMMU bank；旧 `start` 与 FMMU-only API 保持兼容。两类 live bank 都只作为证据和 reset bound，不是产品期望配置；物理响应真实性、目标 WCET、真实从站互操作、长时运行与实物 HIL 仍未资格化。
 
+同日的直接 Mailbox Status Bit 增量把 ESI `MBoxIn` SyncManager index 与 ordered
+`MBoxState` 能力声明编译为规范 `0x0800 + index * 8 + 5`、mask `0x08`、active-high
+策略；无声明产品保持 PollTime。该策略进入全部生成产物与配置 hash，产品运行时在
+构造 Startup/PDO batch 前重新推导并拒绝篡改。Startup 只有在标准邮箱布局、在线
+MBoxIn SM 地址/容量/control/enabled 和 ordered FMMU usage 全部匹配后才发布完整
+`MailboxConfig`；生产调度仿真证明状态未激活时不会读输入邮箱。FMMU-mapped
+Mailbox Status Bit、物理响应真实性、真实设备 HIL、目标 WCET 与互操作仍未资格化。
+
 2026-09-27 的 ESC watchdog 增量把每从站可选 `divider` 与 `process_data_intervals` 原始值纳入严格产品清单、配置 hash、六类生成产物和 `no_std` 运行时计划。核心按产品顺序对标准 `0x0400/2` 与 `0x0420/2` 执行两字节小端写入和独立精确读回，要求 WKC 1、固定 deadline、完整计划成功后才发布证据；未配置字段保持 ESC 默认且不发请求。生产调度优先级为 PDO、Watchdog、Mapping、DC Clock、DC SYNC、legacy DC，显式启用的 PREOP 屏障在 Watchdog `Complete` 前保持 Configuration/Topology fail-closed。该软件证据不计算实际 watchdog 时间，不证明物理响应来源、真实超时动作、设备互操作、目标 WCET、HIL、ETG 一致性或功能安全。
 
 2026-09-27 的自动 Slave-to-Slave 增量把生成产品的不可变复制计划接入稳定生产周期所有者：周期 N 的共享 RX 核验后，固定容量双页过程映像会为 N+1 预检全部到期计划，完整成功才一次发布新页；错误保持旧页不变并把所有者闭锁到 `Faulted`。共享辅助输出必须携带周期、长度和页地址均匹配的 typed 发布快照，缺失、过期、替换或跳过发布会在 TX 前拒绝。模拟产品已覆盖非到期、有效位置复制、WKC 0 fallback、重放和运动 Domain 目标拒绝；真实响应来源、目标 WCET、长时运行、实物 HIL 和功能安全资格仍不在该证据范围内。

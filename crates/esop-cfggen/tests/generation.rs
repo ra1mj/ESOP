@@ -97,6 +97,24 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
         inventory["devices"][0]["mailbox"]["send_control_byte"],
         0x26
     );
+    assert_eq!(inventory["devices"][0]["mailbox"]["send_sync_manager"], 0);
+    assert_eq!(
+        inventory["devices"][0]["mailbox"]["receive_sync_manager"],
+        1
+    );
+    assert_eq!(
+        inventory["devices"][0]["mailbox"]["status_bit"]["address"],
+        "0x080d"
+    );
+    assert_eq!(
+        inventory["devices"][0]["mailbox"]["status_bit"]["mask"],
+        0x08
+    );
+    assert!(
+        inventory["devices"][2]["mailbox"]
+            .get("status_bit")
+            .is_none()
+    );
     assert_eq!(
         inventory["devices"][2]["mailbox"]["receive_address"],
         0x1300
@@ -108,10 +126,15 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert_eq!(product["slaves"][2]["mailbox"]["send_capacity"], 32);
     assert_eq!(product["slaves"][0]["sii_sync_manager_count"], 4);
     assert_eq!(product["slaves"][0]["sii_enabled_sync_managers"], 15);
-    assert_eq!(product["slaves"][0]["sii_fmmu_count"], 2);
+    assert_eq!(product["slaves"][0]["sii_fmmu_count"], 3);
+    assert_eq!(product["slaves"][2]["sii_fmmu_count"], 2);
     assert_eq!(product["slaves"][0]["sii_fmmu_usages"][0], "outputs");
     assert_eq!(product["slaves"][0]["sii_fmmu_usages"][1], "inputs");
-    assert_eq!(product["slaves"][0]["sii_fmmu_usages"][2], "unused");
+    assert_eq!(
+        product["slaves"][0]["sii_fmmu_usages"][2],
+        "sync_manager_status"
+    );
+    assert_eq!(product["slaves"][2]["sii_fmmu_usages"][2], "unused");
     assert_eq!(
         product["slaves"][0]["sii_fmmu_usages"]
             .as_array()
@@ -153,6 +176,11 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
 
     let header = fs::read_to_string(first.join("esop_product_config.h")).unwrap();
     assert!(header.contains("uint16_t mailbox_send_address"));
+    assert!(header.contains("uint8_t mailbox_send_sync_manager"));
+    assert!(header.contains("uint8_t mailbox_receive_sync_manager"));
+    assert!(header.contains("uint8_t has_mailbox_status_bit"));
+    assert!(header.contains("uint16_t mailbox_status_bit_address"));
+    assert!(header.contains("uint8_t mailbox_status_bit_mask"));
     assert!(header.contains("uint8_t sii_sync_manager_count"));
     assert!(header.contains("uint16_t sii_enabled_sync_managers"));
     assert!(header.contains("#define ESOP_SII_FMMU_CAPACITY 16u"));
@@ -174,14 +202,22 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(header.contains("\"left_position_to_io\", 9u, 15u, 16u"));
     assert!(header.contains("UINT16_C(0x1000), UINT16_C(64), UINT16_C(0x1100), UINT16_C(64)"));
     assert!(header.contains("4u, UINT16_C(0x000f)"));
-    assert!(header.contains("2u, {1u, 2u, 0u, 0u"));
+    assert!(header.contains("1u, UINT16_C(0x080d), UINT8_C(0x08), 1u"));
+    assert!(header.contains("3u, {1u, 2u, 3u, 0u"));
 
     let rust = fs::read_to_string(first.join("esop_product_config.rs")).unwrap();
-    assert!(rust.contains("MailboxConfig::new(0x1000, 64, 0x1100, 64)"));
+    assert!(rust.contains(
+        "MailboxConfig::new(0x1000, 64, 0x1100, 64).with_status_bit(MailboxStatusBit::sync_manager_mailbox_full(1))"
+    ));
     assert!(rust.contains("MailboxConfig::new(0x1200, 32, 0x1300, 32)"));
+    assert!(rust.contains("mailbox_send_sync_manager: 0"));
+    assert!(rust.contains("mailbox_send_control_byte: 0x26"));
+    assert!(rust.contains("MailboxReceiveSyncManager::new(1, 0x1100, 64, 0x22)"));
+    assert!(rust.contains("MailboxReceiveSyncManager::new(1, 0x1300, 32, 0x22)"));
     assert!(rust.contains("sii_sync_manager_count: 4"));
     assert!(rust.contains("sii_enabled_sync_managers: 0x000f"));
-    assert!(rust.contains("sii_fmmu_count: 2"));
+    assert!(rust.contains("sii_fmmu_count: 3"));
+    assert!(rust.contains("SiiFmmuUsage::SyncManagerStatus"));
     assert!(rust.contains("SiiFmmuUsage::Outputs"));
     assert!(rust.contains("SiiFmmuUsage::Inputs"));
     assert!(rust.contains("dc_required: true, dc_reference_clock: true"));

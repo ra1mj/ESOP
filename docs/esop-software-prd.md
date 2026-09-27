@@ -549,7 +549,21 @@ inventory、规范化 JSON、C/Rust 静态配置、ESI semantic hash 和最终�
 `0x001C..0x0020`，要求 CoE，只比较 SII 可表示的 send/receive 地址与容量，并在匹配后
 按 position 保留验证证据。独立 `SiiMailbox` 动作避免身份读与邮箱读串线；generation、
 token、WKC、长度、deadline 和控制请求池所有权继续沿用原有闭环。旧 `start()` 和无
-邮箱 profile 保持兼容。物理响应真实性、Status Bit 发现和 HIL 仍未完成。
+邮箱 profile 保持兼容。物理响应真实性与 HIL 仍未完成；下述增量已补齐直接
+SyncManager-register Status Bit 发现，FMMU-mapped 路径保持开放。
+
+R2 直接 Mailbox Status Bit 增量：cfggen 现保留 ESI `MBoxOut`/`MBoxIn` 的
+SyncManager index，并把 ordered `MBoxState`/SyncManager-status FMMU usage 解释为
+“允许直接读取 MBoxIn SM 状态字节”的能力声明。规范策略只可由 MBoxIn index 推导：
+`0x0800 + index * 8 + 5`、mask `0x08`、active-high；没有声明的产品继续使用
+PollTime。JSON、inventory、C/Rust 和配置 hash 均携带 index 与策略，`no_std`
+产品层在构建 Startup profile 和 PDO batch 前重新推导并拒绝地址、mask、极性、
+index 或存在性篡改。Startup 在标准邮箱头匹配后仍不发布策略，必须再从在线 SII
+category 精确核对 MBoxIn SM 的地址、容量、control byte、enabled 状态以及 ordered
+FMMU usage，全部一致后才原子发布完整 `MailboxConfig`。Linux 生产调度仿真证明状态
+未激活时不读输入邮箱，激活后下一周期才读；手工 Status Bit 与 PollTime 路径保持兼容。
+本增量不包含把 Mailbox Status Bit 通过 FMMU 映射到周期过程映像，也不证明物理响应
+真实性、目标 WCET、互操作或实物 HIL。
 
 R2 SII category stream 增量：`SiiCategoryStreamReader<WORDS>` 复用现有 EEPROM
 寄存器动作与控制请求池，从标准 word `0x0040` 读取两字 category header 和精确

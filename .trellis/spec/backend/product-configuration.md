@@ -216,6 +216,12 @@ milliseconds converted to checked nanoseconds; missing values use the named
 `ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1`. Mailbox data, timeout profiles, and
 activation templates and the ordered FMMU usage profile participate in ESI
 semantic and configuration hashes.
+The generator also retains both mailbox SyncManager indexes. An ordered
+SyncManager-status / `MBoxState` FMMU usage requires the canonical direct
+MBoxIn status policy `0x0800 + index * 8 + 5`, mask `0x08`, active-high;
+absence retains PollTime. JSON, inventory, C and Rust must expose the indexes
+and derived policy, and no product input may override its address, mask or
+polarity.
 All ordered ESI DC mode metadata participates in the ESI semantic hash. The
 product-selected mode, its exact SII-representable descriptor, and the resolved
 absolute SYNC0/SYNC1 cycle, signed SYNC0 shift, and exact 16-bit
@@ -230,9 +236,13 @@ slave-to-master direction conversion. It parses caller-owned words or a
 completed exact-range `SiiBlockReader`. A Startup profile may carry the
 generated expected mailbox; after identity verification and before any AL
 transition, Startup reads exactly SII words `0x001C..0x0020`, requires CoE,
-compares only the four physical address/capacity fields, and publishes
-position-keyed verified evidence. Runtime poll, timeout, retry and status-bit
-policy are not SII layout fields. Profiles without an expected mailbox and the
+compares only the four physical address/capacity fields, and stages rather
+than publishes the expected runtime policy. The later SII category comparison
+must verify the generated MBoxIn SyncManager index, address, length, control
+byte and enabled state, while ordered FMMU usage verifies whether the
+canonical direct Status Bit is permitted. Only then may Startup publish the
+complete position-keyed MailboxConfig. Runtime poll, timeout, retry and
+status-bit policy are not SII-header layout fields. Profiles without an expected mailbox and the
 legacy `start` API retain the identity-to-AL path.
 
 The core also provides a fixed-capacity SII category stream contract.
@@ -257,12 +267,16 @@ names use exact one-based string indices, reserved bytes must be zero, and all
 signed shifts/factors retain their protocol widths without allocation.
 
 `startup_profiles` validates timeout values, exact slave positions, generated
-mailbox ranges, generated FMMU count, generated SM count/enabled mask, OpOnly
+mailbox ranges, the MBoxIn descriptor, canonical direct Status Bit policy,
+generated FMMU count, generated SM count/enabled mask, OpOnly
 flags, exclusive selected RxPDO ownership, and contiguous PDO groups before
 rebuilding the expected SII signature from the static fields used by runtime
 configuration. In deterministic all-Rx-then-all-Tx group order, every process
 data FMMU index must declare Outputs for Rx or Inputs for Tx; missing or other
-usage values fail before Startup mutation.
+usage values fail before Startup mutation. A SyncManager-status declaration
+requires the canonical Status Bit, while its absence requires PollTime; no
+silent fallback is allowed. Generated PDO batches repeat the same validation
+before exposing jobs to the production scheduler.
 It first validates the product-wide DC invariant and maps each static policy to
 `StartupDcRequirement::{None,SystemTime,ReferenceClock}`; invalid policy must
 return before Startup mutation. It also propagates the selected

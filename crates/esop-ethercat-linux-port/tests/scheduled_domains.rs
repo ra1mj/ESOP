@@ -1563,6 +1563,134 @@ fn production_scheduler_runs_pdo_mailbox_readback_before_lower_priority_services
 }
 
 #[test]
+fn generated_mailbox_status_policy_suppresses_input_reads_until_active() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<2, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let batch_plan = generated_product::PRODUCT_CONFIG
+        .build_generated_pdo_configuration_batch::<3, 17>()
+        .unwrap();
+    let first_job = batch_plan.jobs()[0];
+    let mailbox_config = first_job.mailbox_config();
+    let status_bit = mailbox_config.status_bit.unwrap();
+    assert_eq!(first_job.station_address(), 0x1001);
+    assert_eq!(status_bit.address, 0x080D);
+    assert_eq!(status_bit.mask, 0x08);
+    assert!(status_bit.active_high);
+
+    let mut pdo_batch = PdoConfigBatch::new();
+    pdo_batch
+        .start(batch_plan, 41, 90_000, 1_000_000, 100_000)
+        .unwrap();
+    let mut scheduler = ScheduledProductionServiceScheduler::new();
+    let mut controls = ControlRequestPool::<2>::new();
+    let mut port = TwoFrameSimPort::new();
+    port.configure_mailbox(first_job.station_address(), mailbox_config);
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut dc_image = [0; 8];
+
+    macro_rules! run_cycle {
+        ($now_ns:expr, $generation:expr) => {{
+            port.set_now_ns($now_ns);
+            scheduler
+                .run_cycle(
+                    &mut bank,
+                    &mut master,
+                    &mut port,
+                    &mut scratch,
+                    &mut dc,
+                    &mut dc_image,
+                    $now_ns,
+                    &mut controls,
+                    &mut ScheduledProductionServices::<0, 0, 0, 17, 3>::new(None, None, None, None)
+                        .with_pdo_configuration(ScheduledPdoConfiguration::batch(&mut pdo_batch)),
+                    $generation,
+                    $now_ns + 50_000,
+                    $now_ns + 50_000,
+                )
+                .unwrap()
+        }};
+    }
+
+    let sent = run_cycle!(100_000, 1);
+    assert_eq!(
+        sent.progress(),
+        ScheduledProductionServiceProgress::PdoConfiguration(
+            ScheduledPdoConfigurationProgress::Mailbox(MailboxProgress::Advanced)
+        )
+    );
+    assert_eq!(pdo_batch.mailbox().phase(), MailboxPhase::CheckingStatus);
+    assert_eq!(port.mailbox_status_reads, 0);
+    assert_eq!(port.mailbox_receive_reads, 0);
+
+    let status_address = fixed_address(first_job.station_address(), status_bit.address);
+    port.set_next_control_response(status_address, &[0]);
+    let inactive = run_cycle!(101_000, 2);
+    assert_eq!(
+        inactive.progress(),
+        ScheduledProductionServiceProgress::PdoConfiguration(
+            ScheduledPdoConfigurationProgress::Mailbox(MailboxProgress::NoMessage)
+        )
+    );
+    assert_eq!(pdo_batch.mailbox().phase(), MailboxPhase::CheckingStatus);
+    assert_eq!(port.mailbox_status_reads, 1);
+    assert_eq!(port.mailbox_receive_reads, 0);
+
+    port.set_next_control_response(status_address, &[status_bit.mask]);
+    let active = run_cycle!(102_000, 3);
+    assert_eq!(
+        active.progress(),
+        ScheduledProductionServiceProgress::PdoConfiguration(
+            ScheduledPdoConfigurationProgress::Mailbox(MailboxProgress::Advanced)
+        )
+    );
+    assert_eq!(pdo_batch.mailbox().phase(), MailboxPhase::Polling);
+    assert_eq!(port.mailbox_status_reads, 2);
+    assert_eq!(port.mailbox_receive_reads, 0);
+
+    let polled = run_cycle!(103_000, 4);
+    assert_eq!(
+        polled.progress(),
+        ScheduledProductionServiceProgress::PdoConfiguration(
+            ScheduledPdoConfigurationProgress::Mailbox(MailboxProgress::NoMessage)
+        )
+    );
+    assert_eq!(port.mailbox_status_reads, 2);
+    assert_eq!(port.mailbox_receive_reads, 1);
+}
+
+#[test]
 fn pdo_transport_fault_blocks_lower_priority_until_explicit_restart() {
     let schedule = ScheduleTable::<1, 1>::build(
         100_000,
@@ -4124,6 +4252,9 @@ struct TwoFrameSimPort {
     reported_now_after_rx_polls: Option<(usize, u64)>,
     mailbox_send_address: Option<u32>,
     mailbox_receive_address: Option<u32>,
+    mailbox_status_address: Option<u32>,
+    mailbox_receive_reads: usize,
+    mailbox_status_reads: usize,
     mailbox_counter: u8,
     mailbox_response: [u8; MAX_MAILBOX_BYTES],
     mailbox_response_len: usize,
@@ -4147,6 +4278,9 @@ impl TwoFrameSimPort {
             reported_now_after_rx_polls: None,
             mailbox_send_address: None,
             mailbox_receive_address: None,
+            mailbox_status_address: None,
+            mailbox_receive_reads: 0,
+            mailbox_status_reads: 0,
             mailbox_counter: 0,
             mailbox_response: [0; MAX_MAILBOX_BYTES],
             mailbox_response_len: 0,
@@ -4160,6 +4294,11 @@ impl TwoFrameSimPort {
     fn configure_mailbox(&mut self, station_address: u16, config: MailboxConfig) {
         self.mailbox_send_address = Some(fixed_address(station_address, config.send_address));
         self.mailbox_receive_address = Some(fixed_address(station_address, config.receive_address));
+        self.mailbox_status_address = config
+            .status_bit
+            .map(|status_bit| fixed_address(station_address, status_bit.address));
+        self.mailbox_receive_reads = 0;
+        self.mailbox_status_reads = 0;
     }
 
     fn set_next_mailbox_response(&mut self, payload: &[u8]) {
@@ -4253,6 +4392,11 @@ impl EthercatPort for TwoFrameSimPort {
                 let header =
                     DatagramHeader::decode(&self.frames[self.count][offset..header_end]).unwrap();
                 let payload_end = header_end + header.length as usize;
+                if Some(header.address) == self.mailbox_status_address
+                    && header.command == Command::Fprd
+                {
+                    self.mailbox_status_reads += 1;
+                }
                 if Some(header.address) == self.mailbox_send_address
                     && header.command == Command::Fpwr
                 {
@@ -4262,13 +4406,15 @@ impl EthercatPort for TwoFrameSimPort {
                             .counter;
                 } else if Some(header.address) == self.mailbox_receive_address
                     && header.command == Command::Fprd
-                    && self.mailbox_response_len != 0
                 {
-                    let response_len = self.mailbox_response_len.min(header.length as usize);
-                    self.frames[self.count][header_end..payload_end].fill(0);
-                    self.frames[self.count][header_end..header_end + response_len]
-                        .copy_from_slice(&self.mailbox_response[..response_len]);
-                    self.mailbox_response_len = 0;
+                    self.mailbox_receive_reads += 1;
+                    if self.mailbox_response_len != 0 {
+                        let response_len = self.mailbox_response_len.min(header.length as usize);
+                        self.frames[self.count][header_end..payload_end].fill(0);
+                        self.frames[self.count][header_end..header_end + response_len]
+                            .copy_from_slice(&self.mailbox_response[..response_len]);
+                        self.mailbox_response_len = 0;
+                    }
                 } else if self.control_response_address == Some(header.address)
                     && header.command == Command::Fprd
                     && self.control_response_len != 0

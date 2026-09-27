@@ -13,8 +13,8 @@ use esop_ethercat_core::wire::{
 };
 use esop_ethercat_core::{
     DcSyncTiming, DomainConfig, DomainDatagramSpec, DomainRegistry, EscWatchdogConfig,
-    FramePlanSet, MAX_SII_FMMU_USAGES, PdoDirection, PdoEntryHandle, PdoRegistrationRequest,
-    SiiDcMode, SlaveCopyPlan, SlaveCopyPlanSet,
+    FramePlanSet, MAX_SII_FMMU_USAGES, MailboxStatusBit, PdoDirection, PdoEntryHandle,
+    PdoRegistrationRequest, SiiDcMode, SlaveCopyPlan, SlaveCopyPlanSet,
 };
 use esop_lifecycle_guard::procbuf::Cia402AxisCommandPolicy;
 use esop_procbuf::{ABI_VERSION, ProcBufDimensions, ProcBufLayoutDescriptor, describe_layout};
@@ -140,7 +140,7 @@ struct GeneratedSlave {
     esi_type_name: String,
     esi_device_name: String,
     transition_timeouts: EsiTransitionTimeouts,
-    mailbox: EsiMailbox,
+    mailbox: GeneratedMailbox,
     sii_fmmu_count: u8,
     sii_fmmu_usages: [EsiFmmuUsage; MAX_SII_FMMU_USAGES],
     sii_sync_manager_count: u8,
@@ -148,6 +148,53 @@ struct GeneratedSlave {
     op_only_outputs: Vec<GeneratedOpOnlySyncManager>,
     rx_pdos: Vec<HexU16>,
     tx_pdos: Vec<HexU16>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct GeneratedMailboxStatusBit {
+    address: HexU16,
+    mask: u8,
+    active_high: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct GeneratedMailbox {
+    send_sync_manager: u8,
+    send_address: u16,
+    send_capacity: u16,
+    send_control_byte: u8,
+    receive_sync_manager: u8,
+    receive_address: u16,
+    receive_capacity: u16,
+    receive_control_byte: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status_bit: Option<GeneratedMailboxStatusBit>,
+}
+
+impl GeneratedMailbox {
+    fn from_esi(mailbox: EsiMailbox, status_bit_enabled: bool) -> Self {
+        let receive_sync_manager = mailbox.receive_sync_manager();
+        let status_bit = status_bit_enabled.then(|| {
+            let status_bit =
+                MailboxStatusBit::sync_manager_mailbox_full(receive_sync_manager.index);
+            GeneratedMailboxStatusBit {
+                address: HexU16(status_bit.address),
+                mask: status_bit.mask,
+                active_high: status_bit.active_high,
+            }
+        });
+        Self {
+            send_sync_manager: mailbox.send_sync_manager,
+            send_address: mailbox.send_address,
+            send_capacity: mailbox.send_capacity,
+            send_control_byte: mailbox.send_control_byte,
+            receive_sync_manager: receive_sync_manager.index,
+            receive_address: receive_sync_manager.physical_start,
+            receive_capacity: receive_sync_manager.length,
+            receive_control_byte: receive_sync_manager.control,
+            status_bit,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -352,6 +399,13 @@ fn build_artifacts(input: &Path) -> Result<GeneratedArtifacts> {
             let mut sii_fmmu_usages = [EsiFmmuUsage::Unused; MAX_SII_FMMU_USAGES];
             sii_fmmu_usages[..slave.device.fmmu_usages.len()]
                 .copy_from_slice(&slave.device.fmmu_usages);
+            let mailbox = GeneratedMailbox::from_esi(
+                slave.mailbox,
+                slave
+                    .device
+                    .fmmu_usages
+                    .contains(&EsiFmmuUsage::SyncManagerStatus),
+            );
             Ok(GeneratedSlave {
                 name: slave.manifest.name.clone(),
                 kind: slave.manifest.kind,
@@ -371,7 +425,7 @@ fn build_artifacts(input: &Path) -> Result<GeneratedArtifacts> {
                 esi_type_name: slave.device.type_name.clone(),
                 esi_device_name: slave.device.name.clone(),
                 transition_timeouts: slave.device.transition_timeouts,
-                mailbox: slave.mailbox,
+                mailbox,
                 sii_fmmu_count: slave.device.fmmu_usages.len() as u8,
                 sii_fmmu_usages,
                 sii_sync_manager_count: slave.device.sync_managers.len() as u8,
@@ -1612,7 +1666,7 @@ fn render_header(
         "#ifndef ESOP_PRODUCT_CONFIG_H\n#define ESOP_PRODUCT_CONFIG_H\n\n#include <stdint.h>\n\n",
     );
     header.push_str("#define ESOP_SII_FMMU_CAPACITY 16u\n\n");
-    header.push_str("typedef struct { const char *name; uint16_t position; uint16_t station_address; uint8_t domain_id; uint8_t kind; uint32_t vendor_id; uint32_t product_code; uint32_t revision; uint32_t serial; uint8_t has_serial; uint8_t dc_required; uint8_t dc_reference_clock; const char *dc_op_mode; uint8_t has_dc_op_mode; uint32_t dc_cycle_time0_ns; int32_t dc_shift_time0_ns; int32_t dc_shift_time1_ns; int16_t dc_sync1_cycle_factor; uint16_t dc_assign_activate; int16_t dc_sync0_cycle_factor; uint8_t has_dc_sync_timing; uint32_t dc_sync_cycle_time0_ns; uint32_t dc_sync_cycle_time1_ns; int32_t dc_sync_shift_time0_ns; uint16_t dc_sync_assign_activate; uint16_t mailbox_send_address; uint16_t mailbox_send_capacity; uint16_t mailbox_receive_address; uint16_t mailbox_receive_capacity; uint8_t sii_sync_manager_count; uint16_t sii_enabled_sync_managers; uint8_t sii_fmmu_count; uint8_t sii_fmmu_usages[ESOP_SII_FMMU_CAPACITY]; uint8_t has_watchdog; uint8_t has_watchdog_divider; uint16_t watchdog_divider; uint8_t has_process_data_watchdog; uint16_t process_data_watchdog_intervals; } esop_slave_config_t;\n");
+    header.push_str("typedef struct { const char *name; uint16_t position; uint16_t station_address; uint8_t domain_id; uint8_t kind; uint32_t vendor_id; uint32_t product_code; uint32_t revision; uint32_t serial; uint8_t has_serial; uint8_t dc_required; uint8_t dc_reference_clock; const char *dc_op_mode; uint8_t has_dc_op_mode; uint32_t dc_cycle_time0_ns; int32_t dc_shift_time0_ns; int32_t dc_shift_time1_ns; int16_t dc_sync1_cycle_factor; uint16_t dc_assign_activate; int16_t dc_sync0_cycle_factor; uint8_t has_dc_sync_timing; uint32_t dc_sync_cycle_time0_ns; uint32_t dc_sync_cycle_time1_ns; int32_t dc_sync_shift_time0_ns; uint16_t dc_sync_assign_activate; uint16_t mailbox_send_address; uint16_t mailbox_send_capacity; uint16_t mailbox_receive_address; uint16_t mailbox_receive_capacity; uint8_t mailbox_send_sync_manager; uint8_t mailbox_send_control_byte; uint8_t mailbox_receive_sync_manager; uint8_t mailbox_receive_control_byte; uint8_t has_mailbox_status_bit; uint16_t mailbox_status_bit_address; uint8_t mailbox_status_bit_mask; uint8_t mailbox_status_bit_active_high; uint8_t sii_sync_manager_count; uint16_t sii_enabled_sync_managers; uint8_t sii_fmmu_count; uint8_t sii_fmmu_usages[ESOP_SII_FMMU_CAPACITY]; uint8_t has_watchdog; uint8_t has_watchdog_divider; uint16_t watchdog_divider; uint8_t has_process_data_watchdog; uint16_t process_data_watchdog_intervals; } esop_slave_config_t;\n");
     header.push_str("typedef struct { const char *name; uint8_t id; uint32_t logical_address; uint32_t image_offset; uint32_t image_bytes; uint32_t output_bytes; uint32_t input_bytes; uint32_t period_ticks; uint32_t phase_ticks; uint16_t expected_wkc; } esop_domain_config_t;\n");
     header.push_str("typedef struct { uint8_t domain_id; uint16_t slave_position; uint16_t assignment_index; uint8_t sync_manager; uint16_t object_index; uint8_t subindex; uint8_t direction; uint32_t bit_offset; uint8_t bit_length; uint8_t is_signed; } esop_pdo_config_t;\n");
     header.push_str("typedef struct { uint8_t domain_id; uint8_t command; uint8_t index; uint32_t logical_address; uint32_t image_offset; uint16_t payload_len; uint16_t expected_wkc; uint8_t input; } esop_datagram_config_t;\n");
@@ -1648,6 +1702,7 @@ fn render_header(
             let dc_mode = slave.sii_dc_mode.as_ref();
             let dc_sync_timing = slave.dc_sync_timing;
             let watchdog = slave.watchdog;
+            let mailbox_status_bit = slave.mailbox.status_bit;
             let fmmu_initializer = format!(
                 "{{{}}}",
                 slave
@@ -1658,7 +1713,7 @@ fn render_header(
                     .join(", ")
             );
             header.push_str(&format!(
-                "  {{{}, {}u, UINT16_C(0x{:04x}), {}u, {}u, UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), {}u, {}u, {}u, {}, {}u, UINT32_C({}), INT32_C({}), INT32_C({}), INT16_C({}), UINT16_C(0x{:04x}), INT16_C({}), {}u, UINT32_C({}), UINT32_C({}), INT32_C({}), UINT16_C(0x{:04x}), UINT16_C(0x{:04x}), UINT16_C({}), UINT16_C(0x{:04x}), UINT16_C({}), {}u, UINT16_C(0x{:04x}), {}u, {}, {}u, {}u, UINT16_C({}), {}u, UINT16_C({})}},\n",
+                "  {{{}, {}u, UINT16_C(0x{:04x}), {}u, {}u, UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), {}u, {}u, {}u, {}, {}u, UINT32_C({}), INT32_C({}), INT32_C({}), INT16_C({}), UINT16_C(0x{:04x}), INT16_C({}), {}u, UINT32_C({}), UINT32_C({}), INT32_C({}), UINT16_C(0x{:04x}), UINT16_C(0x{:04x}), UINT16_C({}), UINT16_C(0x{:04x}), UINT16_C({}), {}u, UINT8_C(0x{:02x}), {}u, UINT8_C(0x{:02x}), {}u, UINT16_C(0x{:04x}), UINT8_C(0x{:02x}), {}u, {}u, UINT16_C(0x{:04x}), {}u, {}, {}u, {}u, UINT16_C({}), {}u, UINT16_C({})}},\n",
                 c_string(&slave.name),
                 slave.position,
                 slave.station_address.0,
@@ -1688,6 +1743,14 @@ fn render_header(
                 slave.mailbox.send_capacity,
                 slave.mailbox.receive_address,
                 slave.mailbox.receive_capacity,
+                slave.mailbox.send_sync_manager,
+                slave.mailbox.send_control_byte,
+                slave.mailbox.receive_sync_manager,
+                slave.mailbox.receive_control_byte,
+                u8::from(mailbox_status_bit.is_some()),
+                mailbox_status_bit.map_or(0, |status_bit| status_bit.address.0),
+                mailbox_status_bit.map_or(0, |status_bit| status_bit.mask),
+                u8::from(mailbox_status_bit.is_some_and(|status_bit| status_bit.active_high)),
                 slave.sii_sync_manager_count,
                 slave.sii_enabled_sync_managers,
                 slave.sii_fmmu_count,
@@ -1805,7 +1868,8 @@ fn render_rust_module(
         "// @generated by esop-cfggen; do not edit.\n\
 use esop_product_config::{\n\
     AlTransitionTimeouts, Cia402AxisCommandPolicy, Command, DcSyncTiming, DomainConfig,\n\
-    DomainDatagramSpec, MailboxConfig, OpOnlySyncManagerProfile, OperatingMode, PdoDirection,\n\
+    DomainDatagramSpec, MailboxConfig, MailboxReceiveSyncManager, MailboxStatusBit,\n\
+    OpOnlySyncManagerProfile, OperatingMode, PdoDirection,\n\
     PdoRegistrationRequest,\n\
     ProcBufDimensions, ProcBufLayoutDescriptor, ProductAxisConfig, ProductDatagramConfig,\n\
     ProductDomainConfig, ProductMetadata, ProductPdoConfig, ProductSlaveConfig, ProductSlaveCopyConfig,\n\
@@ -1972,8 +2036,26 @@ use esop_product_config::{\n\
                 )
             },
         );
+        let mailbox_config = if slave.mailbox.status_bit.is_some() {
+            format!(
+                "MailboxConfig::new(0x{:04x}, {}, 0x{:04x}, {}).with_status_bit(MailboxStatusBit::sync_manager_mailbox_full({}))",
+                slave.mailbox.send_address,
+                slave.mailbox.send_capacity,
+                slave.mailbox.receive_address,
+                slave.mailbox.receive_capacity,
+                slave.mailbox.receive_sync_manager,
+            )
+        } else {
+            format!(
+                "MailboxConfig::new(0x{:04x}, {}, 0x{:04x}, {})",
+                slave.mailbox.send_address,
+                slave.mailbox.send_capacity,
+                slave.mailbox.receive_address,
+                slave.mailbox.receive_capacity,
+            )
+        };
         output.push_str(&format!(
-            "        ProductSlaveConfig {{ name: {}, position: {}, station_address: 0x{:04x}, domain_id: {}, kind: ProductSlaveKind::{}, identity: SlaveIdentity {{ vendor_id: 0x{:08x}, product_code: 0x{:08x}, revision: 0x{:08x}, serial: 0x{:08x} }}, dc_required: {}, dc_reference_clock: {}, sii_dc_mode: {}, dc_sync_timing: {}, watchdog: {}, transition_timeouts: AlTransitionTimeouts::new({}, {}, {}, {}), mailbox_config: MailboxConfig::new(0x{:04x}, {}, 0x{:04x}, {}), op_only_outputs: OpOnlySyncManagerProfile::from_raw(0x{:04x}, [{}]), sii_sync_manager_count: {}, sii_enabled_sync_managers: 0x{:04x}, sii_fmmu_count: {}, sii_fmmu_usages: [{}] }},\n",
+            "        ProductSlaveConfig {{ name: {}, position: {}, station_address: 0x{:04x}, domain_id: {}, kind: ProductSlaveKind::{}, identity: SlaveIdentity {{ vendor_id: 0x{:08x}, product_code: 0x{:08x}, revision: 0x{:08x}, serial: 0x{:08x} }}, dc_required: {}, dc_reference_clock: {}, sii_dc_mode: {}, dc_sync_timing: {}, watchdog: {}, transition_timeouts: AlTransitionTimeouts::new({}, {}, {}, {}), mailbox_config: {}, mailbox_send_sync_manager: {}, mailbox_send_control_byte: 0x{:02x}, mailbox_receive_sync_manager: MailboxReceiveSyncManager::new({}, 0x{:04x}, {}, 0x{:02x}), op_only_outputs: OpOnlySyncManagerProfile::from_raw(0x{:04x}, [{}]), sii_sync_manager_count: {}, sii_enabled_sync_managers: 0x{:04x}, sii_fmmu_count: {}, sii_fmmu_usages: [{}] }},\n",
             rust_string(&slave.name),
             slave.position,
             slave.station_address.0,
@@ -1992,10 +2074,13 @@ use esop_product_config::{\n\
             slave.transition_timeouts.safeop_to_op_ns,
             slave.transition_timeouts.back_to_init_ns,
             slave.transition_timeouts.back_to_safeop_ns,
-            slave.mailbox.send_address,
-            slave.mailbox.send_capacity,
+            mailbox_config,
+            slave.mailbox.send_sync_manager,
+            slave.mailbox.send_control_byte,
+            slave.mailbox.receive_sync_manager,
             slave.mailbox.receive_address,
             slave.mailbox.receive_capacity,
+            slave.mailbox.receive_control_byte,
             op_only_mask,
             activation,
             slave.sii_sync_manager_count,

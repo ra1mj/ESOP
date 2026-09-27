@@ -91,14 +91,15 @@ pub use fmmu_discovery::{
 };
 pub use frame_pool::{FrameHandle, FramePool, FramePoolError, FrameSlot};
 pub use mailbox::{
-    MAILBOX_HEADER_LEN, MAX_MAILBOX_BYTES, MailboxAction, MailboxConfig, MailboxConfigError,
-    MailboxController, MailboxDirection, MailboxError, MailboxFrame, MailboxHeader, MailboxPhase,
-    MailboxProgress, MailboxProtocol, MailboxRetryPolicy, MailboxStatusBit,
+    MAILBOX_FULL_STATUS_MASK, MAILBOX_HEADER_LEN, MAX_MAILBOX_BYTES, MailboxAction, MailboxConfig,
+    MailboxConfigError, MailboxController, MailboxDirection, MailboxError, MailboxFrame,
+    MailboxHeader, MailboxPhase, MailboxProgress, MailboxProtocol, MailboxReceiveSyncManager,
+    MailboxReceiveSyncManagerError, MailboxRetryPolicy, MailboxStatusBit,
 };
 pub use mapping::{
     ESC_FMMU_BASE, ESC_FMMU_STRIDE, ESC_SYNC_MANAGER_BASE, ESC_SYNC_MANAGER_STRIDE, FMMU_IMAGE_LEN,
     FmmuConfig, MAX_ESC_FMMUS, MappingError, MappingSummary, MappingTable, SYNC_MANAGER_IMAGE_LEN,
-    SyncManagerConfig,
+    SYNC_MANAGER_STATUS_OFFSET, SyncManagerConfig,
 };
 pub use mapping_config::{
     MappingConfigAction, MappingConfigController, MappingConfigError, MappingConfigItem,

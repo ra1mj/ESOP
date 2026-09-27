@@ -71,6 +71,13 @@ index/subindex/bit length/DataType。未提供 timeout 时使用版本化的 ETG
   `CycleTimeSync1` 的 DC OpMode；
 - vendor-specific scaling、替代对象和隐式默认映射。
 
+解析器同时保留 `MBoxOut`/`MBoxIn` 的 SyncManager index。若 ordered
+`Fmmu` usage 声明 `MBoxState`，cfggen 必须从 `MBoxIn` index 推导直接
+SyncManager 状态寄存器策略：地址为 `0x0800 + index * 8 + 5`、mask 为
+`0x08`、active-high；不得从产品输入接受任意地址、mask 或极性。没有该声明
+的设备继续生成 PollTime 策略。两种策略以及 mailbox SyncManager 证据都进入
+JSON、inventory、C/Rust 和配置 hash。
+
 生成前会一次性完成身份唯一性、Domain/过程镜像范围、静态容量、PDO
 偏移、datagram、Frame Plan、多速率 schedule、expected WKC、CiA 402
 对象集、轴掩码、SI/raw 可表示范围、ProcBuf layout 和周期预算校验。任何
@@ -134,13 +141,15 @@ position-keyed 扫描证据验证所有 DC 要求：显式 reference 合格时�
 身份验证后、首个 AL 动作前，Startup 对携带
 邮箱期望的 profile 精确读取 SII `0x001C..0x0020`，要求 CoE，并只比较 SII 可表示的
 send/receive 地址和容量；轮询、超时、重试和 Status Bit 仍是运行期策略，不参与布局
-相等判定。匹配后才按 position 发布验证证据，任一读取、协议、范围或布局错误均闭锁
-Startup。随后，携带 SII 期望的 profile 进入独立 `ReadingConfiguration` 阶段：从标准
+相等判定。该布局先暂存而不发布。随后，携带 SII 期望的 profile 进入独立
+`ReadingConfiguration` 阶段：从标准
 `0x0040` 有界读取到 END，原子投影有序 FMMU usage 与 SM/RxPDO/TxPDO candidate，并比较
 FMMU count/order/usage、SM 数量、enabled/OpOnly mask 以及按 Rx 后 Tx 冻结顺序排列的 PDO index、SM、object、subindex 和
-bit length。相同完整镜像还会以借用方式解析 Strings `0x000a` 与 DC `0x003c`
+bit length。Startup 还按生成的 `MBoxIn` index 精确比较对应在线 SM 的地址、容量、
+control byte 与 enabled 状态，并要求 Status Bit 的存在性与 ordered
+SyncManager-status FMMU usage 一致。相同完整镜像还会以借用方式解析 Strings `0x000a` 与 DC `0x003c`
 固定 24-byte 条目，按精确模式名比较 cycle、shift、factor 与 AssignActivate。两类检查
-全部成功后才同时按 position 发布签名/DC 证据并开始 AL；在线 FMMU 条目数还必须不超过
+全部成功后才同时按 position 发布完整 `MailboxConfig`、签名/DC 证据并开始 AL；在线 FMMU 条目数还必须不超过
 扫描时 ESC 基础信息报告的 FMMU 数量。任何 stream、容量、
 投影、动作所有权、deadline、结构或 DC 描述符差异均闭锁且不发布部分证据。未携带对应期望的 profile
 和旧 `start()` API 保持原有兼容路径。
@@ -178,14 +187,19 @@ control-pool 所有权和同一绝对配置 deadline；任一失败锁存首个�
 恢复必须显式重启控制器。
 
 产品默认调用 `build_generated_pdo_configuration_batch::<JOBS, OPS>()`，直接使用每个
-`ProductSlaveConfig` 中由 ESI 生成并校验的 `MailboxConfig`。原有 position-keyed
+`ProductSlaveConfig` 中由 ESI 生成并校验的 `MailboxConfig`。构建器会从
+`MBoxIn` descriptor 与 ordered FMMU usage 重新推导规范 Status Bit，并拒绝地址、
+mask、极性、index 或声明存在性被篡改的配置；调用方不需要再调用
+`with_status_bit`。原有 position-keyed
 `ProductMailboxBinding` 与 `build_pdo_configuration_batch` 继续作为测试、维护和显式
 替换路径。两条路径共用邮箱范围、重复站地址、job/operation 容量及逐站计划校验，
 任一失败都不会返回部分批次。`PdoConfigBatch`
 启动一次后复用同一 PDO/邮箱控制器，以 `base_generation + job_index` 自动推进；
 空计划有界跳过，故障保留当前 index/station，只有显式重启才替换计划和清除故障。
 `ScheduledPdoConfiguration::batch` 将当前 job 接入原有邮箱/DC/共享 RX 路径，报告
-公开批 phase、当前 index、总 job 数和当前站地址。
+公开批 phase、当前 index、总 job 数和当前站地址。直接 SM 状态位未激活时只读状态
+字节而不读输入邮箱，激活后才读取输入邮箱；无 `MBoxState` 声明的设备保持 PollTime。
+FMMU 映射状态位到周期过程映像不在当前合同内。
 
 核心另提供严格的 SII 标准邮箱五字固定头解析：只接受精确 word 起点/长度和已完成
 `SiiBlockReader`，检查 CoE 协议位，并把从站 receive/send 字段转换为主站

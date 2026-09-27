@@ -3,11 +3,12 @@ use esop_ethercat_core::{Domain, DomainSegment, SlaveCopyStatus};
 use esop_product_config::{
     ActivatedProduct, AlTransitionTimeouts, Cia402AxisCommandPolicyError, DomainRegistryError,
     ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, EscWatchdogConfig, FramePlanSetError,
-    MAX_PRODUCT_SLAVE_COPIES, MailboxConfig, MailboxConfigError, MailboxDirection, OperatingMode,
-    PdoConfigBatchPlanError, PdoConfigPlanError, PdoSdoWrite, ProcBuf, ProcBufHeaderError,
-    ProductActivationError, ProductMailboxBinding, ProductPdoBatchError, ProductPdoPlanError,
-    ProductSlaveKind, ProductStartupError, SiiFmmuUsage, SlaveCopyPlanSetError, SlaveRecord,
-    StartupDcRequirement,
+    MAX_PRODUCT_SLAVE_COPIES, MailboxConfig, MailboxConfigError, MailboxDirection,
+    MailboxReceiveSyncManager, MailboxStatusBit, OperatingMode, PdoConfigBatchPlanError,
+    PdoConfigPlanError, PdoSdoWrite, ProcBuf, ProcBufHeaderError, ProductActivationError,
+    ProductMailboxBinding, ProductMailboxPolicyError, ProductPdoBatchError, ProductPdoPlanError,
+    ProductSlaveKind, ProductStartupError, SiiConfigurationSignatureError, SiiFmmuUsage,
+    SlaveCopyPlanSetError, SlaveRecord, StartupDcRequirement,
 };
 
 mod generated {
@@ -55,9 +56,9 @@ fn checked_in_product_activates_exact_generated_evidence() {
     assert_eq!(
         active.metadata().config_sha256,
         [
-            0xe2, 0x41, 0xac, 0x19, 0x60, 0x2f, 0x9a, 0xdc, 0x68, 0xd2, 0x06, 0xe7, 0x26, 0xed,
-            0x04, 0x8f, 0xa3, 0xf9, 0x15, 0xe3, 0x4b, 0x04, 0xe6, 0xbd, 0x35, 0xa4, 0x5a, 0xf9,
-            0x77, 0x4b, 0x62, 0x41,
+            0x88, 0xdb, 0x86, 0x1d, 0x4c, 0x7d, 0x43, 0xce, 0x20, 0xf4, 0xa8, 0xce, 0x76, 0x4d,
+            0xd6, 0x71, 0x6a, 0x9e, 0x40, 0x6b, 0x57, 0x8d, 0xf8, 0x7a, 0x26, 0x5e, 0xe5, 0xdb,
+            0xa5, 0x79, 0xc6, 0x07,
         ]
     );
 
@@ -99,7 +100,13 @@ fn checked_in_product_activates_exact_generated_evidence() {
         .iter()
         .zip(generated::PRODUCT_CONFIG.slaves)
     {
+        assert_eq!(slave.mailbox_send_sync_manager, 0);
+        assert_eq!(slave.mailbox_send_control_byte, 0x26);
         assert_eq!(profile.expected_mailbox, Some(slave.mailbox_config));
+        assert_eq!(
+            profile.expected_mailbox_receive_sync_manager,
+            Some(slave.mailbox_receive_sync_manager)
+        );
         let expected_sii = profile.expected_sii.expect("generated SII expectation");
         assert_eq!(
             expected_sii.sync_manager_count(),
@@ -114,9 +121,13 @@ fn checked_in_product_activates_exact_generated_evidence() {
             slave.op_only_outputs.mask()
         );
         assert_eq!(expected_sii.fmmu_count(), slave.sii_fmmu_count);
-        assert_eq!(slave.sii_fmmu_count, 2);
+        assert_eq!(slave.sii_fmmu_count, if slave.position < 2 { 3 } else { 2 });
         assert_eq!(slave.sii_fmmu_usages[0], SiiFmmuUsage::Outputs);
         assert_eq!(slave.sii_fmmu_usages[1], SiiFmmuUsage::Inputs);
+        assert_eq!(
+            slave.mailbox_config.status_bit,
+            (slave.position < 2).then(|| MailboxStatusBit::sync_manager_mailbox_full(1))
+        );
     }
 
     assert_eq!(active.registry().domain_count(), 2);
@@ -292,6 +303,90 @@ fn checked_in_product_rejects_tampered_fmmu_usage_profiles() {
 }
 
 #[test]
+fn checked_in_product_rejects_tampered_mailbox_status_policy() {
+    let expected = Some(MailboxStatusBit::sync_manager_mailbox_full(1));
+    for actual in [
+        Some(MailboxStatusBit::new(0x080c, 0x08, true)),
+        Some(MailboxStatusBit::new(0x080d, 0x04, true)),
+        Some(MailboxStatusBit::new(0x080d, 0x08, false)),
+        None,
+    ] {
+        let mut tampered = generated::PRODUCT_CONFIG;
+        tampered.slaves[0].mailbox_config.status_bit = actual;
+        assert_eq!(
+            tampered.startup_profiles(),
+            Err(ProductStartupError::MailboxPolicy {
+                position: 0,
+                error: ProductMailboxPolicyError::StatusBitMismatch { expected, actual },
+            })
+        );
+        assert_eq!(
+            tampered.build_generated_pdo_configuration_batch::<3, 17>(),
+            Err(ProductPdoBatchError::MailboxPolicy {
+                position: 0,
+                error: ProductMailboxPolicyError::StatusBitMismatch { expected, actual },
+            })
+        );
+    }
+
+    let mut wrong_index = generated::PRODUCT_CONFIG;
+    wrong_index.slaves[0].mailbox_receive_sync_manager =
+        MailboxReceiveSyncManager::new(4, 0x1100, 64, 0x22);
+    assert_eq!(
+        wrong_index.startup_profiles(),
+        Err(ProductStartupError::MailboxPolicy {
+            position: 0,
+            error: ProductMailboxPolicyError::ReceiveSyncManagerNotDeclared { index: 4, count: 4 },
+        })
+    );
+
+    let mut wrong_send_index = generated::PRODUCT_CONFIG;
+    wrong_send_index.slaves[0].mailbox_send_sync_manager = 4;
+    assert_eq!(
+        wrong_send_index.startup_profiles(),
+        Err(ProductStartupError::MailboxPolicy {
+            position: 0,
+            error: ProductMailboxPolicyError::SendSyncManagerNotDeclared { index: 4, count: 4 },
+        })
+    );
+
+    let mut duplicate_index = generated::PRODUCT_CONFIG;
+    duplicate_index.slaves[0].mailbox_send_sync_manager = 1;
+    assert_eq!(
+        duplicate_index.startup_profiles(),
+        Err(ProductStartupError::MailboxPolicy {
+            position: 0,
+            error: ProductMailboxPolicyError::DuplicateMailboxSyncManager(1),
+        })
+    );
+
+    let mut invalid_count = generated::PRODUCT_CONFIG;
+    invalid_count.slaves[0].sii_sync_manager_count = 17;
+    assert_eq!(
+        invalid_count.startup_profiles(),
+        Err(ProductStartupError::SiiConfiguration {
+            position: 0,
+            error: SiiConfigurationSignatureError::SyncManagerCountOutOfBounds,
+        })
+    );
+    assert_eq!(
+        invalid_count.build_generated_pdo_configuration_batch::<3, 17>(),
+        Err(ProductPdoBatchError::MailboxPolicy {
+            position: 0,
+            error: ProductMailboxPolicyError::InvalidSyncManagerCount(17),
+        })
+    );
+
+    assert_eq!(
+        generated::PRODUCT_CONFIG.slaves[2]
+            .mailbox_config
+            .status_bit,
+        None
+    );
+    assert!(generated::PRODUCT_CONFIG.startup_profiles().is_ok());
+}
+
+#[test]
 fn checked_in_product_builds_exact_per_slave_pdo_startup_plans() {
     let left = generated::PRODUCT_CONFIG
         .build_pdo_startup_plan::<17>(0)
@@ -376,6 +471,7 @@ fn checked_in_product_builds_one_exact_ordered_pdo_batch() {
     assert_eq!(
         jobs[0].mailbox_config(),
         MailboxConfig::new(0x1000, 64, 0x1100, 64)
+            .with_status_bit(MailboxStatusBit::sync_manager_mailbox_full(1))
     );
     assert_eq!(jobs[1].mailbox_config(), jobs[0].mailbox_config());
     assert_eq!(
