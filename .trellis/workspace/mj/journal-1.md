@@ -1565,3 +1565,37 @@ Implemented optional topology-wide EtherCAT DC 0x092c/4 runtime sync-window moni
 ### Next Steps
 
 - None - task complete
+
+
+## Session 47: SII FMMU usage descriptor verification
+
+**Date**: 2026-09-27
+**Task**: SII FMMU usage descriptor verification
+**Branch**: `main`
+
+### Summary
+
+Implemented bounded standard SII FMMU usage parsing and schema-v2 startup evidence, propagated ordered Device/Fmmu declarations through deterministic C/Rust/JSON generation, enforced product RxPDO-to-Outputs and TxPDO-to-Inputs compatibility plus ESC count gating before AL, synchronized PRD/capability contracts, and passed local plus exact pushed-SHA GitHub quality gates.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0bd1d18c89df3fa50aef1fd658c6c15c9bcca3ef` | (see git log) |
+| `a5b983a` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
