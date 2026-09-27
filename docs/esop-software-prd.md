@@ -497,7 +497,9 @@ R2 后续增量：可选的实测 deadline 入口在活动 TX 前后采样端口
 
 R2 多 Domain RX 增量：固定容量 `ScheduledDomainBank` 将冻结 ID 顺序和独占数据报索引绑定到实际 Domain；每周期仅接收到期 Domain，并在漏收时使其质量失效。软件模拟已验证真实辅助 Domain 到期漏收会撤销运动许可，且运动 Domain 的已提交输入与真实质量由同一接收所有者提供给生命周期停机分支。发送计划、辅助 Domain 输出、DC/控制接收以及最终 deadline 仍由完整周期所有者接线；本增量不满足 R2 的 HIL 与实时资格出口条件。
 
-R2 辅助 TX 增量：可选的 `ScheduledAuxiliaryOutputs` 在激活时将运动与辅助分帧计划绑定到 `ScheduledDomainBank` 的真实段，拒绝索引复用、镜像越界及可写地址重叠。生命周期输出阶段按下一次共享 RX 的周期计算 due mask：周期 N 结束时提交周期 N+1 到期的辅助与运动帧，避免 period > 1 的 Domain 发生一拍相位错位。首次 TX 失败或发送跨过当前周期截止时间时，同周期撤销运动许可并尝试发送停机帧，State 保留已接受帧数量、失败位置和预算结果。软件模拟覆盖提前一拍提交、非到期不发、下一拍到期漏收、TX 失败与跨期截止时间；安全镜像来源、其他服务和实物 HIL 仍未闭环，R2 出口条件不变。
+R2 辅助 TX 增量：可选的 `ScheduledAuxiliaryOutputs` 在激活时将运动与辅助分帧计划绑定到 `ScheduledDomainBank` 的真实段，拒绝索引复用、镜像越界及可写地址重叠。生命周期输出阶段按下一次共享 RX 的周期计算 due mask：周期 N 结束时提交周期 N+1 到期的辅助与运动帧，避免 period > 1 的 Domain 发生一拍相位错位。首次 TX 失败或发送跨过当前周期截止时间时，同周期撤销运动许可并尝试发送停机帧，State 保留已接受帧数量、失败位置和预算结果。共享安全映像现要求周期所有者提供 typed 发布快照，并在 TX 前核对周期、长度和底层页地址；软件模拟覆盖提前一拍提交、非到期不发、下一拍到期漏收、TX 失败、跨期截止时间及缺失/错误快照拒绝。其他服务和实物 HIL 仍未闭环，R2 出口条件不变。
+
+R2 自动 Slave-to-Slave 发布增量：`ScheduledProductionCycleOwner::with_slave_copies` 在激活时绑定生成产品的不可变计划集，并拒绝自动写入生命周期拥有的运动 Domain。周期 N 的 mailbox、control、统一生产服务或 raw receive 完成并通过既有 handoff 核验后，`ScheduledDomainBank` 为 N+1 预检全部到期计划；固定容量 `SlaveCopyProcessImage` 从上一个已发布页生成非活动页，只在所有计划成功后一次切换。地址、Domain、映像、周期顺序或计划错误均不发布新页，并把所有者闭锁到 `Faulted`，从而拒绝 RX 重放和输出结算；成功 release 精确报告应用计划数。生成的双轴模拟产品已证明非到期保持、有效位置到 IO 镜像、WKC 0 fallback/质量 0、旧页不变和 typed 快照门。该证据不认证物理响应来源、真实输出执行、目标 WCET、长时运行、HIL 或功能安全。
 
 R2 同周期 DC RX 增量：固定容量 `ScheduledDomainBank::receive_with_dc` 将到期 Domain 和 DC 响应交由同一次主站 RX 分发；DC 索引冲突/世代不匹配在进入接收前拒绝。即使 DC 响应丢失或端口 RX 报错，也结束到期 Domain 和 DC pending；端口错误返回保守预算失败的真实周期报告和原始错误。软件模拟验证 DC 缺帧而运动 Domain WKC 有效时同周期停止、旧 DC lock 不复用、恢复同步后不自动恢复旧许可、端口错误的保守质量。调用方仍需负责 DC 准备/发送、控制接收、TX 计划、安全镜像、完整周期最终 deadline 及实物 HIL；先前段落中的“DC 接收未接线”仅描述当时阶段，R2 出口条件仍未满足。
 

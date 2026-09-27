@@ -260,7 +260,9 @@ expected-SII profile 会先顺序发现完整 16-byte FMMU bank 和 8-byte SyncM
 
 PDO-006 的软件复制路径使用产品生成的 `SlaveCopyPlanSet`：`esop.product.v1` 的可选 `slave_copies` 以从站名、对象 index/subindex 描述源 TxPDO、目标 RxPDO、目标质量 RxPDO 和 fallback 字节，不接受手写偏移。cfggen 只在已选择 ESI PDO 中解析引用，并在生成注册表激活后复用 `SlaveCopyPlan::build` 校验不同从站、等宽字节对齐、方向与输入/输出数据报覆盖；解析后的 PDO 索引、语义引用和 fallback 进入 JSON/C/Rust 产物及配置哈希。产品运行时只保留计划引用的固定容量句柄，在自身注册表激活后再次构建计划集，并在容量超限、目标/质量字节重叠或任一索引/映射漂移时拒绝整个产品激活。
 
-周期所有者必须在 `finish_receive` 后、目标到期发送前调用 `apply_to_domains` 或同 Domain 的 `apply_within_domain`；源最近一次成功接收只能是本周期或上一周期，且 WKC、完整性及配置相位均通过。目标质量字节为 `1`（源有效）或 `0`（源无效）；失配或过期时目标字段替换为产品显式配置的降级字节，并输出源周期/年龄诊断。映像、域或目标到期检查失败则返回错误且目标不变，周期所有者不得发送该目标帧。受检模拟产品已配置“左驱动实际位置 → IO 镜像值 + 质量”，跨层测试覆盖生成、运行时复验、目标帧字节、WKC 错误、时效过期及拒绝路径；该质量字节不是功能安全信号，真实从站映射/回读、端到端时间上界、稳定周期镜像发布所有权与实物 HIL 仍待验证。
+稳定周期通过 `ScheduledProductionCycleOwner::with_slave_copies` 绑定激活产品的不可变计划集，并拒绝以生命周期拥有的运动 Domain 为目标。周期 N 的共享 RX 完成并通过既有 handoff 核验后，`ScheduledDomainBank::publish_slave_copies` 为周期 N+1 预检全部到期计划；只有地址、Domain、映像边界和顺序全部通过，才从上一已发布页复制到双页过程映像的非活动页、按计划顺序写入并一次切换发布页。任一错误都保持旧页逐字节不变并把周期所有者闭锁到 `Faulted`，不得重放已消费 RX 或进入输出结算。源最近一次成功接收只能是本周期或上一周期，且 WKC、完整性及配置相位均通过；否则写入产品显式 fallback 和质量 `0`，有效源写质量 `1`。
+
+共享辅助输出只接受周期所有者提供的 typed `SlaveCopyPublishedImage`；快照的目标周期、长度和底层页地址必须与 `StopCycleContext` 使用的安全过程映像完全一致，否则在帧获取和 TX 前拒绝。发布成功后，输出结算报告精确携带本周期应用的计划数量。受检模拟产品已覆盖非到期保持、有效位置复制、WKC 0 fallback、重放、缺失/未发布/错误快照和运动 Domain 目标拒绝；该质量字节不是功能安全信号，真实从站映射/回读、端到端时间上界、物理响应来源、目标 WCET 与实物 HIL 仍待验证。
 
 ### 5.5 DC 与时间
 

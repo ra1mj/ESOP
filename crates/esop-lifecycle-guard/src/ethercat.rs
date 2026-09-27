@@ -39,6 +39,7 @@ pub enum StopFrameError<E> {
     UnverifiedInput,
     AxisCapacityExceeded,
     InvalidDeadline,
+    InvalidProcessImage,
     UnsafeOutput(usize),
     MissingTarget(usize),
     UnexpectedTarget(usize),

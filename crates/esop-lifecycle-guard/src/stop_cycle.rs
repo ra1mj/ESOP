@@ -29,7 +29,8 @@ use esop_ethercat_core::{
     CycleReport, DcCyclicSync, Domain, EthercatMaster, EthercatPort, FramePlan, FramePlanSet,
     ScheduleTable, ScheduledControlCycleReport, ScheduledDomainBank, ScheduledMailboxCycleReport,
     ScheduledProcessInputs, ScheduledProcessTxReport, ScheduledProductionServiceCycleReport,
-    ScheduledReceiveReport, ScheduledServiceTxFailure, wire::Command,
+    ScheduledReceiveReport, ScheduledServiceTxFailure, ScheduledSlaveCopyError, SlaveCopyPlanSet,
+    SlaveCopyProcessImage, SlaveCopyPublication, SlaveCopyPublishedImage, wire::Command,
 };
 use esop_procbuf::{CommandPage, HeaderError, ProcBuf, StatePage, StatePublishError};
 use esop_profile_cia402::{
@@ -167,6 +168,7 @@ pub enum ScheduledProductionPhase {
     PrimingRequired,
     ReceiveArmed,
     OutputPending,
+    Faulted,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -176,6 +178,8 @@ pub enum ScheduledProductionCycleError {
     ProcessMismatch,
     ReceiveMismatch,
     OutputMismatch,
+    InvalidCopyTarget { plan_index: usize, domain_id: u8 },
+    SlaveCopy(ScheduledSlaveCopyError),
 }
 
 /// Final settlement of one production task. A cycle can safely advance to
@@ -192,6 +196,7 @@ pub struct ScheduledProductionRelease {
     pub events_published: bool,
     pub controlled_stop_used: bool,
     pub controlled_stop_fallback: bool,
+    pub slave_copies_applied: usize,
 }
 
 impl ScheduledProductionRelease {
@@ -269,6 +274,13 @@ pub struct AuxiliaryOutputEntry<'a, const FRAMES: usize, const DATAGRAMS: usize>
     pub plans: &'a FramePlanSet<FRAMES, DATAGRAMS>,
 }
 
+/// One auxiliary Domain whose frame plans read from the cycle owner's shared
+/// published product process image.
+pub struct SharedAuxiliaryOutputEntry<'a, const FRAMES: usize, const DATAGRAMS: usize> {
+    pub id: u8,
+    pub plans: &'a FramePlanSet<FRAMES, DATAGRAMS>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuxiliaryOutputPlanError {
     InvalidSchedule,
@@ -293,6 +305,27 @@ struct AuxiliaryOutputReport<E> {
     failure: Option<AuxiliaryOutputFailure<E>>,
 }
 
+struct AuxiliarySubmission<'a> {
+    publication: Option<SlaveCopyPublishedImage<'a>>,
+    receive_cycle: u64,
+    generation: u16,
+    rx_deadline_ns: u64,
+    cycle_deadline_ns: Option<u64>,
+}
+
+#[derive(Clone, Copy)]
+enum AuxiliaryOutputImage<'a> {
+    Static(&'a [u8]),
+    Shared,
+}
+
+#[derive(Clone, Copy)]
+struct BoundAuxiliaryOutputEntry<'a, const FRAMES: usize, const DATAGRAMS: usize> {
+    id: u8,
+    image: AuxiliaryOutputImage<'a>,
+    plans: &'a FramePlanSet<FRAMES, DATAGRAMS>,
+}
+
 /// Bind the frozen schedule, verified receive Domains, safe images, and split
 /// TX plans once at activation. No allocation or plan search is needed per tick.
 pub struct ScheduledAuxiliaryOutputs<
@@ -305,7 +338,8 @@ pub struct ScheduledAuxiliaryOutputs<
     schedule: &'a ScheduleTable<DOMAINS, SCHEDULE_SLOTS>,
     motion_domain_id: u8,
     motion_plan: FramePlan<DATAGRAMS>,
-    entries: [Option<AuxiliaryOutputEntry<'a, FRAMES, DATAGRAMS>>; DOMAINS],
+    entries: [Option<BoundAuxiliaryOutputEntry<'a, FRAMES, DATAGRAMS>>; DOMAINS],
+    shared_image_len: Option<usize>,
 }
 
 impl<
@@ -322,6 +356,54 @@ impl<
         motion_domain_id: u8,
         motion_plan: &FramePlan<DATAGRAMS>,
         entries: [Option<AuxiliaryOutputEntry<'a, FRAMES, DATAGRAMS>>; DOMAINS],
+    ) -> Result<Self, AuxiliaryOutputPlanError> {
+        Self::build(
+            bank,
+            schedule,
+            motion_domain_id,
+            motion_plan,
+            entries.map(|entry| {
+                entry.map(|entry| BoundAuxiliaryOutputEntry {
+                    id: entry.id,
+                    image: AuxiliaryOutputImage::Static(entry.image),
+                    plans: entry.plans,
+                })
+            }),
+            None,
+        )
+    }
+
+    pub fn new_with_shared_process_image<const BYTES: usize>(
+        bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        schedule: &'a ScheduleTable<DOMAINS, SCHEDULE_SLOTS>,
+        motion_domain_id: u8,
+        motion_plan: &FramePlan<DATAGRAMS>,
+        image: &SlaveCopyProcessImage<BYTES>,
+        entries: [Option<SharedAuxiliaryOutputEntry<'a, FRAMES, DATAGRAMS>>; DOMAINS],
+    ) -> Result<Self, AuxiliaryOutputPlanError> {
+        Self::build(
+            bank,
+            schedule,
+            motion_domain_id,
+            motion_plan,
+            entries.map(|entry| {
+                entry.map(|entry| BoundAuxiliaryOutputEntry {
+                    id: entry.id,
+                    image: AuxiliaryOutputImage::Shared,
+                    plans: entry.plans,
+                })
+            }),
+            Some(image.published().len()),
+        )
+    }
+
+    fn build(
+        bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        schedule: &'a ScheduleTable<DOMAINS, SCHEDULE_SLOTS>,
+        motion_domain_id: u8,
+        motion_plan: &FramePlan<DATAGRAMS>,
+        entries: [Option<BoundAuxiliaryOutputEntry<'a, FRAMES, DATAGRAMS>>; DOMAINS],
+        shared_image_len: Option<usize>,
     ) -> Result<Self, AuxiliaryOutputPlanError> {
         if !bank.uses_schedule(schedule)
             || schedule.domain_count() != DOMAINS
@@ -354,6 +436,12 @@ impl<
             {
                 return Err(AuxiliaryOutputPlanError::InvalidPlan(configured.id));
             }
+            let image_len = match entry.image {
+                AuxiliaryOutputImage::Static(image) => image.len(),
+                AuxiliaryOutputImage::Shared => {
+                    shared_image_len.ok_or(AuxiliaryOutputPlanError::InvalidPlan(entry.id))?
+                }
+            };
             for plan in entry.plans.plans() {
                 for datagram in plan.datagrams() {
                     if !matches!(datagram.command, Command::Lrd | Command::Lwr | Command::Lrw)
@@ -362,7 +450,7 @@ impl<
                         || datagram
                             .payload_offset
                             .checked_add(datagram.payload_len)
-                            .is_none_or(|end| end > entry.image.len())
+                            .is_none_or(|end| end > image_len)
                     {
                         return Err(AuxiliaryOutputPlanError::InvalidPlan(entry.id));
                     }
@@ -406,36 +494,93 @@ impl<
             motion_domain_id,
             motion_plan: *motion_plan,
             entries,
+            shared_image_len,
         })
+    }
+
+    fn uses_shared_image(&self) -> bool {
+        self.shared_image_len.is_some()
+    }
+
+    fn uses_shared_image_for(&self, domain_id: u8) -> bool {
+        self.entries.iter().flatten().any(|entry| {
+            entry.id == domain_id && matches!(entry.image, AuxiliaryOutputImage::Shared)
+        })
+    }
+
+    fn accepts_shared_image(&self, image: &[u8]) -> bool {
+        self.shared_image_len
+            .is_none_or(|expected| expected == image.len())
+    }
+
+    fn accepts_shared_publication(
+        &self,
+        publication: Option<SlaveCopyPublishedImage<'_>>,
+        receive_cycle: u64,
+        motion_image: &[u8],
+    ) -> bool {
+        if !self.uses_shared_image() {
+            return publication.is_none();
+        }
+        let Some(publication) = publication else {
+            return false;
+        };
+        let bytes = publication.bytes();
+        publication.cycle() == receive_cycle
+            && self.accepts_shared_image(bytes)
+            && bytes.len() == motion_image.len()
+            && core::ptr::eq(bytes.as_ptr(), motion_image.as_ptr())
     }
 
     fn submit_due<P: EthercatPort, const SLOTS: usize, const MTU: usize>(
         &self,
-        receive_cycle: u64,
         master: &mut EthercatMaster<SLOTS, MTU>,
         port: &mut P,
-        generation: u16,
-        rx_deadline_ns: u64,
-        cycle_deadline_ns: Option<u64>,
+        submission: AuxiliarySubmission<'_>,
     ) -> AuxiliaryOutputReport<P::Error> {
-        let (due_mask, expected_frames) = self.due_summary(receive_cycle);
+        let (due_mask, expected_frames) = self.due_summary(submission.receive_cycle);
         let mut sent_frames = 0;
         for entry in self.entries.iter().flatten() {
             if due_mask & (1u64 << entry.id) == 0 {
                 continue;
             }
+            let image = match entry.image {
+                AuxiliaryOutputImage::Static(image) => image,
+                AuxiliaryOutputImage::Shared
+                    if submission.publication.is_some_and(|published| {
+                        published.cycle() == submission.receive_cycle
+                            && self.accepts_shared_image(published.bytes())
+                    }) =>
+                {
+                    submission.publication.unwrap().bytes()
+                }
+                AuxiliaryOutputImage::Shared => {
+                    return AuxiliaryOutputReport {
+                        due_mask,
+                        expected_frames,
+                        sent_frames,
+                        failure: Some(AuxiliaryOutputFailure {
+                            domain_id: entry.id,
+                            frame_index: 0,
+                            error: StopFrameError::InvalidProcessImage,
+                        }),
+                    };
+                }
+            };
             for (frame_index, plan) in entry.plans.plans().iter().enumerate() {
                 let now_ns = port.now_ns();
-                let result = if now_ns >= rx_deadline_ns
-                    || cycle_deadline_ns.is_some_and(|deadline| now_ns >= deadline)
+                let result = if now_ns >= submission.rx_deadline_ns
+                    || submission
+                        .cycle_deadline_ns
+                        .is_some_and(|deadline| now_ns >= deadline)
                 {
                     Err(StopFrameError::InvalidDeadline)
                 } else {
                     master.reap_expired_rx_before_tx(now_ns);
-                    match master.acquire_frame(generation, rx_deadline_ns) {
+                    match master.acquire_frame(submission.generation, submission.rx_deadline_ns) {
                         Err(error) => Err(StopFrameError::FramePool(error)),
                         Ok(handle) => {
-                            match master.build_and_arm_frame_from_plan(handle, plan, entry.image) {
+                            match master.build_and_arm_frame_from_plan(handle, plan, image) {
                                 Err(error) => {
                                     let _ = master.release_unarmed_frame(handle);
                                     Err(StopFrameError::Build(error))
@@ -515,28 +660,120 @@ mod tests {
 enum ScheduledProductionState {
     PrimingRequired,
     ReceiveArmed(ScheduledProcessHandoff),
-    OutputPending { cycle: u64, generation: u16 },
+    OutputPending {
+        cycle: u64,
+        generation: u16,
+        slave_copies_applied: usize,
+    },
+    Faulted,
 }
 
 /// Fixed-capacity owner for the stable process-cycle handoff. Initial
 /// priming records the only explicit pre-RX submission. Every later receive
 /// consumes the prior lifecycle output and every lifecycle settlement records
 /// the next in-flight generation, preventing duplicate index submission.
-pub struct ScheduledProductionCycleOwner<'a, const DOMAINS: usize, const SCHEDULE_SLOTS: usize> {
+pub struct ScheduledProductionCycleOwner<
+    'a,
+    const DOMAINS: usize,
+    const SCHEDULE_SLOTS: usize,
+    const COPY_PLANS: usize = 0,
+> {
     schedule: &'a ScheduleTable<DOMAINS, SCHEDULE_SLOTS>,
+    motion_domain_id: u8,
+    copy_plans: Option<&'a SlaveCopyPlanSet<COPY_PLANS>>,
     state: ScheduledProductionState,
 }
 
 impl<'a, const DOMAINS: usize, const SCHEDULE_SLOTS: usize>
-    ScheduledProductionCycleOwner<'a, DOMAINS, SCHEDULE_SLOTS>
+    ScheduledProductionCycleOwner<'a, DOMAINS, SCHEDULE_SLOTS, 0>
 {
     pub fn new<const FRAMES: usize, const DATAGRAMS: usize>(
         outputs: &ScheduledAuxiliaryOutputs<'a, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
     ) -> Self {
         Self {
             schedule: outputs.schedule,
+            motion_domain_id: outputs.motion_domain_id,
+            copy_plans: None,
             state: ScheduledProductionState::PrimingRequired,
         }
+    }
+
+    pub fn complete_receive<E>(
+        &mut self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        received: &ScheduledReceiveReport<E, DOMAINS>,
+    ) -> Result<(), ScheduledProductionCycleError> {
+        let (cycle, generation) = self.validate_receive(domain_bank, received)?;
+        self.state = ScheduledProductionState::OutputPending {
+            cycle,
+            generation,
+            slave_copies_applied: 0,
+        };
+        Ok(())
+    }
+
+    pub fn complete_mailbox_cycle<E>(
+        &mut self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        cycle: &ScheduledMailboxCycleReport<E, DOMAINS>,
+    ) -> Result<(), ScheduledProductionCycleError> {
+        self.complete_receive(domain_bank, &cycle.receive.received)
+    }
+
+    pub fn complete_control_cycle<E>(
+        &mut self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        cycle: &ScheduledControlCycleReport<E, DOMAINS>,
+    ) -> Result<(), ScheduledProductionCycleError> {
+        if !domain_bank.confirms_control_cycle(cycle) {
+            return Err(ScheduledProductionCycleError::ReceiveMismatch);
+        }
+        self.complete_receive(domain_bank, cycle.received())
+    }
+
+    pub fn complete_service_cycle<E>(
+        &mut self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        cycle: &ScheduledProductionServiceCycleReport<E, DOMAINS>,
+    ) -> Result<(), ScheduledProductionCycleError> {
+        if !domain_bank.confirms_production_service_cycle(cycle) {
+            return Err(ScheduledProductionCycleError::ReceiveMismatch);
+        }
+        self.complete_receive(domain_bank, cycle.received())
+    }
+}
+
+impl<'a, const DOMAINS: usize, const SCHEDULE_SLOTS: usize, const COPY_PLANS: usize>
+    ScheduledProductionCycleOwner<'a, DOMAINS, SCHEDULE_SLOTS, COPY_PLANS>
+{
+    pub fn with_slave_copies<
+        const FRAMES: usize,
+        const DATAGRAMS: usize,
+        const IMAGE_BYTES: usize,
+    >(
+        outputs: &ScheduledAuxiliaryOutputs<'a, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
+        copy_plans: &'a SlaveCopyPlanSet<COPY_PLANS>,
+        image: &SlaveCopyProcessImage<IMAGE_BYTES>,
+    ) -> Result<Self, ScheduledProductionCycleError> {
+        if !outputs.accepts_shared_image(image.published()) {
+            return Err(ScheduledProductionCycleError::InvalidBinding);
+        }
+        for (plan_index, plan) in copy_plans.plans().iter().enumerate() {
+            if plan.target_domain_id() == outputs.motion_domain_id
+                || !outputs.uses_shared_image_for(plan.target_domain_id())
+            {
+                return Err(ScheduledProductionCycleError::InvalidCopyTarget {
+                    plan_index,
+                    domain_id: plan.target_domain_id(),
+                });
+            }
+        }
+        Ok(Self {
+            schedule: outputs.schedule,
+            motion_domain_id: outputs.motion_domain_id,
+            copy_plans: Some(copy_plans),
+            state: ScheduledProductionState::PrimingRequired,
+        })
     }
 
     pub const fn phase(&self) -> ScheduledProductionPhase {
@@ -546,6 +783,7 @@ impl<'a, const DOMAINS: usize, const SCHEDULE_SLOTS: usize>
             ScheduledProductionState::OutputPending { .. } => {
                 ScheduledProductionPhase::OutputPending
             }
+            ScheduledProductionState::Faulted => ScheduledProductionPhase::Faulted,
         }
     }
 
@@ -587,58 +825,69 @@ impl<'a, const DOMAINS: usize, const SCHEDULE_SLOTS: usize>
         Ok(handoff)
     }
 
-    pub fn complete_receive<E>(
+    pub fn complete_receive_with_slave_copies<E, const IMAGE_BYTES: usize>(
         &mut self,
         domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
         received: &ScheduledReceiveReport<E, DOMAINS>,
-    ) -> Result<(), ScheduledProductionCycleError> {
-        let ScheduledProductionState::ReceiveArmed(handoff) = self.state else {
-            return Err(ScheduledProductionCycleError::InvalidPhase);
+        image: &mut SlaveCopyProcessImage<IMAGE_BYTES>,
+    ) -> Result<SlaveCopyPublication<COPY_PLANS>, ScheduledProductionCycleError> {
+        let (cycle, generation) = self.validate_receive(domain_bank, received)?;
+        let Some(target_cycle) = cycle.checked_add(1) else {
+            self.state = ScheduledProductionState::Faulted;
+            return Err(ScheduledProductionCycleError::OutputMismatch);
         };
-        if !domain_bank.uses_schedule(self.schedule) {
+        let Some(copy_plans) = self.copy_plans else {
             return Err(ScheduledProductionCycleError::InvalidBinding);
-        }
-        if handoff.cycle != received.report.cycle
-            || handoff.generation != received.generation
-            || !domain_bank.confirms_receive(received)
-        {
-            return Err(ScheduledProductionCycleError::ReceiveMismatch);
-        }
-        self.state = ScheduledProductionState::OutputPending {
-            cycle: handoff.cycle,
-            generation: handoff.generation,
         };
-        Ok(())
+        let publication = match domain_bank.publish_slave_copies(copy_plans, image, target_cycle) {
+            Ok(publication) => publication,
+            Err(error) => {
+                self.state = ScheduledProductionState::Faulted;
+                return Err(ScheduledProductionCycleError::SlaveCopy(error));
+            }
+        };
+        self.state = ScheduledProductionState::OutputPending {
+            cycle,
+            generation,
+            slave_copies_applied: publication.len(),
+        };
+        Ok(publication)
     }
 
-    pub fn complete_mailbox_cycle<E>(
+    pub fn complete_mailbox_cycle_with_slave_copies<E, const IMAGE_BYTES: usize>(
         &mut self,
         domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
         cycle: &ScheduledMailboxCycleReport<E, DOMAINS>,
-    ) -> Result<(), ScheduledProductionCycleError> {
-        self.complete_receive(domain_bank, &cycle.receive.received)
+        image: &mut SlaveCopyProcessImage<IMAGE_BYTES>,
+    ) -> Result<SlaveCopyPublication<COPY_PLANS>, ScheduledProductionCycleError> {
+        if !domain_bank.confirms_mailbox_cycle(cycle) {
+            return Err(ScheduledProductionCycleError::ReceiveMismatch);
+        }
+        self.complete_receive_with_slave_copies(domain_bank, &cycle.receive.received, image)
     }
 
-    pub fn complete_control_cycle<E>(
+    pub fn complete_control_cycle_with_slave_copies<E, const IMAGE_BYTES: usize>(
         &mut self,
         domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
         cycle: &ScheduledControlCycleReport<E, DOMAINS>,
-    ) -> Result<(), ScheduledProductionCycleError> {
+        image: &mut SlaveCopyProcessImage<IMAGE_BYTES>,
+    ) -> Result<SlaveCopyPublication<COPY_PLANS>, ScheduledProductionCycleError> {
         if !domain_bank.confirms_control_cycle(cycle) {
             return Err(ScheduledProductionCycleError::ReceiveMismatch);
         }
-        self.complete_receive(domain_bank, cycle.received())
+        self.complete_receive_with_slave_copies(domain_bank, cycle.received(), image)
     }
 
-    pub fn complete_service_cycle<E>(
+    pub fn complete_service_cycle_with_slave_copies<E, const IMAGE_BYTES: usize>(
         &mut self,
         domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
         cycle: &ScheduledProductionServiceCycleReport<E, DOMAINS>,
-    ) -> Result<(), ScheduledProductionCycleError> {
+        image: &mut SlaveCopyProcessImage<IMAGE_BYTES>,
+    ) -> Result<SlaveCopyPublication<COPY_PLANS>, ScheduledProductionCycleError> {
         if !domain_bank.confirms_production_service_cycle(cycle) {
             return Err(ScheduledProductionCycleError::ReceiveMismatch);
         }
-        self.complete_receive(domain_bank, cycle.received())
+        self.complete_receive_with_slave_copies(domain_bank, cycle.received(), image)
     }
 
     pub fn settle_output<E, const FRAMES: usize, const DATAGRAMS: usize>(
@@ -647,10 +896,17 @@ impl<'a, const DOMAINS: usize, const SCHEDULE_SLOTS: usize>
         outcome: &StopCycleOutcome<E>,
         expected_next_rx_deadline_ns: u64,
     ) -> Result<ScheduledProductionRelease, ScheduledProductionCycleError> {
-        let ScheduledProductionState::OutputPending { cycle, generation } = self.state else {
+        let ScheduledProductionState::OutputPending {
+            cycle,
+            generation,
+            slave_copies_applied,
+        } = self.state
+        else {
             return Err(ScheduledProductionCycleError::InvalidPhase);
         };
-        if !core::ptr::eq(self.schedule, outputs.schedule) {
+        if !core::ptr::eq(self.schedule, outputs.schedule)
+            || self.motion_domain_id != outputs.motion_domain_id
+        {
             return Err(ScheduledProductionCycleError::InvalidBinding);
         }
         let Some(handoff) = outcome.process_handoff else {
@@ -683,9 +939,30 @@ impl<'a, const DOMAINS: usize, const SCHEDULE_SLOTS: usize>
                 && outcome.deadline_correction_events.is_none(),
             controlled_stop_used: outcome.controlled_stop_used,
             controlled_stop_fallback: outcome.controlled_stop_fallback,
+            slave_copies_applied,
         };
         self.state = ScheduledProductionState::ReceiveArmed(handoff);
         Ok(release)
+    }
+
+    fn validate_receive<E>(
+        &self,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        received: &ScheduledReceiveReport<E, DOMAINS>,
+    ) -> Result<(u64, u16), ScheduledProductionCycleError> {
+        let ScheduledProductionState::ReceiveArmed(handoff) = self.state else {
+            return Err(ScheduledProductionCycleError::InvalidPhase);
+        };
+        if !domain_bank.uses_schedule(self.schedule) {
+            return Err(ScheduledProductionCycleError::InvalidBinding);
+        }
+        if handoff.cycle != received.report.cycle
+            || handoff.generation != received.generation
+            || !domain_bank.confirms_receive(received)
+        {
+            return Err(ScheduledProductionCycleError::ReceiveMismatch);
+        }
+        Ok((handoff.cycle, handoff.generation))
     }
 }
 
@@ -733,6 +1010,7 @@ pub struct StopCycleContext<
     pub axis_policies: &'a [Cia402AxisCommandPolicy; AXES],
     pub max_stationary_velocities: &'a [u32; AXES],
     pub safe_process_image: &'a [u8; BYTES],
+    pub shared_process_image: Option<SlaveCopyPublishedImage<'a>>,
     pub plan: &'a FramePlan<DATAGRAMS>,
     pub next_generation: u16,
     pub deadline_ns: u64,
@@ -1075,6 +1353,9 @@ impl<
         limits: &[CyclicLimits; AXES],
         cycle_deadline_ns: u64,
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        if outputs.uses_shared_image() {
+            return Err(StopCycleError::InvalidAuxiliaryOutputs);
+        }
         let other = self.other;
         self.run_inner_with_outputs(
             Some((schedule, domains, motion_domain_id)),
@@ -1734,9 +2015,19 @@ impl<
             let Some((schedule, _, motion_domain_id)) = scheduled else {
                 return Err(StopCycleError::InvalidAuxiliaryOutputs);
             };
+            let receive_cycle = self
+                .report
+                .cycle
+                .checked_add(1)
+                .ok_or(StopCycleError::CycleMismatch)?;
             if !core::ptr::eq(outputs.schedule, schedule)
                 || outputs.motion_domain_id != motion_domain_id
                 || outputs.motion_plan != *self.plan
+                || !outputs.accepts_shared_publication(
+                    self.shared_process_image,
+                    receive_cycle,
+                    self.safe_process_image,
+                )
             {
                 return Err(StopCycleError::InvalidAuxiliaryOutputs);
             }
@@ -1796,12 +2087,15 @@ impl<
             // A failed pre-TX deadline must not emit auxiliary outputs either.
             if quality.cycle_within_budget {
                 let sent = outputs.submit_due(
-                    receive_cycle,
                     self.master,
                     self.port,
-                    self.next_generation,
-                    self.deadline_ns,
-                    cycle_deadline_ns,
+                    AuxiliarySubmission {
+                        publication: self.shared_process_image,
+                        receive_cycle,
+                        generation: self.next_generation,
+                        rx_deadline_ns: self.deadline_ns,
+                        cycle_deadline_ns,
+                    },
                 );
                 debug_assert_eq!(sent.due_mask, process_due_mask);
                 debug_assert_eq!(sent.expected_frames, expected_auxiliary_frames);

@@ -403,8 +403,19 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   offsets. Bind the source TxPDO, target RxPDO, and target quality RxPDO to
   verified datagram coverage. At the target's scheduled send cycle, accept a
   source sample at most one cycle old; otherwise write the product-specified
-  fallback and invalid quality byte. Runtime binding errors leave output
-  untouched and require suppressing that target frame.
+  fallback and invalid quality byte. A stable production owner must preflight
+  every due plan before mutating an inactive double-buffer page, publish the
+  page once, and enter a terminal fault phase on any binding or cycle-order
+  error. The previously published image remains byte-for-byte unchanged.
+- Shared auxiliary outputs must consume a typed publication snapshot from that
+  owner. Its target cycle, exact length, and backing-page address must match the
+  process image passed to frame construction; missing, stale, detached, or
+  substituted snapshots fail before frame acquisition or TX. Never accept a
+  raw byte slice as proof that automatic copy publication occurred.
+- Keep copy execution between verified receive completion and the transition to
+  `OutputPending`. Reject plans targeting the lifecycle-owned motion Domain,
+  prevent copy-enabled owners from using no-copy completion methods, and carry
+  the exact due-copy count into release evidence.
 - Product-owned slave copies use strict semantic manifest references; cfggen
   resolves them only within selected ESI PDOs, validates through the core plan
   builder, hashes the resolved identity, and emits PDO indices. Runtime

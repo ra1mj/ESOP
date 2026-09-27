@@ -137,6 +137,8 @@ Platform layer
 
 当前 `crates/esop-cfggen/` 已把上述注册层用于宿主机产品编译：显式 ESI identity/PDO 与 `Dc/OpMode` 选择、稳定 Rx-then-Tx offset、每 Domain 的 LWR/LRD、expected WKC、多速率 schedule、CiA 402 对象/缩放/限幅、CoE 邮箱对和 ProcBuf ABI v6 布局会在发布前统一验证。`crates/esop-product-config/` 消费生成的 Rust 静态数据，在激活期通过相同注册/校验 API 重建并冻结计划；配置 hash、ProcBuf、精确从站记录、Domain 证据、DC 选择或轴映射任一不一致均拒绝。它既可按从站生成 assignment-clear/mapping/assignment-publish 启动计划，也可直接使用生成的逐从站 `MailboxConfig` 一次性构建覆盖全部从站的固定容量批次；position-keyed `ProductMailboxBinding` 保留为显式覆盖，非法邮箱、缺失/重复/未知覆盖、站地址重复或容量不足均在返回前拒绝。`PdoConfigBatch` 复用既有控制器，对每个 job 分配独立 generation，并仅在精确 upload 回读后推进。`ScheduledPdoConfiguration` 会在 PREOP 屏障内自动推进整批，生产报告公开 phase/index/count/current station；故障保留原 job，必须显式重启。只有整批及其他必需控制器真实 Complete 才复用已验证拓扑继续 SAFEOP/OP，且配置期间 Topology 始终由报告中的 Startup phase 收紧。Startup 已在身份后、AL 前完成严格 SII 标准邮箱固定头、SM/PDO 结构和选定 DC 描述的在线读取与生成期望交叉验证；真实响应真实性、完整周期 WKC、从站互操作或 HIL 仍未完成，该软件证据不能替代产品资格。
 
+生成产品的 `SlaveCopyPlanSet` 现由稳定 `ScheduledProductionCycleOwner` 自动执行。周期 N 的共享 RX 完成后，Bank 为 N+1 预检全部到期计划并在固定双页全局过程映像上事务式发布；共享辅助输出必须验证 typed 发布快照的周期、长度和页地址后才能构帧。失败会保留旧页、阻止输出结算并把所有者闭锁到 `Faulted`，且运动 Domain 不能作为自动复制目标。该闭环只证明软件所有权、顺序和字节结果，不证明真实从站执行、WCET、HIL 或功能安全。
+
 SII category stream/candidate 路径已成为独立 Startup 动作，并与
 `esop-product-config` 从冻结 PDO/SM 字段重建的结构签名及选定 ESI DC OpMode 描述比较；匹配前不允许 AL，失败不
 发布结构或 DC 验证证据。产品层现通过共享 resolver 冻结绝对 SYNC0/SYNC1 timing，并按产品

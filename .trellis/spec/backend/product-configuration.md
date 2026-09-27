@@ -32,6 +32,17 @@ pub fn StaticProductConfig::activate(...) ->
     Result<ActivatedProduct<...>, ProductActivationError>;
 pub fn ActivatedProduct::slave_copy_plans(...) ->
     &SlaveCopyPlanSet<MAX_PRODUCT_SLAVE_COPIES>;
+pub fn ScheduledDomainBank::publish_slave_copies(
+    plans: &SlaveCopyPlanSet<PLANS>,
+    image: &mut SlaveCopyProcessImage<BYTES>,
+    target_cycle: u64,
+) -> Result<SlaveCopyPublication<PLANS>, ScheduledSlaveCopyError>;
+pub fn ScheduledProductionCycleOwner::with_slave_copies(
+    ...,
+    plans: &'a SlaveCopyPlanSet<PLANS>,
+    image: &SlaveCopyProcessImage<BYTES>,
+) -> Result<Self, ScheduledProductionOwnerError>;
+pub fn SlaveCopyProcessImage::published_image(&self) -> SlaveCopyPublishedImage<'_>;
 pub fn StaticProductConfig::build_pdo_startup_plan<const OPS: usize>(...) ->
     Result<ProductPdoStartupPlan<OPS>, ProductPdoPlanError>;
 pub fn StaticProductConfig::build_pdo_configuration_batch<
@@ -175,6 +186,21 @@ after all checks pass.
 `copy_bytes_per_cycle` is the maximum sum of configured slave-copy payload
 widths whose target Domains are due on one hyperperiod tick. It is not the
 Domain input-byte count and excludes the separate target quality-byte write.
+
+The activated plan set is executed only by the stable production-cycle owner.
+After verified cycle N receive completion, the owner asks the active
+`ScheduledDomainBank` to preflight every plan due for N+1, stage from the last
+published process-image page, apply value/fallback and quality writes in plan
+order, and atomically publish one new page. Any missing binding, image mismatch,
+cycle replay, or plan error publishes nothing and moves the owner to a terminal
+fault phase. Plans targeting the lifecycle-owned motion Domain are rejected at
+owner construction.
+
+An auxiliary frame backed by the shared process image requires the exact typed
+`SlaveCopyPublishedImage` returned by that publisher. The lifecycle boundary
+checks the target cycle, image length, and backing-page address before any TX
+mutation. Static auxiliary images and empty-copy products retain their existing
+paths; a detached raw slice cannot authorize a shared-image output.
 
 Each generated slave carries four ESM transition timeout classes, one validated
 CoE mailbox pair, one bounded `OpOnlySyncManagerProfile`, and an ordered FMMU
@@ -423,6 +449,10 @@ datagrams, FCS, and inter-packet gap respectively.
 | Generated/raw DC timing mismatch, invalid factor/activation, plan/topology/reference mismatch, or common-epoch overflow | Reject before the first SYNC action or latch the first typed controller fault; publish no programmed evidence. |
 | Watchdog action/generation/length/WKC/readback/deadline/control-pool mismatch | Latch the first typed Watchdog fault, publish no programmed evidence, and keep the PREOP barrier closed. |
 | Runtime Domain/axis evidence or capacity mismatch | Reject with typed owning-contract evidence and return no partial configuration. |
+| Slave-copy target is the motion Domain or is not backed by a shared auxiliary image | Reject owner construction with `InvalidCopyTarget`; do not arm production RX. |
+| Slave-copy target cycle is not exactly the finalized RX cycle plus one, or was already published | Return `ScheduledSlaveCopyError::CycleOrder`; preserve the published page and fault the copy-enabled owner. |
+| Referenced source/target Domain is missing, or a plan fails address/image preflight | Return the plan-indexed typed error before staging mutation; preserve the published page and fault the owner. |
+| Shared auxiliary publication is absent, has the wrong cycle/length, or does not point to the exact safe image | Return `InvalidAuxiliaryOutputs` before frame acquisition, TX, State mutation, or event publication. |
 | PDO plan owner/SM/group/capacity mismatch | Reject before returning any startup plan. |
 | Invalid generated mailbox or invalid/missing/duplicate/unknown override binding | Reject before returning any batch. |
 | Duplicate batch station, insufficient jobs/operations, or generation overflow | Reject before replacing or starting a batch. |
@@ -445,12 +475,15 @@ datagrams, FCS, and inter-packet gap respectively.
 - Base: no `PRODUCT_INPUT` produces the existing unqualified host build
   report; an omitted slave `dc` object produces no Startup DC requirement, and
   optional unmeasurable DC evidence remains explicitly `None`; an omitted
-  `watchdog` object produces an empty watchdog plan and no ESC requests.
+  `watchdog` object produces an empty watchdog plan and no ESC requests. A
+  product with no slave-copy plans keeps the existing static auxiliary-output
+  owner path and reports zero applied copies.
 - Bad: a selected RxPDO moved to TxPDO, a malformed Controlword width, a
   duplicate object, a path escape, zero product limit, reference-without-
   required, duplicate reference, wrapped/misplaced DC mode field, malformed
   port tree, required unmeasurable DC, empty/zero watchdog declaration,
-  watchdog readback mismatch, or forged qualification fails without partial
+  watchdog readback mismatch, motion-Domain copy target, replayed copy cycle,
+  substituted publication page, or forged qualification fails without partial
   publication.
 
 ## 6. Tests Required
@@ -523,6 +556,16 @@ datagrams, FCS, and inter-packet gap respectively.
   complete discovered-bank zero-write/readback sequences, including unused
   slots and position/station/count/index/readback failures, through the
   production scheduler/control-pool path.
+- Drive the checked-in generated slave-copy plan through the stable production
+  owner. Assert a non-due target publishes an unchanged page with zero
+  applications, a fresh source produces the exact N+1 IO frame and quality 1,
+  and bad WKC produces fallback plus quality 0. Assert all-plan preflight keeps
+  the old page unchanged, replay faults the owner, motion targets are rejected,
+  and release evidence reports the exact due-copy count.
+- For shared auxiliary output, assert missing, cycle-zero, stale, wrong-length,
+  and pointer-substituted typed snapshots fail before TX or lifecycle
+  publication. Assert the exact owner-published snapshot is accepted and the
+  static-image compatibility path still passes without a snapshot.
 - Route a generated-style PDO action through `ScheduledPdoConfiguration`, the
   existing mailbox/DC/shared-RX path, exact upload readback, request rebuild,
   cross-generation waiting, timeout, lifecycle gating, fault blocking and
@@ -556,6 +599,33 @@ let wire_bytes = 8 + mac_frame_bytes + 12;
 Generated plans and exact comparison of supplied SDO responses are software
 evidence, not proof of production mailbox execution, authentic physical
 read-back, drive behavior, measured timing, or functional safety.
+
+### Slave-copy publication ownership
+
+Wrong:
+
+```rust
+// A raw slice does not prove which cycle or page produced these bytes.
+context.safe_process_image = image.published();
+context.shared_process_image = None;
+owner.complete_receive(&bank, &received)?;
+```
+
+Correct:
+
+```rust
+let publication = owner.complete_receive_with_slave_copies(
+    &bank,
+    &received,
+    &mut image,
+)?;
+context.safe_process_image = image.published();
+context.shared_process_image = Some(image.published_image());
+assert_eq!(publication.target_cycle(), received.report.cycle + 1);
+```
+
+The typed snapshot is still ordinary software evidence. It proves the local
+owner/page/cycle handoff, not physical slave execution or functional safety.
 
 ### DC policy and scan evidence
 

@@ -12,6 +12,10 @@ use crate::plan::{FramePlan, FramePlanSet};
 use crate::port::{EthercatPort, LinkState};
 use crate::rx_index::RxMatch;
 use crate::schedule::ScheduleTable;
+use crate::slave_copy::{
+    SlaveCopyApplication, SlaveCopyError, SlaveCopyPlanSet, SlaveCopyProcessImage,
+    SlaveCopyPublication,
+};
 use crate::wire::{Command, DatagramHeader, MAX_ETHERNET_FRAME_LEN};
 use core::any::Any;
 use core::convert::Infallible;
@@ -26,11 +30,13 @@ mod private {
 pub trait ScheduledDomainRx: private::Sealed + RxDatagramConsumer {
     fn as_any(&self) -> &dyn Any;
     fn logical_address(&self) -> u32;
+    fn image_len(&self) -> usize;
     fn segments(&self) -> &[DomainSegment];
     fn receive_generation(&self) -> Option<u16>;
     fn begin_receive(&mut self, generation: u16) -> Result<(), DomainError>;
     fn finish_receive(&mut self, generation: u16, cycle: u64) -> Result<bool, DomainError>;
     fn quality(&self) -> DomainQuality;
+    fn input(&self) -> &[u8];
 }
 
 impl<const BYTES: usize, const SEGMENTS: usize> private::Sealed for Domain<BYTES, SEGMENTS> {}
@@ -42,6 +48,10 @@ impl<const BYTES: usize, const SEGMENTS: usize> ScheduledDomainRx for Domain<BYT
 
     fn logical_address(&self) -> u32 {
         Domain::logical_address(self)
+    }
+
+    fn image_len(&self) -> usize {
+        BYTES
     }
 
     fn segments(&self) -> &[DomainSegment] {
@@ -63,11 +73,80 @@ impl<const BYTES: usize, const SEGMENTS: usize> ScheduledDomainRx for Domain<BYT
     fn quality(&self) -> DomainQuality {
         Domain::quality(self)
     }
+
+    fn input(&self) -> &[u8] {
+        Domain::input(self)
+    }
 }
 
 pub struct ScheduledDomainEntry<'a> {
     pub id: u8,
     pub domain: &'a mut dyn ScheduledDomainRx,
+}
+
+pub struct ScheduledProcessImageDomainEntry<'a> {
+    pub id: u8,
+    pub process_image_offset: usize,
+    pub domain: &'a mut dyn ScheduledDomainRx,
+}
+
+struct BoundScheduledDomainEntry<'a> {
+    id: u8,
+    process_image_offset: usize,
+    domain: &'a mut dyn ScheduledDomainRx,
+}
+
+fn datagram_matches_segment(
+    entry: &BoundScheduledDomainEntry<'_>,
+    datagram: &crate::plan::DatagramPlan,
+    segment: &DomainSegment,
+) -> bool {
+    datagram.index == segment.datagram_index
+        && entry.process_image_offset.checked_add(segment.input_offset)
+            == Some(datagram.payload_offset)
+        && datagram.payload_len == segment.len
+        && datagram.expected_wkc == segment.expected_wkc
+        && u32::try_from(segment.input_offset)
+            .ok()
+            .and_then(|offset| entry.domain.logical_address().checked_add(offset))
+            == Some(datagram.address)
+}
+
+fn output_datagram_matches_domain(
+    entry: &BoundScheduledDomainEntry<'_>,
+    datagram: &crate::plan::DatagramPlan,
+) -> bool {
+    if datagram.command != Command::Lwr || datagram.payload_len == 0 || datagram.expected_wkc == 0 {
+        return false;
+    }
+    let Some(local_offset) = datagram
+        .payload_offset
+        .checked_sub(entry.process_image_offset)
+    else {
+        return false;
+    };
+    local_offset
+        .checked_add(datagram.payload_len)
+        .is_some_and(|end| end <= entry.domain.image_len())
+        && u32::try_from(local_offset)
+            .ok()
+            .and_then(|offset| entry.domain.logical_address().checked_add(offset))
+            == Some(datagram.address)
+}
+
+fn datagram_matches_domain(
+    entry: &BoundScheduledDomainEntry<'_>,
+    datagram: &crate::plan::DatagramPlan,
+) -> bool {
+    match datagram.command {
+        Command::Lwr => output_datagram_matches_domain(entry, datagram),
+        Command::Lrd | Command::Lrw => entry
+            .domain
+            .segments()
+            .iter()
+            .any(|segment| datagram_matches_segment(entry, datagram, segment)),
+        _ => false,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -416,6 +495,19 @@ pub enum ScheduledProcessTxError {
     CycleOrder,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScheduledSlaveCopyError {
+    CycleOrder,
+    MissingDomain {
+        plan_index: usize,
+        domain_id: u8,
+    },
+    Plan {
+        plan_index: usize,
+        error: SlaveCopyError,
+    },
+}
+
 impl<
     'a,
     const DOMAINS: usize,
@@ -525,7 +617,7 @@ fn process_writable_overlap(
 /// projection in the same order.
 pub struct ScheduledDomainBank<'a, const DOMAINS: usize, const SLOTS: usize> {
     schedule: &'a ScheduleTable<DOMAINS, SLOTS>,
-    domains: [ScheduledDomainEntry<'a>; DOMAINS],
+    domains: [BoundScheduledDomainEntry<'a>; DOMAINS],
     index_owner: [u8; 256],
     active: Option<(u64, u16, u64)>,
     last_cycle: u64,
@@ -1300,6 +1392,84 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
                 .all(|(entry, quality)| entry.domain.quality() == quality)
     }
 
+    /// Publish every slave copy due for the cycle immediately following the
+    /// bank's most recently finalized receive. All plans are preflighted before
+    /// the inactive page is touched, and the published page swaps only after
+    /// every write succeeds.
+    pub fn publish_slave_copies<const PLANS: usize, const BYTES: usize>(
+        &self,
+        plans: &SlaveCopyPlanSet<PLANS>,
+        image: &mut SlaveCopyProcessImage<BYTES>,
+        target_cycle: u64,
+    ) -> Result<SlaveCopyPublication<PLANS>, ScheduledSlaveCopyError> {
+        if self.active.is_some()
+            || self.last_cycle == 0
+            || self.last_cycle.checked_add(1) != Some(target_cycle)
+            || image.published_cycle() >= target_cycle
+        {
+            return Err(ScheduledSlaveCopyError::CycleOrder);
+        }
+
+        let mut applications = [SlaveCopyApplication::EMPTY; PLANS];
+        let mut count = 0usize;
+        for (plan_index, plan) in plans.plans().iter().enumerate() {
+            let source = self
+                .domains
+                .iter()
+                .find(|entry| entry.id == plan.source_domain_id())
+                .ok_or(ScheduledSlaveCopyError::MissingDomain {
+                    plan_index,
+                    domain_id: plan.source_domain_id(),
+                })?;
+            let target = self
+                .domains
+                .iter()
+                .find(|entry| entry.id == plan.target_domain_id())
+                .ok_or(ScheduledSlaveCopyError::MissingDomain {
+                    plan_index,
+                    domain_id: plan.target_domain_id(),
+                })?;
+            if !plan.target_due(target_cycle) {
+                continue;
+            }
+            let outcome = plan
+                .preflight_process_image(
+                    source.domain.logical_address(),
+                    source.domain.input(),
+                    source.domain.quality(),
+                    target.domain.logical_address(),
+                    BYTES,
+                    target_cycle,
+                )
+                .map_err(|error| ScheduledSlaveCopyError::Plan { plan_index, error })?;
+            applications[count] = SlaveCopyApplication {
+                plan_index,
+                outcome,
+            };
+            count += 1;
+        }
+
+        let staging = image.stage_from_published();
+        for application in &applications[..count] {
+            let plan = &plans.plans()[application.plan_index];
+            let source = self
+                .domains
+                .iter()
+                .find(|entry| entry.id == plan.source_domain_id())
+                .ok_or(ScheduledSlaveCopyError::MissingDomain {
+                    plan_index: application.plan_index,
+                    domain_id: plan.source_domain_id(),
+                })?;
+            plan.write_process_image(source.domain.input(), staging, application.outcome)
+                .map_err(|error| ScheduledSlaveCopyError::Plan {
+                    plan_index: application.plan_index,
+                    error,
+                })?;
+        }
+        image.commit(target_cycle);
+        Ok(SlaveCopyPublication::new(target_cycle, applications, count))
+    }
+
     /// Confirm that a non-mailbox control cycle was produced by this bank's
     /// latest shared RX and that its private request-state evidence agrees with
     /// the only legal single-send transitions.
@@ -1333,6 +1503,34 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
     pub fn new(
         schedule: &'a ScheduleTable<DOMAINS, SLOTS>,
         domains: [ScheduledDomainEntry<'a>; DOMAINS],
+    ) -> Result<Self, ScheduledDomainError> {
+        Self::build(
+            schedule,
+            domains.map(|entry| BoundScheduledDomainEntry {
+                id: entry.id,
+                process_image_offset: 0,
+                domain: entry.domain,
+            }),
+        )
+    }
+
+    pub fn new_with_process_image_offsets(
+        schedule: &'a ScheduleTable<DOMAINS, SLOTS>,
+        domains: [ScheduledProcessImageDomainEntry<'a>; DOMAINS],
+    ) -> Result<Self, ScheduledDomainError> {
+        Self::build(
+            schedule,
+            domains.map(|entry| BoundScheduledDomainEntry {
+                id: entry.id,
+                process_image_offset: entry.process_image_offset,
+                domain: entry.domain,
+            }),
+        )
+    }
+
+    fn build(
+        schedule: &'a ScheduleTable<DOMAINS, SLOTS>,
+        domains: [BoundScheduledDomainEntry<'a>; DOMAINS],
     ) -> Result<Self, ScheduledDomainError> {
         if DOMAINS == 0
             || DOMAINS != schedule.domain_count()
@@ -1389,7 +1587,8 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
             .downcast_ref()
     }
 
-    /// Bind every TX datagram to exactly one actual RX segment of this Domain.
+    /// Bind every input-bearing datagram to exactly one actual RX segment and
+    /// every pure output datagram to the same Domain's process-image range.
     /// A split frame plan may rearrange frame boundaries but not addresses,
     /// indices, offsets, lengths, or WKC ownership.
     pub fn matches_frame_plans<const FRAMES: usize, const DATAGRAMS: usize>(
@@ -1400,23 +1599,10 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
         let Some(entry) = self.domains.iter().find(|entry| entry.id == id) else {
             return false;
         };
-        let segments = entry.domain.segments();
-        plans.datagram_count() == segments.len()
-            && segments.iter().all(|segment| {
-                plans
-                    .plans()
-                    .iter()
-                    .flat_map(|plan| plan.datagrams())
-                    .any(|datagram| {
-                        datagram.index == segment.datagram_index
-                            && datagram.payload_offset == segment.input_offset
-                            && datagram.payload_len == segment.len
-                            && datagram.expected_wkc == segment.expected_wkc
-                            && u32::try_from(segment.input_offset).ok().and_then(|offset| {
-                                entry.domain.logical_address().checked_add(offset)
-                            }) == Some(datagram.address)
-                    })
-            })
+        let datagrams = || plans.plans().iter().flat_map(|plan| plan.datagrams());
+        entry.domain.segments().iter().all(|segment| {
+            datagrams().any(|datagram| datagram_matches_segment(entry, datagram, segment))
+        }) && datagrams().all(|datagram| datagram_matches_domain(entry, datagram))
     }
 
     pub fn matches_frame_plan<const DATAGRAMS: usize>(
@@ -1427,20 +1613,14 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
         let Some(entry) = self.domains.iter().find(|entry| entry.id == id) else {
             return false;
         };
-        let segments = entry.domain.segments();
-        plan.len() == segments.len()
-            && segments.iter().all(|segment| {
-                plan.datagrams().iter().any(|datagram| {
-                    datagram.index == segment.datagram_index
-                        && datagram.payload_offset == segment.input_offset
-                        && datagram.payload_len == segment.len
-                        && datagram.expected_wkc == segment.expected_wkc
-                        && u32::try_from(segment.input_offset)
-                            .ok()
-                            .and_then(|offset| entry.domain.logical_address().checked_add(offset))
-                            == Some(datagram.address)
-                })
-            })
+        entry.domain.segments().iter().all(|segment| {
+            plan.datagrams()
+                .iter()
+                .any(|datagram| datagram_matches_segment(entry, datagram, segment))
+        }) && plan
+            .datagrams()
+            .iter()
+            .all(|datagram| datagram_matches_domain(entry, datagram))
     }
 
     pub fn begin_due(&mut self, cycle: u64, generation: u16) -> Result<(), ScheduledDomainError> {
@@ -1739,7 +1919,7 @@ mod tests {
     }
 
     #[test]
-    fn split_output_plans_must_match_every_bound_domain_segment() {
+    fn split_plans_allow_bounded_pure_outputs_and_match_every_input_segment() {
         let schedule = ScheduleTable::<2, 2>::build(
             100_000,
             &[
@@ -1807,6 +1987,45 @@ mod tests {
             .unwrap();
         wrong.push(plans.plan(1).unwrap().datagrams()[0]).unwrap();
         assert!(!bank.matches_frame_plans(10, &wrong));
+
+        let pure_output = DatagramPlan {
+            command: Command::Lwr,
+            index: 15,
+            address: 0x2000,
+            payload_offset: 0,
+            payload_len: 2,
+            expected_wkc: 2,
+        };
+        let mut with_output = FramePlanSet::<3, 1>::new();
+        with_output.push(pure_output).unwrap();
+        with_output
+            .push(plans.plan(0).unwrap().datagrams()[0])
+            .unwrap();
+        with_output
+            .push(plans.plan(1).unwrap().datagrams()[0])
+            .unwrap();
+        assert!(bank.matches_frame_plans(10, &with_output));
+
+        let mut combined = FramePlan::<3>::new();
+        combined.push(pure_output).unwrap();
+        combined
+            .push(plans.plan(0).unwrap().datagrams()[0])
+            .unwrap();
+        combined
+            .push(plans.plan(1).unwrap().datagrams()[0])
+            .unwrap();
+        assert!(bank.matches_frame_plan(10, &combined));
+
+        let mut outside = FramePlanSet::<3, 1>::new();
+        outside
+            .push(DatagramPlan {
+                payload_len: 3,
+                ..pure_output
+            })
+            .unwrap();
+        outside.push(plans.plan(0).unwrap().datagrams()[0]).unwrap();
+        outside.push(plans.plan(1).unwrap().datagrams()[0]).unwrap();
+        assert!(!bank.matches_frame_plans(10, &outside));
     }
 
     #[test]

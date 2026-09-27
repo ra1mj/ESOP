@@ -1,12 +1,14 @@
-use esop_ethercat_core::wire::{Command, MAX_ETHERNET_FRAME_LEN};
+use esop_ethercat_core::wire::{Command, FrameView, MAX_ETHERNET_FRAME_LEN};
 use esop_ethercat_core::{
     ControlRequestPool, CycleError, CycleReport, DatagramPlan, DcCyclicConfig, DcCyclicError,
-    DcCyclicSync, DcMonitor, Domain, DomainSegment, EthercatMaster, EthercatPort, FramePlan,
-    FramePlanSet, LinkState, MailboxConfig, MailboxController, MailboxError, MailboxProgress,
-    MailboxProtocol, MasterConfig, PdoDirection, PdoEntry, PortError, RegisterOperation,
-    RequestHandle, RequestState, RxPoll, ScheduleDomain, ScheduleTable, ScheduledDomainBank,
-    ScheduledDomainEntry, ScheduledProcessInputEntry, ScheduledProcessInputs,
-    ScheduledServiceTxFailure,
+    DcCyclicSync, DcMonitor, Domain, DomainConfig, DomainDatagramSpec, DomainRegistry,
+    DomainSegment, EthercatMaster, EthercatPort, FramePlan, FramePlanSet, LinkState, MailboxConfig,
+    MailboxController, MailboxError, MailboxProgress, MailboxProtocol, MasterConfig, PdoDirection,
+    PdoEntry, PdoRegistrationRequest, PortError, RegisterOperation, RequestHandle, RequestState,
+    RxPoll, ScheduleDomain, ScheduleTable, ScheduledDomainBank, ScheduledDomainEntry,
+    ScheduledProcessImageDomainEntry, ScheduledProcessInputEntry, ScheduledProcessInputs,
+    ScheduledServiceTxFailure, ScheduledSlaveCopyError, SlaveCopyPlan, SlaveCopyPlanSet,
+    SlaveCopyProcessImage, SlaveCopyStatus,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::cia402::{
@@ -27,7 +29,7 @@ use esop_lifecycle_guard::procbuf::{
 use esop_lifecycle_guard::stop_cycle::{
     AuxiliaryOutputEntry, AuxiliaryOutputPlanError, ControlledStopCycleState,
     ScheduledAuxiliaryOutputs, ScheduledProductionCycleError, ScheduledProductionCycleOwner,
-    ScheduledProductionPhase, StopCycleContext, StopCycleError,
+    ScheduledProductionPhase, SharedAuxiliaryOutputEntry, StopCycleContext, StopCycleError,
 };
 use esop_lifecycle_guard::{
     AxisStopPolicy, GateId, GuardPolicy, LifecycleAction, LifecycleError, LifecycleGuard,
@@ -39,6 +41,13 @@ use esop_profile_cia402::{
     Cia402PdoMap, Cia402Target, CyclicLimits, CyclicSetpoint, CyclicSetpointError,
     CyclicSetpointGuard, DriveRequest, OperatingMode,
 };
+
+mod generated_product {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../config/examples/sim-dual-axis/expected/esop_product_config.rs"
+    ));
+}
 
 const IMAGE_BYTES: usize = 32;
 const FEEDBACK_POLICY: Cia402AxisCommandPolicy = Cia402AxisCommandPolicy {
@@ -302,23 +311,75 @@ fn rejected_process_submission_is_bound_to_the_invalidated_receive_cycle() {
 
 #[test]
 fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
-    let schedule = ScheduleTable::<2, 1>::build(
-        100_000,
-        &[
-            ScheduleDomain {
-                id: 9,
-                period_ticks: 1,
-                phase_ticks: 0,
-            },
-            ScheduleDomain {
-                id: 10,
-                period_ticks: 1,
-                phase_ticks: 0,
-            },
-        ],
-    )
-    .unwrap();
-    let mut motion = Domain::<IMAGE_BYTES, 1>::new(0x1000);
+    const PRODUCT_IMAGE_BYTES: usize = IMAGE_BYTES + 5;
+    let mut registry = DomainRegistry::<2, 5, 2>::new();
+    registry
+        .register_domain(DomainConfig::new(9, 0x1000, 0, IMAGE_BYTES, 1, 0))
+        .unwrap();
+    registry
+        .register_domain(DomainConfig::new(10, 0x2000, IMAGE_BYTES, 5, 1, 0))
+        .unwrap();
+    let source = registry
+        .register_pdo_at(
+            9,
+            40,
+            PdoRegistrationRequest::new(0, 0x6064, 0, PdoDirection::Tx, 32, true),
+        )
+        .unwrap();
+    let target = registry
+        .register_pdo_at(
+            10,
+            0,
+            PdoRegistrationRequest::new(1, 0x7010, 1, PdoDirection::Rx, 32, true),
+        )
+        .unwrap();
+    let quality = registry
+        .register_pdo_at(
+            10,
+            32,
+            PdoRegistrationRequest::new(1, 0x7011, 1, PdoDirection::Rx, 8, false),
+        )
+        .unwrap();
+    let motion_target = registry
+        .register_pdo_at(
+            9,
+            192,
+            PdoRegistrationRequest::new(1, 0x607A, 0, PdoDirection::Rx, 32, true),
+        )
+        .unwrap();
+    let motion_quality = registry
+        .register_pdo_at(
+            9,
+            224,
+            PdoRegistrationRequest::new(1, 0x7012, 1, PdoDirection::Rx, 8, false),
+        )
+        .unwrap();
+    registry
+        .register_datagram(
+            9,
+            DomainDatagramSpec::input(Command::Lrw, 12, 0x1000, 0, IMAGE_BYTES, 1),
+        )
+        .unwrap();
+    registry
+        .register_datagram(
+            10,
+            DomainDatagramSpec::input(Command::Lrw, 13, 0x2000, 0, 5, 1),
+        )
+        .unwrap();
+    let mut frame_plans = [FramePlanSet::<1, 3>::new(); 2];
+    let schedule = registry
+        .activate_with_frame_plans::<1, 1, 3>(100_000, &mut frame_plans)
+        .unwrap();
+    let mut copy_plans = SlaveCopyPlanSet::<1>::new();
+    copy_plans
+        .push(SlaveCopyPlan::build(&registry, source, target, quality, 0xCC).unwrap())
+        .unwrap();
+    let mut motion_copy_plans = SlaveCopyPlanSet::<1>::new();
+    motion_copy_plans
+        .push(SlaveCopyPlan::build(&registry, source, motion_target, motion_quality, 0xCC).unwrap())
+        .unwrap();
+    let motion_plan = *frame_plans[0].plans().first().unwrap();
+    let mut motion = Domain::<PRODUCT_IMAGE_BYTES, 1>::new(0x1000);
     motion
         .add_segment(DomainSegment {
             datagram_index: 12,
@@ -327,74 +388,69 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
             expected_wkc: 1,
         })
         .unwrap();
-    let mut auxiliary = Domain::<2, 1>::new(0x2000);
+    let mut auxiliary = Domain::<5, 1>::new(0x2000);
     auxiliary
         .add_segment(DomainSegment {
             datagram_index: 13,
             input_offset: 0,
-            len: 2,
+            len: 5,
             expected_wkc: 1,
         })
         .unwrap();
-    let mut domain_bank = ScheduledDomainBank::new(
+    let mut domain_bank = ScheduledDomainBank::new_with_process_image_offsets(
         &schedule,
         [
-            ScheduledDomainEntry {
+            ScheduledProcessImageDomainEntry {
                 id: 9,
+                process_image_offset: 0,
                 domain: &mut motion,
             },
-            ScheduledDomainEntry {
+            ScheduledProcessImageDomainEntry {
                 id: 10,
+                process_image_offset: IMAGE_BYTES,
                 domain: &mut auxiliary,
             },
         ],
     )
     .unwrap();
-    let mut motion_plan = FramePlan::<3>::new();
-    motion_plan
-        .push(DatagramPlan {
-            command: Command::Lrw,
-            index: 12,
-            address: 0x1000,
-            payload_offset: 0,
-            payload_len: IMAGE_BYTES,
-            expected_wkc: 1,
-        })
-        .unwrap();
-    let mut auxiliary_plans = FramePlanSet::<1, 3>::new();
-    auxiliary_plans
-        .push(DatagramPlan {
-            command: Command::Lrw,
-            index: 13,
-            address: 0x2000,
-            payload_offset: 0,
-            payload_len: 2,
-            expected_wkc: 1,
-        })
-        .unwrap();
     let mut dc = DcCyclicSync::new(
         DcCyclicConfig::new(0x3000, 14, 0),
         DcMonitor::new(50, 10, 1, 2),
     );
-    let mut motion_input_plans = FramePlanSet::<1, 3>::new();
-    motion_input_plans.push(motion_plan.datagrams()[0]).unwrap();
-    let safe_image = csp_input_image(0x0027, 120, 10);
-    let auxiliary_image = [0xAA, 0xBB];
-    let auxiliary_outputs = ScheduledAuxiliaryOutputs::new(
+    let mut initial_image = [0u8; PRODUCT_IMAGE_BYTES];
+    initial_image[..IMAGE_BYTES].copy_from_slice(&csp_input_image(0x0027, 120, 10));
+    initial_image[IMAGE_BYTES..].copy_from_slice(&[0xAA, 0xBB, 0, 0, 0]);
+    let priming_image = initial_image;
+    let mut copy_image = SlaveCopyProcessImage::new(initial_image);
+    let mut fault_image = SlaveCopyProcessImage::new(initial_image);
+    let unpublished_image = SlaveCopyProcessImage::new(initial_image);
+    let auxiliary_outputs = ScheduledAuxiliaryOutputs::new_with_shared_process_image(
         &domain_bank,
         &schedule,
         9,
         &motion_plan,
+        &copy_image,
         [
             None,
-            Some(AuxiliaryOutputEntry {
+            Some(SharedAuxiliaryOutputEntry {
                 id: 10,
-                image: &auxiliary_image,
-                plans: &auxiliary_plans,
+                plans: &frame_plans[1],
             }),
         ],
     )
     .unwrap();
+    assert_eq!(
+        ScheduledProductionCycleOwner::with_slave_copies(
+            &auxiliary_outputs,
+            &motion_copy_plans,
+            &copy_image,
+        )
+        .map(|_| ()),
+        Err(ScheduledProductionCycleError::InvalidCopyTarget {
+            plan_index: 0,
+            domain_id: 9,
+        })
+    );
     let mut master = EthercatMaster::<2, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
         [0xFF; 6],
         [1, 2, 3, 4, 5, 6],
@@ -424,13 +480,13 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         [
             ScheduledProcessInputEntry {
                 id: 9,
-                image: &safe_image,
-                plans: &motion_input_plans,
+                image: &priming_image,
+                plans: &frame_plans[0],
             },
             ScheduledProcessInputEntry {
                 id: 10,
-                image: &auxiliary_image,
-                plans: &auxiliary_plans,
+                image: &priming_image,
+                plans: &frame_plans[1],
             },
         ],
     )
@@ -442,7 +498,18 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
     assert_eq!(process.expected_frames, 2);
     assert_eq!(process.sent_frames, 2);
     assert!(process.failure.is_none() && process.post_tx_deadline_met);
-    let mut production = ScheduledProductionCycleOwner::new(&auxiliary_outputs);
+    let mut production = ScheduledProductionCycleOwner::with_slave_copies(
+        &auxiliary_outputs,
+        &copy_plans,
+        &copy_image,
+    )
+    .unwrap();
+    let mut faulted_production = ScheduledProductionCycleOwner::with_slave_copies(
+        &auxiliary_outputs,
+        &copy_plans,
+        &fault_image,
+    )
+    .unwrap();
     assert_eq!(
         production.phase(),
         ScheduledProductionPhase::PrimingRequired
@@ -454,6 +521,9 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
     );
     process.generation = 1;
     let primed = production
+        .arm_priming(&domain_bank, &process_inputs, &process, 1, 150_000)
+        .unwrap();
+    faulted_production
         .arm_priming(&domain_bank, &process_inputs, &process, 1, 150_000)
         .unwrap();
     assert_eq!(primed.cycle(), 1);
@@ -500,9 +570,45 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
     service_cycle.receive.received.generation = 2;
     assert!(!domain_bank.confirms_receive(&service_cycle.receive.received));
     service_cycle.receive.received.generation = 1;
-    production
-        .complete_mailbox_cycle(&domain_bank, &service_cycle)
+    domain_bank
+        .publish_slave_copies(&copy_plans, &mut fault_image, 2)
         .unwrap();
+    let fault_page = *fault_image.published();
+    assert_eq!(
+        faulted_production.complete_mailbox_cycle_with_slave_copies(
+            &domain_bank,
+            &service_cycle,
+            &mut fault_image,
+        ),
+        Err(ScheduledProductionCycleError::SlaveCopy(
+            ScheduledSlaveCopyError::CycleOrder,
+        ))
+    );
+    assert_eq!(
+        faulted_production.phase(),
+        ScheduledProductionPhase::Faulted
+    );
+    assert_eq!(fault_image.published(), &fault_page);
+    assert_eq!(
+        faulted_production.complete_mailbox_cycle_with_slave_copies(
+            &domain_bank,
+            &service_cycle,
+            &mut fault_image,
+        ),
+        Err(ScheduledProductionCycleError::InvalidPhase)
+    );
+    assert_eq!(fault_image.published(), &fault_page);
+    let publication = production
+        .complete_mailbox_cycle_with_slave_copies(&domain_bank, &service_cycle, &mut copy_image)
+        .unwrap();
+    assert_eq!(publication.target_cycle(), 2);
+    assert_eq!(publication.len(), 1);
+    assert_eq!(
+        publication.applications()[0].outcome.status,
+        SlaveCopyStatus::Valid
+    );
+    assert_eq!(copy_image.published_cycle(), 2);
+    assert_eq!(&copy_image.published()[IMAGE_BYTES..], &[120, 0, 0, 0, 1]);
     assert_eq!(production.phase(), ScheduledProductionPhase::OutputPending);
 
     let other = OtherCycleFacts {
@@ -601,16 +707,13 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
     let targets = [Some(Cia402Target::Position(120))];
     let mut state = StatePage::<1, 0, 2>::new(7);
     state.sequence = service_cycle.receive.received.report.cycle;
-    // The auxiliary output is submitted first for the next cycle. Drop its
-    // response deliberately instead of relying on a one-frame simulator queue.
-    port.inner.drop_next_response();
     {
         let mut context = StopCycleContext {
             guard: &mut guard,
             bank: &mut axis_bank,
             master: &mut master,
             port: &mut port,
-            domain: domain_bank.domain::<IMAGE_BYTES, 1>(9).unwrap(),
+            domain: domain_bank.domain::<PRODUCT_IMAGE_BYTES, 1>(9).unwrap(),
             dc: &dc,
             buffer: &buffer,
             event_cursor: &mut cursor,
@@ -621,13 +724,51 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
             modes: &modes,
             axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
             max_stationary_velocities: &[1],
-            safe_process_image: &safe_image,
+            safe_process_image: copy_image.published(),
+            shared_process_image: None,
             plan: &motion_plan,
             next_generation: 2,
             deadline_ns: 250_000,
             now_ns: 100_000,
             transition_time_ns: 100_000,
         };
+        let tx_before_publication_proof = context.port.tx_frames();
+        assert!(matches!(
+            context.run_process_mailbox_cycle_with_outputs_until(
+                &domain_bank,
+                &process_inputs,
+                &process,
+                &service_cycle,
+                9,
+                &auxiliary_outputs,
+                &targets,
+                &mut guards,
+                &limits,
+                150_000,
+            ),
+            Err(StopCycleError::InvalidAuxiliaryOutputs)
+        ));
+        assert_eq!(context.port.tx_frames(), tx_before_publication_proof);
+        assert_eq!(context.state.quality.sequence, 0);
+        context.shared_process_image = Some(unpublished_image.published_image());
+        assert!(matches!(
+            context.run_process_mailbox_cycle_with_outputs_until(
+                &domain_bank,
+                &process_inputs,
+                &process,
+                &service_cycle,
+                9,
+                &auxiliary_outputs,
+                &targets,
+                &mut guards,
+                &limits,
+                150_000,
+            ),
+            Err(StopCycleError::InvalidAuxiliaryOutputs)
+        ));
+        assert_eq!(context.port.tx_frames(), tx_before_publication_proof);
+        assert_eq!(context.state.quality.sequence, 0);
+        context.shared_process_image = Some(copy_image.published_image());
         service_cycle.receive.received.qualities[1].actual_wkc = 0;
         assert!(!domain_bank.confirms_receive(&service_cycle.receive.received));
         assert!(matches!(
@@ -721,6 +862,14 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         assert_eq!(outcome.state_publish, Ok(1));
         assert_eq!(buffer.read_state().unwrap().state.sequence, 1);
         assert_eq!(context.port.tx_frames(), 6);
+        let auxiliary_slot = context.port.read % context.port.pending.len();
+        let (length, frame) = context.port.pending[auxiliary_slot].as_ref().unwrap();
+        let frame = FrameView::parse(&frame[..*length]).unwrap();
+        let datagram = frame.datagrams().next().unwrap().unwrap();
+        assert_eq!(datagram.header.index, 13);
+        assert_eq!(datagram.payload, &[120, 0, 0, 0, 1]);
+        context.port.pending[auxiliary_slot].take();
+        context.port.read += 1;
         assert_eq!(
             production.settle_output(&auxiliary_outputs, &outcome, 249_999),
             Err(ScheduledProductionCycleError::OutputMismatch)
@@ -734,6 +883,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         assert_eq!(release.next.cycle(), 2);
         assert_eq!(release.next.generation(), 2);
         assert_eq!(release.next.sent_frames(), 2);
+        assert_eq!(release.slave_copies_applied, 1);
         assert_eq!(production.phase(), ScheduledProductionPhase::ReceiveArmed);
     }
     port.inner.set_now_ns(200_000);
@@ -764,9 +914,15 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         Some(RequestState::Complete)
     );
     assert!(domain_bank.confirms_control_cycle(&control_cycle));
-    production
-        .complete_control_cycle(&domain_bank, &control_cycle)
+    let publication = production
+        .complete_control_cycle_with_slave_copies(&domain_bank, &control_cycle, &mut copy_image)
         .unwrap();
+    assert_eq!(publication.target_cycle(), 3);
+    assert_eq!(publication.len(), 1);
+    assert_eq!(
+        publication.applications()[0].outcome.status,
+        SlaveCopyStatus::Valid
+    );
     assert_eq!(production.phase(), ScheduledProductionPhase::OutputPending);
     controls.release(control).unwrap();
     let received = control_cycle.received();
@@ -787,7 +943,7 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         bank: &mut axis_bank,
         master: &mut master,
         port: &mut port,
-        domain: domain_bank.domain::<IMAGE_BYTES, 1>(9).unwrap(),
+        domain: domain_bank.domain::<PRODUCT_IMAGE_BYTES, 1>(9).unwrap(),
         dc: &dc,
         buffer: &buffer,
         event_cursor: &mut cursor,
@@ -798,7 +954,8 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
         modes: &modes,
         axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &[1],
-        safe_process_image: &safe_image,
+        safe_process_image: copy_image.published(),
+        shared_process_image: Some(copy_image.published_image()),
         plan: &motion_plan,
         next_generation: 3,
         deadline_ns: 350_000,
@@ -845,8 +1002,329 @@ fn shared_rx_report_qualifies_scheduled_outputs_only_for_its_bound_cycle() {
     assert!(!release.process_complete);
     assert_eq!(release.next.sent_frames(), 1);
     assert_eq!(release.next.expected_frames(), 2);
+    assert_eq!(release.slave_copies_applied, 1);
     assert!(release.controlled_stop_used);
     assert!(!release.controlled_stop_fallback);
+}
+
+#[test]
+fn generated_product_copy_plan_publishes_the_next_due_io_frame_through_the_owner() {
+    const BOOT_ID: u64 = 0x2026_0927;
+    const PRODUCT_IMAGE_BYTES: usize = 73;
+
+    let procbuf =
+        ProcBuf::<2, 16, 2, 64>::new(generated_product::PRODUCT_CONFIG.metadata.robot_id, BOOT_ID);
+    let observed =
+        generated_product::PRODUCT_CONFIG
+            .slaves
+            .map(|slave| esop_product_config::SlaveRecord {
+                position: slave.position,
+                station_address: slave.station_address,
+                identity: slave.identity,
+                online: true,
+                configured: true,
+                last_seen_cycle: 1,
+                ..esop_product_config::SlaveRecord::EMPTY
+            });
+    let active = generated_product::PRODUCT_CONFIG
+        .activate::<16, 64, 14, 2, 4, 2, 16>(
+            generated_product::PRODUCT_CONFIG.metadata.config_sha256,
+            &observed,
+            &procbuf,
+            BOOT_ID,
+        )
+        .unwrap();
+    assert_eq!(active.slave_copy_plans().len(), 1);
+
+    let motion_info = active.registry().domain(0).unwrap();
+    let io_info = active.registry().domain(1).unwrap();
+    let mut motion_segments = [DomainSegment::EMPTY; 1];
+    let mut io_segments = [DomainSegment::EMPTY; 1];
+    assert_eq!(
+        active
+            .registry()
+            .copy_domain_segments(0, &mut motion_segments)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        active
+            .registry()
+            .copy_domain_segments(1, &mut io_segments)
+            .unwrap(),
+        1
+    );
+    let mut motion = Domain::<32, 1>::new(motion_info.config.logical_address);
+    motion.add_segment(motion_segments[0]).unwrap();
+    let mut io = Domain::<9, 1>::new(io_info.config.logical_address);
+    io.add_segment(io_segments[0]).unwrap();
+    let mut bank = ScheduledDomainBank::new_with_process_image_offsets(
+        active.schedule(),
+        [
+            ScheduledProcessImageDomainEntry {
+                id: 0,
+                process_image_offset: motion_info.config.process_image_offset,
+                domain: &mut motion,
+            },
+            ScheduledProcessImageDomainEntry {
+                id: 1,
+                process_image_offset: io_info.config.process_image_offset,
+                domain: &mut io,
+            },
+        ],
+    )
+    .unwrap();
+
+    let mut process_image = [0u8; PRODUCT_IMAGE_BYTES];
+    process_image[19..23].copy_from_slice(&0x1234_5678i32.to_le_bytes());
+    let mut published = SlaveCopyProcessImage::new(process_image);
+    let motion_plan = *active.frame_plans()[0].plans().first().unwrap();
+    let process_inputs = ScheduledProcessInputs::new(
+        &bank,
+        active.schedule(),
+        [
+            ScheduledProcessInputEntry {
+                id: 0,
+                image: &process_image,
+                plans: &active.frame_plans()[0],
+            },
+            ScheduledProcessInputEntry {
+                id: 1,
+                image: &process_image,
+                plans: &active.frame_plans()[1],
+            },
+        ],
+    )
+    .unwrap();
+    let outputs = ScheduledAuxiliaryOutputs::new_with_shared_process_image(
+        &bank,
+        active.schedule(),
+        0,
+        &motion_plan,
+        &published,
+        [
+            None,
+            Some(SharedAuxiliaryOutputEntry {
+                id: 1,
+                plans: &active.frame_plans()[1],
+            }),
+        ],
+    )
+    .unwrap();
+    let mut non_due_owner = ScheduledProductionCycleOwner::with_slave_copies(
+        &outputs,
+        active.slave_copy_plans(),
+        &published,
+    )
+    .unwrap();
+
+    let mut master = EthercatMaster::<4, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut port = QueuedRxPort {
+        inner: SimulatedPort::new(2),
+        pending: [None; 4],
+        read: 0,
+        written: 0,
+    };
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 20, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let mut dc_image = [0u8; 8];
+    let mut controls = ControlRequestPool::<1>::new();
+
+    port.inner.set_now_ns(1_000_000);
+    let first_process = bank
+        .submit_due_process_inputs(
+            &process_inputs,
+            &mut master,
+            &mut port,
+            1,
+            1_800_000,
+            1_800_000,
+        )
+        .unwrap();
+    assert_eq!(first_process.expected_frames, 2);
+    non_due_owner
+        .arm_priming(&bank, &process_inputs, &first_process, 1, 1_800_000)
+        .unwrap();
+    port.inner.set_response_wkc(1);
+    let first_cycle = bank
+        .run_dc_and_control_cycle(
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            1_000_000,
+            &mut controls,
+            None,
+            1,
+            1_800_000,
+            1_800_000,
+        )
+        .unwrap();
+    let initial_published = *published.published();
+    let non_due = non_due_owner
+        .complete_control_cycle_with_slave_copies(&bank, &first_cycle, &mut published)
+        .unwrap();
+    assert_eq!(non_due.target_cycle(), 2);
+    assert!(non_due.is_empty());
+    assert_eq!(published.published_cycle(), 2);
+    assert_eq!(published.published(), &initial_published);
+
+    port.inner.set_response_wkc(2);
+    for cycle in 2..=3u64 {
+        let generation = cycle as u16;
+        port.inner.set_now_ns(cycle * 1_000_000);
+        bank.begin_due(cycle, generation).unwrap();
+        let frame = master
+            .acquire_frame(generation, cycle * 1_000_000 + 800_000)
+            .unwrap();
+        master
+            .build_and_arm_frame_from_plan(frame, &motion_plan, &process_image)
+            .unwrap();
+        master.submit_frame(&mut port, frame).unwrap();
+        let report = master
+            .cycle_receive_with_consumer(&mut port, &mut scratch, generation, &mut bank)
+            .unwrap();
+        let qualities = bank.finish_due(report.cycle, generation).unwrap();
+        assert!(qualities[0].valid);
+    }
+
+    let mut owner = ScheduledProductionCycleOwner::with_slave_copies(
+        &outputs,
+        active.slave_copy_plans(),
+        &published,
+    )
+    .unwrap();
+    port.inner.set_now_ns(4_000_000);
+    let process = bank
+        .submit_due_process_inputs(
+            &process_inputs,
+            &mut master,
+            &mut port,
+            4,
+            4_800_000,
+            4_800_000,
+        )
+        .unwrap();
+    assert_eq!(process.expected_frames, 1);
+    owner
+        .arm_priming(&bank, &process_inputs, &process, 4, 4_800_000)
+        .unwrap();
+
+    port.inner.set_response_wkc(1);
+    let control_cycle = bank
+        .run_dc_and_control_cycle(
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            4_000_000,
+            &mut controls,
+            None,
+            4,
+            4_800_000,
+            4_800_000,
+        )
+        .unwrap();
+    let publication = owner
+        .complete_control_cycle_with_slave_copies(&bank, &control_cycle, &mut published)
+        .unwrap();
+    assert_eq!(publication.target_cycle(), 5);
+    assert_eq!(publication.len(), 1);
+    assert_eq!(
+        publication.applications()[0].outcome.status,
+        SlaveCopyStatus::Valid
+    );
+    assert_eq!(published.published_cycle(), 5);
+    assert_eq!(&published.published()[66..71], &[0x78, 0x56, 0x34, 0x12, 1]);
+
+    let mut frame = [0u8; MAX_ETHERNET_FRAME_LEN];
+    let frame_len = active.frame_plans()[1].plans()[0]
+        .build(
+            &mut frame,
+            [0xFF; 6],
+            [1, 2, 3, 4, 5, 6],
+            published.published(),
+        )
+        .unwrap();
+    let parsed = FrameView::parse(&frame[..frame_len]).unwrap();
+    let io_output = parsed.datagrams().next().unwrap().unwrap();
+    assert_eq!(io_output.header.index, 2);
+    assert_eq!(io_output.payload, &[0, 0, 0x78, 0x56, 0x34, 0x12, 1]);
+    assert_eq!(owner.phase(), ScheduledProductionPhase::OutputPending);
+
+    port.inner.set_response_wkc(2);
+    for cycle in 5..=7u64 {
+        let generation = cycle as u16;
+        port.inner.set_now_ns(cycle * 1_000_000);
+        bank.begin_due(cycle, generation).unwrap();
+        let frame = master
+            .acquire_frame(generation, cycle * 1_000_000 + 800_000)
+            .unwrap();
+        master
+            .build_and_arm_frame_from_plan(frame, &motion_plan, &process_image)
+            .unwrap();
+        master.submit_frame(&mut port, frame).unwrap();
+        let report = master
+            .cycle_receive_with_consumer(&mut port, &mut scratch, generation, &mut bank)
+            .unwrap();
+        bank.finish_due(report.cycle, generation).unwrap();
+    }
+
+    let mut invalid_owner = ScheduledProductionCycleOwner::with_slave_copies(
+        &outputs,
+        active.slave_copy_plans(),
+        &published,
+    )
+    .unwrap();
+    port.inner.set_now_ns(8_000_000);
+    port.inner.set_response_wkc(0);
+    let invalid_process = bank
+        .submit_due_process_inputs(
+            &process_inputs,
+            &mut master,
+            &mut port,
+            8,
+            8_800_000,
+            8_800_000,
+        )
+        .unwrap();
+    invalid_owner
+        .arm_priming(&bank, &process_inputs, &invalid_process, 8, 8_800_000)
+        .unwrap();
+    port.inner.set_response_wkc(1);
+    let invalid_cycle = bank
+        .run_dc_and_control_cycle(
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            8_000_000,
+            &mut controls,
+            None,
+            8,
+            8_800_000,
+            8_800_000,
+        )
+        .unwrap();
+    let invalid = invalid_owner
+        .complete_control_cycle_with_slave_copies(&bank, &invalid_cycle, &mut published)
+        .unwrap();
+    assert_eq!(invalid.target_cycle(), 9);
+    assert_eq!(invalid.len(), 1);
+    assert_eq!(
+        invalid.applications()[0].outcome.status,
+        SlaveCopyStatus::InvalidSource
+    );
+    assert_eq!(&published.published()[66..71], &[0; 5]);
 }
 
 struct AdvancingTxPort<'a> {
@@ -1001,6 +1479,7 @@ fn checked_cycle_records_deadline_after_tx_without_claiming_a_stop_was_sent() {
                 axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
                 max_stationary_velocities: &[1],
                 safe_process_image: &image,
+                shared_process_image: None,
                 plan: &plan,
                 next_generation: 2,
                 deadline_ns: 150_000,
@@ -1118,6 +1597,7 @@ fn checked_cycle_records_deadline_after_tx_without_claiming_a_stop_was_sent() {
                 axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
                 max_stationary_velocities: &[1],
                 safe_process_image: &image,
+                shared_process_image: None,
                 plan: &plan,
                 next_generation: 3,
                 deadline_ns: 180_000,
@@ -1426,6 +1906,7 @@ fn active_frame_requires_verified_feedback_and_bounded_target_committed_only_aft
         axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &[1],
         safe_process_image: &enable_image,
+        shared_process_image: None,
         plan: &plan,
         next_generation: 3,
         deadline_ns: 250_000,
@@ -1494,6 +1975,7 @@ fn active_frame_requires_verified_feedback_and_bounded_target_committed_only_aft
         axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &[1],
         safe_process_image: &running_image,
+        shared_process_image: None,
         plan: &plan,
         next_generation: 4,
         deadline_ns: 350_000,
@@ -1552,6 +2034,7 @@ fn active_frame_requires_verified_feedback_and_bounded_target_committed_only_aft
         axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &[1],
         safe_process_image: &running_image,
+        shared_process_image: None,
         plan: &plan,
         next_generation: 5,
         deadline_ns: 450_000,
@@ -1593,6 +2076,7 @@ fn active_frame_requires_verified_feedback_and_bounded_target_committed_only_aft
         axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &[1],
         safe_process_image: &running_image,
+        shared_process_image: None,
         plan: &plan,
         next_generation: 6,
         deadline_ns: 550_000,
@@ -1800,6 +2284,7 @@ fn procbuf_command_executes_actual_hold_then_scaled_csp_target() {
         axis_policies: &policies,
         max_stationary_velocities: &[1],
         safe_process_image: &running_image,
+        shared_process_image: None,
         plan: &plan,
         next_generation: 2,
         deadline_ns: 250_000,
@@ -1849,6 +2334,7 @@ fn procbuf_command_executes_actual_hold_then_scaled_csp_target() {
         axis_policies: &policies,
         max_stationary_velocities: &[1],
         safe_process_image: &running_image,
+        shared_process_image: None,
         plan: &plan,
         next_generation: 3,
         deadline_ns: 350_000,
@@ -1897,6 +2383,7 @@ fn procbuf_command_executes_actual_hold_then_scaled_csp_target() {
         axis_policies: &policies,
         max_stationary_velocities: &[1],
         safe_process_image: &running_image,
+        shared_process_image: None,
         plan: &plan,
         next_generation: 4,
         deadline_ns: 450_000,
@@ -2180,6 +2667,7 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
         axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &max_stationary_velocities,
         safe_process_image: &safe_image,
+        shared_process_image: None,
         plan: &plan,
         next_generation: 2,
         deadline_ns: 250_000,
@@ -2236,6 +2724,7 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
             axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
             max_stationary_velocities: &max_stationary_velocities,
             safe_process_image: &safe_image,
+            shared_process_image: None,
             plan: &plan,
             next_generation: 3,
             deadline_ns: 350_000,
@@ -2268,6 +2757,7 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
         axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &max_stationary_velocities,
         safe_process_image: &safe_image,
+        shared_process_image: None,
         plan: &plan,
         next_generation: 3,
         deadline_ns: 350_000,
@@ -2324,6 +2814,7 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
         axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &max_stationary_velocities,
         safe_process_image: &safe_image,
+        shared_process_image: None,
         plan: &plan,
         next_generation: 4,
         deadline_ns: 450_000,
@@ -2376,6 +2867,7 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
         axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &max_stationary_velocities,
         safe_process_image: &safe_image,
+        shared_process_image: None,
         plan: &plan,
         next_generation: 5,
         deadline_ns: 550_000,
@@ -2425,6 +2917,7 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
         axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &max_stationary_velocities,
         safe_process_image: &safe_image,
+        shared_process_image: None,
         plan: &plan,
         next_generation: 6,
         deadline_ns: 650_000,
@@ -2460,6 +2953,7 @@ fn stop_cycle_owner_publishes_failed_tx_then_qualifies_a_later_response() {
         axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &max_stationary_velocities,
         safe_process_image: &safe_image,
+        shared_process_image: None,
         plan: &plan,
         next_generation: 6,
         deadline_ns: 650_000,
@@ -2620,6 +3114,7 @@ fn stop_timeout_latches_and_still_sends_disable_with_ordered_events() {
         axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &thresholds,
         safe_process_image: &safe_image,
+        shared_process_image: None,
         plan: &plan,
         next_generation: 3,
         deadline_ns: 350_000,
@@ -2664,6 +3159,7 @@ fn stop_timeout_latches_and_still_sends_disable_with_ordered_events() {
         axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &thresholds,
         safe_process_image: &safe_image,
+        shared_process_image: None,
         plan: &plan,
         next_generation: 4,
         deadline_ns: 450_000,
@@ -2700,6 +3196,7 @@ fn stop_timeout_latches_and_still_sends_disable_with_ordered_events() {
         axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &thresholds,
         safe_process_image: &safe_image,
+        shared_process_image: None,
         plan: &plan,
         next_generation: 5,
         deadline_ns: 550_000,
@@ -2762,6 +3259,7 @@ fn stop_timeout_latches_and_still_sends_disable_with_ordered_events() {
         axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &thresholds,
         safe_process_image: &safe_image,
+        shared_process_image: None,
         plan: &plan,
         next_generation: 6,
         deadline_ns: 650_000,
@@ -3665,6 +4163,7 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
             axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
             max_stationary_velocities: &[1],
             safe_process_image: &safe_image,
+            shared_process_image: None,
             plan: &motion_plan,
             next_generation: 2,
             deadline_ns: 250_000,
@@ -3795,6 +4294,7 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
         axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &[1],
         safe_process_image: &safe_image,
+        shared_process_image: None,
         plan: &motion_plan,
         next_generation: 3,
         deadline_ns: 350_000,
@@ -3849,6 +4349,7 @@ fn scheduled_cycle_stops_when_another_due_domain_misses_its_receive() {
         axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
         max_stationary_velocities: &[1],
         safe_process_image: &safe_image,
+        shared_process_image: None,
         plan: &motion_plan,
         next_generation: 4,
         deadline_ns: 450_000,
@@ -4117,6 +4618,7 @@ fn due_auxiliary_output_failure_or_overrun_blocks_active_motion() {
             axis_policies: &core::array::from_fn(|_| FEEDBACK_POLICY),
             max_stationary_velocities: &[1],
             safe_process_image: &safe_image,
+            shared_process_image: None,
             plan: &motion_plan,
             next_generation: 2,
             deadline_ns: 250_000,

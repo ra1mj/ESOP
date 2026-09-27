@@ -43,6 +43,127 @@ pub struct SlaveCopyOutcome {
     pub target_cycle: u64,
 }
 
+impl SlaveCopyOutcome {
+    pub(crate) const EMPTY: Self = Self {
+        status: SlaveCopyStatus::InvalidSource,
+        source_last_valid_cycle: 0,
+        source_age_cycles: 0,
+        target_cycle: 0,
+    };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SlaveCopyApplication {
+    pub plan_index: usize,
+    pub outcome: SlaveCopyOutcome,
+}
+
+impl SlaveCopyApplication {
+    pub(crate) const EMPTY: Self = Self {
+        plan_index: 0,
+        outcome: SlaveCopyOutcome::EMPTY,
+    };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SlaveCopyPublication<const PLANS: usize> {
+    target_cycle: u64,
+    applications: [SlaveCopyApplication; PLANS],
+    count: usize,
+}
+
+#[derive(Clone, Copy)]
+pub struct SlaveCopyPublishedImage<'a> {
+    bytes: &'a [u8],
+    cycle: u64,
+}
+
+impl<'a> SlaveCopyPublishedImage<'a> {
+    pub const fn cycle(self) -> u64 {
+        self.cycle
+    }
+
+    pub const fn bytes(self) -> &'a [u8] {
+        self.bytes
+    }
+}
+
+impl<const PLANS: usize> SlaveCopyPublication<PLANS> {
+    pub(crate) const fn new(
+        target_cycle: u64,
+        applications: [SlaveCopyApplication; PLANS],
+        count: usize,
+    ) -> Self {
+        Self {
+            target_cycle,
+            applications,
+            count,
+        }
+    }
+
+    pub const fn target_cycle(&self) -> u64 {
+        self.target_cycle
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn applications(&self) -> &[SlaveCopyApplication] {
+        &self.applications[..self.count]
+    }
+}
+
+/// Caller-owned double-page product process image. Only the published page is
+/// visible outside the core; scheduled copy publication stages into the other
+/// page and swaps it after every due plan succeeds.
+pub struct SlaveCopyProcessImage<const BYTES: usize> {
+    pages: [[u8; BYTES]; 2],
+    published_page: usize,
+    published_cycle: u64,
+}
+
+impl<const BYTES: usize> SlaveCopyProcessImage<BYTES> {
+    pub const fn new(initial: [u8; BYTES]) -> Self {
+        Self {
+            pages: [initial, initial],
+            published_page: 0,
+            published_cycle: 0,
+        }
+    }
+
+    pub const fn published_cycle(&self) -> u64 {
+        self.published_cycle
+    }
+
+    pub fn published(&self) -> &[u8; BYTES] {
+        &self.pages[self.published_page]
+    }
+
+    pub fn published_image(&self) -> SlaveCopyPublishedImage<'_> {
+        SlaveCopyPublishedImage {
+            bytes: self.published(),
+            cycle: self.published_cycle,
+        }
+    }
+
+    pub(crate) fn stage_from_published(&mut self) -> &mut [u8; BYTES] {
+        let staging_page = self.published_page ^ 1;
+        let published = self.pages[self.published_page];
+        self.pages[staging_page] = published;
+        &mut self.pages[staging_page]
+    }
+
+    pub(crate) fn commit(&mut self, target_cycle: u64) {
+        self.published_page ^= 1;
+        self.published_cycle = target_cycle;
+    }
+}
+
 /// One immutable link between a source TxPDO and a destination RxPDO.
 ///
 /// The destination quality byte is 1 for fresh verified data, 0 otherwise.
@@ -54,6 +175,7 @@ pub struct SlaveCopyPlan {
     target_domain_id: u8,
     source_address: u32,
     target_address: u32,
+    target_process_image_offset: usize,
     source_offset: usize,
     target_offset: usize,
     quality_offset: usize,
@@ -68,12 +190,25 @@ pub struct SlaveCopyPlan {
     invalid_fill: u8,
 }
 
+struct SlaveCopySourceImage<'a> {
+    address: u32,
+    bytes: &'a [u8],
+    quality: DomainQuality,
+}
+
+struct SlaveCopyTargetImage {
+    address: u32,
+    len: usize,
+    base: usize,
+}
+
 impl SlaveCopyPlan {
     const EMPTY: Self = Self {
         source_domain_id: 0,
         target_domain_id: 0,
         source_address: 0,
         target_address: 0,
+        target_process_image_offset: 0,
         source_offset: 0,
         target_offset: 0,
         quality_offset: 0,
@@ -159,6 +294,7 @@ impl SlaveCopyPlan {
             target_domain_id: target.domain_id(),
             source_address: source_info.config.logical_address,
             target_address: target_info.config.logical_address,
+            target_process_image_offset: target_info.config.process_image_offset,
             source_offset,
             target_offset,
             quality_offset,
@@ -180,6 +316,10 @@ impl SlaveCopyPlan {
 
     pub const fn target_domain_id(&self) -> u8 {
         self.target_domain_id
+    }
+
+    pub const fn target_process_image_offset(&self) -> usize {
+        self.target_process_image_offset
     }
 
     pub const fn payload_len(&self) -> usize {
@@ -237,25 +377,90 @@ impl SlaveCopyPlan {
         target_image: &mut [u8],
         target_cycle: u64,
     ) -> Result<SlaveCopyOutcome, SlaveCopyError> {
-        if source_address != self.source_address || target_address != self.target_address {
+        let outcome = self.preflight_images(
+            SlaveCopySourceImage {
+                address: source_address,
+                bytes: source_image,
+                quality: source_quality,
+            },
+            SlaveCopyTargetImage {
+                address: target_address,
+                len: target_image.len(),
+                base: 0,
+            },
+            target_cycle,
+        )?;
+        self.write_images(source_image, target_image, 0, outcome)?;
+        Ok(outcome)
+    }
+
+    pub(crate) fn preflight_process_image(
+        &self,
+        source_address: u32,
+        source_image: &[u8],
+        source_quality: DomainQuality,
+        target_address: u32,
+        target_image_len: usize,
+        target_cycle: u64,
+    ) -> Result<SlaveCopyOutcome, SlaveCopyError> {
+        self.preflight_images(
+            SlaveCopySourceImage {
+                address: source_address,
+                bytes: source_image,
+                quality: source_quality,
+            },
+            SlaveCopyTargetImage {
+                address: target_address,
+                len: target_image_len,
+                base: self.target_process_image_offset,
+            },
+            target_cycle,
+        )
+    }
+
+    pub(crate) fn write_process_image(
+        &self,
+        source_image: &[u8],
+        target_image: &mut [u8],
+        outcome: SlaveCopyOutcome,
+    ) -> Result<(), SlaveCopyError> {
+        self.write_images(
+            source_image,
+            target_image,
+            self.target_process_image_offset,
+            outcome,
+        )
+    }
+
+    fn preflight_images(
+        &self,
+        source: SlaveCopySourceImage<'_>,
+        target: SlaveCopyTargetImage,
+        target_cycle: u64,
+    ) -> Result<SlaveCopyOutcome, SlaveCopyError> {
+        if source.address != self.source_address || target.address != self.target_address {
             return Err(SlaveCopyError::DomainMismatch);
         }
-        if source_image.len() < self.source_len || target_image.len() < self.target_len {
+        let target_end = target
+            .base
+            .checked_add(self.target_len)
+            .ok_or(SlaveCopyError::ImageBounds)?;
+        if source.bytes.len() < self.source_len || target_end > target.len {
             return Err(SlaveCopyError::ImageBounds);
         }
         if !self.target_due(target_cycle) {
             return Err(SlaveCopyError::TargetNotDue);
         }
 
-        let age = target_cycle.saturating_sub(source_quality.last_valid_cycle);
-        let status = if source_quality.valid
-            && source_quality.complete
-            && source_quality.expected_wkc == self.source_expected_wkc
-            && source_quality.actual_wkc == self.source_expected_wkc
-            && source_quality.input_age_cycles == 0
-            && source_quality.last_valid_cycle != 0
-            && source_quality.last_valid_cycle <= target_cycle
-            && (source_quality.last_valid_cycle - 1) % u64::from(self.source_period_ticks)
+        let age = target_cycle.saturating_sub(source.quality.last_valid_cycle);
+        let status = if source.quality.valid
+            && source.quality.complete
+            && source.quality.expected_wkc == self.source_expected_wkc
+            && source.quality.actual_wkc == self.source_expected_wkc
+            && source.quality.input_age_cycles == 0
+            && source.quality.last_valid_cycle != 0
+            && source.quality.last_valid_cycle <= target_cycle
+            && (source.quality.last_valid_cycle - 1) % u64::from(self.source_period_ticks)
                 == u64::from(self.source_phase_ticks)
         {
             if age <= 1 {
@@ -266,20 +471,45 @@ impl SlaveCopyPlan {
         } else {
             SlaveCopyStatus::InvalidSource
         };
-        let destination = &mut target_image[self.target_offset..self.target_offset + self.len];
-        if status == SlaveCopyStatus::Valid {
+        Ok(SlaveCopyOutcome {
+            status,
+            source_last_valid_cycle: source.quality.last_valid_cycle,
+            source_age_cycles: age,
+            target_cycle,
+        })
+    }
+
+    fn write_images(
+        &self,
+        source_image: &[u8],
+        target_image: &mut [u8],
+        target_base: usize,
+        outcome: SlaveCopyOutcome,
+    ) -> Result<(), SlaveCopyError> {
+        let destination_start = target_base
+            .checked_add(self.target_offset)
+            .ok_or(SlaveCopyError::ImageBounds)?;
+        let destination_end = destination_start
+            .checked_add(self.len)
+            .ok_or(SlaveCopyError::ImageBounds)?;
+        let quality_offset = target_base
+            .checked_add(self.quality_offset)
+            .ok_or(SlaveCopyError::ImageBounds)?;
+        if source_image.len() < self.source_offset.saturating_add(self.len)
+            || destination_end > target_image.len()
+            || quality_offset >= target_image.len()
+        {
+            return Err(SlaveCopyError::ImageBounds);
+        }
+        let destination = &mut target_image[destination_start..destination_end];
+        if outcome.status == SlaveCopyStatus::Valid {
             destination
                 .copy_from_slice(&source_image[self.source_offset..self.source_offset + self.len]);
         } else {
             destination.fill(self.invalid_fill);
         }
-        target_image[self.quality_offset] = u8::from(status == SlaveCopyStatus::Valid);
-        Ok(SlaveCopyOutcome {
-            status,
-            source_last_valid_cycle: source_quality.last_valid_cycle,
-            source_age_cycles: age,
-            target_cycle,
-        })
+        target_image[quality_offset] = u8::from(outcome.status == SlaveCopyStatus::Valid);
+        Ok(())
     }
 
     fn target_overlaps(&self, other: &Self) -> bool {

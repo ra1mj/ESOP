@@ -152,11 +152,12 @@ pub use scheduled_domains::{
     ScheduledControlCycleError, ScheduledControlCycleReport, ScheduledDomainBank,
     ScheduledDomainEntry, ScheduledDomainError, ScheduledDomainRx, ScheduledMailboxCycleError,
     ScheduledMailboxCycleReport, ScheduledMailboxReceiveReport, ScheduledMailboxTxError,
-    ScheduledMailboxTxReport, ScheduledProcessFrameError, ScheduledProcessInputEntry,
-    ScheduledProcessInputPlanError, ScheduledProcessInputs, ScheduledProcessTxError,
-    ScheduledProcessTxFailure, ScheduledProcessTxReport, ScheduledReceiveError,
-    ScheduledReceiveReport, ScheduledServiceFrameError, ScheduledServiceTxError,
-    ScheduledServiceTxFailure, ScheduledServiceTxReport,
+    ScheduledMailboxTxReport, ScheduledProcessFrameError, ScheduledProcessImageDomainEntry,
+    ScheduledProcessInputEntry, ScheduledProcessInputPlanError, ScheduledProcessInputs,
+    ScheduledProcessTxError, ScheduledProcessTxFailure, ScheduledProcessTxReport,
+    ScheduledReceiveError, ScheduledReceiveReport, ScheduledServiceFrameError,
+    ScheduledServiceTxError, ScheduledServiceTxFailure, ScheduledServiceTxReport,
+    ScheduledSlaveCopyError,
 };
 pub use sii::{
     EEPROM_BUSY, EEPROM_ERROR_MASK, EEPROM_READ_COMMAND, MAX_SII_FMMU_USAGES, SII_CATEGORY_DC,
@@ -190,7 +191,8 @@ pub use slave::{
     AlStatus, EthercatState, SlaveIdentity, SlaveRecord, SlaveTable, SlaveTableError, next_state,
 };
 pub use slave_copy::{
-    SlaveCopyError, SlaveCopyOutcome, SlaveCopyPlan, SlaveCopyPlanSet, SlaveCopyPlanSetError,
+    SlaveCopyApplication, SlaveCopyError, SlaveCopyOutcome, SlaveCopyPlan, SlaveCopyPlanSet,
+    SlaveCopyPlanSetError, SlaveCopyProcessImage, SlaveCopyPublication, SlaveCopyPublishedImage,
     SlaveCopyStatus,
 };
 pub use startup::{

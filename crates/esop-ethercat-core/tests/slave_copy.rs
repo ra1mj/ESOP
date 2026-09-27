@@ -1,16 +1,23 @@
 use esop_ethercat_core::wire::{Command, DatagramHeader, FrameView, MAX_ETHERNET_FRAME_LEN};
 use esop_ethercat_core::{
     Domain, DomainConfig, DomainDatagramSpec, DomainRegistry, DomainSegment, FramePlan,
-    PdoDirection, PdoEntryHandle, PdoRegistrationRequest, SlaveCopyError, SlaveCopyPlan,
-    SlaveCopyPlanSet, SlaveCopyPlanSetError, SlaveCopyStatus,
+    PdoDirection, PdoEntryHandle, PdoRegistrationRequest, RxDatagramConsumer, RxMatch,
+    ScheduledDomainBank, ScheduledDomainEntry, ScheduledSlaveCopyError, SlaveCopyError,
+    SlaveCopyPlan, SlaveCopyPlanSet, SlaveCopyPlanSetError, SlaveCopyProcessImage, SlaveCopyStatus,
 };
 
 type Registry = DomainRegistry<2, 4, 2>;
 
 fn mapping() -> (Registry, PdoEntryHandle, PdoEntryHandle, PdoEntryHandle) {
+    mapping_with_source_period(1)
+}
+
+fn mapping_with_source_period(
+    source_period_ticks: u32,
+) -> (Registry, PdoEntryHandle, PdoEntryHandle, PdoEntryHandle) {
     let mut registry = Registry::new();
     registry
-        .register_domain(DomainConfig::new(1, 0x1000, 0, 2, 1, 0))
+        .register_domain(DomainConfig::new(1, 0x1000, 0, 2, source_period_ticks, 0))
         .unwrap();
     registry
         .register_domain(DomainConfig::new(2, 0x2000, 2, 3, 1, 0))
@@ -386,4 +393,143 @@ fn fixed_plan_set_rejects_capacity_and_overlapping_target_bytes_transactionally(
     );
     assert_eq!(plans.len(), 1);
     assert_eq!(plans.plans(), &[plan]);
+}
+
+#[test]
+fn scheduled_publication_is_double_buffered_ordered_and_wkc_aware() {
+    let (mut registry, source_handle, target_handle, quality_handle) =
+        mapping_with_source_period(2);
+    let schedule = registry.activate::<4>(250_000).unwrap();
+    let plan = SlaveCopyPlan::build(
+        &registry,
+        source_handle,
+        target_handle,
+        quality_handle,
+        0xCC,
+    )
+    .unwrap();
+    assert_eq!(plan.target_process_image_offset(), 2);
+    let mut plans = SlaveCopyPlanSet::<1>::new();
+    plans.push(plan).unwrap();
+
+    let mut source = source_domain();
+    let mut target = Domain::<3, 1>::new(0x2000);
+    target
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 3,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [
+            ScheduledDomainEntry {
+                id: 1,
+                domain: &mut source,
+            },
+            ScheduledDomainEntry {
+                id: 2,
+                domain: &mut target,
+            },
+        ],
+    )
+    .unwrap();
+
+    let response = |generation, working_counter| RxMatch {
+        slot_id: 0,
+        generation,
+        working_counter,
+    };
+    let header = |command, index, address, length| DatagramHeader {
+        command,
+        index,
+        address,
+        length,
+        last: true,
+    };
+    bank.begin_due(1, 1).unwrap();
+    assert!(bank.accept(
+        1,
+        100,
+        response(1, 1),
+        header(Command::Lrd, 11, 0x1000, 2),
+        &[0xA5, 0x5A],
+    ));
+    assert!(bank.accept(
+        1,
+        100,
+        response(1, 1),
+        header(Command::Lwr, 12, 0x2000, 3),
+        &[0; 3],
+    ));
+    bank.finish_due(1, 1).unwrap();
+
+    let mut short = SlaveCopyProcessImage::<4>::new([9; 4]);
+    assert_eq!(
+        bank.publish_slave_copies(&plans, &mut short, 2),
+        Err(ScheduledSlaveCopyError::Plan {
+            plan_index: 0,
+            error: SlaveCopyError::ImageBounds,
+        })
+    );
+    assert_eq!(short.published(), &[9; 4]);
+    assert_eq!(short.published_cycle(), 0);
+
+    let mut image = SlaveCopyProcessImage::<5>::new([0xEE; 5]);
+    let publication = bank.publish_slave_copies(&plans, &mut image, 2).unwrap();
+    assert_eq!(publication.target_cycle(), 2);
+    assert_eq!(publication.len(), 1);
+    assert_eq!(publication.applications()[0].plan_index, 0);
+    assert_eq!(
+        publication.applications()[0].outcome.status,
+        SlaveCopyStatus::Valid
+    );
+    assert_eq!(image.published(), &[0xEE, 0xEE, 0xA5, 0x5A, 1]);
+    assert_eq!(image.published_cycle(), 2);
+    assert_eq!(
+        bank.publish_slave_copies(&plans, &mut image, 2),
+        Err(ScheduledSlaveCopyError::CycleOrder)
+    );
+    assert_eq!(image.published(), &[0xEE, 0xEE, 0xA5, 0x5A, 1]);
+
+    bank.begin_due(2, 2).unwrap();
+    assert!(bank.accept(
+        2,
+        200,
+        response(2, 1),
+        header(Command::Lwr, 12, 0x2000, 3),
+        &[0; 3],
+    ));
+    bank.finish_due(2, 2).unwrap();
+    let publication = bank.publish_slave_copies(&plans, &mut image, 3).unwrap();
+    assert_eq!(
+        publication.applications()[0].outcome.status,
+        SlaveCopyStatus::StaleSource
+    );
+    assert_eq!(image.published(), &[0xEE, 0xEE, 0xCC, 0xCC, 0]);
+
+    bank.begin_due(3, 3).unwrap();
+    assert!(bank.accept(
+        3,
+        300,
+        response(3, 0),
+        header(Command::Lrd, 11, 0x1000, 2),
+        &[0xDE, 0xAD],
+    ));
+    assert!(bank.accept(
+        3,
+        300,
+        response(3, 1),
+        header(Command::Lwr, 12, 0x2000, 3),
+        &[0; 3],
+    ));
+    bank.finish_due(3, 3).unwrap();
+    let publication = bank.publish_slave_copies(&plans, &mut image, 4).unwrap();
+    assert_eq!(
+        publication.applications()[0].outcome.status,
+        SlaveCopyStatus::InvalidSource
+    );
+    assert_eq!(image.published(), &[0xEE, 0xEE, 0xCC, 0xCC, 0]);
 }
