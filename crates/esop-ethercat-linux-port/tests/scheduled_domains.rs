@@ -3,10 +3,11 @@ use esop_ethercat_core::wire::{
     MAX_ETHERNET_FRAME_LEN, WORKING_COUNTER_LEN,
 };
 use esop_ethercat_core::{
-    AlStatus, CoeHeader, CoeService, ControlError, ControlRequestPool, CycleError, DatagramPlan,
-    DcClockConfig, DcClockController, DcClockProgress, DcCyclicConfig, DcCyclicError, DcCyclicSync,
-    DcMonitor, DcSyncConfig, DcSyncController, DcSyncProgress, DcSyncWindowConfig, DcTopology,
-    Domain, DomainSegment, ESC_AL_STATUS, ESC_CONFIGURATION, ESC_DC_SYSTEM_DIFF,
+    AL_ID_LOADED_FLAG, AL_ID_REQUEST_FLAG, AlStatus, CoeHeader, CoeService, ControlError,
+    ControlRequestPool, CycleError, DatagramPlan, DcClockConfig, DcClockController,
+    DcClockProgress, DcCyclicConfig, DcCyclicError, DcCyclicSync, DcMonitor, DcSyncConfig,
+    DcSyncController, DcSyncProgress, DcSyncWindowConfig, DcTopology, Domain, DomainSegment,
+    ESC_AL_CONTROL, ESC_AL_STATUS, ESC_AL_STATUS_CODE, ESC_CONFIGURATION, ESC_DC_SYSTEM_DIFF,
     ESC_DC_SYSTEM_TIME, ESC_FEATURE_DC_SUPPORTED, ESC_PROCESS_DATA_WATCHDOG_TIME,
     ESC_WATCHDOG_DIVIDER, EscDcRange, EscWatchdogConfig, EthercatMaster, EthercatPort,
     EthercatState, ExpectedSlave, FMMU_IMAGE_LEN, FmmuRegisterDiscoveryController,
@@ -25,11 +26,11 @@ use esop_ethercat_core::{
     ScheduledProductionServiceRecovery, ScheduledProductionServiceScheduler,
     ScheduledProductionServices, ScheduledReceiveError, ScheduledServiceFrameError,
     ScheduledServiceTxError, ScheduledServiceTxFailure, SlaveIdentity, StartupAction,
-    StartupConfig, StartupConfigurationServices, StartupController, StartupPhase, StartupProgress,
-    SyncManagerConfig, SyncManagerRegisterDiscoveryController,
-    SyncManagerRegisterDiscoveryProgress, WatchdogController, WatchdogControllerConfig,
-    WatchdogError, WatchdogField, WatchdogPhase, WatchdogPlan, WatchdogPlanEntry, WatchdogProgress,
-    fixed_address,
+    StartupConfig, StartupConfigurationServices, StartupController, StartupError, StartupPhase,
+    StartupProgress, StartupSlaveProfile, SyncManagerConfig,
+    SyncManagerRegisterDiscoveryController, SyncManagerRegisterDiscoveryProgress,
+    WatchdogController, WatchdogControllerConfig, WatchdogError, WatchdogField, WatchdogPhase,
+    WatchdogPlan, WatchdogPlanEntry, WatchdogProgress, fixed_address,
 };
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::ethercat::{
@@ -2234,12 +2235,38 @@ fn drive_startup_to_configuration_barrier(
     expected: &[ExpectedSlave; 1],
     requirements: StartupConfigurationServices,
 ) {
+    let profiles = [StartupSlaveProfile::new(expected[0].position)];
+    let now_ns = drive_startup_through_identity(startup, expected, &profiles, requirements);
+
+    let write = startup.next_action(now_ns).unwrap().unwrap();
+    assert!(matches!(write, StartupAction::Al(_)));
+    accept_startup_action(startup, write, &[], now_ns + 1);
+    let read = startup.next_action(now_ns + 2).unwrap().unwrap();
+    assert_eq!(
+        accept_startup_action(
+            startup,
+            read,
+            &startup_status(EthercatState::PreOp),
+            now_ns + 3,
+        ),
+        StartupProgress::AwaitingConfiguration
+    );
+    assert_eq!(startup.phase(), StartupPhase::AwaitingConfiguration);
+}
+
+fn drive_startup_through_identity(
+    startup: &mut StartupController<2>,
+    expected: &[ExpectedSlave; 1],
+    profiles: &[StartupSlaveProfile; 1],
+    requirements: StartupConfigurationServices,
+) -> u64 {
     startup
-        .start(
+        .start_with_profiles(
             7,
             0,
             StartupConfig::new(EthercatState::Op).with_configuration_services(requirements),
             expected,
+            profiles,
         )
         .unwrap();
     let probe = startup.next_action(1).unwrap().unwrap();
@@ -2282,21 +2309,160 @@ fn drive_startup_to_configuration_barrier(
         accept_startup_action(startup, data, &word.to_le_bytes(), now_ns + 7);
         now_ns += 8;
     }
+    now_ns
+}
 
-    let write = startup.next_action(now_ns).unwrap().unwrap();
-    assert!(matches!(write, StartupAction::Al(_)));
-    accept_startup_action(startup, write, &[], now_ns + 1);
-    let read = startup.next_action(now_ns + 2).unwrap().unwrap();
-    assert_eq!(
-        accept_startup_action(
-            startup,
-            read,
-            &startup_status(EthercatState::PreOp),
-            now_ns + 3,
-        ),
-        StartupProgress::AwaitingConfiguration
+#[test]
+fn production_scheduler_requesting_id_mismatch_blocks_topology_before_preop() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<2, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
     );
-    assert_eq!(startup.phase(), StartupPhase::AwaitingConfiguration);
+    let expected = [ExpectedSlave {
+        position: 0,
+        station_address: 0x1000,
+        identity: SlaveIdentity {
+            vendor_id: 0x1122_3344,
+            product_code: 0x5566_7788,
+            revision: 0x99AA_BBCC,
+            serial: 0xDDEE_FF00,
+        },
+    }];
+    let profiles = [StartupSlaveProfile::new(0).with_expected_requesting_id(0x0041)];
+    let mut startup = StartupController::<2>::new(0x1000);
+    drive_startup_through_identity(
+        &mut startup,
+        &expected,
+        &profiles,
+        StartupConfigurationServices::NONE,
+    );
+    assert_eq!(startup.phase(), StartupPhase::ReadingRequestingId);
+
+    let pending = startup.next_action(90_000).unwrap().unwrap();
+    assert_eq!(pending.address(), fixed_address(0x1000, ESC_AL_CONTROL));
+    assert_eq!(
+        pending.payload(),
+        &((EthercatState::Init as u16) | AL_ID_REQUEST_FLAG).to_le_bytes()
+    );
+
+    let mut scheduler = ScheduledProductionServiceScheduler::new();
+    let mut controls = ControlRequestPool::<1>::new();
+    let mut port = TwoFrameSimPort::new();
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut dc_image = [0; 8];
+
+    let mut run_cycle = |now_ns, generation, response: Option<(u32, [u8; 2])>| {
+        port.set_now_ns(now_ns);
+        if let Some((address, payload)) = response {
+            port.set_next_control_response(address, &payload);
+        }
+        scheduler
+            .run_cycle(
+                &mut bank,
+                &mut master,
+                &mut port,
+                &mut scratch,
+                &mut dc,
+                &mut dc_image,
+                now_ns,
+                &mut controls,
+                &mut ScheduledProductionServices::<2, 0, 0>::new(
+                    Some(&mut startup),
+                    None,
+                    None,
+                    None,
+                ),
+                generation,
+                now_ns + 50_000,
+                now_ns + 50_000,
+            )
+            .unwrap()
+    };
+
+    let requested = run_cycle(100_000, 1, None);
+    assert_eq!(
+        requested.selected(),
+        ScheduledProductionServiceKind::Startup
+    );
+    assert_eq!(requested.fault(), None);
+    assert_eq!(
+        requested.startup_phase(),
+        Some(StartupPhase::ReadingRequestingId)
+    );
+
+    let loaded = (EthercatState::Init as u16) | AL_ID_LOADED_FLAG;
+    let polled = run_cycle(
+        200_000,
+        2,
+        Some((fixed_address(0x1000, ESC_AL_STATUS), loaded.to_le_bytes())),
+    );
+    assert_eq!(polled.fault(), None);
+    assert_eq!(
+        polled.startup_phase(),
+        Some(StartupPhase::ReadingRequestingId)
+    );
+
+    let mismatch = run_cycle(
+        300_000,
+        3,
+        Some((
+            fixed_address(0x1000, ESC_AL_STATUS_CODE),
+            0x0042u16.to_le_bytes(),
+        )),
+    );
+    let expected_fault = StartupError::RequestingIdMismatch {
+        position: 0,
+        expected: 0x0041,
+        observed: 0x0042,
+    };
+    assert_eq!(
+        mismatch.fault(),
+        Some(ScheduledProductionServiceFault::Startup(expected_fault))
+    );
+    assert_eq!(mismatch.startup_phase(), Some(StartupPhase::Faulted));
+    assert!(!mismatch.service_ready());
+    assert_eq!(startup.last_error(), Some(expected_fault));
+    assert_eq!(startup.verified_requesting_id(0), None);
+    assert_eq!(startup.records()[0].al_status.state, EthercatState::Init);
+    assert_eq!(port.al_control_writes, 1);
+    assert_eq!(
+        port.last_al_control,
+        Some((EthercatState::Init as u16) | AL_ID_REQUEST_FLAG)
+    );
+    assert_eq!(controls.in_use(), 0);
+    let facts =
+        other_cycle_facts_from_production_service_cycle(&mismatch, ready_other_cycle_facts());
+    assert!(!facts.topology_valid);
 }
 
 #[test]
@@ -4262,6 +4428,8 @@ struct TwoFrameSimPort {
     control_response: [u8; MAX_MAILBOX_BYTES],
     control_response_len: usize,
     sync_window_difference: Option<u32>,
+    al_control_writes: usize,
+    last_al_control: Option<u16>,
 }
 
 impl TwoFrameSimPort {
@@ -4288,6 +4456,8 @@ impl TwoFrameSimPort {
             control_response: [0; MAX_MAILBOX_BYTES],
             control_response_len: 0,
             sync_window_difference: None,
+            al_control_writes: 0,
+            last_al_control: None,
         }
     }
 
@@ -4396,6 +4566,16 @@ impl EthercatPort for TwoFrameSimPort {
                     && header.command == Command::Fprd
                 {
                     self.mailbox_status_reads += 1;
+                }
+                if header.address & 0xFFFF == u32::from(ESC_AL_CONTROL)
+                    && header.command == Command::Fpwr
+                    && header.length == 2
+                {
+                    self.al_control_writes += 1;
+                    self.last_al_control = Some(u16::from_le_bytes([
+                        self.frames[self.count][header_end],
+                        self.frames[self.count][header_end + 1],
+                    ]));
                 }
                 if Some(header.address) == self.mailbox_send_address
                     && header.command == Command::Fpwr

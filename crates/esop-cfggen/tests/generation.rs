@@ -131,6 +131,28 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
         build_input["devices"]["coe_sdo_information"][2]["supported"],
         false
     );
+    assert_eq!(
+        build_input["devices"]["requesting_id"][0],
+        serde_json::json!({
+            "name": "drive_left",
+            "position": 0,
+            "supported": true,
+            "expected": "0x0041",
+        })
+    );
+    assert_eq!(
+        build_input["devices"]["requesting_id"][1]["expected"],
+        "0x0042"
+    );
+    assert_eq!(
+        build_input["devices"]["requesting_id"][2],
+        serde_json::json!({
+            "name": "io_block",
+            "position": 2,
+            "supported": false,
+            "expected": null,
+        })
+    );
 
     let inventory: Value =
         serde_json::from_slice(&fs::read(first.join("device_inventory.json")).unwrap()).unwrap();
@@ -178,6 +200,11 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
         inventory["devices"][2]["coe_sdo_information_supported"],
         false
     );
+    assert_eq!(inventory["devices"][0]["requesting_id_supported"], true);
+    assert_eq!(inventory["devices"][0]["requesting_id"], "0x0041");
+    assert_eq!(inventory["devices"][1]["requesting_id"], "0x0042");
+    assert_eq!(inventory["devices"][2]["requesting_id_supported"], false);
+    assert!(inventory["devices"][2]["requesting_id"].is_null());
     assert_eq!(
         inventory["devices"][0]["watchdog"]["process_data_intervals"],
         100
@@ -217,6 +244,9 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert_eq!(product["slaves"][1]["coe_complete_access_enabled"], false);
     assert_eq!(product["slaves"][0]["coe_sdo_information_enabled"], true);
     assert_eq!(product["slaves"][1]["coe_sdo_information_enabled"], false);
+    assert_eq!(product["slaves"][0]["requesting_id_supported"], true);
+    assert_eq!(product["slaves"][0]["requesting_id"], "0x0041");
+    assert_eq!(product["slaves"][1]["requesting_id"], "0x0042");
     assert_eq!(
         product["slaves"][0]["sdo_information_expectations"][0]["index"],
         "0x603f"
@@ -337,6 +367,9 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(header.contains("uint16_t watchdog_divider"));
     assert!(header.contains("uint8_t has_process_data_watchdog"));
     assert!(header.contains("uint16_t process_data_watchdog_intervals"));
+    assert!(header.contains("uint8_t requesting_id_supported"));
+    assert!(header.contains("uint8_t has_requesting_id"));
+    assert!(header.contains("uint16_t requesting_id"));
     assert!(header.contains("uint8_t coe_complete_access_supported"));
     assert!(header.contains("uint8_t coe_complete_access_enabled"));
     assert!(header.contains("uint8_t coe_sdo_information_supported"));
@@ -378,6 +411,9 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(rust.contains("cycle_time1_ns: 0"));
     assert!(rust.contains("watchdog: Some(EscWatchdogConfig::new(Some(2500), Some(100)))"));
     assert!(rust.contains("watchdog: None"));
+    assert!(rust.contains("requesting_id_supported: true, requesting_id: Some(65)"));
+    assert!(rust.contains("requesting_id_supported: true, requesting_id: Some(66)"));
+    assert!(rust.contains("requesting_id_supported: false, requesting_id: None"));
     assert!(
         rust.contains("coe_complete_access_supported: true, coe_complete_access_enabled: true")
     );
@@ -404,6 +440,89 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
 
     assert_eq!(first_summary.config_sha256, second_summary.config_sha256);
     assert_eq!(artifact_bytes(&first), artifact_bytes(&second));
+}
+
+#[test]
+fn requesting_id_capability_policy_and_hashes_are_strict() {
+    let fixture = Fixture::new();
+    let enabled = generate(&fixture.product, &fixture.output("id-enabled")).unwrap();
+    fixture.edit_product(|product| {
+        product["slaves"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("identification");
+    });
+    let disabled_output = fixture.output("id-disabled");
+    let disabled = generate(&fixture.product, &disabled_output).unwrap();
+    assert_ne!(enabled.config_sha256, disabled.config_sha256);
+    let disabled_product: Value =
+        serde_json::from_slice(&fs::read(disabled_output.join("product_config.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        disabled_product["slaves"][0]["requesting_id_supported"],
+        true
+    );
+    assert!(disabled_product["slaves"][0]["requesting_id"].is_null());
+
+    let fixture = Fixture::new();
+    fixture.edit_esi(|xml| {
+        xml.replace(
+            "        <Info><IdentificationReg134>true</IdentificationReg134></Info>\n",
+            "",
+        )
+    });
+    let error = generate(&fixture.product, &fixture.output("id-unsupported"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains(
+            "configures a Requesting ID but its ESI does not advertise IdentificationReg134 support"
+        ),
+        "{error}"
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        for index in [0usize, 1] {
+            product["slaves"][index]
+                .as_object_mut()
+                .unwrap()
+                .remove("identification");
+        }
+    });
+    let supported_output = fixture.output("id-supported-hash");
+    let supported = generate(&fixture.product, &supported_output).unwrap();
+    let supported_inventory: Value =
+        serde_json::from_slice(&fs::read(supported_output.join("device_inventory.json")).unwrap())
+            .unwrap();
+    fixture.edit_esi(|xml| {
+        xml.replace(
+            "        <Info><IdentificationReg134>true</IdentificationReg134></Info>\n",
+            "",
+        )
+    });
+    let unsupported_output = fixture.output("id-unsupported-hash");
+    let unsupported = generate(&fixture.product, &unsupported_output).unwrap();
+    let unsupported_inventory: Value = serde_json::from_slice(
+        &fs::read(unsupported_output.join("device_inventory.json")).unwrap(),
+    )
+    .unwrap();
+    assert_ne!(supported.config_sha256, unsupported.config_sha256);
+    assert_ne!(
+        supported_inventory["devices"][0]["esi_semantic_sha256"],
+        unsupported_inventory["devices"][0]["esi_semantic_sha256"]
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        product["slaves"][0]["identification"]["unexpected"] = Value::Bool(true);
+    });
+    assert!(
+        generate(&fixture.product, &fixture.output("id-unknown-field"))
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field `unexpected`")
+    );
 }
 
 #[test]

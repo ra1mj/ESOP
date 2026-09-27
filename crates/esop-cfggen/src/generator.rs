@@ -141,6 +141,8 @@ struct GeneratedSlave {
     esi_type_name: String,
     esi_device_name: String,
     transition_timeouts: EsiTransitionTimeouts,
+    requesting_id_supported: bool,
+    requesting_id: Option<HexU16>,
     coe_complete_access_supported: bool,
     coe_complete_access_enabled: bool,
     coe_sdo_information_supported: bool,
@@ -460,6 +462,8 @@ fn build_artifacts(input: &Path) -> Result<GeneratedArtifacts> {
                 esi_type_name: slave.device.type_name.clone(),
                 esi_device_name: slave.device.name.clone(),
                 transition_timeouts: slave.device.transition_timeouts,
+                requesting_id_supported: slave.device.requesting_id_supported,
+                requesting_id: slave.manifest.identification.requesting_id,
                 coe_complete_access_supported: slave.device.coe_complete_access_supported,
                 coe_complete_access_enabled: slave.manifest.coe.complete_access,
                 coe_sdo_information_supported: slave.device.coe_sdo_information_supported,
@@ -849,6 +853,12 @@ fn resolve_slaves(base: &Path, slaves: &[SlaveManifest]) -> Result<Vec<ResolvedS
         if manifest.coe.sdo_information && !device.coe_sdo_information_supported {
             return Err(GeneratorError::Invalid(format!(
                 "slave {} enables CoE SDO Information but its ESI does not advertise support",
+                manifest.name
+            )));
+        }
+        if manifest.identification.requesting_id.is_some() && !device.requesting_id_supported {
+            return Err(GeneratorError::Invalid(format!(
+                "slave {} configures a Requesting ID but its ESI does not advertise IdentificationReg134 support",
                 manifest.name
             )));
         }
@@ -1796,6 +1806,13 @@ fn semantic_identity(
                 ),
             ))
             .collect::<BTreeMap<_, _>>(),
+        "requesting_id": slaves
+            .iter()
+            .map(|slave| (
+                slave.position,
+                (slave.requesting_id_supported, slave.requesting_id),
+            ))
+            .collect::<BTreeMap<_, _>>(),
         "domains": domains,
         "pdo_entries": pdos,
         "datagrams": datagrams,
@@ -1865,6 +1882,15 @@ fn robot_build_input(
                     "expectations": slave.sdo_information_expectations,
                 }))
                 .collect::<Vec<_>>(),
+            "requesting_id": slaves
+                .iter()
+                .map(|slave| json!({
+                    "name": slave.name,
+                    "position": slave.position,
+                    "supported": slave.requesting_id_supported,
+                    "expected": slave.requesting_id,
+                }))
+                .collect::<Vec<_>>(),
             "source": "esop-cfggen validated product manifest and ESI subset",
         },
         "process_data": metrics,
@@ -1906,7 +1932,7 @@ fn render_header(
         "#ifndef ESOP_PRODUCT_CONFIG_H\n#define ESOP_PRODUCT_CONFIG_H\n\n#include <stdint.h>\n\n",
     );
     header.push_str("#define ESOP_SII_FMMU_CAPACITY 16u\n\n");
-    header.push_str("typedef struct { const char *name; uint16_t position; uint16_t station_address; uint8_t domain_id; uint8_t kind; uint32_t vendor_id; uint32_t product_code; uint32_t revision; uint32_t serial; uint8_t has_serial; uint8_t dc_required; uint8_t dc_reference_clock; const char *dc_op_mode; uint8_t has_dc_op_mode; uint32_t dc_cycle_time0_ns; int32_t dc_shift_time0_ns; int32_t dc_shift_time1_ns; int16_t dc_sync1_cycle_factor; uint16_t dc_assign_activate; int16_t dc_sync0_cycle_factor; uint8_t has_dc_sync_timing; uint32_t dc_sync_cycle_time0_ns; uint32_t dc_sync_cycle_time1_ns; int32_t dc_sync_shift_time0_ns; uint16_t dc_sync_assign_activate; uint16_t mailbox_send_address; uint16_t mailbox_send_capacity; uint16_t mailbox_receive_address; uint16_t mailbox_receive_capacity; uint8_t mailbox_send_sync_manager; uint8_t mailbox_send_control_byte; uint8_t mailbox_receive_sync_manager; uint8_t mailbox_receive_control_byte; uint8_t has_mailbox_status_bit; uint16_t mailbox_status_bit_address; uint8_t mailbox_status_bit_mask; uint8_t mailbox_status_bit_active_high; uint8_t sii_sync_manager_count; uint16_t sii_enabled_sync_managers; uint8_t sii_fmmu_count; uint8_t sii_fmmu_usages[ESOP_SII_FMMU_CAPACITY]; uint8_t has_watchdog; uint8_t has_watchdog_divider; uint16_t watchdog_divider; uint8_t has_process_data_watchdog; uint16_t process_data_watchdog_intervals; uint8_t coe_complete_access_supported; uint8_t coe_complete_access_enabled; uint8_t coe_sdo_information_supported; uint8_t coe_sdo_information_enabled; uint32_t sdo_information_offset; uint32_t sdo_information_count; } esop_slave_config_t;\n");
+    header.push_str("typedef struct { const char *name; uint16_t position; uint16_t station_address; uint8_t domain_id; uint8_t kind; uint32_t vendor_id; uint32_t product_code; uint32_t revision; uint32_t serial; uint8_t has_serial; uint8_t dc_required; uint8_t dc_reference_clock; const char *dc_op_mode; uint8_t has_dc_op_mode; uint32_t dc_cycle_time0_ns; int32_t dc_shift_time0_ns; int32_t dc_shift_time1_ns; int16_t dc_sync1_cycle_factor; uint16_t dc_assign_activate; int16_t dc_sync0_cycle_factor; uint8_t has_dc_sync_timing; uint32_t dc_sync_cycle_time0_ns; uint32_t dc_sync_cycle_time1_ns; int32_t dc_sync_shift_time0_ns; uint16_t dc_sync_assign_activate; uint16_t mailbox_send_address; uint16_t mailbox_send_capacity; uint16_t mailbox_receive_address; uint16_t mailbox_receive_capacity; uint8_t mailbox_send_sync_manager; uint8_t mailbox_send_control_byte; uint8_t mailbox_receive_sync_manager; uint8_t mailbox_receive_control_byte; uint8_t has_mailbox_status_bit; uint16_t mailbox_status_bit_address; uint8_t mailbox_status_bit_mask; uint8_t mailbox_status_bit_active_high; uint8_t sii_sync_manager_count; uint16_t sii_enabled_sync_managers; uint8_t sii_fmmu_count; uint8_t sii_fmmu_usages[ESOP_SII_FMMU_CAPACITY]; uint8_t has_watchdog; uint8_t has_watchdog_divider; uint16_t watchdog_divider; uint8_t has_process_data_watchdog; uint16_t process_data_watchdog_intervals; uint8_t requesting_id_supported; uint8_t has_requesting_id; uint16_t requesting_id; uint8_t coe_complete_access_supported; uint8_t coe_complete_access_enabled; uint8_t coe_sdo_information_supported; uint8_t coe_sdo_information_enabled; uint32_t sdo_information_offset; uint32_t sdo_information_count; } esop_slave_config_t;\n");
     header.push_str("typedef struct { uint16_t slave_position; uint16_t index; uint8_t subindex; uint16_t data_type; uint16_t bit_length; uint8_t required_access; } esop_sdo_information_expectation_t;\n");
     header.push_str("typedef struct { const char *name; uint8_t id; uint32_t logical_address; uint32_t image_offset; uint32_t image_bytes; uint32_t output_bytes; uint32_t input_bytes; uint32_t period_ticks; uint32_t phase_ticks; uint16_t expected_wkc; } esop_domain_config_t;\n");
     header.push_str("typedef struct { uint16_t slave_position; uint8_t present; uint8_t domain_id; uint32_t domain_bit_offset; uint32_t max_age_cycles; uint8_t fmmu_index; uint32_t logical_start; uint8_t logical_start_bit; uint8_t logical_end_bit; uint16_t physical_start; uint8_t physical_start_bit; uint8_t fmmu_type; uint8_t enable; } esop_mailbox_status_mapping_t;\n");
@@ -1960,7 +1986,7 @@ fn render_header(
                     .join(", ")
             );
             header.push_str(&format!(
-                "  {{{}, {}u, UINT16_C(0x{:04x}), {}u, {}u, UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), {}u, {}u, {}u, {}, {}u, UINT32_C({}), INT32_C({}), INT32_C({}), INT16_C({}), UINT16_C(0x{:04x}), INT16_C({}), {}u, UINT32_C({}), UINT32_C({}), INT32_C({}), UINT16_C(0x{:04x}), UINT16_C(0x{:04x}), UINT16_C({}), UINT16_C(0x{:04x}), UINT16_C({}), {}u, UINT8_C(0x{:02x}), {}u, UINT8_C(0x{:02x}), {}u, UINT16_C(0x{:04x}), UINT8_C(0x{:02x}), {}u, {}u, UINT16_C(0x{:04x}), {}u, {}, {}u, {}u, UINT16_C({}), {}u, UINT16_C({}), {}u, {}u, {}u, {}u, {}u, {}u}},\n",
+                "  {{{}, {}u, UINT16_C(0x{:04x}), {}u, {}u, UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), {}u, {}u, {}u, {}, {}u, UINT32_C({}), INT32_C({}), INT32_C({}), INT16_C({}), UINT16_C(0x{:04x}), INT16_C({}), {}u, UINT32_C({}), UINT32_C({}), INT32_C({}), UINT16_C(0x{:04x}), UINT16_C(0x{:04x}), UINT16_C({}), UINT16_C(0x{:04x}), UINT16_C({}), {}u, UINT8_C(0x{:02x}), {}u, UINT8_C(0x{:02x}), {}u, UINT16_C(0x{:04x}), UINT8_C(0x{:02x}), {}u, {}u, UINT16_C(0x{:04x}), {}u, {}, {}u, {}u, UINT16_C({}), {}u, UINT16_C({}), {}u, {}u, UINT16_C(0x{:04x}), {}u, {}u, {}u, {}u, {}u, {}u}},\n",
                 c_string(&slave.name),
                 slave.position,
                 slave.station_address.0,
@@ -2013,6 +2039,9 @@ fn render_header(
                 watchdog
                     .and_then(|value| value.process_data_intervals)
                     .unwrap_or(0),
+                u8::from(slave.requesting_id_supported),
+                u8::from(slave.requesting_id.is_some()),
+                slave.requesting_id.map_or(0, |value| value.0),
                 u8::from(slave.coe_complete_access_supported),
                 u8::from(slave.coe_complete_access_enabled),
                 u8::from(slave.coe_sdo_information_supported),
@@ -2397,7 +2426,7 @@ use esop_product_config::{\n\
             },
         );
         output.push_str(&format!(
-            "        ProductSlaveConfig {{ name: {}, position: {}, station_address: 0x{:04x}, domain_id: {}, kind: ProductSlaveKind::{}, identity: SlaveIdentity {{ vendor_id: 0x{:08x}, product_code: 0x{:08x}, revision: 0x{:08x}, serial: 0x{:08x} }}, dc_required: {}, dc_reference_clock: {}, sii_dc_mode: {}, dc_sync_timing: {}, watchdog: {}, transition_timeouts: AlTransitionTimeouts::new({}, {}, {}, {}), coe_complete_access_supported: {}, coe_complete_access_enabled: {}, coe_sdo_information_supported: {}, coe_sdo_information_enabled: {}, sdo_information_expectations: &PRODUCT_SDO_INFORMATION_{}, mailbox_config: {}, mailbox_send_sync_manager: {}, mailbox_send_control_byte: 0x{:02x}, mailbox_receive_sync_manager: MailboxReceiveSyncManager::new({}, 0x{:04x}, {}, 0x{:02x}), mapped_mailbox_status: {}, op_only_outputs: OpOnlySyncManagerProfile::from_raw(0x{:04x}, [{}]), sii_sync_manager_count: {}, sii_enabled_sync_managers: 0x{:04x}, sii_fmmu_count: {}, sii_fmmu_usages: [{}] }},\n",
+            "        ProductSlaveConfig {{ name: {}, position: {}, station_address: 0x{:04x}, domain_id: {}, kind: ProductSlaveKind::{}, identity: SlaveIdentity {{ vendor_id: 0x{:08x}, product_code: 0x{:08x}, revision: 0x{:08x}, serial: 0x{:08x} }}, dc_required: {}, dc_reference_clock: {}, sii_dc_mode: {}, dc_sync_timing: {}, watchdog: {}, transition_timeouts: AlTransitionTimeouts::new({}, {}, {}, {}), requesting_id_supported: {}, requesting_id: {}, coe_complete_access_supported: {}, coe_complete_access_enabled: {}, coe_sdo_information_supported: {}, coe_sdo_information_enabled: {}, sdo_information_expectations: &PRODUCT_SDO_INFORMATION_{}, mailbox_config: {}, mailbox_send_sync_manager: {}, mailbox_send_control_byte: 0x{:02x}, mailbox_receive_sync_manager: MailboxReceiveSyncManager::new({}, 0x{:04x}, {}, 0x{:02x}), mapped_mailbox_status: {}, op_only_outputs: OpOnlySyncManagerProfile::from_raw(0x{:04x}, [{}]), sii_sync_manager_count: {}, sii_enabled_sync_managers: 0x{:04x}, sii_fmmu_count: {}, sii_fmmu_usages: [{}] }},\n",
             rust_string(&slave.name),
             slave.position,
             slave.station_address.0,
@@ -2416,6 +2445,8 @@ use esop_product_config::{\n\
             slave.transition_timeouts.safeop_to_op_ns,
             slave.transition_timeouts.back_to_init_ns,
             slave.transition_timeouts.back_to_safeop_ns,
+            slave.requesting_id_supported,
+            rust_option_u16(slave.requesting_id.map(|value| value.0)),
             slave.coe_complete_access_supported,
             slave.coe_complete_access_enabled,
             slave.coe_sdo_information_supported,

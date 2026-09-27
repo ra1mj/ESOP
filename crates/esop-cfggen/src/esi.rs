@@ -29,6 +29,7 @@ pub struct EsiDevice {
     pub coe_supported: bool,
     pub coe_complete_access_supported: bool,
     pub coe_sdo_information_supported: bool,
+    pub requesting_id_supported: bool,
     pub dc_modes: Vec<EsiDcMode>,
     pub rx_pdos: Vec<EsiPdo>,
     pub tx_pdos: Vec<EsiPdo>,
@@ -199,6 +200,7 @@ struct DeviceBuilder {
     coe_supported: bool,
     coe_complete_access_supported: bool,
     coe_sdo_information_supported: bool,
+    requesting_id_supported: Option<bool>,
     dc_modes: Vec<EsiDcMode>,
     rx_pdos: Vec<EsiPdo>,
     tx_pdos: Vec<EsiPdo>,
@@ -235,6 +237,7 @@ impl DeviceBuilder {
             coe_supported: self.coe_supported,
             coe_complete_access_supported: self.coe_complete_access_supported,
             coe_sdo_information_supported: self.coe_sdo_information_supported,
+            requesting_id_supported: self.requesting_id_supported.unwrap_or(false),
             dc_modes: self.dc_modes,
             rx_pdos: self.rx_pdos,
             tx_pdos: self.tx_pdos,
@@ -615,6 +618,19 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                         device.coe_complete_access_supported = capabilities.complete_access;
                         device.coe_sdo_information_supported = capabilities.sdo_information;
                     }
+                    "IdentificationReg134"
+                        if device.is_some()
+                            && pdo.is_none()
+                            && stack_ends_with(
+                                &stack,
+                                &["Device", "Info", "IdentificationReg134"],
+                            ) => {}
+                    "IdentificationReg134" => {
+                        return xml_error(
+                            path,
+                            "IdentificationReg134 must be a direct Device/Info child",
+                        );
+                    }
                     "Entry" if pdo.is_some() => {
                         if entry.is_some() {
                             return xml_error(path, "nested Entry elements are unsupported");
@@ -635,6 +651,9 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                     device.coe_supported = true;
                     device.coe_complete_access_supported = capabilities.complete_access;
                     device.coe_sdo_information_supported = capabilities.sdo_information;
+                }
+                if name == "IdentificationReg134" {
+                    return xml_error(path, "empty IdentificationReg134 is unsupported");
                 }
                 if matches!(
                     name.as_str(),
@@ -701,6 +720,30 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                     }
                     "Fmmu" if device.is_some() && pdo.is_none() => {
                         return xml_error(path, "Fmmu must be a direct Device child");
+                    }
+                    "IdentificationReg134"
+                        if device.is_some()
+                            && pdo.is_none()
+                            && stack_ends_with(
+                                &stack,
+                                &["Device", "Info", "IdentificationReg134"],
+                            ) =>
+                    {
+                        let supported =
+                            parse_bool(value).map_err(|detail| GeneratorError::Xml {
+                                path: path.to_owned(),
+                                detail: format!("invalid IdentificationReg134: {detail}"),
+                            })?;
+                        let builder = device.as_mut().expect("device exists");
+                        if builder.requesting_id_supported.replace(supported).is_some() {
+                            return xml_error(path, "duplicate IdentificationReg134 declaration");
+                        }
+                    }
+                    "IdentificationReg134" => {
+                        return xml_error(
+                            path,
+                            "IdentificationReg134 must be a direct Device/Info child",
+                        );
                     }
                     "Name"
                         if dc_mode.is_some()
@@ -1404,6 +1447,37 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("invalid CoE SdoInfo"), "{error}");
+    }
+
+    #[test]
+    fn requesting_id_capability_is_strict_and_direct() {
+        let base = r##"<EtherCATInfo><Vendor><Id>1</Id></Vendor><Descriptions><Devices><Device>
+<Type ProductCode="1" RevisionNo="1">Drive</Type><Name>Drive</Name>{info}
+</Device></Devices></Descriptions></EtherCATInfo>"##;
+        for (value, expected) in [("true", true), ("1", true), ("false", false), ("0", false)] {
+            let xml = base.replace(
+                "{info}",
+                &format!("<Info><IdentificationReg134>{value}</IdentificationReg134></Info>"),
+            );
+            let catalog = parse_text(Path::new("fixture.xml"), &xml).unwrap();
+            assert_eq!(catalog.devices[0].requesting_id_supported, expected);
+        }
+        let catalog = parse_text(Path::new("fixture.xml"), &base.replace("{info}", "")).unwrap();
+        assert!(!catalog.devices[0].requesting_id_supported);
+
+        for invalid in [
+            "<Info><IdentificationReg134/></Info>",
+            "<Info><IdentificationReg134></IdentificationReg134></Info>",
+            "<Info><IdentificationReg134>sometimes</IdentificationReg134></Info>",
+            "<IdentificationReg134>true</IdentificationReg134>",
+            "<Info><Wrapper><IdentificationReg134>true</IdentificationReg134></Wrapper></Info>",
+            "<Info><IdentificationReg134>true</IdentificationReg134><IdentificationReg134>true</IdentificationReg134></Info>",
+        ] {
+            let error = parse_text(Path::new("fixture.xml"), &base.replace("{info}", invalid))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("IdentificationReg134"), "{error}");
+        }
     }
 
     #[test]

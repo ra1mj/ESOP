@@ -1,5 +1,5 @@
 {
-  "config_sha256": "7f90316cf7747aa9bed0edd7f8ec170a19dd1aa9356ca12e5ba2d787f8912a28",
+  "config_sha256": "824795ddcc1d22880a6e681ab4347ca417edb9e91f151910589b7993193b7e80",
   "cycle_budget": {
     "deadline_ns": 800000,
     "period_ns": 1000000,
@@ -109,6 +109,26 @@
     "declared_axes": 2,
     "declared_io_channels": 16,
     "declared_slaves": 3,
+    "requesting_id": [
+      {
+        "expected": "0x0041",
+        "name": "drive_left",
+        "position": 0,
+        "supported": true
+      },
+      {
+        "expected": "0x0042",
+        "name": "drive_right",
+        "position": 1,
+        "supported": true
+      },
+      {
+        "expected": null,
+        "name": "io_block",
+        "position": 2,
+        "supported": false
+      }
+    ],
     "source": "esop-cfggen validated product manifest and ESI subset"
   },
   "platform": {

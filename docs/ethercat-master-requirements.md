@@ -229,7 +229,15 @@ for (;;) {
 | CFG-007 | P1 | 支持配置阶段读取完整 SII PDO/SM 类别，作为静态描述的校验来源。 | 已具备 Startup-owned 有界 stream、原子 candidate、覆盖有序 FMMU usage 的 schema-v2 结构签名、所选 ESI DC OpMode 与在线 SII `0x003c` 描述符、完整 FMMU/SyncManager live register bank 的首个 AL 前联合比对；逻辑地址仍由主站生成，物理响应真实性和 HIL 仍需独立证据。 |
 | CFG-008 | P0 | 识别并正确处理带/不带 Device Emulation 的从站；不得对 Device Emulation 从站错误使用 AL Error Acknowledge。 | 两类虚拟 ESC 的状态切换与错误确认序列测试。 |
 | CFG-009 | P0 | ESM 转换使用 ESI/SII 提供的超时；缺失时使用受版本管理的 ETG.1020 默认值。`OpOnly` 设备在非 OP 状态必须禁用输出 SyncManager。 | 超时覆盖、默认回退和 `OpOnly` 输出隔离 HIL。 |
-| CFG-010 | P1 | 支持 Explicit Device Identification，并可按配置用于防止换线/错位设备进入 OP。 | 交换两个同型号设备或修改 Identification ADO 后拒绝激活。 |
+| CFG-010 | P1 | 支持 Explicit Device Identification，并可按配置用于防止换线/错位设备进入 OP。 | 软件测试覆盖 Requesting ID 的 `0x0120 -> 0x0130 -> 0x0134` 精确序列、同型号设备值互换、生成/运行时防篡改、生产控制池与 Topology 门控；物理设备与其他识别机制另行验收。 |
+
+CFG-010 当前实现范围限定为 ESI 直接 `Device/Info/IdentificationReg134=true` 与产品逐位置
+配置的 16-bit Requesting ID。Startup 在 SII identity 成功后、邮箱、live FMMU/SyncManager、
+SII 配置和普通 AL 转换之前，仅在 INIT 写入 `INIT|ID Request`，等待 ID Loaded，再读取
+AL Status Code 的识别值；任一差异或事务故障锁存首错且不得进入 PREOP/OP。支持声明与产品
+期望独立，缺少产品期望不会自动启用。该软件证据不包含 Configured Station Alias、任意
+`IdentificationAdo` Data Word、动态 Hot Connect 组、物理响应真实性、真实从站互操作、HIL、
+ETG conformance 或功能安全资格。
 
 ### 5.4 Domain 与周期 PDO
 

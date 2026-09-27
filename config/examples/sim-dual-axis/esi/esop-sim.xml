@@ -9,6 +9,7 @@
       <Device>
         <Type ProductCode="#x00004020" RevisionNo="#x00000001">ESOP-SIM-402</Type>
         <Name>ESOP simulated CiA 402 drive</Name>
+        <Info><IdentificationReg134>true</IdentificationReg134></Info>
         <Fmmu>Outputs</Fmmu>
         <Fmmu>Inputs</Fmmu>
         <Fmmu>MBoxState</Fmmu>

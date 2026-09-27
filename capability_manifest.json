@@ -127,6 +127,29 @@
       "limitation": "Software tests cover caller-delivered EEPROM responses, ordered standard SII FMMU usage bytes, ESC-reported count bounds and exact structural/DC descriptor comparison only; logical-address allocation remains master-owned, while physical response authenticity, target timing, interoperability and hardware HIL remain open"
     },
     {
+      "id": "ethercat_requesting_id",
+      "status": "implemented",
+      "scope": "Allocation-free product-configured EtherCAT Requesting ID with strict direct ESI IdentificationReg134 capability parsing, independent per-position expected u16 policy, deterministic artifact/build-input/hash propagation, runtime anti-tamper validation, exact INIT-only 0x0120 request/0x0130 loaded polling/0x0134 value sequence, first-fault retention, complete-only evidence, existing production control-pool scheduling and fail-closed lifecycle Topology gating before mailbox, SII configuration or normal AL activation",
+      "evidence": [
+        "crates/esop-ethercat-core/src/explicit_id.rs",
+        "crates/esop-ethercat-core/src/startup.rs",
+        "crates/esop-cfggen/src/esi.rs",
+        "crates/esop-cfggen/src/generator.rs",
+        "crates/esop-cfggen/tests/generation.rs",
+        "crates/esop-product-config/src/lib.rs",
+        "crates/esop-product-config/tests/generated_product.rs",
+        "crates/esop-ethercat-linux-port/tests/scheduled_domains.rs",
+        "config/examples/sim-dual-axis/product.json",
+        "config/examples/sim-dual-axis/esi/esop-sim.xml",
+        "scripts/tests/test_robot_build_report.py",
+        "docs/ethercat-master-requirements.md",
+        "docs/esop-product-configuration.md",
+        "docs/esop-software-prd.md",
+        ".trellis/spec/backend/product-configuration.md"
+      ],
+      "limitation": "Deterministic software tests prove strict configuration, exact register sequence/ownership/WKC/shape/deadline checks, swapped-value rejection and lifecycle gating for caller-delivered or simulated responses only. Configured Station Alias, arbitrary IdentificationAdo Data Word identification, dynamic Hot Connect discovery, physical response provenance, real-device interoperability, target timing/WCET, long-duration operation, ETG conformance, hardware HIL and functional-safety qualification remain open"
+    },
+    {
       "id": "ethercat_fmmu_register_discovery",
       "status": "implemented",
       "scope": "Allocation-free fixed-capacity discovery of every ESC-reported standard 16-byte FMMU register page before SII/AL, position/station-bound complete-bank evidence, atomic FMMU/SII/DC Startup publication, a typed Startup-to-Mapping bridge, complete-bank zero-write/readback before desired SM/FMMU programming, and production scheduler/control-pool integration",

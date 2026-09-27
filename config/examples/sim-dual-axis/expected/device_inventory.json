@@ -1,5 +1,5 @@
 {
-  "config_sha256": "7f90316cf7747aa9bed0edd7f8ec170a19dd1aa9356ca12e5ba2d787f8912a28",
+  "config_sha256": "824795ddcc1d22880a6e681ab4347ca417edb9e91f151910589b7993193b7e80",
   "devices": [
     {
       "coe_complete_access_enabled": true,
@@ -20,7 +20,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP simulated CiA 402 drive",
       "esi_label": "esop-sim-drive-v1",
-      "esi_semantic_sha256": "54277de1036c1f23bd2c938381f8fc5eecac78b5c6aec976171913029103e7e2",
+      "esi_semantic_sha256": "844555e09abdc58952c03cdfe24c4594f12f13ed066d608d12494fce91a6d9ad",
       "esi_type_name": "ESOP-SIM-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -60,6 +60,8 @@
       ],
       "position": 0,
       "product_code": "0x00004020",
+      "requesting_id": "0x0041",
+      "requesting_id_supported": true,
       "revision": "0x00000001",
       "rx_pdos": [
         "0x1600"
@@ -189,7 +191,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP simulated CiA 402 drive",
       "esi_label": "esop-sim-drive-v1",
-      "esi_semantic_sha256": "54277de1036c1f23bd2c938381f8fc5eecac78b5c6aec976171913029103e7e2",
+      "esi_semantic_sha256": "844555e09abdc58952c03cdfe24c4594f12f13ed066d608d12494fce91a6d9ad",
       "esi_type_name": "ESOP-SIM-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -229,6 +231,8 @@
       ],
       "position": 1,
       "product_code": "0x00004020",
+      "requesting_id": "0x0042",
+      "requesting_id_supported": true,
       "revision": "0x00000001",
       "rx_pdos": [
         "0x1600"
@@ -296,7 +300,7 @@
       "domain_id": 1,
       "esi_device_name": "ESOP simulated digital IO",
       "esi_label": "esop-sim-io-v1",
-      "esi_semantic_sha256": "725bbc4c3823dd0192075c652876dcc57b635ef3e0d0d5bf64f06a28ee510ea5",
+      "esi_semantic_sha256": "50bb59dbbe0da72c0158449b6840eb5ff4ef62a7aa21a345d91126f6eccb4ccf",
       "esi_type_name": "ESOP-SIM-IO",
       "kind": "ethercat_io",
       "mailbox": {
@@ -313,6 +317,8 @@
       "op_only_outputs": [],
       "position": 2,
       "product_code": "0x00007010",
+      "requesting_id": null,
+      "requesting_id_supported": false,
       "revision": "0x00000001",
       "rx_pdos": [
         "0x1601"

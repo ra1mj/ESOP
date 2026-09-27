@@ -175,6 +175,8 @@ pub struct SlaveManifest {
     #[serde(default)]
     pub coe: SlaveCoeManifest,
     #[serde(default)]
+    pub identification: SlaveIdentificationManifest,
+    #[serde(default)]
     pub dc: SlaveDcManifest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watchdog: Option<SlaveWatchdogManifest>,
@@ -190,6 +192,13 @@ pub struct SlaveCoeManifest {
     pub complete_access: bool,
     #[serde(default)]
     pub sdo_information: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SlaveIdentificationManifest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requesting_id: Option<HexU16>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

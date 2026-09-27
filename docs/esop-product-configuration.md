@@ -44,6 +44,9 @@ CI 重新生成相同示例、校验产品化构建报告，并上传六个生�
 - 每从站可选严格 `watchdog` 对象：`divider` 和 `process_data_intervals` 为
   独立可选的非零原始 `u16`；对象至少包含一项，缺失对象或字段表示保留对应
   ESC 默认值且不发写请求；
+- 每从站可选严格 `identification.requesting_id`：使用小写 `0x` 前缀的 16-bit
+  期望值；只有所选 ESI 的直接 `Device/Info/IdentificationReg134=true` 声明支持时
+  才可配置，ESI 支持本身不会自动启用；
 - 每从站可选严格 `coe` 对象：`complete_access` 默认为 `false`；只有所选 ESI 的
   直接 `Device/Mailbox/CoE@CompleteAccess` 声明支持时才可设为 `true`；
 - CiA 402 轴、CSP/CSV/CST 模式、带方向的 SI/raw 缩放、机械范围和每周期限幅。
@@ -58,7 +61,8 @@ ESI/ENI 的兼容声明。
 当前解析器支持 namespace-qualified XML 中的 vendor ID、Device Type
 identity/name、四类 `StateMachine/Timeout`、带 `Enable`/`OpOnly` 的有序
 SyncManager、`MBoxOut`/`MBoxIn` 的 `StartAddress`/`DefaultSize`/`ControlByte`、
-`Mailbox/CoE` 及其可选严格布尔 `CompleteAccess`/`SdoInfo` 属性、有序且直接位于 `Device` 下的重复 `Fmmu` usage、
+`Mailbox/CoE` 及其可选严格布尔 `CompleteAccess`/`SdoInfo` 属性、直接
+`Device/Info/IdentificationReg134` 布尔 capability、有序且直接位于 `Device` 下的重复 `Fmmu` usage、
 有序 `Device/Dc/OpMode`、RxPDO/TxPDO assignment，以及 byte-aligned PDO entry 的
 index/subindex/bit length/DataType。未提供 timeout 时使用版本化的 ETG.1020
 默认 profile。它明确拒绝：
@@ -69,6 +73,7 @@ index/subindex/bit length/DataType。未提供 timeout 时使用版本化的 ETG
 - 缺失 CoE、缺半边/重复/禁用的邮箱 SyncManager、缺失物理字段、容量越界及地址
   溢出或重叠；
 - 非法 `CompleteAccess`/`SdoInfo` 布尔值，或产品为未声明对应 capability 的 ESI 设备启用功能；
+- 空、重复、嵌套、错位或非法的 `IdentificationReg134`，以及产品为不支持该能力的设备配置 Requesting ID；
 - 启用 SDO Information 但所选 PDO 期望为空、超出固定容量，或同一对象条目的精确 CANopen 类型/位宽冲突；
 - 未选择、重复、方向错误或宽度不匹配的对象；
 - 缺少名称/AssignActivate、重复名称、数值宽度错误或包含非零直接
@@ -93,26 +98,27 @@ position 把该物理 bit 3 作为一位读 FMMU 打包到所属 Domain 的输�
 
 | 文件 | 内容 |
 | --- | --- |
-| `esop_product_config.h` | 固定大小的 slave、Domain、PDO、datagram、SDO Information 期望、轴策略和 ProcBuf 常量。 |
-| `esop_product_config.rs` | 可直接编入 `no_std` 固件的静态产品合同、类型化 SDO Information 期望与 32-byte 配置 hash。 |
-| `product_config.json` | 规范化后的产品、注册、Frame Plan、schedule、SDO Information 期望和配置 hash。 |
-| `device_inventory.json` | ESI identity、选择的 PDO、CoE capability/授权/期望和语义化 ESI SHA-256。 |
+| `esop_product_config.h` | 固定大小的 slave、Requesting ID、Domain、PDO、datagram、SDO Information 期望、轴策略和 ProcBuf 常量。 |
+| `esop_product_config.rs` | 可直接编入 `no_std` 固件的静态产品合同、Requesting ID、类型化 SDO Information 期望与 32-byte 配置 hash。 |
+| `product_config.json` | 规范化后的产品、Requesting ID、注册、Frame Plan、schedule、SDO Information 期望和配置 hash。 |
+| `device_inventory.json` | ESI identity、Requesting ID capability/期望、选择的 PDO、CoE capability/授权/期望和语义化 ESI SHA-256。 |
 | `procbuf_layout.json` | ProcBuf ABI v7、维度、精确字节数和 layout hash。 |
-| `robot_build_input.json` | 设备数、逐从站 Complete Access 与 SDO Information 支持/授权/期望、PDO/frame/wire/WKC/copy、周期和资源输入。 |
+| `robot_build_input.json` | 设备数、逐从站 Requesting ID 与 Complete Access/SDO Information 支持/授权/期望、PDO/frame/wire/WKC/copy、周期和资源输入。 |
 
 生成的 inventory、JSON、C 和 Rust product slave 均携带精确主站发送/接收邮箱
 地址与容量、显式 DC requirement/reference policy、所选 OpMode 的 SII 可表示描述符，
 以及由产品基准周期解析出的绝对 SYNC0/SYNC1 周期、signed SYNC0 shift 和完整
 16-bit `AssignActivate`；规范化 JSON、C 和 Rust 还携带 SII FMMU usage 实际数量、固定
 16 项有序数组，以及 SyncManager 数量与 enabled mask，
-ESI inventory 保留两侧 control byte。ESI mailbox、Complete Access/SDO Information capability、timeout profile、`OpOnly` mask 及
+ESI inventory 保留两侧 control byte。ESI mailbox、Requesting ID 与 Complete Access/SDO Information capability、timeout profile、`OpOnly` mask 及
 activation template、FMMU usage 顺序参与 ESI semantic hash 和配置 SHA-256；显式 DC policy 属于产品
-语义，只参与配置 SHA-256，不反向改写 ESI 内容 hash。逐从站 Complete Access/SDO Information
+语义，只参与配置 SHA-256，不反向改写 ESI 内容 hash。逐从站 Requesting ID 期望与 Complete Access/SDO Information
 授权和可选 watchdog 原始值同样属于产品语义，并在 normalized JSON、inventory、C 和 Rust
 静态字段中保持精确一致。启用 SDO Information 时，cfggen 从所选 RxPDO/TxPDO 生成按
 `(index, subindex)` 严格排序、去重的期望；Rx 条目要求 SDO write 与 RxPDO mappability，Tx 条目要求
 SDO read 与 TxPDO mappability，同一条目跨方向出现时合并要求但必须保持类型和位宽一致。
-`robot_build_input.json` 还按从站输出两类 capability 的 name、position、supported、enabled，并为
+`robot_build_input.json` 还按从站输出 Requesting ID 的 name、position、supported、expected，
+以及两类 CoE capability 的 name、position、supported、enabled，并为
 SDO Information 输出完整期望；构建报告入口重新校验条目数、唯一性、所有权、顺序、类型、位宽、
 访问标志和 `enabled => supported`。配置 SHA-256 只依赖规范化产品语义和排序后的 ESI 语义内容，不依赖 JSON
 键顺序、XML 排版、输入/输出路径、主机或当前时间。同一语义输入必须生成
@@ -129,14 +135,15 @@ SDO Information 输出完整期望；构建报告入口重新校验条目数、�
 ProcBuf。激活按以下顺序 fail-closed：
 
 1. 校验 `esop.product-runtime.v1` 与 32-byte 配置 hash；
-2. 逐从站校验 Complete Access 的 `enabled => supported` 不变量；
-3. 逐从站校验 SDO Information 的 `enabled => supported`、禁用时空计划、启用时非空、固定容量、
+2. 逐从站校验 Requesting ID 的 `expected => supported` 不变量；
+3. 逐从站校验 Complete Access 的 `enabled => supported` 不变量；
+4. 逐从站校验 SDO Information 的 `enabled => supported`、禁用时空计划、启用时非空、固定容量、
    所有权、形状和严格顺序；
-4. 重算 ProcBuf ABI v7 layout，并校验 robot/boot/layout/region/capacity header；
-5. 要求从站数量、position、station address、online、configured 和 identity 精确匹配；
-6. 通过 `DomainRegistry` 重新登记 Domain/PDO/datagram，核对 PDO/datagram/WKC；
-7. 通过既有 API 生成多速率 schedule 与每 Domain `FramePlanSet`；
-8. 逐轴校验连续索引、驱动归属、冻结策略和选定模式的 `Cia402PdoMap`。
+5. 重算 ProcBuf ABI v7 layout，并校验 robot/boot/layout/region/capacity header；
+6. 要求从站数量、position、station address、online、configured 和 identity 精确匹配；
+7. 通过 `DomainRegistry` 重新登记 Domain/PDO/datagram，核对 PDO/datagram/WKC；
+8. 通过既有 API 生成多速率 schedule 与每 Domain `FramePlanSet`；
+9. 逐轴校验连续索引、驱动归属、冻结策略和选定模式的 `Cia402PdoMap`。
 
 `PRODUCT_CONFIG.sdo_access_policy(position)` 只从满足上述不变量的静态从站字段构造类型化
 `SdoAccessPolicy`；未知 position 或启用但不支持均返回类型化错误。调用方把该策略交给
@@ -165,7 +172,12 @@ RxPDO、每个 PDO 分组连续。运行时还按所有 RxPDO group 后所有 Tx
 从站拓扑一起交给 `StartupController`。在线扫描完成后、任何身份读取之前，Startup 以
 position-keyed 扫描证据验证所有 DC 要求：显式 reference 合格时选中它，否则选择扫描顺序
 中的首个 System-Time-capable 从站；失败时不发布部分选择，也不进入 identity/SII/AL。
-身份验证后、首个 AL 动作前，Startup 对携带
+身份验证后，Startup 先对携带 Requesting ID 期望的 profile 在 INIT 中通过同一有界
+控制请求池执行 `0x0120/2` 写入 `INIT|ID Request`、轮询 `0x0130/2` 的 ID Loaded，
+再从 `0x0134/2` 读取精确 16-bit 值。只有值与 position 对应期望完全一致才发布证据并
+继续 mailbox/FMMU/SyncManager/SII/AL；WKC、长度、generation、动作、deadline、AL 状态或
+值不匹配均锁存首错并保持 Topology 门关闭。未配置期望时不产生该线上序列。
+其后、首个普通 AL 转换动作前，Startup 对携带
 邮箱期望的 profile 精确读取 SII `0x001C..0x0020`，要求 CoE，并只比较 SII 可表示的
 send/receive 地址和容量；轮询、超时、重试和 Status Bit 仍是运行期策略，不参与布局
 相等判定。该布局先暂存而不发布。随后，携带 SII 期望的 profile 进入独立
@@ -265,8 +277,8 @@ make build-report \
   PRODUCT_INPUT=build/generated/sim-dual-axis/robot_build_input.json
 ```
 
-脚本拒绝未知字段、无效 hash、零过程数据、deadline 超过周期、Complete Access/SDO Information
-设备清单长度/唯一性/授权不变量错误、SDO Information 期望所有权/十六进制类型/位宽/访问标志/
+脚本拒绝未知字段、无效 hash、零过程数据、deadline 超过周期、Requesting ID 与 Complete Access/SDO Information
+设备清单长度/唯一性/支持不变量错误、Requesting ID 十六进制值、SDO Information 期望所有权/十六进制类型/位宽/访问标志/
 顺序错误和伪造的 `passed: true`。它把配置 hash、平台、设备及其两类 CoE capability/计划证据、
 PDO/frame/wire/WKC/copy、周期和 ProcBuf
 资源投影到 `esop.build.v1`；未传 `PRODUCT_INPUT` 时仍生成原有的主机
@@ -282,8 +294,10 @@ PDO/frame/wire/WKC/copy、周期和 ProcBuf
 顺序、逐转换 deadline 选择、`OpOnly` 写入读回顺序，以及调用方交付 SII 响应的邮箱
 布局比对、完整 category stream/candidate 投影、ordered FMMU usage/schema-v2 生成结构签名
 和 ESC count 门的 AL 前精确比较，以及调用方
-交付 ESC/System Time 响应的能力判断和参考时钟选择；它不证明
-该响应来自真实目标从站，也不等于真实从站 PDO
+交付 ESC/System Time 响应的能力判断和参考时钟选择，以及调用方交付的 Requesting ID
+寄存器响应、错位阻断和生产调度 Topology 门控；它不证明
+该响应来自真实目标从站，也不提供 Station Alias、任意 `IdentificationAdo` Data Word 或
+动态 Hot Connect 识别，不等于真实从站 PDO
 assignment/mapping、ESM timeout、SyncManager/FMMU 寄存器或 DC 时钟响应证据；模拟端口覆盖生成
 双驱动计划的完整 watchdog 写入/读回和 DC SYNC 请求/RX/屏障路径。Complete Access 软件证据还覆盖
 精确 initiate 命令位、策略拒绝、upload 响应模式核对、生成哈希和邮箱/主站路由；SDO Information

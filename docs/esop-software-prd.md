@@ -160,6 +160,18 @@ process-data interval 计划，按产品顺序执行写入与独立精确读回�
 fail-closed。该证据不证明真实 watchdog 周期、超时动作或物理响应真实性。
 因此 FR-004 的完整产品验收仍保持开放。
 
+FR-005 的 Explicit Device Identification 软件路径现已实现为可选 EtherCAT Requesting ID。
+cfggen 只接受直接 `Device/Info/IdentificationReg134` 严格布尔 capability，并要求产品按
+position 显式配置 16-bit 期望；支持和启用分别进入规范化 JSON、inventory、C/Rust、build
+input、ESI semantic hash 与配置 hash，运行时在 Startup 之前重复校验 `expected => supported`。
+Startup 在普通 SII identity 成功后、邮箱/FMMU/SyncManager/SII 配置与 AL 转换前，通过现有
+固定容量控制池执行 `0x0120` ID Request、`0x0130` ID Loaded 轮询和 `0x0134` 两字节读取。
+同型号设备的值互换、WKC/长度/generation/action/deadline/状态错误均锁存类型化首错，生产
+调度报告保持 Topology 门关闭且不进入 PREOP。未配置产品期望时保持旧路径且不发该请求。
+该实现不声明 Station Alias、任意 Identification ADO Data Word、动态 Hot Connect、物理响应
+真实性、真实从站互操作、目标 WCET、HIL、ETG conformance 或功能安全资格，因此 FR-005 的
+完整产品验收仍需实物证据。
+
 FR-006 当前增量由宿主机 `esop-cfggen` 与 `no_std` 的 `esop-product-config` 共同实现：前者严格解析 `esop.product.v1` 和 byte-aligned ESI 子集，通过既有 Domain/Frame Plan/CiA 402/ProcBuf 校验路径，原子输出静态 C/Rust 配置、规范化产品、设备清单、ProcBuf ABI v7 布局和 build input；后者在固件激活时重新校验配置 hash、ProcBuf header/layout、精确从站拓扑、Domain/PDO/datagram/WKC、schedule/frame plan、轴策略和 CiA 402 PDO map，并仅在全部成功后返回冻结配置。同一语义的 JSON/ESI 排版变化不改变 SHA-256 或输出字节。模块化设备、bit-packed PDO、厂商 scaling/quirk、完整 ENI/ESI 和真实 SII/PDO read-back 仍明确拒绝或留待硬件集成，不能被解释为完整 ESI 兼容或 HIL 资格。
 
 ### 7.2 EtherCAT 周期数据与 Domain

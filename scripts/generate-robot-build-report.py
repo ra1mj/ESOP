@@ -121,6 +121,45 @@ def require_hex_u16(value: object, path: str, *, nonzero: bool = False) -> int:
     return parsed
 
 
+def validate_requesting_id_devices(
+    value: object, declared_slaves: int, path: str
+) -> list[dict]:
+    if not isinstance(value, list):
+        raise ValueError(f"{path} must be a list")
+    if len(value) != declared_slaves:
+        raise ValueError(f"{path} length must match declared_slaves")
+
+    names: set[str] = set()
+    positions: set[int] = set()
+    checked: list[dict] = []
+    for index, entry in enumerate(value):
+        item_path = f"{path}[{index}]"
+        item = require_exact_object(
+            entry, {"name", "position", "supported", "expected"}, item_path
+        )
+        name = require_nonempty_string(item["name"], f"{item_path}.name")
+        position = require_nonnegative_int(item["position"], f"{item_path}.position")
+        if position > 0xFFFF:
+            raise ValueError(f"{item_path}.position must fit in u16")
+        if type(item["supported"]) is not bool:
+            raise ValueError(f"{item_path}.supported must be a boolean")
+        expected = item["expected"]
+        if expected is not None:
+            require_hex_u16(expected, f"{item_path}.expected")
+            if not item["supported"]:
+                raise ValueError(
+                    f"{item_path} cannot expect an unsupported Requesting ID"
+                )
+        if name in names:
+            raise ValueError(f"{path} contains duplicate name: {name}")
+        if position in positions:
+            raise ValueError(f"{path} contains duplicate position: {position}")
+        names.add(name)
+        positions.add(position)
+        checked.append(item)
+    return checked
+
+
 def validate_sdo_information_devices(
     value: object, declared_slaves: int, path: str
 ) -> list[dict]:
@@ -254,6 +293,7 @@ def validate_product_input(value: object) -> dict:
             "declared_io_channels",
             "coe_complete_access",
             "coe_sdo_information",
+            "requesting_id",
             "source",
         },
         "product input devices",
@@ -272,10 +312,19 @@ def validate_product_input(value: object) -> dict:
         devices["declared_slaves"],
         "product input devices.coe_sdo_information",
     )
+    requesting_id = validate_requesting_id_devices(
+        devices["requesting_id"],
+        devices["declared_slaves"],
+        "product input devices.requesting_id",
+    )
     if [
         (entry["name"], entry["position"]) for entry in complete_access
     ] != [(entry["name"], entry["position"]) for entry in sdo_information]:
         raise ValueError("product input CoE device identities must match")
+    if [
+        (entry["name"], entry["position"]) for entry in complete_access
+    ] != [(entry["name"], entry["position"]) for entry in requesting_id]:
+        raise ValueError("product input Requesting ID device identities must match")
     require_nonempty_string(devices["source"], "product input devices.source")
 
     process_data = require_exact_object(
@@ -396,6 +445,7 @@ def build_report(product_input: object | None = None) -> dict:
             "declared_io_channels": 0,
             "coe_complete_access": [],
             "coe_sdo_information": [],
+            "requesting_id": [],
             "source": "no hardware topology supplied",
         },
         "process_data": {

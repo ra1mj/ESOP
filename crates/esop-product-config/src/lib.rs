@@ -72,6 +72,8 @@ pub struct ProductSlaveConfig {
     pub dc_sync_timing: Option<DcSyncTiming>,
     pub watchdog: Option<EscWatchdogConfig>,
     pub transition_timeouts: AlTransitionTimeouts,
+    pub requesting_id_supported: bool,
+    pub requesting_id: Option<u16>,
     pub coe_complete_access_supported: bool,
     pub coe_complete_access_enabled: bool,
     pub coe_sdo_information_supported: bool,
@@ -87,6 +89,20 @@ pub struct ProductSlaveConfig {
     pub sii_enabled_sync_managers: u16,
     pub sii_fmmu_count: u8,
     pub sii_fmmu_usages: [SiiFmmuUsage; MAX_SII_FMMU_USAGES],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductRequestingIdError {
+    EnabledWithoutSupport { position: u16 },
+}
+
+fn validate_requesting_id(slave: ProductSlaveConfig) -> Result<(), ProductRequestingIdError> {
+    if slave.requesting_id.is_some() && !slave.requesting_id_supported {
+        return Err(ProductRequestingIdError::EnabledWithoutSupport {
+            position: slave.position,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -274,6 +290,7 @@ pub enum ProductMailboxPolicyError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProductStartupError {
+    RequestingId(ProductRequestingIdError),
     DcReferenceRequiresRequired {
         position: u16,
     },
@@ -590,6 +607,7 @@ pub enum ProductActivationError {
     InvalidRobotId,
     InvalidPolicyVersion,
     InvalidCycleTiming,
+    RequestingId(ProductRequestingIdError),
     ProcBufDimensionsMismatch,
     ProcBufLayout(ProcBufLayoutError),
     ProcBufLayoutMismatch,
@@ -932,6 +950,7 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
         let _ = self.dc_sync_plan()?;
         let mut reference_position = None;
         for slave in self.slaves.iter().copied() {
+            validate_requesting_id(slave).map_err(ProductStartupError::RequestingId)?;
             match (slave.dc_required, slave.sii_dc_mode.is_some()) {
                 (true, false) => {
                     return Err(ProductStartupError::DcModeRequired {
@@ -1028,6 +1047,9 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                 .with_expected_mailbox(slave.mailbox_config)
                 .with_expected_mailbox_receive_sync_manager(slave.mailbox_receive_sync_manager)
                 .with_expected_sii(expected_sii);
+            if let Some(requesting_id) = slave.requesting_id {
+                profile = profile.with_expected_requesting_id(requesting_id);
+            }
             if let Some(expected_dc_mode) = slave.sii_dc_mode {
                 profile = profile.with_expected_dc_mode(expected_dc_mode);
             }
@@ -1705,6 +1727,7 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
         ProductActivationError,
     > {
         self.validate_identity(expected_config_sha256)?;
+        self.validate_requesting_ids()?;
         self.validate_sdo_access_policies()?;
         self.validate_sdo_information_plans()?;
         self.validate_procbuf::<IO, EVENTS>(procbuf, boot_id)?;
@@ -1839,6 +1862,13 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
     fn validate_sdo_access_policies(&self) -> Result<(), ProductActivationError> {
         for slave in self.slaves.iter().copied() {
             validated_sdo_access_policy(slave).map_err(ProductActivationError::SdoAccessPolicy)?;
+        }
+        Ok(())
+    }
+
+    fn validate_requesting_ids(&self) -> Result<(), ProductActivationError> {
+        for slave in self.slaves.iter().copied() {
+            validate_requesting_id(slave).map_err(ProductActivationError::RequestingId)?;
         }
         Ok(())
     }
@@ -2160,6 +2190,8 @@ mod tests {
                 dc_sync_timing: None,
                 watchdog: None,
                 transition_timeouts: ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
+                requesting_id_supported: false,
+                requesting_id: None,
                 coe_complete_access_supported: false,
                 coe_complete_access_enabled: false,
                 coe_sdo_information_supported: false,
@@ -2273,6 +2305,33 @@ mod tests {
             activate(&product, &[observed()], &procbuf),
             Err(ProductActivationError::SdoAccessPolicy(
                 ProductSdoAccessPolicyError::CompleteAccessEnabledWithoutSupport { position: 0 }
+            ))
+        ));
+    }
+
+    #[test]
+    fn requesting_id_policy_is_rebuilt_and_activation_rejects_tampering() {
+        let mut product = config();
+        let profiles = product.startup_profiles().unwrap();
+        assert_eq!(profiles[0].expected_requesting_id, None);
+
+        product.slaves[0].requesting_id_supported = true;
+        product.slaves[0].requesting_id = Some(0x0041);
+        let profiles = product.startup_profiles().unwrap();
+        assert_eq!(profiles[0].expected_requesting_id, Some(0x0041));
+
+        product.slaves[0].requesting_id_supported = false;
+        assert_eq!(
+            product.startup_profiles(),
+            Err(ProductStartupError::RequestingId(
+                ProductRequestingIdError::EnabledWithoutSupport { position: 0 }
+            ))
+        );
+        let procbuf = ProcBuf::<1, 0, 1, 8>::new(7, 11);
+        assert!(matches!(
+            activate(&product, &[observed()], &procbuf),
+            Err(ProductActivationError::RequestingId(
+                ProductRequestingIdError::EnabledWithoutSupport { position: 0 }
             ))
         ));
     }
@@ -2414,6 +2473,8 @@ mod tests {
             .unwrap();
         config.slaves[0].transition_timeouts = timeouts;
         config.slaves[0].op_only_outputs = op_only;
+        config.slaves[0].requesting_id_supported = true;
+        config.slaves[0].requesting_id = Some(0x0041);
         config.slaves[0].dc_required = true;
         config.slaves[0].dc_reference_clock = true;
         config.slaves[0].sii_dc_mode = Some(SiiDcModeExpectation {
@@ -2454,6 +2515,7 @@ mod tests {
         );
         assert_eq!(profiles[0].transition_timeouts, timeouts);
         assert_eq!(profiles[0].op_only_outputs, op_only);
+        assert_eq!(profiles[0].expected_requesting_id, Some(0x0041));
         assert_eq!(profiles[0].expected_dc_mode, config.slaves[0].sii_dc_mode);
         assert_eq!(
             profiles[0].expected_mailbox,

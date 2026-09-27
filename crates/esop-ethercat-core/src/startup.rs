@@ -14,6 +14,10 @@ use crate::control::{
     RequestState,
 };
 use crate::dc::{DcTopology, DcTopologyError};
+use crate::explicit_id::{
+    RequestingIdAction, RequestingIdController, RequestingIdError, RequestingIdPhase,
+    RequestingIdProgress, RequestingIdRequest,
+};
 use crate::fmmu_discovery::{
     FmmuRegisterBank, FmmuRegisterDiscoveryAction, FmmuRegisterDiscoveryController,
     FmmuRegisterDiscoveryError, FmmuRegisterDiscoveryPhase, FmmuRegisterDiscoveryProgress,
@@ -86,6 +90,7 @@ pub struct StartupSlaveProfile {
     pub transition_timeouts: AlTransitionTimeouts,
     pub op_only_outputs: OpOnlySyncManagerProfile,
     pub expected_mailbox: Option<MailboxConfig>,
+    pub expected_requesting_id: Option<u16>,
     pub expected_mailbox_receive_sync_manager: Option<MailboxReceiveSyncManager>,
     pub expected_sii: Option<SiiConfigurationSignature>,
     pub expected_dc_mode: Option<SiiDcModeExpectation>,
@@ -98,6 +103,7 @@ impl StartupSlaveProfile {
         transition_timeouts: ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
         op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
         expected_mailbox: None,
+        expected_requesting_id: None,
         expected_mailbox_receive_sync_manager: None,
         expected_sii: None,
         expected_dc_mode: None,
@@ -130,6 +136,11 @@ impl StartupSlaveProfile {
 
     pub const fn with_expected_mailbox(mut self, expected_mailbox: MailboxConfig) -> Self {
         self.expected_mailbox = Some(expected_mailbox);
+        self
+    }
+
+    pub const fn with_expected_requesting_id(mut self, expected_requesting_id: u16) -> Self {
+        self.expected_requesting_id = Some(expected_requesting_id);
         self
     }
 
@@ -286,6 +297,7 @@ pub enum StartupPhase {
     Idle,
     Scanning,
     ReadingIdentity,
+    ReadingRequestingId,
     ReadingMailbox,
     ReadingFmmuRegisters,
     ReadingSyncManagerRegisters,
@@ -300,6 +312,7 @@ pub enum StartupPhase {
 pub enum StartupAction {
     Scan(ScanAction),
     Sii(SiiAction),
+    RequestingId(RequestingIdAction),
     SiiMailbox(SiiAction),
     FmmuRegisters(FmmuRegisterDiscoveryAction),
     SyncManagerRegisters(SyncManagerRegisterDiscoveryAction),
@@ -313,6 +326,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.token,
             Self::Sii(action) => action.token,
+            Self::RequestingId(action) => action.token,
             Self::SiiMailbox(action) => action.token,
             Self::FmmuRegisters(action) => action.token,
             Self::SyncManagerRegisters(action) => action.token,
@@ -326,6 +340,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.datagram_index,
             Self::Sii(action) => action.datagram_index,
+            Self::RequestingId(action) => action.datagram_index,
             Self::SiiMailbox(action) => action.datagram_index,
             Self::FmmuRegisters(action) => action.datagram_index,
             Self::SyncManagerRegisters(action) => action.datagram_index,
@@ -339,6 +354,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.generation,
             Self::Sii(action) => action.generation,
+            Self::RequestingId(action) => action.generation,
             Self::SiiMailbox(action) => action.generation,
             Self::FmmuRegisters(action) => action.generation,
             Self::SyncManagerRegisters(action) => action.generation,
@@ -352,6 +368,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.address,
             Self::Sii(action) => action.address,
+            Self::RequestingId(action) => action.address,
             Self::SiiMailbox(action) => action.address,
             Self::FmmuRegisters(action) => action.address,
             Self::SyncManagerRegisters(action) => action.address,
@@ -365,6 +382,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.operation,
             Self::Sii(action) => action.operation,
+            Self::RequestingId(action) => action.operation,
             Self::SiiMailbox(action) => action.operation,
             Self::FmmuRegisters(action) => action.operation,
             Self::SyncManagerRegisters(action) => action.operation,
@@ -378,6 +396,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.payload(),
             Self::Sii(action) => action.payload(),
+            Self::RequestingId(action) => action.payload(),
             Self::SiiMailbox(action) => action.payload(),
             Self::FmmuRegisters(action) => action.payload(),
             Self::SyncManagerRegisters(action) => action.payload(),
@@ -391,6 +410,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.deadline_ns,
             Self::Sii(action) => action.deadline_ns,
+            Self::RequestingId(action) => action.deadline_ns,
             Self::SiiMailbox(action) => action.deadline_ns,
             Self::FmmuRegisters(action) => action.deadline_ns,
             Self::SyncManagerRegisters(action) => action.deadline_ns,
@@ -404,6 +424,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.expected_wkc,
             Self::Sii(action) => action.expected_wkc,
+            Self::RequestingId(action) => action.expected_wkc,
             Self::SiiMailbox(action) => action.expected_wkc,
             Self::FmmuRegisters(action) => action.expected_wkc,
             Self::SyncManagerRegisters(action) => action.expected_wkc,
@@ -417,6 +438,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.working_counter_policy,
             Self::Sii(_)
+            | Self::RequestingId(_)
             | Self::SiiMailbox(_)
             | Self::FmmuRegisters(_)
             | Self::SyncManagerRegisters(_)
@@ -430,6 +452,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.datagram_len(),
             Self::Sii(action) => action.datagram_len(),
+            Self::RequestingId(action) => action.datagram_len(),
             Self::SiiMailbox(action) => action.datagram_len(),
             Self::FmmuRegisters(action) => action.datagram_len(),
             Self::SyncManagerRegisters(action) => action.datagram_len(),
@@ -443,6 +466,7 @@ impl StartupAction {
         match self {
             Self::Scan(action) => action.read_len as usize,
             Self::Sii(action) => action.read_len as usize,
+            Self::RequestingId(action) => action.response_len(),
             Self::SiiMailbox(action) => action.read_len as usize,
             Self::FmmuRegisters(action) => action.response_len(),
             Self::SyncManagerRegisters(action) => action.response_len(),
@@ -458,6 +482,7 @@ pub enum StartupProgress {
     Advanced,
     SlaveDiscovered(usize),
     IdentityVerified(usize),
+    RequestingIdVerified(usize),
     MailboxVerified(usize),
     FmmuRegistersRead(usize),
     SyncManagerRegistersRead(usize),
@@ -519,6 +544,12 @@ pub enum StartupError {
     Control(ControlError),
     Scan(ScanError),
     Sii(SiiError),
+    RequestingId(RequestingIdError),
+    RequestingIdMismatch {
+        position: u16,
+        expected: u16,
+        observed: u16,
+    },
     SiiMailbox(SiiMailboxError),
     FmmuRegisters(FmmuRegisterDiscoveryError),
     SyncManagerRegisters(SyncManagerRegisterDiscoveryError),
@@ -618,6 +649,7 @@ pub struct StartupController<const MAX_SLAVES: usize> {
     expected_count: usize,
     scan: ScanController<MAX_SLAVES>,
     sii: SiiIdentityReader,
+    requesting_id: RequestingIdController,
     sii_mailbox: SiiBlockReader<SII_STANDARD_MAILBOX_WORD_COUNT>,
     fmmu_registers: FmmuRegisterDiscoveryController,
     staged_fmmu_registers: Option<FmmuRegisterBank>,
@@ -632,6 +664,7 @@ pub struct StartupController<const MAX_SLAVES: usize> {
     esc_fmmu_counts: [u8; MAX_SLAVES],
     esc_sync_manager_counts: [u8; MAX_SLAVES],
     staged_mailbox: Option<MailboxConfig>,
+    verified_requesting_ids: [Option<u16>; MAX_SLAVES],
     verified_mailboxes: [Option<MailboxConfig>; MAX_SLAVES],
     verified_fmmu_registers: [Option<FmmuRegisterBank>; MAX_SLAVES],
     verified_sync_manager_registers: [Option<SyncManagerRegisterBank>; MAX_SLAVES],
@@ -661,6 +694,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             expected_count: 0,
             scan: ScanController::new(station_address_base),
             sii: SiiIdentityReader::new(),
+            requesting_id: RequestingIdController::new(),
             sii_mailbox: SiiBlockReader::new(),
             fmmu_registers: FmmuRegisterDiscoveryController::new(),
             staged_fmmu_registers: None,
@@ -675,6 +709,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             esc_fmmu_counts: [0; MAX_SLAVES],
             esc_sync_manager_counts: [0; MAX_SLAVES],
             staged_mailbox: None,
+            verified_requesting_ids: [None; MAX_SLAVES],
             verified_mailboxes: [None; MAX_SLAVES],
             verified_fmmu_registers: [None; MAX_SLAVES],
             verified_sync_manager_registers: [None; MAX_SLAVES],
@@ -723,6 +758,14 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             .iter()
             .position(|record| record.position == position)
             .and_then(|index| self.verified_mailboxes[index])
+    }
+
+    pub fn verified_requesting_id(&self, position: u16) -> Option<u16> {
+        self.table
+            .records()
+            .iter()
+            .position(|record| record.position == position)
+            .and_then(|index| self.verified_requesting_ids[index])
     }
 
     pub fn verified_sii(&self, position: u16) -> Option<SiiConfigurationSignature> {
@@ -856,6 +899,10 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         match self.phase {
             StartupPhase::Scanning => self.scan.pending().map(StartupAction::Scan),
             StartupPhase::ReadingIdentity => self.sii.pending().map(StartupAction::Sii),
+            StartupPhase::ReadingRequestingId => self
+                .requesting_id
+                .pending()
+                .map(StartupAction::RequestingId),
             StartupPhase::ReadingMailbox => {
                 self.sii_mailbox.pending().map(StartupAction::SiiMailbox)
             }
@@ -1029,6 +1076,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.expected_count = expected.len();
         self.scan = ScanController::new(self.station_address_base);
         self.sii = SiiIdentityReader::new();
+        self.requesting_id = RequestingIdController::new();
         self.sii_mailbox = SiiBlockReader::new();
         self.fmmu_registers = FmmuRegisterDiscoveryController::new();
         self.staged_fmmu_registers = None;
@@ -1043,6 +1091,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.esc_fmmu_counts = [0; MAX_SLAVES];
         self.esc_sync_manager_counts = [0; MAX_SLAVES];
         self.staged_mailbox = None;
+        self.verified_requesting_ids = [None; MAX_SLAVES];
         self.verified_mailboxes = [None; MAX_SLAVES];
         self.verified_fmmu_registers = [None; MAX_SLAVES];
         self.verified_sync_manager_registers = [None; MAX_SLAVES];
@@ -1090,6 +1139,16 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                         Ok(Some(action)) => return Ok(Some(StartupAction::Sii(action))),
                         Ok(None) => return Ok(None),
                         Err(error) => return self.fail(StartupError::Sii(error)),
+                    }
+                }
+                StartupPhase::ReadingRequestingId => {
+                    self.start_requesting_id_reader(now_ns)?;
+                    match self.requesting_id.next_action(now_ns) {
+                        Ok(Some(action)) => {
+                            return Ok(Some(StartupAction::RequestingId(action)));
+                        }
+                        Ok(None) => return Ok(None),
+                        Err(error) => return self.fail(StartupError::RequestingId(error)),
                     }
                 }
                 StartupPhase::ReadingMailbox => {
@@ -1254,6 +1313,25 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                 };
                 if progress == SiiProgress::Complete {
                     return self.finish_identity(now_ns);
+                }
+                Ok(StartupProgress::Advanced)
+            }
+            StartupAction::RequestingId(action) => {
+                if self.phase != StartupPhase::ReadingRequestingId {
+                    return self.fail(StartupError::NoPendingAction);
+                }
+                let progress = match self.requesting_id.accept(
+                    action,
+                    generation,
+                    payload,
+                    working_counter,
+                    now_ns,
+                ) {
+                    Ok(progress) => progress,
+                    Err(error) => return self.fail(StartupError::RequestingId(error)),
+                };
+                if let RequestingIdProgress::ValueRead(value) = progress {
+                    return self.finish_requesting_id(value, now_ns);
                 }
                 Ok(StartupProgress::Advanced)
             }
@@ -1500,6 +1578,12 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                     }
                 }
             },
+            StartupAction::RequestingId(action) => {
+                match self.requesting_id.timeout(action, now_ns) {
+                    Ok(_) => Ok(StartupProgress::Advanced),
+                    Err(error) => self.fail(StartupError::RequestingId(error)),
+                }
+            }
             StartupAction::SiiMailbox(action) => {
                 match self.sii_mailbox.timeout(action.token, now_ns) {
                     Ok(()) => self.fail(StartupError::SiiMailbox(SiiMailboxError::Block(
@@ -1605,6 +1689,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.generation = generation;
         self.scan = ScanController::new(self.station_address_base);
         self.sii = SiiIdentityReader::new();
+        self.requesting_id = RequestingIdController::new();
         self.sii_mailbox = SiiBlockReader::new();
         self.fmmu_registers = FmmuRegisterDiscoveryController::new();
         self.staged_fmmu_registers = None;
@@ -1619,6 +1704,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.esc_fmmu_counts = [0; MAX_SLAVES];
         self.esc_sync_manager_counts = [0; MAX_SLAVES];
         self.staged_mailbox = None;
+        self.verified_requesting_ids = [None; MAX_SLAVES];
         self.verified_mailboxes = [None; MAX_SLAVES];
         self.verified_fmmu_registers = [None; MAX_SLAVES];
         self.verified_sync_manager_registers = [None; MAX_SLAVES];
@@ -1785,6 +1871,32 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         }
     }
 
+    fn start_requesting_id_reader(&mut self, now_ns: u64) -> Result<(), StartupError> {
+        if !matches!(
+            self.requesting_id.phase(),
+            RequestingIdPhase::Idle | RequestingIdPhase::Complete | RequestingIdPhase::Faulted
+        ) {
+            return Ok(());
+        }
+        let record = self
+            .table
+            .records()
+            .get(self.current_index)
+            .copied()
+            .ok_or(StartupError::ExpectedCountMismatch)?;
+        match self.requesting_id.start(RequestingIdRequest {
+            station_address: record.station_address,
+            current_state: record.al_status.state,
+            generation: self.generation,
+            now_ns,
+            timeout_ns: self.config.identity_timeout_ns,
+            request_timeout_ns: self.config.request_timeout_ns,
+        }) {
+            Ok(()) => Ok(()),
+            Err(error) => self.fail(StartupError::RequestingId(error)),
+        }
+    }
+
     fn start_fmmu_register_reader(&mut self, now_ns: u64) -> Result<(), StartupError> {
         if !matches!(
             self.fmmu_registers.phase(),
@@ -1917,6 +2029,10 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             return self.fail(StartupError::Table(error));
         }
         let profile = self.profile_for_position(scan_record.position)?;
+        if profile.expected_requesting_id.is_some() {
+            self.phase = StartupPhase::ReadingRequestingId;
+            return Ok(StartupProgress::IdentityVerified(self.current_index));
+        }
         if profile.expected_mailbox.is_some() {
             self.phase = StartupPhase::ReadingMailbox;
             return Ok(StartupProgress::IdentityVerified(self.current_index));
@@ -1931,6 +2047,50 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         }
         self.phase = StartupPhase::TransitioningAl;
         self.start_al_for_current(now_ns)
+    }
+
+    fn finish_requesting_id(
+        &mut self,
+        observed: u16,
+        now_ns: u64,
+    ) -> Result<StartupProgress, StartupError> {
+        let record = self
+            .table
+            .records()
+            .get(self.current_index)
+            .copied()
+            .ok_or(StartupError::ExpectedCountMismatch)?;
+        let profile = self.profile_for_position(record.position)?;
+        let expected = profile
+            .expected_requesting_id
+            .ok_or(StartupError::NoPendingAction)?;
+        if observed != expected {
+            return self.fail(StartupError::RequestingIdMismatch {
+                position: record.position,
+                expected,
+                observed,
+            });
+        }
+        self.verified_requesting_ids[self.current_index] = Some(observed);
+        if profile.expected_mailbox.is_some() {
+            self.phase = StartupPhase::ReadingMailbox;
+            return Ok(StartupProgress::RequestingIdVerified(self.current_index));
+        }
+        if profile.expected_sii.is_some() {
+            self.phase = StartupPhase::ReadingFmmuRegisters;
+            return Ok(StartupProgress::RequestingIdVerified(self.current_index));
+        }
+        if profile.expected_dc_mode.is_some() {
+            self.phase = StartupPhase::ReadingConfiguration;
+            return Ok(StartupProgress::RequestingIdVerified(self.current_index));
+        }
+        self.phase = StartupPhase::TransitioningAl;
+        match self.start_al_for_current(now_ns)? {
+            StartupProgress::IdentityVerified(index) => {
+                Ok(StartupProgress::RequestingIdVerified(index))
+            }
+            progress => Ok(progress),
+        }
     }
 
     fn finish_mailbox(&mut self, now_ns: u64) -> Result<StartupProgress, StartupError> {
@@ -2354,14 +2514,16 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
     }
 
     fn fail<T>(&mut self, error: StartupError) -> Result<T, StartupError> {
-        self.last_error = Some(error);
+        if self.last_error.is_none() {
+            self.last_error = Some(error);
+        }
         self.selected_reference_clock = None;
         self.dc_topology = None;
         self.staged_mailbox = None;
         self.staged_fmmu_registers = None;
         self.staged_sync_manager_registers = None;
         self.phase = StartupPhase::Faulted;
-        Err(error)
+        Err(self.last_error.unwrap_or(error))
     }
 
     fn capture_al_fault(&mut self) {
@@ -2399,8 +2561,9 @@ mod tests {
     use crate::mapping::FmmuConfig;
     use crate::op_only::{SYNC_MANAGER_ENABLE_FLAG, SYNC_MANAGER_OP_ONLY_FLAG};
     use crate::registers::{
-        ESC_AL_STATUS, ESC_CONFIGURATION, ESC_EEPROM_CONTROL, ESC_EEPROM_DATA, ESC_TYPE,
-        auto_increment_address, fixed_address, register_from_address,
+        AL_ID_LOADED_FLAG, ESC_AL_CONTROL, ESC_AL_STATUS, ESC_AL_STATUS_CODE, ESC_CONFIGURATION,
+        ESC_EEPROM_CONTROL, ESC_EEPROM_DATA, ESC_TYPE, auto_increment_address, fixed_address,
+        register_from_address,
     };
     use crate::sii::{
         SII_CATEGORY_DC, SII_CATEGORY_END, SII_CATEGORY_FMMU, SII_CATEGORY_RX_PDO,
@@ -4917,11 +5080,152 @@ mod tests {
             StartupAction::FmmuRegisters(_)
             | StartupAction::SyncManagerRegisters(_)
             | StartupAction::Sii(_)
+            | StartupAction::RequestingId(_)
             | StartupAction::SiiMailbox(_)
             | StartupAction::SiiConfiguration(_)
             | StartupAction::Al(_)
             | StartupAction::OpOnly(_) => 0,
         }
+    }
+
+    #[test]
+    fn requesting_id_runs_after_identity_and_before_mailbox() {
+        let identity = SlaveIdentity {
+            vendor_id: 0x1122_3344,
+            product_code: 0x5566_7788,
+            revision: 0x99AA_BBCC,
+            serial: 0,
+        };
+        let expected = [ExpectedSlave {
+            position: 0,
+            station_address: 0x1000,
+            identity,
+        }];
+        let mailbox = MailboxConfig::new(0x1000, 64, 0x1100, 64);
+        let profiles = [StartupSlaveProfile::new(0)
+            .with_expected_requesting_id(0x0041)
+            .with_expected_mailbox(mailbox)];
+        let mut startup = StartupController::<1>::new(0x1000);
+        startup
+            .start_with_profiles(
+                7,
+                0,
+                StartupConfig::new(EthercatState::PreOp),
+                &expected,
+                &profiles,
+            )
+            .unwrap();
+
+        let mut now_ns = 1;
+        accept_scanned_slave(&mut startup, 0, None, &mut now_ns);
+        finish_scan(&mut startup, now_ns).unwrap();
+        assert_eq!(startup.phase(), StartupPhase::ReadingIdentity);
+        now_ns += 2;
+        accept_identity(&mut startup, identity, &mut now_ns);
+        assert_eq!(startup.phase(), StartupPhase::ReadingRequestingId);
+        assert_eq!(startup.verified_requesting_id(0), None);
+
+        let write = startup.next_action(now_ns).unwrap().unwrap();
+        assert!(matches!(write, StartupAction::RequestingId(_)));
+        assert_eq!(write.address(), fixed_address(0x1000, ESC_AL_CONTROL));
+        assert_eq!(write.payload(), &[0x21, 0x00]);
+        assert_eq!(
+            accept_action(&mut startup, write, &[], 1, now_ns + 1),
+            StartupProgress::Advanced
+        );
+
+        let poll = startup.next_action(now_ns + 2).unwrap().unwrap();
+        assert_eq!(poll.address(), fixed_address(0x1000, ESC_AL_STATUS));
+        accept_action(
+            &mut startup,
+            poll,
+            &(EthercatState::Init as u16).to_le_bytes(),
+            1,
+            now_ns + 3,
+        );
+        let loaded = startup.next_action(now_ns + 4).unwrap().unwrap();
+        accept_action(
+            &mut startup,
+            loaded,
+            &((EthercatState::Init as u16) | AL_ID_LOADED_FLAG).to_le_bytes(),
+            1,
+            now_ns + 5,
+        );
+        let value = startup.next_action(now_ns + 6).unwrap().unwrap();
+        assert_eq!(value.address(), fixed_address(0x1000, ESC_AL_STATUS_CODE));
+        assert_eq!(
+            accept_action(&mut startup, value, &0x0041u16.to_le_bytes(), 1, now_ns + 7,),
+            StartupProgress::RequestingIdVerified(0)
+        );
+        assert_eq!(startup.verified_requesting_id(0), Some(0x0041));
+        assert_eq!(startup.phase(), StartupPhase::ReadingMailbox);
+        assert!(matches!(
+            startup.next_action(now_ns + 8).unwrap(),
+            Some(StartupAction::SiiMailbox(_))
+        ));
+    }
+
+    #[test]
+    fn swapped_requesting_id_faults_before_al_and_preserves_first_reason() {
+        let identity = SlaveIdentity {
+            vendor_id: 1,
+            product_code: 2,
+            revision: 3,
+            serial: 0,
+        };
+        let mut startup = StartupController::<2>::new(0x1000);
+        startup.phase = StartupPhase::ReadingRequestingId;
+        startup.config = StartupConfig::new(EthercatState::Op);
+        startup.generation = 7;
+        startup.expected_count = 2;
+        startup.profiles[0] = StartupSlaveProfile::new(0).with_expected_requesting_id(0x0041);
+        startup.profiles[1] = StartupSlaveProfile::new(1).with_expected_requesting_id(0x0042);
+        for (position, station_address) in [(0, 0x1000), (1, 0x1001)] {
+            startup
+                .table
+                .add(position, station_address, identity)
+                .unwrap();
+            startup
+                .table
+                .observe_status(
+                    position,
+                    crate::slave::AlStatus::new(EthercatState::Init as u16, 0),
+                    0,
+                )
+                .unwrap();
+            startup.table.verify_identity(position, identity).unwrap();
+        }
+
+        let write = startup.next_action(1).unwrap().unwrap();
+        accept_action(&mut startup, write, &[], 1, 2);
+        let loaded = startup.next_action(3).unwrap().unwrap();
+        accept_action(
+            &mut startup,
+            loaded,
+            &((EthercatState::Init as u16) | AL_ID_LOADED_FLAG).to_le_bytes(),
+            1,
+            4,
+        );
+        let value = startup.next_action(5).unwrap().unwrap();
+        assert_eq!(
+            startup.accept(value, value.generation(), &0x0042u16.to_le_bytes(), 1, 6),
+            Err(StartupError::RequestingIdMismatch {
+                position: 0,
+                expected: 0x0041,
+                observed: 0x0042,
+            })
+        );
+        assert_eq!(startup.phase(), StartupPhase::Faulted);
+        assert_eq!(startup.verified_requesting_id(0), None);
+        assert_eq!(startup.next_action(7), Ok(None));
+        assert_eq!(
+            startup.accept(value, value.generation(), &0x0041u16.to_le_bytes(), 1, 8),
+            Err(StartupError::RequestingIdMismatch {
+                position: 0,
+                expected: 0x0041,
+                observed: 0x0042,
+            })
+        );
     }
 
     #[test]

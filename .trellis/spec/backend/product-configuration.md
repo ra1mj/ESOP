@@ -150,6 +150,10 @@ Input schema `esop.product.v1` is strict (`deny_unknown_fields`) and owns:
   `process_data_intervals` raw `u16` values are independently optional, where
   the object contains at least one field and every present value is nonzero;
   absence preserves the corresponding ESC default and emits no action.
+- an optional strict per-slave `identification.requesting_id` lowercase
+  `0x`-prefixed `u16`. It may be present only when the selected direct
+  `Device/Info/IdentificationReg134` declares strict boolean support. ESI
+  support alone never enables the runtime check.
 - an optional strict per-slave `coe` object whose `complete_access` boolean
   defaults false. It may be true only when the selected direct
   `Device/Mailbox/CoE` declares a valid `CompleteAccess=true` capability.
@@ -232,6 +236,12 @@ rechecks the same implication before ProcBuf/topology mutation, and
 fields into a core `SdoAccessPolicy`. Policy-aware transfers use
 `SdoTransfer::with_policy`; default transfers and all generated PDO
 assignment/mapping operations remain explicitly `SdoAccess::Single`.
+The direct `Device/Info/IdentificationReg134` element is an independent strict
+boolean capability. Empty, malformed, duplicate, nested, or misplaced
+declarations fail before publication. Generated support and optional expected
+value fields participate in normalized JSON, inventory, C/Rust, build input,
+the semantic ESI hash, and the configuration hash. Generation and runtime
+activation both reject an expectation without support.
 The generator also retains both mailbox SyncManager indexes. An ordered
 SyncManager-status / `MBoxState` FMMU usage requires the canonical direct
 MBoxIn status policy `0x0800 + index * 8 + 5`, mask `0x08`, active-high;
@@ -251,6 +261,17 @@ absolute SYNC0/SYNC1 cycle, signed SYNC0 shift, and exact 16-bit
 C/Rust and configuration hash. One shared `DcSyncTiming::resolve` contract owns
 the checked direct/factor arithmetic; cfggen and the `no_std` runtime boundary
 must not implement private timing formulas.
+
+After ordinary SII identity verification and before mailbox, live FMMU/
+SyncManager discovery, SII configuration, or normal AL transitions, a Startup
+profile with an expected Requesting ID runs the exact INIT-only sequence through
+the existing bounded control pool: write `INIT | bit 5` to `0x0120/2`, poll
+`0x0130/2` until bit 5 is loaded, then read the exact `u16` from `0x0134/2`.
+Every action requires exact address, operation, generation, ownership, response
+shape, WKC 1, and bounded absolute deadlines. Evidence is published only after
+an exact position-keyed value match. Any transaction or value fault latches the
+first Startup error, prevents PREOP/Ready, and keeps lifecycle Topology false.
+Profiles without an expectation retain the previous traffic shape.
 
 The core SII parser accepts only the exact five-word standard mailbox header,
 checks CoE support and the same address/capacity rules, and performs the same
@@ -445,9 +466,12 @@ label-to-semantic-ESI-hash map. It excludes timestamps, host paths, compiler,
 output directory, JSON key order, and XML formatting.
 
 `robot_build_input.json` uses `esop.product-build-input.v1`. Its devices object
-contains one exact Complete Access record and one exact SDO Information record
-per declared slave with matching name/position, ESI support and product
-enablement. An enabled SDO Information record also carries the strictly ordered,
+contains one exact Requesting ID record, one exact Complete Access record, and
+one exact SDO Information record per declared slave with matching name/position.
+The Requesting ID record carries ESI support plus an optional lowercase
+`0x`-prefixed expected `u16`; the report boundary rejects an expectation without
+support. CoE records carry ESI support and product enablement. An enabled SDO
+Information record also carries the strictly ordered,
 deduplicated selected-PDO expectation list: owner position, object/subindex,
 exact CANopen data type, bit length and required read/write/PDO-mappability flags.
 The report boundary rejects length or identity mismatch, duplicate
@@ -481,6 +505,8 @@ datagrams, FCS, and inter-packet gap respectively.
 | Zero/malformed/overflowing ESM timeout or non-output OpOnly SM | Reject before staging or hash publication. |
 | Missing CoE, partial/duplicate/disabled ESI mailbox SM, or invalid mailbox range | Reject before staging or hash publication. |
 | Malformed ESI Complete Access/SDO Information capability, product enablement without support, or duplicate/malformed build-input policy evidence | Reject before staging, runtime mutation, or build-report publication. |
+| Empty/duplicate/misplaced/malformed ESI `IdentificationReg134`, Requesting ID expectation without support, or malformed/misaligned build-input Requesting ID evidence | Reject before staging, runtime mutation, Startup mutation, or build-report publication. |
+| Requesting ID wrong AL state, action/generation/address/shape/WKC/deadline/control ownership, or value mismatch | Latch the first typed Startup fault before mailbox/SII/normal AL work, publish no Requesting ID evidence, and keep Topology closed. |
 | Empty/over-capacity/conflicting generated SDO Information expectation, wrong runtime owner, invalid type/width/access, or duplicate/unordered plan | Reject before artifact publication, runtime activation, mailbox request, or build-report publication. |
 | Malformed, out-of-order, over-capacity, wrong-service/opcode/object/subindex/value-info SDO Information response, or abort | Latch the typed transfer/verifier fault, clear pending publication, and never report a partially verified plan. |
 | Duplicate Domain/slave/axis identity or overlapping range | Reject before registry mutation/publication. |

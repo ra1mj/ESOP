@@ -68,6 +68,9 @@
       "product_code": "0x00004020",
       "revision": "0x00000001",
       "serial": "0x00000001",
+      "identification": {
+        "requesting_id": "0x0041"
+      },
       "coe": {
         "complete_access": true,
         "sdo_information": true
@@ -98,6 +101,9 @@
       "product_code": "0x00004020",
       "revision": "0x00000001",
       "serial": "0x00000002",
+      "identification": {
+        "requesting_id": "0x0042"
+      },
       "dc": {
         "required": true,
         "reference_clock": false,

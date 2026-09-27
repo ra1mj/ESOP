@@ -96,6 +96,26 @@ def product_input() -> dict:
                     "expectations": [],
                 },
             ],
+            "requesting_id": [
+                {
+                    "name": "drive_left",
+                    "position": 0,
+                    "supported": True,
+                    "expected": "0x0041",
+                },
+                {
+                    "name": "drive_right",
+                    "position": 1,
+                    "supported": True,
+                    "expected": "0x0042",
+                },
+                {
+                    "name": "io_block",
+                    "position": 2,
+                    "supported": False,
+                    "expected": None,
+                },
+            ],
             "source": "esop-cfggen validated product manifest and ESI subset",
         },
         "process_data": {
@@ -140,6 +160,7 @@ class RobotBuildReportTests(unittest.TestCase):
         self.assertEqual(report["devices"]["declared_slaves"], 0)
         self.assertEqual(report["devices"]["coe_complete_access"], [])
         self.assertEqual(report["devices"]["coe_sdo_information"], [])
+        self.assertEqual(report["devices"]["requesting_id"], [])
         self.assertFalse(report["qualification"]["passed"])
 
     def test_product_input_projects_exact_generated_evidence(self):
@@ -240,6 +261,22 @@ class RobotBuildReportTests(unittest.TestCase):
         ][0]["required_access"] = 0x10
         cases.append((invalid_sdo_information_access, "known nonzero flags"))
 
+        unsupported_requesting_id = product_input()
+        unsupported_requesting_id["devices"]["requesting_id"][2][
+            "expected"
+        ] = "0x0043"
+        cases.append((unsupported_requesting_id, "cannot expect an unsupported"))
+
+        invalid_requesting_id = product_input()
+        invalid_requesting_id["devices"]["requesting_id"][0]["expected"] = "0X0041"
+        cases.append((invalid_requesting_id, "lowercase 0x-prefixed u16"))
+
+        requesting_id_identity_drift = product_input()
+        requesting_id_identity_drift["devices"]["requesting_id"][1][
+            "name"
+        ] = "other_drive"
+        cases.append((requesting_id_identity_drift, "device identities must match"))
+
         for value, reason in cases:
             with self.subTest(reason=reason):
                 self.assert_product_rejected(value, reason)
@@ -262,6 +299,13 @@ class RobotBuildReportTests(unittest.TestCase):
         ][0]["index"] = "0x0000"
         with self.assertRaisesRegex(ValueError, "must be nonzero"):
             validate_report(invalid_sdo_information_report)
+
+        invalid_requesting_id_report = build_report(product_input())
+        invalid_requesting_id_report["devices"]["requesting_id"][2][
+            "expected"
+        ] = "0x0043"
+        with self.assertRaisesRegex(ValueError, "cannot expect an unsupported"):
+            validate_report(invalid_requesting_id_report)
 
     def test_build_report_does_not_mutate_product_input(self):
         source = product_input()

@@ -107,6 +107,42 @@ def parse_hex_u16(value: object, path: str, *, nonzero: bool = False) -> int:
     return parsed
 
 
+def validate_requesting_id_devices(value: object, declared_slaves: int) -> None:
+    if not isinstance(value, list):
+        fail("devices.requesting_id must be a list")
+    if len(value) != declared_slaves:
+        fail("devices.requesting_id length must match declared_slaves")
+
+    names: set[str] = set()
+    positions: set[int] = set()
+    for index, entry in enumerate(value):
+        path = f"devices.requesting_id[{index}]"
+        if not isinstance(entry, dict):
+            fail(f"{path} must be an object")
+        expected_keys = {"name", "position", "supported", "expected"}
+        if set(entry) != expected_keys:
+            fail(f"{path} must contain exactly name, position, supported, expected")
+        name = entry["name"]
+        position = entry["position"]
+        if not isinstance(name, str) or not name.strip():
+            fail(f"{path}.name must be a non-empty string")
+        if type(position) is not int or not 0 <= position <= 0xFFFF:
+            fail(f"{path}.position must be a non-negative u16 integer")
+        if type(entry["supported"]) is not bool:
+            fail(f"{path}.supported must be a boolean")
+        expected = entry["expected"]
+        if expected is not None:
+            parse_hex_u16(expected, f"{path}.expected")
+            if not entry["supported"]:
+                fail(f"{path} cannot expect an unsupported Requesting ID")
+        if name in names:
+            fail(f"devices.requesting_id contains duplicate name: {name}")
+        if position in positions:
+            fail(f"devices.requesting_id contains duplicate position: {position}")
+        names.add(name)
+        positions.add(position)
+
+
 def validate_sdo_information_devices(value: object, declared_slaves: int) -> None:
     if not isinstance(value, list):
         fail("devices.coe_sdo_information must be a list")
@@ -228,8 +264,10 @@ def validate_report(report: dict) -> None:
         fail("devices.source must be a string")
     complete_access = require(devices, "coe_complete_access", "devices")
     sdo_information = require(devices, "coe_sdo_information", "devices")
+    requesting_id = require(devices, "requesting_id", "devices")
     validate_complete_access_devices(complete_access, devices["declared_slaves"])
     validate_sdo_information_devices(sdo_information, devices["declared_slaves"])
+    validate_requesting_id_devices(requesting_id, devices["declared_slaves"])
     complete_identities = [
         (entry["name"], entry["position"]) for entry in complete_access
     ]
@@ -238,6 +276,11 @@ def validate_report(report: dict) -> None:
     ]
     if complete_identities != sdo_identities:
         fail("devices CoE device identities must match")
+    requesting_identities = [
+        (entry["name"], entry["position"]) for entry in requesting_id
+    ]
+    if complete_identities != requesting_identities:
+        fail("devices Requesting ID device identities must match")
 
     process_data = require(report, "process_data", "report")
     for key in (

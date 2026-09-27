@@ -197,6 +197,26 @@ class R2QualificationTests(unittest.TestCase):
                         "expectations": [],
                     },
                 ],
+                "requesting_id": [
+                    {
+                        "name": "drive-a",
+                        "position": 0,
+                        "supported": True,
+                        "expected": "0x0041",
+                    },
+                    {
+                        "name": "drive-b",
+                        "position": 1,
+                        "supported": True,
+                        "expected": "0x0042",
+                    },
+                    {
+                        "name": "io-a",
+                        "position": 2,
+                        "supported": False,
+                        "expected": None,
+                    },
+                ],
             },
             "process_data": {
                 "pdo_bytes_per_cycle": 1024,
