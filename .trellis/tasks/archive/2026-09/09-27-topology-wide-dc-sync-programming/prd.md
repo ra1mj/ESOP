@@ -102,7 +102,7 @@ may leave its PREOP configuration barrier.
       `AssignActivate=0x0300`; the IO slave emits none.
 - [x] README, PRD/requirements/product docs, backend spec, and capability
       manifest describe the implemented boundary without stronger claims.
-- [ ] Focused tests, no-std checks, `make cfggen-runtime-example`, repository
+- [x] Focused tests, no-std checks, `make cfggen-runtime-example`, repository
       `make ci`, `make bpf`, and exact pushed-SHA GitHub Actions all pass.
 
 ## Acceptance Evidence
@@ -121,7 +121,10 @@ may leave its PREOP configuration barrier.
   performance report, eBPF qualification reports, R2 report, and Zenoh check.
 - `make bpf`: passed the CO-RE object build target.
 - Trellis task validation and capability-manifest validation passed.
-- Exact pushed-SHA GitHub Actions evidence is pending the implementation push.
+- Exact pushed-SHA GitHub Actions passed for
+  `6e900742414d91e198fc749626b5bc42c266df0d`: quality run
+  `36284581048` completed successfully, including all eBPF/BPF jobs, the Rust
+  quality gate, Zenoh router integration tests, and build-evidence upload.
 
 ## Out Of Scope
 

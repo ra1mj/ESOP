@@ -45,7 +45,7 @@
 - [x] Run `cargo check --workspace --all-features`, no-std target checks,
       `make cfggen-runtime-example`, `make ci`, `make bpf`, and
       `git diff --check`.
-- [ ] Run Trellis validation/check, record acceptance evidence, commit the
+- [x] Run Trellis validation/check, record acceptance evidence, commit the
       implementation, push `main`, and require GitHub Actions success for the
       exact final SHA before archive/journal commits.
 
