@@ -1497,3 +1497,37 @@ Implemented deterministic ESI DC OpMode parsing, SII DC category verification du
 ### Next Steps
 
 - None - task complete
+
+
+## Session 45: Topology-wide DC SYNC programming
+
+**Date**: 2026-09-27
+**Task**: Topology-wide DC SYNC programming
+**Branch**: `main`
+
+### Summary
+
+Implemented generated topology-wide EtherCAT DC SYNC0/SYNC1 timing and common-epoch programming, integrated Startup/lifecycle gating and Linux simulated-port coverage, and passed local plus exact pushed-SHA CI verification.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `2697b23e3cb3149ad170d13541523626cf709fb1` | (see git log) |
+| `6e900742414d91e198fc749626b5bc42c266df0d` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
