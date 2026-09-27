@@ -1801,3 +1801,36 @@ Generated canonical direct MBoxIn SyncManager status-bit policy from ESI, revali
 ### Next Steps
 
 - None - task complete
+
+
+## Session 54: FMMU-mapped mailbox status bit
+
+**Date**: 2026-09-27
+**Task**: FMMU-mapped mailbox status bit
+**Branch**: `main`
+
+### Summary
+
+Generated deterministic Domain-tail mailbox status FMMUs, validated them at product activation, integrated fresh mapped observations into production mailbox polling without direct fallback, updated artifacts/docs, and passed make ci.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ecd68af` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
