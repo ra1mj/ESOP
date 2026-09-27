@@ -86,7 +86,7 @@ qualification. Those remain separate release evidence.
       describe the implemented boundary and remaining physical qualification gap.
 - [x] Formatting, focused tests, `no_std` checks, repository validation, and `make ci`
       pass.
-- [ ] The completed task is committed, archived, pushed to `ra1mj/ESOP`, and the exact
+- [x] The completed task is committed, archived, pushed to `ra1mj/ESOP`, and the exact
       final commit passes GitHub Actions.
 
 ## Notes
@@ -98,3 +98,6 @@ qualification. Those remain separate release evidence.
 - Verification passed on 2026-09-27 with `cargo test -p esop-ethercat-core
   --all-features`, the focused lifecycle/ProcBuf/Linux quality tests,
   `make test-hil`, and full `make ci`.
+- The pushed implementation/archive/journal chain passed GitHub Actions quality run
+  `36321792882`; the checklist-only completion commit was then verified against its
+  own exact SHA.
