@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 49
+- **Total Sessions**: 50
 - **Last Active**: 2026-09-27
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1669 | Active |
+| `journal-1.md` | ~1703 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 50 | 2026-09-27 | ESC watchdog configuration and readback | `e7c8e8e7f1189ce273748afcc843f720926df713`, `52c5bc3df09269ffc84f821170b75596e19384ca` | `main` |
 | 49 | 2026-09-27 | SyncManager register bank discovery and clearing | `bacaa05`, `c6dfcaf` | `main` |
 | 48 | 2026-09-27 | FMMU register bank discovery and clearing | `3bba091`, `d866558` | `main` |
 | 47 | 2026-09-27 | SII FMMU usage descriptor verification | `0bd1d18c89df3fa50aef1fd658c6c15c9bcca3ef`, `a5b983a` | `main` |

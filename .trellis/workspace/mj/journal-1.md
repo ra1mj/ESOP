@@ -1667,3 +1667,37 @@ Added bounded ESC SyncManager register-bank discovery, atomic FMMU/SyncManager/S
 ### Next Steps
 
 - None - task complete
+
+
+## Session 50: ESC watchdog configuration and readback
+
+**Date**: 2026-09-27
+**Task**: ESC watchdog configuration and readback
+**Branch**: `main`
+
+### Summary
+
+Added strict product-owned ESC watchdog intent, bounded register write/readback verification, scheduler ordering and PREOP lifecycle gating; expanded deterministic cfggen artifacts and tests; passed local make ci and exact implementation-SHA GitHub Actions quality.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e7c8e8e7f1189ce273748afcc843f720926df713` | (see git log) |
+| `52c5bc3df09269ffc84f821170b75596e19384ca` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
