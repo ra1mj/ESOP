@@ -1633,3 +1633,37 @@ Added bounded ESC FMMU register-bank discovery, atomic Startup evidence, full-ba
 ### Next Steps
 
 - None - task complete
+
+
+## Session 49: SyncManager register bank discovery and clearing
+
+**Date**: 2026-09-27
+**Task**: SyncManager register bank discovery and clearing
+**Branch**: `main`
+
+### Summary
+
+Added bounded ESC SyncManager register-bank discovery, atomic FMMU/SyncManager/SII/DC Startup evidence, full SyncManager-then-FMMU bank clear/readback mapping qualification, production scheduler coverage, synchronized specifications and PRD evidence, and exact-SHA GitHub quality verification.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `bacaa05` | (see git log) |
+| `c6dfcaf` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
