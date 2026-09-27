@@ -1531,3 +1531,37 @@ Implemented generated topology-wide EtherCAT DC SYNC0/SYNC1 timing and common-ep
 ### Next Steps
 
 - None - task complete
+
+
+## Session 46: DC sync-window runtime monitoring
+
+**Date**: 2026-09-27
+**Task**: DC sync-window runtime monitoring
+**Branch**: `main`
+
+### Summary
+
+Implemented optional topology-wide EtherCAT DC 0x092c/4 runtime sync-window monitoring with atomic same-generation FRMW/BRD publication, exact WKC and index validation, lifecycle fail-closed gating, Linux simulated-port loss/recovery coverage, capability documentation, and successful local plus exact pushed-SHA GitHub quality gates.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `b91cfb021a8e2dd81dfbf7ba2bb91754adbb852c` | (see git log) |
+| `a4d57896b2cd65dc8336826dcda6da67cb3bc998` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
