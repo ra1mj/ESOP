@@ -1,6 +1,6 @@
-use crate::engine::RxDatagramConsumer;
+use crate::engine::{RxDatagramConsumer, RxWorkingCounterMismatch};
 use crate::rx_index::RxMatch;
-use crate::wire::DatagramHeader;
+use crate::wire::{Command, DatagramHeader};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DomainSegment {
@@ -23,6 +23,7 @@ impl DomainSegment {
 pub struct DomainQuality {
     pub expected_wkc: u16,
     pub actual_wkc: u16,
+    pub consecutive_wkc_mismatches: u16,
     pub valid: bool,
     pub complete: bool,
     pub last_valid_cycle: u64,
@@ -33,6 +34,7 @@ impl DomainQuality {
     pub const EMPTY: Self = Self {
         expected_wkc: 0,
         actual_wkc: 0,
+        consecutive_wkc_mismatches: 0,
         valid: false,
         complete: false,
         last_valid_cycle: 0,
@@ -72,6 +74,7 @@ pub struct Domain<const BYTES: usize, const SEGMENTS: usize> {
     received_mask: u64,
     staging_error: bool,
     actual_wkc: u16,
+    wkc_mismatch_seen: bool,
     quality: DomainQuality,
 }
 
@@ -90,6 +93,7 @@ impl<const BYTES: usize, const SEGMENTS: usize> Domain<BYTES, SEGMENTS> {
             received_mask: 0,
             staging_error: false,
             actual_wkc: 0,
+            wkc_mismatch_seen: false,
             quality: DomainQuality::EMPTY,
         }
     }
@@ -174,9 +178,40 @@ impl<const BYTES: usize, const SEGMENTS: usize> Domain<BYTES, SEGMENTS> {
         self.received_mask = 0;
         self.staging_error = false;
         self.actual_wkc = 0;
+        self.wkc_mismatch_seen = false;
         self.quality.complete = false;
         self.quality.actual_wkc = 0;
         Ok(())
+    }
+
+    fn record_working_counter_mismatch(
+        &mut self,
+        mismatch: RxWorkingCounterMismatch,
+        header: DatagramHeader,
+    ) -> bool {
+        if self.active_generation != Some(mismatch.generation) {
+            return false;
+        }
+        let Some(segment_index) = self.segments().iter().position(|segment| {
+            segment.datagram_index == header.index
+                && segment.expected_wkc == mismatch.expected_wkc
+                && segment.len == usize::from(header.length)
+                && u32::try_from(segment.input_offset)
+                    .ok()
+                    .and_then(|offset| self.logical_address.checked_add(offset))
+                    == Some(header.address)
+                && matches!(header.command, Command::Lrd | Command::Lrw)
+        }) else {
+            return false;
+        };
+        let bit = 1u64 << segment_index;
+        if self.received_mask & bit != 0 {
+            return false;
+        }
+        self.received_mask |= bit;
+        self.actual_wkc = self.actual_wkc.saturating_add(mismatch.actual_wkc);
+        self.wkc_mismatch_seen = true;
+        true
     }
 
     pub fn stage_datagram(
@@ -222,11 +257,18 @@ impl<const BYTES: usize, const SEGMENTS: usize> Domain<BYTES, SEGMENTS> {
             (1u64 << self.segment_count) - 1
         };
         let complete = !self.staging_error
+            && !self.wkc_mismatch_seen
             && self.received_mask == expected_mask
             && self.actual_wkc == self.expected_wkc;
 
         self.quality.actual_wkc = self.actual_wkc;
         self.quality.complete = complete;
+        if self.wkc_mismatch_seen {
+            self.quality.consecutive_wkc_mismatches =
+                self.quality.consecutive_wkc_mismatches.saturating_add(1);
+        } else {
+            self.quality.consecutive_wkc_mismatches = 0;
+        }
         self.active_generation = None;
         if complete {
             self.committed
@@ -250,6 +292,16 @@ impl<const BYTES: usize, const SEGMENTS: usize> Default for Domain<BYTES, SEGMEN
 }
 
 impl<const BYTES: usize, const SEGMENTS: usize> RxDatagramConsumer for Domain<BYTES, SEGMENTS> {
+    fn observe_working_counter_mismatch(
+        &mut self,
+        _: u64,
+        _: u64,
+        mismatch: RxWorkingCounterMismatch,
+        header: DatagramHeader,
+    ) {
+        self.record_working_counter_mismatch(mismatch, header);
+    }
+
     fn accept(
         &mut self,
         _: u64,
@@ -341,5 +393,95 @@ mod tests {
             Err(DomainError::DuplicateDatagram)
         );
         assert!(!domain.finish_receive(1, 1).unwrap());
+    }
+
+    #[test]
+    fn domain_tracks_explicit_wkc_mismatch_episodes_without_committing_payload() {
+        let mut domain = Domain::<2, 1>::new(0x1000);
+        domain
+            .add_segment(DomainSegment {
+                datagram_index: 1,
+                input_offset: 0,
+                len: 2,
+                expected_wkc: 2,
+            })
+            .unwrap();
+        let mismatch = |generation, actual_wkc| RxWorkingCounterMismatch {
+            slot_id: 0,
+            generation,
+            expected_wkc: 2,
+            actual_wkc,
+        };
+
+        domain.begin_receive(1).unwrap();
+        domain.observe_working_counter_mismatch(1, 10, mismatch(1, 1), header(1));
+        assert!(!domain.finish_receive(1, 1).unwrap());
+        assert_eq!(domain.input(), &[0, 0]);
+        assert_eq!(domain.quality().actual_wkc, 1);
+        assert_eq!(domain.quality().consecutive_wkc_mismatches, 1);
+
+        domain.begin_receive(2).unwrap();
+        domain.observe_working_counter_mismatch(2, 20, mismatch(2, 0), header(1));
+        domain.observe_working_counter_mismatch(2, 20, mismatch(2, 0), header(1));
+        assert!(!domain.finish_receive(2, 2).unwrap());
+        assert_eq!(domain.quality().actual_wkc, 0);
+        assert_eq!(domain.quality().consecutive_wkc_mismatches, 2);
+
+        domain.quality.consecutive_wkc_mismatches = u16::MAX;
+        domain.begin_receive(3).unwrap();
+        domain.observe_working_counter_mismatch(3, 30, mismatch(3, 1), header(1));
+        assert!(!domain.finish_receive(3, 3).unwrap());
+        assert_eq!(domain.quality().consecutive_wkc_mismatches, u16::MAX);
+
+        domain.begin_receive(4).unwrap();
+        assert!(!domain.finish_receive(4, 4).unwrap());
+        assert_eq!(domain.quality().consecutive_wkc_mismatches, 0);
+
+        domain.begin_receive(5).unwrap();
+        domain.stage_datagram(5, header(1), &[5, 6], 2).unwrap();
+        assert!(domain.finish_receive(5, 5).unwrap());
+        assert_eq!(domain.input(), &[5, 6]);
+        assert_eq!(domain.quality().consecutive_wkc_mismatches, 0);
+    }
+
+    #[test]
+    fn multiple_mismatched_segments_count_as_one_domain_episode() {
+        let mut domain = Domain::<4, 2>::new(0x1000);
+        for (datagram_index, input_offset) in [(1, 0), (2, 2)] {
+            domain
+                .add_segment(DomainSegment {
+                    datagram_index,
+                    input_offset,
+                    len: 2,
+                    expected_wkc: 1,
+                })
+                .unwrap();
+        }
+
+        domain.begin_receive(9).unwrap();
+        for (slot_id, index, address, actual_wkc) in [(0, 1, 0x1000, 1), (1, 2, 0x1002, 0)] {
+            domain.observe_working_counter_mismatch(
+                1,
+                10,
+                RxWorkingCounterMismatch {
+                    slot_id,
+                    generation: 9,
+                    expected_wkc: 1,
+                    actual_wkc,
+                },
+                DatagramHeader {
+                    command: Command::Lrw,
+                    index,
+                    address,
+                    length: 2,
+                    last: index == 2,
+                },
+            );
+        }
+
+        assert!(!domain.finish_receive(9, 1).unwrap());
+        assert_eq!(domain.input(), &[0; 4]);
+        assert_eq!(domain.quality().actual_wkc, 1);
+        assert_eq!(domain.quality().consecutive_wkc_mismatches, 1);
     }
 }

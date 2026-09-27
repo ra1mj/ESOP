@@ -83,7 +83,7 @@ pub use domain_registry::{
 };
 pub use engine::{
     CycleError, CycleReport, DmaReceiveCycle, EthercatMaster, MasterConfig, RxConsumerMux,
-    RxDatagramConsumer,
+    RxDatagramConsumer, RxWorkingCounterMismatch,
 };
 pub use fmmu_discovery::{
     FmmuRegisterBank, FmmuRegisterDescriptor, FmmuRegisterDiscoveryAction,

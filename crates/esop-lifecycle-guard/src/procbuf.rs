@@ -622,7 +622,7 @@ fn project_ethercat_diagnostics<const AXES: usize, const IO: usize, const DOMAIN
             actual_wkc: source.actual_wkc,
             valid: source.valid as u8,
             complete: source.complete as u8,
-            reserved: 0,
+            consecutive_wkc_mismatches: source.consecutive_wkc_mismatches,
             last_valid_cycle: source.last_valid_cycle,
             input_age_cycles: source
                 .input_age_cycles
@@ -1817,6 +1817,7 @@ mod tests {
             EthercatDomainQuality {
                 expected_wkc: 2,
                 actual_wkc: 2,
+                consecutive_wkc_mismatches: 3,
                 valid: true,
                 complete: true,
                 last_valid_cycle: 5,
@@ -1825,6 +1826,7 @@ mod tests {
             EthercatDomainQuality {
                 expected_wkc: 1,
                 actual_wkc: 1,
+                consecutive_wkc_mismatches: 1,
                 valid: true,
                 complete: true,
                 last_valid_cycle: 3,
@@ -1859,8 +1861,10 @@ mod tests {
         assert_eq!(state.quality.dc_offset_ns, 20);
         assert_eq!(state.ecat_time_ns, 100);
         assert_eq!(state.quality.domains[0].expected_wkc, 2);
+        assert_eq!(state.quality.domains[0].consecutive_wkc_mismatches, 3);
         assert_eq!(state.quality.domains[0].input_age_cycles, 0);
         assert_eq!(state.quality.domains[1].last_valid_cycle, 3);
+        assert_eq!(state.quality.domains[1].consecutive_wkc_mismatches, 1);
         assert_eq!(state.quality.domains[1].input_age_cycles, 2);
         assert_eq!(state.quality.al_state, 8);
         assert_eq!(state.quality.command_age_cycles, 9);
@@ -1962,6 +1966,7 @@ mod tests {
         let domains = [EthercatDomainQuality {
             expected_wkc: 1,
             actual_wkc: 1,
+            consecutive_wkc_mismatches: 0,
             valid: true,
             complete: true,
             last_valid_cycle: 5,

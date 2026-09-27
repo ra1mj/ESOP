@@ -9,6 +9,14 @@ use crate::rx_index::{
 };
 use crate::wire::{DatagramHeader, FrameBuilder, FrameView, MAX_ETHERNET_FRAME_LEN, WireError};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RxWorkingCounterMismatch {
+    pub slot_id: u16,
+    pub generation: u16,
+    pub expected_wkc: u16,
+    pub actual_wkc: u16,
+}
+
 pub trait RxDatagramConsumer {
     /// Authorize a response for an expectation armed by an earlier cyclic
     /// generation. The default keeps Domain/DC traffic strictly bound to the
@@ -17,6 +25,19 @@ pub trait RxDatagramConsumer {
     /// in flight.
     fn accepts_prior_generation(&self, _: u8, _: u16, _: u16, _: u16) -> bool {
         false
+    }
+
+    /// Observe a datagram that matched its armed expectation except for WKC.
+    /// The default keeps non-Domain consumers source-compatible. Consumers
+    /// must still verify their own generation and datagram ownership before
+    /// updating diagnostics.
+    fn observe_working_counter_mismatch(
+        &mut self,
+        _: u64,
+        _: u64,
+        _: RxWorkingCounterMismatch,
+        _: DatagramHeader,
+    ) {
     }
 
     /// Returns false when a verified RX datagram cannot be consumed by the
@@ -49,6 +70,16 @@ impl<T: RxDatagramConsumer + ?Sized> RxDatagramConsumer for &mut T {
         current_generation: u16,
     ) -> bool {
         (**self).accepts_prior_generation(index, slot_id, expected_generation, current_generation)
+    }
+
+    fn observe_working_counter_mismatch(
+        &mut self,
+        cycle: u64,
+        received_at_ns: u64,
+        mismatch: RxWorkingCounterMismatch,
+        header: DatagramHeader,
+    ) {
+        (**self).observe_working_counter_mismatch(cycle, received_at_ns, mismatch, header);
     }
 
     fn accept(
@@ -117,6 +148,19 @@ impl<FIRST: RxDatagramConsumer, SECOND: RxDatagramConsumer> RxDatagramConsumer
                 expected_generation,
                 current_generation,
             )
+    }
+
+    fn observe_working_counter_mismatch(
+        &mut self,
+        cycle: u64,
+        received_at_ns: u64,
+        mismatch: RxWorkingCounterMismatch,
+        header: DatagramHeader,
+    ) {
+        self.first
+            .observe_working_counter_mismatch(cycle, received_at_ns, mismatch, header);
+        self.second
+            .observe_working_counter_mismatch(cycle, received_at_ns, mismatch, header);
     }
 
     fn accept(
@@ -962,6 +1006,17 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
                 }
                 Err(RxIndexError::WorkingCounterMismatch) => {
                     report.wkc_mismatches += 1;
+                    consumer.observe_working_counter_mismatch(
+                        cycle,
+                        received_at_ns,
+                        RxWorkingCounterMismatch {
+                            slot_id: entry.slot_id,
+                            generation: entry.generation,
+                            expected_wkc: entry.expected_wkc,
+                            actual_wkc: datagram.working_counter,
+                        },
+                        datagram.header,
+                    );
                     self.diagnostics.record(EventRecord::new(
                         cycle,
                         received_at_ns,

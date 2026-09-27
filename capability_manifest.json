@@ -15,6 +15,24 @@
       "limitation": "Real slave interoperability, target MAC ports and long-duration HIL remain open"
     },
     {
+      "id": "ethercat_domain_wkc_qualification",
+      "status": "implemented",
+      "scope": "Allocation-free exact post-validation WKC mismatch observation, fixed-index attribution to the owning due Domain, actual-WKC retention, saturating consecutive mismatch diagnostics, no-partial-commit behavior, fail-closed lifecycle projection and ProcBuf ABI v7 exposure",
+      "evidence": [
+        "crates/esop-ethercat-core/src/engine.rs",
+        "crates/esop-ethercat-core/src/domain.rs",
+        "crates/esop-ethercat-core/src/scheduled_domains.rs",
+        "crates/esop-ethercat-core/tests/cycle.rs",
+        "crates/esop-lifecycle-guard/src/ethercat.rs",
+        "crates/esop-lifecycle-guard/src/procbuf.rs",
+        "crates/esop-procbuf/src/lib.rs",
+        "docs/ethercat-master-requirements.md",
+        "docs/esop-software-prd.md",
+        ".trellis/spec/backend/quality-guidelines.md"
+      ],
+      "limitation": "Deterministic software tests prove exact mismatch attribution and lifecycle behavior for caller-delivered or simulated frames. Physical response provenance, real-slave full-period WKC behavior, interoperability, target timing/WCET, long-duration operation, HIL, ETG conformance and functional-safety qualification remain open"
+    },
+    {
       "id": "ethercat_dc_capability_discovery",
       "status": "implemented",
       "scope": "Allocation-free exact 12-byte ESC base-register decoding, Features Supported projection, 32/64-bit DC System Time probing with explicit WKC 0/1 policy, exact four-port DC receive-time and Data Link Status acquisition, fixed-capacity physical topology projection, checked reference-relative propagation-delay evidence, generated per-slave DC requirements, and transactional pre-SII/AL reference/topology selection",
@@ -160,7 +178,7 @@
     {
       "id": "product_config_generator",
       "status": "implemented",
-      "scope": "Deterministic host-only esop.product.v1 and bounded ESI-subset compilation into static C/Rust, normalized Domain/PDO/Frame Plan, per-slave CoE mailbox plus independent Complete Access and SDO Information capability/authorization, deterministic selected-PDO object metadata expectations, optional raw ESC watchdog intent, fixed-capacity ordered ESI FMMU usage plus structural SII SM evidence, ESM timeout, OpOnly, explicit DC System Time/reference-clock policy, selected ESI DC OpMode descriptors and resolved absolute DC SYNC timing, device inventory, exact ProcBuf v6 layout and fail-closed build input",
+      "scope": "Deterministic host-only esop.product.v1 and bounded ESI-subset compilation into static C/Rust, normalized Domain/PDO/Frame Plan, per-slave CoE mailbox plus independent Complete Access and SDO Information capability/authorization, deterministic selected-PDO object metadata expectations, optional raw ESC watchdog intent, fixed-capacity ordered ESI FMMU usage plus structural SII SM evidence, ESM timeout, OpOnly, explicit DC System Time/reference-clock policy, selected ESI DC OpMode descriptors and resolved absolute DC SYNC timing, device inventory, exact ProcBuf v7 layout and fail-closed build input",
       "evidence": [
         "crates/esop-cfggen/src/lib.rs",
         "crates/esop-cfggen/src/generator.rs",
@@ -238,7 +256,7 @@
     {
       "id": "product_runtime_attachment",
       "status": "implemented",
-      "scope": "Allocation-free no_std activation of generated Rust product configuration with exact hash, ProcBuf v6, observed topology, Domain/PDO/datagram/WKC, schedule/frame-plan, per-slave ESM timeout, OpOnly, mailbox, validated typed Complete Access policy, validated product-gated SDO Information policy and expectation slices, optional ESC watchdog, ordered FMMU usage, schema-v2 structural SII and selected DC mode startup profiles, ordered watchdog and resolved DC SYNC plans, CiA 402 map and axis-policy validation plus deterministic all-slave PDO batch construction",
+      "scope": "Allocation-free no_std activation of generated Rust product configuration with exact hash, ProcBuf v7, observed topology, Domain/PDO/datagram/WKC, schedule/frame-plan, per-slave ESM timeout, OpOnly, mailbox, validated typed Complete Access policy, validated product-gated SDO Information policy and expectation slices, optional ESC watchdog, ordered FMMU usage, schema-v2 structural SII and selected DC mode startup profiles, ordered watchdog and resolved DC SYNC plans, CiA 402 map and axis-policy validation plus deterministic all-slave PDO batch construction",
       "evidence": [
         "crates/esop-product-config/src/lib.rs",
         "crates/esop-product-config/tests/generated_product.rs",
@@ -262,7 +280,7 @@
         "crates/esop-product-config/tests/generated_product.rs",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Deterministic simulation proves ordered multi-job advancement, scheduler/mailbox ownership, exact response routing and whole-batch PREOP-barrier release only; Startup SII layout comparison does not authenticate physical responses, while full-period WKC, device interoperability, target timing and HIL remain open"
+      "limitation": "Deterministic simulation proves ordered multi-job advancement, scheduler/mailbox ownership, exact response routing and whole-batch PREOP-barrier release only; Startup SII layout comparison does not authenticate physical responses, while real-slave full-period WKC qualification, device interoperability, target timing and HIL remain open"
     },
     {
       "id": "ethercat_al_activation_barrier",
@@ -276,7 +294,7 @@
         "docs/ethercat-master-requirements.md",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Software simulation proves state ordering, bounded request ownership, actual-controller Complete gating and lifecycle projection only; generated complete mapping/SYNC policy, full-period process-data WKC, physical response authenticity, interoperability, target WCET and HIL remain open"
+      "limitation": "Software simulation proves state ordering, bounded request ownership, actual-controller Complete gating and lifecycle projection only; generated complete mapping/SYNC policy, real-slave full-period process-data WKC qualification, physical response authenticity, interoperability, target WCET and HIL remain open"
     },
     {
       "id": "ethercat_al_error_acknowledgement",
@@ -340,7 +358,7 @@
     {
       "id": "procbuf_cia402_execution",
       "status": "implemented",
-      "scope": "Allocation-free ProcBuf v6 CSP/CSV/CST command validation, exact lifecycle-permit binding, deterministic SI-to-raw conversion, enable-edge actual hold and transactional CiA 402 PDO submission",
+      "scope": "Allocation-free ProcBuf v7 CSP/CSV/CST command validation, exact lifecycle-permit binding, deterministic SI-to-raw conversion, enable-edge actual hold and transactional CiA 402 PDO submission",
       "evidence": [
         "crates/esop-procbuf/src/lib.rs",
         "crates/esop-lifecycle-guard/src/procbuf.rs",
@@ -353,7 +371,7 @@
     {
       "id": "cia402_procbuf_feedback",
       "status": "implemented",
-      "scope": "Allocation-free verified CiA 402 PDO feedback projection into ProcBuf v6 State with bidirectional frozen axis scaling, drive error code, field-level freshness, accepted-Controlword truth and additive Protobuf exposure",
+      "scope": "Allocation-free verified CiA 402 PDO feedback projection into ProcBuf v7 State with bidirectional frozen axis scaling, drive error code, field-level freshness, accepted-Controlword truth and additive Protobuf exposure",
       "evidence": [
         "crates/esop-profile-cia402/src/pdo.rs",
         "crates/esop-lifecycle-guard/src/procbuf.rs",
@@ -392,7 +410,7 @@
     {
       "id": "procbuf_abi",
       "status": "implemented",
-      "scope": "ProcBuf ABI v6 fixed-layout command/state pages with complete command permit identity, per-axis CiA 402 feedback/error/quality, lifecycle history and event ring",
+      "scope": "ProcBuf ABI v7 fixed-layout command/state pages with complete command permit identity, per-Domain consecutive WKC mismatch diagnostics, per-axis CiA 402 feedback/error/quality, lifecycle history and event ring",
       "evidence": [
         "crates/esop-procbuf/src/lib.rs",
         "crates/esop-procbuf/tests/cross_layer.rs"

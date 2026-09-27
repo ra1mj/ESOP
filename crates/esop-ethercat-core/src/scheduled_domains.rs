@@ -5,7 +5,10 @@ use crate::control::{
 };
 use crate::dc::{DcCyclicError, DcCyclicSync};
 use crate::domain::{Domain, DomainError, DomainQuality, DomainSegment};
-use crate::engine::{CycleError, CycleReport, EthercatMaster, RxConsumerMux, RxDatagramConsumer};
+use crate::engine::{
+    CycleError, CycleReport, EthercatMaster, RxConsumerMux, RxDatagramConsumer,
+    RxWorkingCounterMismatch,
+};
 use crate::frame_pool::FramePoolError;
 use crate::mailbox::{
     MailboxController, MailboxError, MailboxMappedStatusBit, MailboxMappedStatusObservation,
@@ -1780,6 +1783,31 @@ fn submit_dc_frame<
 impl<const DOMAINS: usize, const SLOTS: usize> RxDatagramConsumer
     for ScheduledDomainBank<'_, DOMAINS, SLOTS>
 {
+    fn observe_working_counter_mismatch(
+        &mut self,
+        cycle: u64,
+        received_at_ns: u64,
+        mismatch: RxWorkingCounterMismatch,
+        header: DatagramHeader,
+    ) {
+        let Some((active_cycle, generation, due_mask)) = self.active else {
+            return;
+        };
+        if cycle != active_cycle || mismatch.generation != generation {
+            return;
+        }
+        let owner = self.index_owner[header.index as usize];
+        if owner == 0 {
+            return;
+        }
+        let entry = &mut self.domains[(owner - 1) as usize];
+        if due_mask & (1u64 << entry.id) != 0 {
+            entry
+                .domain
+                .observe_working_counter_mismatch(cycle, received_at_ns, mismatch, header);
+        }
+    }
+
     fn accept(
         &mut self,
         cycle: u64,
@@ -2043,6 +2071,108 @@ mod tests {
         assert!(!qualities[1].valid);
         assert!(!qualities[1].complete);
         assert_eq!(qualities[1].last_valid_cycle, 1);
+    }
+
+    #[test]
+    fn scheduled_wkc_mismatch_updates_only_the_owning_due_domain() {
+        let schedule = ScheduleTable::<2, 2>::build(
+            100_000,
+            &[
+                ScheduleDomain {
+                    id: 9,
+                    period_ticks: 1,
+                    phase_ticks: 0,
+                },
+                ScheduleDomain {
+                    id: 10,
+                    period_ticks: 2,
+                    phase_ticks: 0,
+                },
+            ],
+        )
+        .unwrap();
+        let mut first = domain::<2>(12);
+        let mut second = domain::<1>(13);
+        let mut bank = ScheduledDomainBank::new(
+            &schedule,
+            [
+                ScheduledDomainEntry {
+                    id: 9,
+                    domain: &mut first,
+                },
+                ScheduledDomainEntry {
+                    id: 10,
+                    domain: &mut second,
+                },
+            ],
+        )
+        .unwrap();
+        let mismatch = |index, generation| {
+            (
+                RxWorkingCounterMismatch {
+                    slot_id: 0,
+                    generation,
+                    expected_wkc: 1,
+                    actual_wkc: 0,
+                },
+                DatagramHeader {
+                    command: Command::Lrw,
+                    index,
+                    address: 0x1000 + u32::from(index),
+                    length: if index == 12 { 2 } else { 1 },
+                    last: true,
+                },
+            )
+        };
+
+        bank.begin_due(1, 1).unwrap();
+        let (evidence, header) = mismatch(13, 1);
+        bank.observe_working_counter_mismatch(1, 100, evidence, header);
+        let (foreign, header) = mismatch(14, 1);
+        bank.observe_working_counter_mismatch(1, 100, foreign, header);
+        assert!(bank.accept(
+            1,
+            100,
+            RxMatch {
+                slot_id: 0,
+                generation: 1,
+                working_counter: 1,
+            },
+            DatagramHeader {
+                command: Command::Lrw,
+                index: 12,
+                address: 0x100c,
+                length: 2,
+                last: true,
+            },
+            &[1, 2],
+        ));
+        let qualities = bank.finish_due(1, 1).unwrap();
+        assert_eq!(qualities[0].consecutive_wkc_mismatches, 0);
+        assert_eq!(qualities[1].consecutive_wkc_mismatches, 1);
+
+        bank.begin_due(2, 2).unwrap();
+        let (non_due, header) = mismatch(13, 2);
+        bank.observe_working_counter_mismatch(2, 200, non_due, header);
+        assert!(bank.accept(
+            2,
+            200,
+            RxMatch {
+                slot_id: 0,
+                generation: 2,
+                working_counter: 1,
+            },
+            DatagramHeader {
+                command: Command::Lrw,
+                index: 12,
+                address: 0x100c,
+                length: 2,
+                last: true,
+            },
+            &[3, 4],
+        ));
+        let qualities = bank.finish_due(2, 2).unwrap();
+        assert_eq!(qualities[1].consecutive_wkc_mismatches, 1);
     }
 
     #[test]

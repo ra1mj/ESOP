@@ -33,9 +33,9 @@ typedef struct { const char *name; uint8_t index; uint16_t slave_position; int8_
 #define ESOP_SDO_INFORMATION_STORAGE_COUNT (ESOP_SDO_INFORMATION_COUNT ? ESOP_SDO_INFORMATION_COUNT : 1u)
 #define ESOP_AXIS_STORAGE_COUNT (ESOP_AXIS_COUNT ? ESOP_AXIS_COUNT : 1u)
 
-static const uint16_t esop_procbuf_abi_version = 6u;
+static const uint16_t esop_procbuf_abi_version = 7u;
 static const uint32_t esop_procbuf_region_bytes = 4144u;
-static const uint64_t esop_procbuf_layout_hash = UINT64_C(0x9f41a7c67a7a6376);
+static const uint64_t esop_procbuf_layout_hash = UINT64_C(0xf6f9d227084b3edf);
 
 static const esop_slave_config_t esop_slaves[ESOP_SLAVE_STORAGE_COUNT] = {
   {"drive_left", 0u, UINT16_C(0x1001), 0u, 1u, UINT32_C(0x0000e500), UINT32_C(0x00004020), UINT32_C(0x00000001), UINT32_C(0x00000001), 1u, 1u, 1u, "DcSync", 1u, UINT32_C(1000000), INT32_C(0), INT32_C(0), INT16_C(0), UINT16_C(0x0300), INT16_C(1), 1u, UINT32_C(1000000), UINT32_C(0), INT32_C(0), UINT16_C(0x0300), UINT16_C(0x1000), UINT16_C(64), UINT16_C(0x1100), UINT16_C(64), 0u, UINT8_C(0x26), 1u, UINT8_C(0x22), 1u, UINT16_C(0x080d), UINT8_C(0x08), 1u, 4u, UINT16_C(0x000f), 3u, {1u, 2u, 3u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u}, 1u, 1u, UINT16_C(2500), 1u, UINT16_C(100), 1u, 1u, 1u, 1u, 0u, 7u},

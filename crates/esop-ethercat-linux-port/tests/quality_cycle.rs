@@ -157,6 +157,10 @@ fn received_domain_and_dc_drive_guard_and_published_quality() {
             published.quality.domains[0].actual_wkc,
             u16::from(generation == 7)
         );
+        assert_eq!(
+            published.quality.domains[0].consecutive_wkc_mismatches,
+            u16::from(generation == 8)
+        );
         assert_eq!(published.quality.domains[0].valid, facts.domain_valid as u8);
         if generation == 7 {
             assert_eq!(action, LifecycleAction::EnableAllowed);

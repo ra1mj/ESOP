@@ -8,9 +8,10 @@ use esop_ethercat_core::{
     Domain, DomainSegment, ESC_FEATURE_DC_SUPPORTED, EscDcRange, EthercatDmaTxPort, EthercatMaster,
     EthercatPort, EthercatState, EventCode, ExpectedSlave, FrameHandle, FramePlan, LinkState,
     MAX_MAILBOX_BYTES, MailboxConfig, MailboxController, MailboxHeader, MailboxProtocol,
-    MasterConfig, NoopDmaCache, PortError, RegisterOperation, RxExpectation, RxPoll, RxSlotState,
-    RxWorkingCounterPolicy, ScanDcCapabilities, ScanPortLink, ScanRecord, SdoAccess,
-    SdoAccessPolicy, SdoInformationExpectation, SdoInformationPolicy, SdoInformationRequiredAccess,
+    MasterConfig, NoopDmaCache, PortError, RegisterOperation, RxDatagramConsumer, RxExpectation,
+    RxMatch, RxPoll, RxSlotState, RxWorkingCounterMismatch, RxWorkingCounterPolicy,
+    ScanDcCapabilities, ScanPortLink, ScanRecord, SdoAccess, SdoAccessPolicy,
+    SdoInformationExpectation, SdoInformationPolicy, SdoInformationRequiredAccess,
     SdoInformationVerifier, SdoInformationVerifierProgress, SdoProgress, SdoTransfer,
     SlaveIdentity, StartupConfig, StartupController, StartupProgress,
 };
@@ -158,6 +159,28 @@ impl EthercatPort for QueuedPort {
 
 struct BadFramePort {
     polls: usize,
+}
+
+#[derive(Default)]
+struct WkcObserver {
+    observed: Option<(u64, u64, RxWorkingCounterMismatch, DatagramHeader)>,
+}
+
+impl RxDatagramConsumer for WkcObserver {
+    fn observe_working_counter_mismatch(
+        &mut self,
+        cycle: u64,
+        received_at_ns: u64,
+        mismatch: RxWorkingCounterMismatch,
+        header: DatagramHeader,
+    ) {
+        assert!(self.observed.is_none());
+        self.observed = Some((cycle, received_at_ns, mismatch, header));
+    }
+
+    fn accept(&mut self, _: u64, _: u64, _: RxMatch, _: DatagramHeader, _: &[u8]) -> bool {
+        true
+    }
 }
 
 impl EthercatPort for BadFramePort {
@@ -797,9 +820,32 @@ fn wkc_failure_is_reported_and_index_can_be_rearmed() {
     let mut port = MockPort::new(0);
     master.submit_frame(&mut port, handle).unwrap();
     let mut scratch = [0; MTU];
-    let report = master.cycle_receive(&mut port, &mut scratch, 42).unwrap();
+    let mut observer = WkcObserver::default();
+    let report = master
+        .cycle_receive_with_consumer(&mut port, &mut scratch, 42, &mut observer)
+        .unwrap();
 
     assert_eq!(report.wkc_mismatches, 1);
+    assert_eq!(
+        observer.observed,
+        Some((
+            1,
+            0,
+            RxWorkingCounterMismatch {
+                slot_id: handle.index() as u16,
+                generation: 42,
+                expected_wkc: 1,
+                actual_wkc: 0,
+            },
+            DatagramHeader {
+                command: Command::Lrw,
+                index,
+                address: 0x1000,
+                length: 3,
+                last: true,
+            },
+        ))
+    );
     assert_eq!(master.rx_entry(index).state, RxSlotState::Empty);
     let event = master.diagnostics().pop().unwrap();
     assert_eq!(event.code, EventCode::WorkingCounterMismatch);
@@ -820,6 +866,29 @@ fn wkc_failure_is_reported_and_index_can_be_rearmed() {
             },
         )
         .unwrap();
+}
+
+#[test]
+fn non_wkc_validation_failure_does_not_emit_wkc_observation() {
+    let config = MasterConfig::new([0xFF; 6], [1, 2, 3, 4, 5, 6]);
+    let mut master = EthercatMaster::<2, MTU>::new(config);
+    arm_response(&mut master, 64, 42, 2);
+
+    let mut bytes = [0; MTU];
+    let mut builder = FrameBuilder::new(&mut bytes, [0xFF; 6], [1, 2, 3, 4, 5, 6]).unwrap();
+    builder.push(Command::Lrd, 64, 0x1001, &[1, 2]).unwrap();
+    let len = builder.finish().unwrap();
+    let wkc_offset = ETHERNET_HEADER_LEN + ETHERCAT_FRAME_HEADER_LEN + DATAGRAM_HEADER_LEN + 2;
+    bytes[wkc_offset..wkc_offset + 2].copy_from_slice(&0u16.to_le_bytes());
+
+    let mut observer = WkcObserver::default();
+    let mut receive = master.begin_dma_receive_cycle(0, 42);
+    receive.consume_frame(&bytes[..len], 1, &mut observer);
+    let report = receive.finish(1);
+
+    assert_eq!(report.wkc_mismatches, 0);
+    assert_eq!(report.corrupt_frames, 1);
+    assert_eq!(observer.observed, None);
 }
 
 #[test]

@@ -195,7 +195,7 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   must reset the planners and latch every later cycle in that sequence to the
   default Disable/QuickStop path; a new transition sequence clears that latch.
   An active-frame failure that creates the stop sequence must enter the same
-  latched fallback path. ProcBuf v6 carries per-axis requested and issued
+  latched fallback path. ProcBuf v7 carries per-axis requested and issued
   actions plus fresh, quality-checked feedback proof bits. Use the controlled
   evidence projector only for an accepted controlled frame so an enabled
   Hold/Ramp target is recorded as the policy action and its terminal Disable
@@ -263,9 +263,15 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   reuse previous-cycle lock evidence. Decode only the lower 31-bit aggregate
   magnitude; never claim per-slave attribution or automatic clock correction.
 - For ProcBuf diagnostics, keep Domain slot order and the due mask aligned with
-  the frozen schedule. Project every configured Domain's WKC and age, but only
-  qualify scheduled Domains as current; do not overwrite AL, command, or
-  fault facts owned by other producers.
+  the frozen schedule. Project every configured Domain's WKC, consecutive
+  explicit WKC mismatch count, and age, but only qualify scheduled Domains as
+  current; do not overwrite AL, command, or fault facts owned by other
+  producers. A mismatch observation is valid only after deadline, generation,
+  address, size, and command checks pass. Route it by the fixed datagram-index
+  owner, increment at most once per due Domain cycle, retain actual WKC without
+  committing payload, reset the streak on a due non-WKC result, and preserve it
+  on non-due cycles. The count is diagnostic only and cannot weaken the current
+  cycle's fail-closed WKC gate.
 - For multi-rate MLG projection, bind each Domain quality snapshot to its
   frozen schedule ID and derive the due tick from master cycle 1 = schedule
   tick 0. An idle tick may reuse only the last successfully scheduled sample
@@ -470,11 +476,126 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   build/performance validators; never treat simulator tests, placeholder target
   data, or a structurally valid manifest as product qualification.
 
+## Scenario: Per-Domain Cyclic WKC Mismatch Qualification
+
+### 1. Scope / Trigger
+
+- Trigger: changing cyclic RX validation, Domain receive staging, scheduled
+  Domain routing, per-Domain ProcBuf quality, or lifecycle WKC qualification.
+- Scope: deterministic software attribution after all non-WKC checks pass.
+  Physical response provenance, real-slave full-period behavior, WCET,
+  interoperability, HIL, ETG conformance, and functional-safety qualification
+  remain separate evidence.
+
+### 2. Signatures
+
+```rust
+pub struct RxWorkingCounterMismatch {
+    pub slot_id: u16,
+    pub generation: u16,
+    pub expected_wkc: u16,
+    pub actual_wkc: u16,
+}
+
+pub trait RxDatagramConsumer {
+    fn observe_working_counter_mismatch(
+        &mut self,
+        cycle: u64,
+        received_at_ns: u64,
+        mismatch: RxWorkingCounterMismatch,
+        header: DatagramHeader,
+    ) { }
+}
+
+pub struct DomainQuality {
+    pub expected_wkc: u16,
+    pub actual_wkc: u16,
+    pub consecutive_wkc_mismatches: u16,
+    // existing validity, completion, and age fields
+}
+```
+
+ProcBuf ABI v7 reuses the prior two-byte per-Domain reserved range as
+`consecutive_wkc_mismatches`; its record size and offsets stay fixed, but v6
+headers are rejected and the layout hash changes.
+
+### 3. Contracts
+
+- Emit the observer only from the exact WKC mismatch branch after deadline,
+  generation, command, address, and payload-length validation succeeded.
+- A consumer rechecks its active generation and index ownership. Scheduled
+  multi-Domain routing uses the frozen 256-entry index-owner table and forwards
+  only to the owning due Domain; control and foreign indices do not mutate it.
+- A due Domain cycle with one or more explicit mismatches sums observed actual
+  WKC with saturation, increments the persistent `u16` streak once with
+  saturation, and never commits staged process input.
+- A due cycle with no explicit mismatch resets the streak, including success,
+  timeout, missing response, malformed input, late input, or another receive
+  failure. A non-due cycle preserves the previous streak.
+- Lifecycle qualification continues to use current-cycle completeness and WKC.
+  The streak is diagnostic only and is never a permissive threshold.
+
+### 4. Validation & Error Matrix
+
+- Non-WKC RX validation failure -> no mismatch observer; normal RX error path.
+- Inactive or wrong Domain generation -> ignore observation; no quality change.
+- Foreign/control/non-due index -> ignore observation; no quality change.
+- Duplicate evidence for one Domain segment -> ignore duplicate actual WKC.
+- One or more owned mismatches in a due cycle -> reject commit, publish summed
+  actual WKC, increment the streak once.
+- Due cycle without explicit mismatch -> reset the streak to zero.
+- ProcBuf v1-v6 header -> reject attachment as an ABI version mismatch.
+
+### 5. Good/Base/Bad Cases
+
+- Good: two owned cyclic datagrams both fail only WKC; actual WKC is summed,
+  the Domain streak increases by one, and the previous input image remains.
+- Base: the Domain is not scheduled this tick; no receive window opens and the
+  prior streak remains unchanged.
+- Bad: a caller treats ten historical mismatches as permission to accept a
+  current bad WKC, or attributes a control datagram's WKC to a Domain.
+
+### 6. Tests Required
+
+- Engine integration asserts exact cycle, timestamp, slot, generation,
+  expected/actual WKC, and header, plus no callback for a non-WKC failure.
+- Domain unit tests cover multiple mismatched segments as one episode, actual
+  WKC retention, no commit, saturation, good/other-failure reset, and duplicate
+  evidence handling.
+- Scheduled tests cover owner-only updates, foreign/control rejection, and
+  non-due preservation.
+- Linux simulation proves engine -> consumer mux -> Domain -> lifecycle ->
+  ProcBuf projection and current-cycle fail-closed behavior.
+- ProcBuf tests assert ABI v7, stable per-Domain record size/offsets, a changed
+  layout hash, exact projection, and v6 rejection.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```rust
+if datagram.working_counter != expected_wkc {
+    domains[0].consecutive_wkc_mismatches += 1;
+}
+let wkc_valid = domain.consecutive_wkc_mismatches < policy_limit;
+```
+
+#### Correct
+
+```rust
+if matches!(validation, Err(RxIndexError::WorkingCounterMismatch)) {
+    consumer.observe_working_counter_mismatch(cycle, now, evidence, header);
+}
+let wkc_valid = report.wkc_mismatches == 0
+    && domain.complete
+    && domain.actual_wkc == domain.expected_wkc;
+```
+
 ## Scenario: ProcBuf SI Command Execution Through CiA 402
 
 ### 1. Scope / Trigger
 
-- Trigger: adding or changing the real-time path that converts a ProcBuf v6
+- Trigger: adding or changing the real-time path that converts a ProcBuf v7
   CSP, CSV, or CST command into a lifecycle-qualified EtherCAT output.
 - Scope: allocation-free software validation, deterministic SI-to-raw
   conversion, enable-edge target selection, and transactional PDO submission.
@@ -770,8 +891,8 @@ submit_prepared_active_frame(
   when `ScheduledDomainBank` confirms its underlying RX evidence.
 - Qualification boundary: callers start one immutable batch and still supply
   MailboxConfig plus mapping/DC descriptors. Simulation does not discover
-  those values or prove physical response authenticity, full-period WKC,
-  device interoperability, WCET, or HIL.
+  those values or prove physical response authenticity, real-slave full-period
+  WKC qualification, device interoperability, WCET, or HIL.
 
 ### 7. Wrong vs Correct
 
@@ -2040,8 +2161,9 @@ from actual hosted fault injection and performance claims.
   and non-negative velocity/torque limits. It builds authority fields only from
   the returned permit, binds robot/boot/layout/capacity, leaves unselected and
   IO slots empty, and keeps publication separately retryable.
-- ProcBuf ABI v6 carries permit `policy_version`, per-axis CiA 402 error code,
-  and field-level feedback quality; v1-v5 attachments are rejected. RT feedback
+- ProcBuf ABI v7 carries permit `policy_version`, per-Domain consecutive WKC
+  mismatch diagnostics, per-axis CiA 402 error code, and field-level feedback
+  quality; v1-v6 attachments are rejected. RT feedback
   projection must retain stale values with all axis quality bits clear, update
   Controlword only from an accepted frame, and stage every axis before publish.
   RT consumers reconstruct permits only from a command returned by

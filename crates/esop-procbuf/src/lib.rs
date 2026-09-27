@@ -13,7 +13,7 @@ use core::mem::size_of;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 pub const ABI_MAGIC: u32 = 0x4553_4F50;
-pub const ABI_VERSION: u16 = 6;
+pub const ABI_VERSION: u16 = 7;
 
 const PAGE_FREE: u32 = 0;
 const PAGE_WRITING: u32 = 1;
@@ -398,7 +398,7 @@ pub struct DomainQuality {
     pub actual_wkc: u16,
     pub valid: u8,
     pub complete: u8,
-    pub reserved: u16,
+    pub consecutive_wkc_mismatches: u16,
     pub last_valid_cycle: u64,
     pub input_age_cycles: u64,
 }
@@ -409,7 +409,7 @@ impl DomainQuality {
         actual_wkc: 0,
         valid: 0,
         complete: 0,
-        reserved: 0,
+        consecutive_wkc_mismatches: 0,
         last_valid_cycle: 0,
         input_age_cycles: 0,
     };
@@ -1076,7 +1076,7 @@ impl<const AXES: usize, const IO: usize, const DOMAINS: usize, const EVENTS: usi
 /// Calculate the exact fixed ABI shape for runtime-selected capacities.
 ///
 /// This follows Rust's `repr(C)` field layout rules and is tested against the
-/// const-generic ABI types. It does not allocate and does not change ABI v6.
+/// const-generic ABI types. It does not allocate and describes ABI v7.
 pub fn describe_layout(
     dimensions: ProcBufDimensions,
 ) -> Result<ProcBufLayoutDescriptor, ProcBufLayoutError> {
@@ -1235,7 +1235,7 @@ mod tests {
         let buffer = TestBuf::new(42, 9);
         assert_eq!(buffer.validate_header(42, 9), Ok(()));
         assert_eq!(buffer.header().abi_version, ABI_VERSION);
-        for version in [1, 2, 3, 4, 5] {
+        for version in [1, 2, 3, 4, 5, 6] {
             let mut previous_abi = buffer.header();
             previous_abi.abi_version = version;
             assert_eq!(
@@ -1301,6 +1301,18 @@ mod tests {
 
     #[test]
     fn runtime_layout_matches_const_generic_abi_shapes() {
+        assert_eq!(ABI_VERSION, 7);
+        assert_eq!(size_of::<DomainQuality>(), 24);
+        assert_eq!(core::mem::offset_of!(DomainQuality, expected_wkc), 0);
+        assert_eq!(core::mem::offset_of!(DomainQuality, actual_wkc), 2);
+        assert_eq!(core::mem::offset_of!(DomainQuality, valid), 4);
+        assert_eq!(core::mem::offset_of!(DomainQuality, complete), 5);
+        assert_eq!(
+            core::mem::offset_of!(DomainQuality, consecutive_wkc_mismatches),
+            6
+        );
+        assert_eq!(core::mem::offset_of!(DomainQuality, last_valid_cycle), 8);
+        assert_eq!(core::mem::offset_of!(DomainQuality, input_age_cycles), 16);
         assert_runtime_layout::<0, 0, 0, 1>();
         assert_runtime_layout::<2, 1, 2, 2>();
         assert_runtime_layout::<8, 32, 4, 64>();

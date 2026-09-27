@@ -97,7 +97,7 @@ position 把该物理 bit 3 作为一位读 FMMU 打包到所属 Domain 的输�
 | `esop_product_config.rs` | 可直接编入 `no_std` 固件的静态产品合同、类型化 SDO Information 期望与 32-byte 配置 hash。 |
 | `product_config.json` | 规范化后的产品、注册、Frame Plan、schedule、SDO Information 期望和配置 hash。 |
 | `device_inventory.json` | ESI identity、选择的 PDO、CoE capability/授权/期望和语义化 ESI SHA-256。 |
-| `procbuf_layout.json` | ProcBuf ABI v6、维度、精确字节数和 layout hash。 |
+| `procbuf_layout.json` | ProcBuf ABI v7、维度、精确字节数和 layout hash。 |
 | `robot_build_input.json` | 设备数、逐从站 Complete Access 与 SDO Information 支持/授权/期望、PDO/frame/wire/WKC/copy、周期和资源输入。 |
 
 生成的 inventory、JSON、C 和 Rust product slave 均携带精确主站发送/接收邮箱
@@ -132,7 +132,7 @@ ProcBuf。激活按以下顺序 fail-closed：
 2. 逐从站校验 Complete Access 的 `enabled => supported` 不变量；
 3. 逐从站校验 SDO Information 的 `enabled => supported`、禁用时空计划、启用时非空、固定容量、
    所有权、形状和严格顺序；
-4. 重算 ProcBuf ABI v6 layout，并校验 robot/boot/layout/region/capacity header；
+4. 重算 ProcBuf ABI v7 layout，并校验 robot/boot/layout/region/capacity header；
 5. 要求从站数量、position、station address、online、configured 和 identity 精确匹配；
 6. 通过 `DomainRegistry` 重新登记 Domain/PDO/datagram，核对 PDO/datagram/WKC；
 7. 通过既有 API 生成多速率 schedule 与每 Domain `FramePlanSet`；
@@ -290,6 +290,6 @@ assignment/mapping、ESM timeout、SyncManager/FMMU 寄存器或 DC 时钟响应
 软件证据覆盖精确 object/entry 请求、abort/malformed/fragment 拒绝、产品所选 PDO 条目的类型/位宽/
 访问权/mappability 交叉验证、生成证据和完整邮箱/主站序列。它不包含无界对象字典浏览、自动 PDO
 Complete Access 分组、block transfer 或真实从站响应。上述证据不证明真实 ESC 定时行为、watchdog 实际周期或超时动作，也不证明驱动
-接受映射、完整周期 WKC、实际线缆时间、WCET、DMA/cache 正确性、制动/机械适配、
+接受映射、真实从站全周期 WKC 资格、实际线缆时间、WCET、DMA/cache 正确性、制动/机械适配、
 STO/FSoE 或功能安全。生成示例和构建报告必须保持
 `passed: false`，直到独立的目标构建、HIL、周期测量和发布审核提供证据。

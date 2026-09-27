@@ -175,7 +175,7 @@ robot_build_input.json
 
 `esop_product_config.rs` contains only static data and the public/re-exported
 `esop-product-config` API. Runtime activation checks `esop.product-runtime.v1`,
-the caller-expected 32-byte hash, exact ProcBuf v6 descriptor/header, exact
+the caller-expected 32-byte hash, exact ProcBuf v7 descriptor/header, exact
 observed online/configured topology, rebuilt Domain/PDO/datagram/WKC evidence,
 schedule/frame plans, drive ownership, product policies, and selected-mode
 CiA 402 PDO maps.

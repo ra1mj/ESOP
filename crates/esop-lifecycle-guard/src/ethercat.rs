@@ -1181,6 +1181,7 @@ mod tests {
         DomainQuality {
             expected_wkc: 1,
             actual_wkc: 1,
+            consecutive_wkc_mismatches: 0,
             valid: true,
             complete: true,
             last_valid_cycle: 7,
@@ -1404,6 +1405,33 @@ mod tests {
         ] {
             assert!(!cyclic_quality_from_ethercat(report(), &[faulty], &dc, other()).domain_valid);
         }
+    }
+
+    #[test]
+    fn mismatch_history_is_diagnostic_and_cannot_mask_current_cycle_quality() {
+        let dc = locked_dc();
+        let historical = DomainQuality {
+            consecutive_wkc_mismatches: 9,
+            ..domain()
+        };
+        let healthy = cyclic_quality_from_ethercat(report(), &[historical], &dc, other());
+        assert!(healthy.domain_valid && healthy.wkc_valid);
+
+        let current_bad = DomainQuality {
+            actual_wkc: 0,
+            consecutive_wkc_mismatches: 10,
+            ..domain()
+        };
+        let failed = cyclic_quality_from_ethercat(
+            CycleReport {
+                wkc_mismatches: 1,
+                ..report()
+            },
+            &[current_bad],
+            &dc,
+            other(),
+        );
+        assert!(!failed.domain_valid && !failed.wkc_valid);
     }
 
     #[test]

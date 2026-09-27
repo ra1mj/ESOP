@@ -84,7 +84,7 @@ ESOP 负责把来自控制器的每轴命令在确定周期内写入驱动，并
 | `split-linux-rt` | 高性能 ARM SoC | Linux PREEMPT_RT 用户态 ESOP | 同机或独立 Linux | P1 |
 | `single-host-dev` | PC 开发、仿真、HIL | Linux raw port | 同进程或同机 | P0，仅开发用途 |
 
-实时节点与 Linux 节点之间的 IPC 必须有版本化头、单调序号、时间戳、质量状态和掉线检测。当前 `esop-ipc` 已提供宿主机文件系统 Unix datagram 的固定容量 v1 帧、非阻塞收发、精确 peer path 准入、重启/离线/重连检测，以及 ProcBuf State/Event 与 Protobuf、MotionCommand target 经结构验证与策略准入后写入 ProcBuf v6 Command 页并由 RT 重建 permit 的共享 payload 适配。下游实时适配器已能用调用方冻结的每轴 SI 缩放和机械边界把命令接入生命周期合格的 CiA 402 PDO 活动帧，并把当前验证的实际值、状态、错误码和质量回写 State/Protobuf；IPC 本身仍不进入实时核心依赖图，也不代表 shared memory、RPMsg、产品策略生成、真实驱动/机械行为、产品延迟/WCET 或 HIL 资格。实时节点不能等待 ROS 2 executor、Zenoh router、DNS、磁盘或远程网络。
+实时节点与 Linux 节点之间的 IPC 必须有版本化头、单调序号、时间戳、质量状态和掉线检测。当前 `esop-ipc` 已提供宿主机文件系统 Unix datagram 的固定容量 v1 帧、非阻塞收发、精确 peer path 准入、重启/离线/重连检测，以及 ProcBuf State/Event 与 Protobuf、MotionCommand target 经结构验证与策略准入后写入 ProcBuf v7 Command 页并由 RT 重建 permit 的共享 payload 适配。下游实时适配器已能用调用方冻结的每轴 SI 缩放和机械边界把命令接入生命周期合格的 CiA 402 PDO 活动帧，并把当前验证的实际值、状态、错误码和质量回写 State/Protobuf；IPC 本身仍不进入实时核心依赖图，也不代表 shared memory、RPMsg、产品策略生成、真实驱动/机械行为、产品延迟/WCET 或 HIL 资格。实时节点不能等待 ROS 2 executor、Zenoh router、DNS、磁盘或远程网络。
 
 ## 4. 分层与软件包规划
 
@@ -135,7 +135,7 @@ Platform layer
 
 当前 `crates/esop-ethercat-core/src/domain_registry.rs` 已提供固定容量的多 Domain/PDO/datagram 注册层：它在激活前分配稳定 bit offset、校验过程映像和逻辑地址范围、生成多速率调度表，并在激活后锁定配置。`SiiConfigurationCandidate` 可冻结为 `SiiDomainProjection`，将方向局部 PDO 布局与已核验的 FMMU/SyncManager 映射事务式登记到统一 Domain；字节对齐的 segment 可自动绑定 `LWR`/`LRD`，`FramePlanSet` 可按 MTU 拆分并在激活时原子发布。核心现可从标准 SII `0x0040` 有界读取 category stream 到 END，并原子投影 ordered FMMU usage 与 SM/RxPDO/TxPDO candidate；同一完整镜像还能借用解析 Strings 与固定 24-byte DC OpMode 描述。Startup 会在首个 AL 动作前将 schema-v2 结构签名和产品选定的精确 DC 描述与生成期望一起比较，并要求在线 FMMU usage 数量不超过 ESC 扫描值，任一失败均不发布两类验证证据。逻辑地址继续由主站生成；该路径不替代 FMMU 寄存器自动发现、真实响应认证或硬件回读。
 
-当前 `crates/esop-cfggen/` 已把上述注册层用于宿主机产品编译：显式 ESI identity/PDO 与 `Dc/OpMode` 选择、稳定 Rx-then-Tx offset、每 Domain 的 LWR/LRD、expected WKC、多速率 schedule、CiA 402 对象/缩放/限幅、CoE 邮箱对和 ProcBuf ABI v6 布局会在发布前统一验证。`crates/esop-product-config/` 消费生成的 Rust 静态数据，在激活期通过相同注册/校验 API 重建并冻结计划；配置 hash、ProcBuf、精确从站记录、Domain 证据、DC 选择或轴映射任一不一致均拒绝。它既可按从站生成 assignment-clear/mapping/assignment-publish 启动计划，也可直接使用生成的逐从站 `MailboxConfig` 一次性构建覆盖全部从站的固定容量批次；position-keyed `ProductMailboxBinding` 保留为显式覆盖，非法邮箱、缺失/重复/未知覆盖、站地址重复或容量不足均在返回前拒绝。`PdoConfigBatch` 复用既有控制器，对每个 job 分配独立 generation，并仅在精确 upload 回读后推进。`ScheduledPdoConfiguration` 会在 PREOP 屏障内自动推进整批，生产报告公开 phase/index/count/current station；故障保留原 job，必须显式重启。只有整批及其他必需控制器真实 Complete 才复用已验证拓扑继续 SAFEOP/OP，且配置期间 Topology 始终由报告中的 Startup phase 收紧。Startup 已在身份后、AL 前完成严格 SII 标准邮箱固定头、SM/PDO 结构和选定 DC 描述的在线读取与生成期望交叉验证；真实响应真实性、完整周期 WKC、从站互操作或 HIL 仍未完成，该软件证据不能替代产品资格。
+当前 `crates/esop-cfggen/` 已把上述注册层用于宿主机产品编译：显式 ESI identity/PDO 与 `Dc/OpMode` 选择、稳定 Rx-then-Tx offset、每 Domain 的 LWR/LRD、expected WKC、多速率 schedule、CiA 402 对象/缩放/限幅、CoE 邮箱对和 ProcBuf ABI v7 布局会在发布前统一验证。`crates/esop-product-config/` 消费生成的 Rust 静态数据，在激活期通过相同注册/校验 API 重建并冻结计划；配置 hash、ProcBuf、精确从站记录、Domain 证据、DC 选择或轴映射任一不一致均拒绝。它既可按从站生成 assignment-clear/mapping/assignment-publish 启动计划，也可直接使用生成的逐从站 `MailboxConfig` 一次性构建覆盖全部从站的固定容量批次；position-keyed `ProductMailboxBinding` 保留为显式覆盖，非法邮箱、缺失/重复/未知覆盖、站地址重复或容量不足均在返回前拒绝。`PdoConfigBatch` 复用既有控制器，对每个 job 分配独立 generation，并仅在精确 upload 回读后推进。`ScheduledPdoConfiguration` 会在 PREOP 屏障内自动推进整批，生产报告公开 phase/index/count/current station；故障保留原 job，必须显式重启。只有整批及其他必需控制器真实 Complete 才复用已验证拓扑继续 SAFEOP/OP，且配置期间 Topology 始终由报告中的 Startup phase 收紧。Startup 已在身份后、AL 前完成严格 SII 标准邮箱固定头、SM/PDO 结构和选定 DC 描述的在线读取与生成期望交叉验证；软件侧已完成纯 WKC 失配归属与连续诊断，真实响应真实性、真实从站全周期 WKC 资格、从站互操作或 HIL 仍未完成，该软件证据不能替代产品资格。
 
 生成的 `MBoxState` 产品会从 MBoxIn index 推导直接 SyncManager 状态字节策略，
 并在在线 SII 的对应 SM 地址、容量、control、enabled 与 ordered FMMU usage 全部
@@ -156,7 +156,7 @@ shift 后的 start time 与完整 AssignActivate，并在全批完成前保持 P
 运行时 cyclic DC 现可在参考钟 FRMW 旁启用 `0x092c/4` BRD，同一 generation 的两份响应
 完整后才发布，并以 lower 31-bit 聚合差值的阈值/滞回驱动生命周期 DC 门的失锁与恢复。
 该广播聚合不能定位单个从站，也不执行自动校时。FMMU 寄存器自动发现、自动周期漂移补偿、真实响应
-真实性、完整周期 WKC、从站互操作和 HIL 仍保持开放。
+真实性、真实从站全周期 WKC 资格、从站互操作和 HIL 仍保持开放。
 
 2026-09-27 的后续增量已补齐上述 FMMU/SyncManager register 软件发现边界：expected-SII
 profile 在 category stream 前顺序读取 ESC 报告的完整 16-byte FMMU bank 和 8-byte
@@ -176,7 +176,7 @@ ProcBuf 是 ESOP 的稳定实时 ABI，用于连接：EtherCAT PDO Domain、设�
 - `esop_product_config.rs`：可编入 `no_std` 固件并由运行时 fail-closed 激活的静态合同；
 - `product_config.json`：规范化注册、Frame Plan、schedule 和 config SHA-256；
 - `device_inventory.json`：ESI identity、选中 PDO 和语义内容 SHA-256；
-- `procbuf_layout.json`：ABI v6 维度、精确 region bytes 和 layout hash；
+- `procbuf_layout.json`：ABI v7 维度、精确 region bytes 和 layout hash；
 - `robot_build_input.json`：设备、PDO/frame/wire/WKC/copy、周期和资源输入。
 
 Protobuf schema 仍由 `esop-proto` 独立版本化，不由当前 cfggen 动态生成。
@@ -348,7 +348,7 @@ ProcBuf State 同时携带 `ecat_time_ns`、`esop_monotonic_time_ns` 和转换�
 | R0：契约与仿真基线 | 目录结构、ProcBuf ABI、`.proto` v1、设备模型、PCAP/虚拟驱动仿真 | 同一产品从生成器产生静态 C header、规范化 JSON、设备清单、ProcBuf layout 和 build input；ABI/Schema 兼容检查在 CI 通过。 |
 | R1：机器人 EtherCAT 实时节点 | `esop_ecat`、CoE、DC、ProcBuf、CiA 402 单轴和分布式 IO，STM32/HPM/Linux test ports | 1/8 轴驱动 + IO 达到 OP；500 us/1 ms 目标周期的 WKC、jitter、无分配报告通过。 |
 | R2：多设备与鲁棒性 | 多 Domain、多速率、外设插件框架、事件环、诊断、恢复策略、配置生成 | EtherCAT + CAN-FD/I2C/SPI 的设备可同一 ProcBuf 表达；故障注入不破坏 RT 周期。 |
-| R3：IPC 与 Zenoh/Protobuf 网关 | `esop_ipc`、`esop_proto`、gateway、ACL、query、记录回放、fleet key namespace | IPC/网络丢失与重连、supervisor 新 boot、schema 升级、命令 TTL 和授权拒绝测试通过。当前宿主机 Unix datagram、共享 ProcBuf/Protobuf payload、严格命令 target 到 ProcBuf v6/RT permit、冻结策略下的 RT CiA 402 命令执行/反馈，以及受限 ESI 产品策略生成已完成；shared memory/RPMsg、生产 ACL、生成策略到生产固件的发布接线、WCET/实物 HIL 尚未完成。 |
+| R3：IPC 与 Zenoh/Protobuf 网关 | `esop_ipc`、`esop_proto`、gateway、ACL、query、记录回放、fleet key namespace | IPC/网络丢失与重连、supervisor 新 boot、schema 升级、命令 TTL 和授权拒绝测试通过。当前宿主机 Unix datagram、共享 ProcBuf/Protobuf payload、严格命令 target 到 ProcBuf v7/RT permit、冻结策略下的 RT CiA 402 命令执行/反馈，以及受限 ESI 产品策略生成已完成；shared memory/RPMsg、生产 ACL、生成策略到生产固件的发布接线、WCET/实物 HIL 尚未完成。 |
 | R4：ROS 2 控制接入 | `esop_ros2_control`、ROS bridge、URDF/ros2_control 配置生成、DDS 与 Zenoh RMW 测试矩阵 | `joint_trajectory_controller` 驱动仿真和实机；read/write 不分配、不等待网络。 |
 | R5：产品扩展 | 力控接口、FoE、EoE/SoE/VoE、冗余、FSoE 项目集成 | 每个扩展独立编译开关，提供对周期、RAM、Flash 和故障模型的影响报告。 |
 
