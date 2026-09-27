@@ -27,14 +27,14 @@
 
 **状态修正（2026-09-27）：** 生成式全从站 start time/SYNC 配置的软件边界现已实现：共享 resolver、哈希后的绝对 timing、产品顺序计划、一次参考钟读取、LCM-aligned common epoch、完整 AssignActivate、生产调度和 PREOP/lifecycle gate 均有确定性测试。上述状态中的外部应用授时、周期漂移补偿、sync-window、物理精度、互操作、HIL 与一致性资格缺口继续有效。
 
-**状态修正（2026-09-27）：** 标准 SII FMMU usage category 已实现固定容量解析、ESI/生成产物传播、schema-v2 结构签名、RxPDO→Outputs/TxPDO→Inputs index 兼容校验，以及 ESC 报告 FMMU count 的首个 AL 前门控。逻辑地址仍由主站确定性分配；FMMU 寄存器描述自动发现、物理响应认证、真实从站互操作和 HIL 仍未完成。
+**状态修正（2026-09-27）：** 标准 SII FMMU usage category 已实现固定容量解析、ESI/生成产物传播、schema-v2 结构签名、RxPDO→Outputs/TxPDO→Inputs index 兼容校验，以及 ESC 报告 FMMU/SyncManager count 的首个 AL 前门控。Startup 现按 FMMU bank、SyncManager bank、SII category stream 的顺序完成 live 证据，并只在 FMMU/SM/SII/可选 DC 全部成功后原子发布；增强 Mapping 路径先清零/回读完整 SM bank，再处理完整 FMMU bank 和期望映射。逻辑地址仍由主站确定性分配；物理响应认证、真实从站互操作、目标 WCET 和 HIL 仍未完成。
 
 SII 增量现已包含从标准 `0x0040` 到 END 的固定容量 category stream acquisition，
 内部续读保持动作游标和绝对 deadline，并在完整读取后原子投影 signedness-aware
 FMMU usage/SM/RxPDO/TxPDO candidate，并由 Startup 在首个 AL 动作前与生成配置重建的
 schema-v2 结构签名比对；同一镜像还会把产品选择的 ESI DC OpMode 与 SII `0x003c`
-固定描述符逐字段比较。逻辑地址不从 SII 导入；FMMU 寄存器自动发现、物理响应真实性
-和实物资格不在此软件证据内。
+固定描述符逐字段比较。FMMU/SyncManager live bank 只作为证据和 reset bound，逻辑地址不从
+SII 或观测寄存器导入；物理响应真实性和实物资格不在此软件证据内。
 
 ProcBuf 的固定 ABI、双页 Command/State 快照、Quality/Lifecycle/Runtime observation 和事件环已在 `esop-procbuf` crate 落地；它尚未替代 shared-memory/RPMsg/UDS IPC 或真实 MCU 端口。
 

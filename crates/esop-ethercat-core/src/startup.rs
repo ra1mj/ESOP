@@ -39,6 +39,11 @@ use crate::sii_stream::{SiiCategoryStreamProgress, SiiCategoryStreamRequest};
 use crate::slave::{
     EthercatState, SlaveIdentity, SlaveRecord, SlaveTable, SlaveTableError, next_state,
 };
+use crate::sync_manager_discovery::{
+    SyncManagerRegisterBank, SyncManagerRegisterDiscoveryAction,
+    SyncManagerRegisterDiscoveryController, SyncManagerRegisterDiscoveryError,
+    SyncManagerRegisterDiscoveryPhase, SyncManagerRegisterDiscoveryProgress,
+};
 use crate::{
     OpOnlyProfileError, OpOnlySyncManagerAction, OpOnlySyncManagerController,
     OpOnlySyncManagerError, OpOnlySyncManagerPhase, OpOnlySyncManagerProfile,
@@ -261,6 +266,7 @@ pub enum StartupPhase {
     ReadingIdentity,
     ReadingMailbox,
     ReadingFmmuRegisters,
+    ReadingSyncManagerRegisters,
     ReadingConfiguration,
     TransitioningAl,
     AwaitingConfiguration,
@@ -274,6 +280,7 @@ pub enum StartupAction {
     Sii(SiiAction),
     SiiMailbox(SiiAction),
     FmmuRegisters(FmmuRegisterDiscoveryAction),
+    SyncManagerRegisters(SyncManagerRegisterDiscoveryAction),
     SiiConfiguration(SiiAction),
     Al(AlAction),
     OpOnly(OpOnlySyncManagerAction),
@@ -286,6 +293,7 @@ impl StartupAction {
             Self::Sii(action) => action.token,
             Self::SiiMailbox(action) => action.token,
             Self::FmmuRegisters(action) => action.token,
+            Self::SyncManagerRegisters(action) => action.token,
             Self::SiiConfiguration(action) => action.token,
             Self::Al(action) => action.token,
             Self::OpOnly(action) => action.token,
@@ -298,6 +306,7 @@ impl StartupAction {
             Self::Sii(action) => action.datagram_index,
             Self::SiiMailbox(action) => action.datagram_index,
             Self::FmmuRegisters(action) => action.datagram_index,
+            Self::SyncManagerRegisters(action) => action.datagram_index,
             Self::SiiConfiguration(action) => action.datagram_index,
             Self::Al(action) => action.datagram_index,
             Self::OpOnly(action) => action.datagram_index,
@@ -310,6 +319,7 @@ impl StartupAction {
             Self::Sii(action) => action.generation,
             Self::SiiMailbox(action) => action.generation,
             Self::FmmuRegisters(action) => action.generation,
+            Self::SyncManagerRegisters(action) => action.generation,
             Self::SiiConfiguration(action) => action.generation,
             Self::Al(action) => action.generation,
             Self::OpOnly(action) => action.generation,
@@ -322,6 +332,7 @@ impl StartupAction {
             Self::Sii(action) => action.address,
             Self::SiiMailbox(action) => action.address,
             Self::FmmuRegisters(action) => action.address,
+            Self::SyncManagerRegisters(action) => action.address,
             Self::SiiConfiguration(action) => action.address,
             Self::Al(action) => action.address,
             Self::OpOnly(action) => action.address,
@@ -334,6 +345,7 @@ impl StartupAction {
             Self::Sii(action) => action.operation,
             Self::SiiMailbox(action) => action.operation,
             Self::FmmuRegisters(action) => action.operation,
+            Self::SyncManagerRegisters(action) => action.operation,
             Self::SiiConfiguration(action) => action.operation,
             Self::Al(action) => action.operation,
             Self::OpOnly(action) => action.operation,
@@ -346,6 +358,7 @@ impl StartupAction {
             Self::Sii(action) => action.payload(),
             Self::SiiMailbox(action) => action.payload(),
             Self::FmmuRegisters(action) => action.payload(),
+            Self::SyncManagerRegisters(action) => action.payload(),
             Self::SiiConfiguration(action) => action.payload(),
             Self::Al(action) => action.payload(),
             Self::OpOnly(action) => action.payload(),
@@ -358,6 +371,7 @@ impl StartupAction {
             Self::Sii(action) => action.deadline_ns,
             Self::SiiMailbox(action) => action.deadline_ns,
             Self::FmmuRegisters(action) => action.deadline_ns,
+            Self::SyncManagerRegisters(action) => action.deadline_ns,
             Self::SiiConfiguration(action) => action.deadline_ns,
             Self::Al(action) => action.deadline_ns,
             Self::OpOnly(action) => action.deadline_ns,
@@ -370,6 +384,7 @@ impl StartupAction {
             Self::Sii(action) => action.expected_wkc,
             Self::SiiMailbox(action) => action.expected_wkc,
             Self::FmmuRegisters(action) => action.expected_wkc,
+            Self::SyncManagerRegisters(action) => action.expected_wkc,
             Self::SiiConfiguration(action) => action.expected_wkc,
             Self::Al(action) => action.expected_wkc,
             Self::OpOnly(action) => action.expected_wkc,
@@ -382,6 +397,7 @@ impl StartupAction {
             Self::Sii(_)
             | Self::SiiMailbox(_)
             | Self::FmmuRegisters(_)
+            | Self::SyncManagerRegisters(_)
             | Self::SiiConfiguration(_)
             | Self::Al(_)
             | Self::OpOnly(_) => RxWorkingCounterPolicy::Exact,
@@ -394,6 +410,7 @@ impl StartupAction {
             Self::Sii(action) => action.datagram_len(),
             Self::SiiMailbox(action) => action.datagram_len(),
             Self::FmmuRegisters(action) => action.datagram_len(),
+            Self::SyncManagerRegisters(action) => action.datagram_len(),
             Self::SiiConfiguration(action) => action.datagram_len(),
             Self::Al(action) => action.datagram_len(),
             Self::OpOnly(action) => action.datagram_len(),
@@ -406,6 +423,7 @@ impl StartupAction {
             Self::Sii(action) => action.read_len as usize,
             Self::SiiMailbox(action) => action.read_len as usize,
             Self::FmmuRegisters(action) => action.response_len(),
+            Self::SyncManagerRegisters(action) => action.response_len(),
             Self::SiiConfiguration(action) => action.read_len as usize,
             Self::Al(action) => action.read_len as usize,
             Self::OpOnly(action) => action.response_len(),
@@ -420,6 +438,7 @@ pub enum StartupProgress {
     IdentityVerified(usize),
     MailboxVerified(usize),
     FmmuRegistersRead(usize),
+    SyncManagerRegistersRead(usize),
     SiiConfigurationVerified(usize),
     SlaveReady(usize),
     AwaitingConfiguration,
@@ -475,12 +494,22 @@ pub enum StartupError {
     Sii(SiiError),
     SiiMailbox(SiiMailboxError),
     FmmuRegisters(FmmuRegisterDiscoveryError),
+    SyncManagerRegisters(SyncManagerRegisterDiscoveryError),
     MissingVerifiedFmmuRegisters(u16),
+    MissingVerifiedSyncManagerRegisters(u16),
     FmmuRegisterPositionMismatch {
         expected: u16,
         observed: u16,
     },
     FmmuRegisterStationMismatch {
+        expected: u16,
+        observed: u16,
+    },
+    SyncManagerRegisterPositionMismatch {
+        expected: u16,
+        observed: u16,
+    },
+    SyncManagerRegisterStationMismatch {
         expected: u16,
         observed: u16,
     },
@@ -493,6 +522,11 @@ pub enum StartupError {
         observed: SiiConfigurationSignature,
     },
     SiiFmmuCountExceedsEsc {
+        position: u16,
+        described: u8,
+        reported: u8,
+    },
+    SiiSyncManagerCountExceedsEsc {
         position: u16,
         described: u8,
         reported: u8,
@@ -555,6 +589,8 @@ pub struct StartupController<const MAX_SLAVES: usize> {
     sii_mailbox: SiiBlockReader<SII_STANDARD_MAILBOX_WORD_COUNT>,
     fmmu_registers: FmmuRegisterDiscoveryController,
     staged_fmmu_registers: Option<FmmuRegisterBank>,
+    sync_manager_registers: SyncManagerRegisterDiscoveryController,
+    staged_sync_manager_registers: Option<SyncManagerRegisterBank>,
     sii_configuration: StartupSiiDiscovery,
     sii_configuration_scratch: [u8; STARTUP_SII_IMAGE_BYTE_CAPACITY],
     al: AlTransitionController,
@@ -562,8 +598,10 @@ pub struct StartupController<const MAX_SLAVES: usize> {
     table: SlaveTable<MAX_SLAVES>,
     device_emulation: [bool; MAX_SLAVES],
     esc_fmmu_counts: [u8; MAX_SLAVES],
+    esc_sync_manager_counts: [u8; MAX_SLAVES],
     verified_mailboxes: [Option<MailboxConfig>; MAX_SLAVES],
     verified_fmmu_registers: [Option<FmmuRegisterBank>; MAX_SLAVES],
+    verified_sync_manager_registers: [Option<SyncManagerRegisterBank>; MAX_SLAVES],
     verified_sii: [Option<SiiConfigurationSignature>; MAX_SLAVES],
     verified_dc_modes: [Option<SiiDcMode>; MAX_SLAVES],
     selected_reference_clock: Option<StartupReferenceClock>,
@@ -593,6 +631,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             sii_mailbox: SiiBlockReader::new(),
             fmmu_registers: FmmuRegisterDiscoveryController::new(),
             staged_fmmu_registers: None,
+            sync_manager_registers: SyncManagerRegisterDiscoveryController::new(),
+            staged_sync_manager_registers: None,
             sii_configuration: SiiStreamDiscoveryController::new(),
             sii_configuration_scratch: [0; STARTUP_SII_IMAGE_BYTE_CAPACITY],
             al: AlTransitionController::new(),
@@ -600,8 +640,10 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             table: SlaveTable::new(),
             device_emulation: [false; MAX_SLAVES],
             esc_fmmu_counts: [0; MAX_SLAVES],
+            esc_sync_manager_counts: [0; MAX_SLAVES],
             verified_mailboxes: [None; MAX_SLAVES],
             verified_fmmu_registers: [None; MAX_SLAVES],
+            verified_sync_manager_registers: [None; MAX_SLAVES],
             verified_sii: [None; MAX_SLAVES],
             verified_dc_modes: [None; MAX_SLAVES],
             selected_reference_clock: None,
@@ -665,6 +707,17 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             .and_then(|index| self.verified_fmmu_registers[index])
     }
 
+    pub fn verified_sync_manager_registers(
+        &self,
+        position: u16,
+    ) -> Option<SyncManagerRegisterBank> {
+        self.table
+            .records()
+            .iter()
+            .position(|record| record.position == position)
+            .and_then(|index| self.verified_sync_manager_registers[index])
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn start_mapping_for_position<const SMS: usize, const FMMUS: usize>(
         &self,
@@ -683,28 +736,43 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             .position(|record| record.position == position)
             .ok_or(StartupError::MissingScanPosition(position))?;
         let record = self.table.records()[index];
-        let bank = self.verified_fmmu_registers[index]
+        let fmmu_bank = self.verified_fmmu_registers[index]
             .ok_or(StartupError::MissingVerifiedFmmuRegisters(position))?;
-        if bank.position() != position {
+        if fmmu_bank.position() != position {
             return Err(StartupError::FmmuRegisterPositionMismatch {
                 expected: position,
-                observed: bank.position(),
+                observed: fmmu_bank.position(),
             });
         }
-        if bank.station_address() != record.station_address {
+        if fmmu_bank.station_address() != record.station_address {
             return Err(StartupError::FmmuRegisterStationMismatch {
                 expected: record.station_address,
-                observed: bank.station_address(),
+                observed: fmmu_bank.station_address(),
+            });
+        }
+        let sync_manager_bank = self.verified_sync_manager_registers[index]
+            .ok_or(StartupError::MissingVerifiedSyncManagerRegisters(position))?;
+        if sync_manager_bank.position() != position {
+            return Err(StartupError::SyncManagerRegisterPositionMismatch {
+                expected: position,
+                observed: sync_manager_bank.position(),
+            });
+        }
+        if sync_manager_bank.station_address() != record.station_address {
+            return Err(StartupError::SyncManagerRegisterStationMismatch {
+                expected: record.station_address,
+                observed: sync_manager_bank.station_address(),
             });
         }
         controller
-            .start_with_verified_fmmus(
+            .start_with_verified_registers(
                 record.station_address,
                 generation,
                 now_ns,
                 timeout_ns,
                 request_timeout_ns,
-                bank,
+                sync_manager_bank,
+                fmmu_bank,
                 table,
             )
             .map_err(StartupError::MappingConfiguration)
@@ -761,6 +829,10 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                 .fmmu_registers
                 .pending()
                 .map(StartupAction::FmmuRegisters),
+            StartupPhase::ReadingSyncManagerRegisters => self
+                .sync_manager_registers
+                .pending()
+                .map(StartupAction::SyncManagerRegisters),
             StartupPhase::ReadingConfiguration => self
                 .sii_configuration
                 .pending()
@@ -913,6 +985,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.sii_mailbox = SiiBlockReader::new();
         self.fmmu_registers = FmmuRegisterDiscoveryController::new();
         self.staged_fmmu_registers = None;
+        self.sync_manager_registers = SyncManagerRegisterDiscoveryController::new();
+        self.staged_sync_manager_registers = None;
         self.sii_configuration = SiiStreamDiscoveryController::new();
         self.sii_configuration_scratch = [0; STARTUP_SII_IMAGE_BYTE_CAPACITY];
         self.al = AlTransitionController::new();
@@ -920,8 +994,10 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.table = SlaveTable::new();
         self.device_emulation = [false; MAX_SLAVES];
         self.esc_fmmu_counts = [0; MAX_SLAVES];
+        self.esc_sync_manager_counts = [0; MAX_SLAVES];
         self.verified_mailboxes = [None; MAX_SLAVES];
         self.verified_fmmu_registers = [None; MAX_SLAVES];
+        self.verified_sync_manager_registers = [None; MAX_SLAVES];
         self.verified_sii = [None; MAX_SLAVES];
         self.verified_dc_modes = [None; MAX_SLAVES];
         self.selected_reference_clock = None;
@@ -994,6 +1070,24 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                         Ok(None) => return Ok(None),
                         Err(error) => {
                             return self.fail(StartupError::FmmuRegisters(error));
+                        }
+                    }
+                }
+                StartupPhase::ReadingSyncManagerRegisters => {
+                    self.start_sync_manager_register_reader(now_ns)?;
+                    match self.sync_manager_registers.next_action(now_ns) {
+                        Ok(Some(action)) => {
+                            return Ok(Some(StartupAction::SyncManagerRegisters(action)));
+                        }
+                        Ok(None)
+                            if self.sync_manager_registers.phase()
+                                == SyncManagerRegisterDiscoveryPhase::Complete =>
+                        {
+                            self.finish_sync_manager_registers()?;
+                        }
+                        Ok(None) => return Ok(None),
+                        Err(error) => {
+                            return self.fail(StartupError::SyncManagerRegisters(error));
                         }
                     }
                 }
@@ -1152,6 +1246,25 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                 };
                 if progress == FmmuRegisterDiscoveryProgress::Complete {
                     return self.finish_fmmu_registers();
+                }
+                Ok(StartupProgress::Advanced)
+            }
+            StartupAction::SyncManagerRegisters(action) => {
+                if self.phase != StartupPhase::ReadingSyncManagerRegisters {
+                    return self.fail(StartupError::NoPendingAction);
+                }
+                let progress = match self.sync_manager_registers.accept(
+                    action,
+                    generation,
+                    payload,
+                    working_counter,
+                    now_ns,
+                ) {
+                    Ok(progress) => progress,
+                    Err(error) => return self.fail(StartupError::SyncManagerRegisters(error)),
+                };
+                if progress == SyncManagerRegisterDiscoveryProgress::Complete {
+                    return self.finish_sync_manager_registers();
                 }
                 Ok(StartupProgress::Advanced)
             }
@@ -1360,6 +1473,12 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                     Err(error) => self.fail(StartupError::FmmuRegisters(error)),
                 }
             }
+            StartupAction::SyncManagerRegisters(action) => {
+                match self.sync_manager_registers.timeout(action, now_ns) {
+                    Ok(_) => Ok(StartupProgress::Advanced),
+                    Err(error) => self.fail(StartupError::SyncManagerRegisters(error)),
+                }
+            }
             StartupAction::SiiConfiguration(action) => {
                 match self.sii_configuration.timeout(action.token, now_ns) {
                     Ok(()) => Ok(StartupProgress::Advanced),
@@ -1441,6 +1560,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.sii_mailbox = SiiBlockReader::new();
         self.fmmu_registers = FmmuRegisterDiscoveryController::new();
         self.staged_fmmu_registers = None;
+        self.sync_manager_registers = SyncManagerRegisterDiscoveryController::new();
+        self.staged_sync_manager_registers = None;
         self.sii_configuration = SiiStreamDiscoveryController::new();
         self.sii_configuration_scratch = [0; STARTUP_SII_IMAGE_BYTE_CAPACITY];
         self.al = AlTransitionController::new();
@@ -1448,8 +1569,10 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.table = SlaveTable::new();
         self.device_emulation = [false; MAX_SLAVES];
         self.esc_fmmu_counts = [0; MAX_SLAVES];
+        self.esc_sync_manager_counts = [0; MAX_SLAVES];
         self.verified_mailboxes = [None; MAX_SLAVES];
         self.verified_fmmu_registers = [None; MAX_SLAVES];
+        self.verified_sync_manager_registers = [None; MAX_SLAVES];
         self.verified_sii = [None; MAX_SLAVES];
         self.verified_dc_modes = [None; MAX_SLAVES];
         self.selected_reference_clock = None;
@@ -1643,6 +1766,36 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         }
     }
 
+    fn start_sync_manager_register_reader(&mut self, now_ns: u64) -> Result<(), StartupError> {
+        if !matches!(
+            self.sync_manager_registers.phase(),
+            SyncManagerRegisterDiscoveryPhase::Idle
+                | SyncManagerRegisterDiscoveryPhase::Complete
+                | SyncManagerRegisterDiscoveryPhase::Faulted
+        ) {
+            return Ok(());
+        }
+        let record = self
+            .table
+            .records()
+            .get(self.current_index)
+            .copied()
+            .ok_or(StartupError::ExpectedCountMismatch)?;
+        let reported_count = self.esc_sync_manager_counts[self.current_index];
+        match self.sync_manager_registers.start(
+            record.position,
+            record.station_address,
+            reported_count,
+            self.generation,
+            now_ns,
+            self.config.sii_configuration_timeout_ns,
+            self.config.request_timeout_ns,
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) => self.fail(StartupError::SyncManagerRegisters(error)),
+        }
+    }
+
     fn start_sii_configuration_reader(&mut self, now_ns: u64) -> Result<(), StartupError> {
         if !matches!(
             self.sii_configuration.phase(),
@@ -1701,6 +1854,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         }
         self.device_emulation[self.current_index] = scan_record.device_emulation;
         self.esc_fmmu_counts[self.current_index] = scan_record.fmmu_count;
+        self.esc_sync_manager_counts[self.current_index] = scan_record.sync_manager_count;
         if let Err(error) =
             self.table
                 .observe_status(scan_record.position, scan_record.al_status, 0)
@@ -1791,8 +1945,34 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             })
             .ok_or(StartupError::MissingVerifiedFmmuRegisters(record.position))?;
         self.staged_fmmu_registers = Some(bank);
-        self.phase = StartupPhase::ReadingConfiguration;
+        self.phase = StartupPhase::ReadingSyncManagerRegisters;
         Ok(StartupProgress::FmmuRegistersRead(self.current_index))
+    }
+
+    fn finish_sync_manager_registers(&mut self) -> Result<StartupProgress, StartupError> {
+        let record = self
+            .table
+            .records()
+            .get(self.current_index)
+            .copied()
+            .ok_or(StartupError::ExpectedCountMismatch)?;
+        let bank = self
+            .sync_manager_registers
+            .bank()
+            .filter(|bank| {
+                bank.position() == record.position
+                    && bank.station_address() == record.station_address
+                    && bank.descriptor_count()
+                        == usize::from(self.esc_sync_manager_counts[self.current_index])
+            })
+            .ok_or(StartupError::MissingVerifiedSyncManagerRegisters(
+                record.position,
+            ))?;
+        self.staged_sync_manager_registers = Some(bank);
+        self.phase = StartupPhase::ReadingConfiguration;
+        Ok(StartupProgress::SyncManagerRegistersRead(
+            self.current_index,
+        ))
     }
 
     fn finish_sii_configuration(&mut self, now_ns: u64) -> Result<StartupProgress, StartupError> {
@@ -1825,6 +2005,20 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         } else {
             None
         };
+        let observed_sync_manager_registers = if profile.expected_sii.is_some() {
+            Some(
+                self.staged_sync_manager_registers
+                    .filter(|bank| {
+                        bank.position() == record.position
+                            && bank.station_address() == record.station_address
+                    })
+                    .ok_or(StartupError::MissingVerifiedSyncManagerRegisters(
+                        record.position,
+                    ))?,
+            )
+        } else {
+            None
+        };
         let described_fmmus = candidate.fmmu_usages().len() as u8;
         let reported_fmmus = self.esc_fmmu_counts[self.current_index];
         if described_fmmus > reported_fmmus {
@@ -1832,6 +2026,15 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                 position: record.position,
                 described: described_fmmus,
                 reported: reported_fmmus,
+            });
+        }
+        let described_sync_managers = candidate.mapping().sync_manager_count() as u8;
+        let reported_sync_managers = self.esc_sync_manager_counts[self.current_index];
+        if described_sync_managers > reported_sync_managers {
+            return self.fail(StartupError::SiiSyncManagerCountExceedsEsc {
+                position: record.position,
+                described: described_sync_managers,
+                reported: reported_sync_managers,
             });
         }
         let observed_sii = if let Some(expected) = profile.expected_sii {
@@ -1874,7 +2077,9 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.verified_sii[self.current_index] = observed_sii;
         self.verified_dc_modes[self.current_index] = observed_dc_mode;
         self.verified_fmmu_registers[self.current_index] = observed_fmmu_registers;
+        self.verified_sync_manager_registers[self.current_index] = observed_sync_manager_registers;
         self.staged_fmmu_registers = None;
+        self.staged_sync_manager_registers = None;
         self.phase = StartupPhase::TransitioningAl;
         match self.start_al_for_current(now_ns)? {
             StartupProgress::IdentityVerified(index) => {
@@ -2085,6 +2290,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.selected_reference_clock = None;
         self.dc_topology = None;
         self.staged_fmmu_registers = None;
+        self.staged_sync_manager_registers = None;
         self.phase = StartupPhase::Faulted;
         Err(error)
     }
@@ -2134,6 +2340,7 @@ mod tests {
     use crate::sii_config::SiiConfigurationSignatureBuilder;
     use crate::sii_stream::SII_CATEGORY_START_WORD;
     use crate::slave::AL_ERROR_FLAG;
+    use crate::sync_manager_discovery::SyncManagerRegisterDescriptor;
 
     fn status(state: EthercatState) -> [u8; 6] {
         let mut bytes = [0; 6];
@@ -2599,6 +2806,19 @@ mod tests {
         )
     }
 
+    fn staged_sync_manager_bank(
+        position: u16,
+        station_address: u16,
+        descriptor_count: u8,
+    ) -> SyncManagerRegisterBank {
+        SyncManagerRegisterBank::from_parts(
+            position,
+            station_address,
+            descriptor_count,
+            [SyncManagerRegisterDescriptor::RESET; crate::MAX_ESC_SYNC_MANAGERS],
+        )
+    }
+
     fn prepared_sii_verification(expected_sii: SiiConfigurationSignature) -> StartupController<1> {
         let identity = SlaveIdentity {
             vendor_id: 1,
@@ -2621,7 +2841,9 @@ mod tests {
         startup.profiles[0] = StartupSlaveProfile::new(0).with_expected_sii(expected_sii);
         startup.expected_count = 1;
         startup.esc_fmmu_counts[0] = 2;
+        startup.esc_sync_manager_counts[0] = 2;
         startup.staged_fmmu_registers = Some(staged_fmmu_bank(0, 0x1000, 2));
+        startup.staged_sync_manager_registers = Some(staged_sync_manager_bank(0, 0x1000, 2));
         startup
             .table
             .add(0, 0x1000, identity)
@@ -2654,6 +2876,8 @@ mod tests {
         startup.phase = StartupPhase::ReadingFmmuRegisters;
         startup.fmmu_registers = FmmuRegisterDiscoveryController::new();
         startup.staged_fmmu_registers = None;
+        startup.sync_manager_registers = SyncManagerRegisterDiscoveryController::new();
+        startup.staged_sync_manager_registers = None;
         startup
     }
 
@@ -2687,6 +2911,36 @@ mod tests {
         }
     }
 
+    fn drive_sync_manager_register_discovery(
+        startup: &mut StartupController<1>,
+        descriptors: [[u8; crate::SYNC_MANAGER_IMAGE_LEN]; 2],
+        now_ns: &mut u64,
+    ) {
+        for (index, descriptor) in descriptors.iter().enumerate() {
+            let action = startup.next_action(*now_ns).unwrap().unwrap();
+            let StartupAction::SyncManagerRegisters(inner) = action else {
+                panic!("expected SyncManager register discovery action");
+            };
+            assert_eq!(inner.descriptor_index as usize, index);
+            assert_eq!(
+                inner.address,
+                fixed_address(
+                    0x1000,
+                    crate::ESC_SYNC_MANAGER_BASE + index as u16 * crate::ESC_SYNC_MANAGER_STRIDE
+                )
+            );
+            let progress = startup
+                .accept(action, action.generation(), descriptor, 1, *now_ns + 1)
+                .unwrap();
+            if index == descriptors.len() - 1 {
+                assert_eq!(progress, StartupProgress::SyncManagerRegistersRead(0));
+            } else {
+                assert_eq!(progress, StartupProgress::Advanced);
+            }
+            *now_ns += 2;
+        }
+    }
+
     fn prepared_multi_sii_verification(
         expected_sii: [SiiConfigurationSignature; 2],
         identities: [SlaveIdentity; 2],
@@ -2709,6 +2963,7 @@ mod tests {
             startup.profiles[index] =
                 StartupSlaveProfile::new(index as u16).with_expected_sii(expected_sii[index]);
             startup.esc_fmmu_counts[index] = 2;
+            startup.esc_sync_manager_counts[index] = 2;
             startup
                 .table
                 .add(index as u16, 0x1000 + index as u16, identities[index])
@@ -2727,6 +2982,7 @@ mod tests {
                 .unwrap();
         }
         startup.staged_fmmu_registers = Some(staged_fmmu_bank(0, 0x1000, 2));
+        startup.staged_sync_manager_registers = Some(staged_sync_manager_bank(0, 0x1000, 2));
         startup
     }
 
@@ -2783,7 +3039,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_discovers_fmmu_bank_then_publishes_and_bridges_atomically() {
+    fn startup_discovers_register_banks_then_publishes_and_bridges_atomically() {
         let expected = startup_sii_signature(0x6040);
         let mut startup = prepared_fmmu_register_discovery(expected);
         let mut first = [0; crate::FMMU_IMAGE_LEN];
@@ -2795,14 +3051,30 @@ mod tests {
         let mut now_ns = 1;
 
         assert_eq!(startup.verified_fmmu_registers(0), None);
+        assert_eq!(startup.verified_sync_manager_registers(0), None);
         assert_eq!(startup.verified_sii(0), None);
         drive_fmmu_register_discovery(
             &mut startup,
             [first, [0; crate::FMMU_IMAGE_LEN]],
             &mut now_ns,
         );
+        assert_eq!(startup.phase(), StartupPhase::ReadingSyncManagerRegisters);
+        assert_eq!(startup.verified_fmmu_registers(0), None);
+        assert_eq!(startup.verified_sync_manager_registers(0), None);
+        assert_eq!(startup.verified_sii(0), None);
+        let mut first_sync_manager = [0; crate::SYNC_MANAGER_IMAGE_LEN];
+        first_sync_manager[0..2].copy_from_slice(&0x1100u16.to_le_bytes());
+        first_sync_manager[2..4].copy_from_slice(&8u16.to_le_bytes());
+        first_sync_manager[4] = 0x26;
+        first_sync_manager[6] = 1;
+        drive_sync_manager_register_discovery(
+            &mut startup,
+            [first_sync_manager, [0; crate::SYNC_MANAGER_IMAGE_LEN]],
+            &mut now_ns,
+        );
         assert_eq!(startup.phase(), StartupPhase::ReadingConfiguration);
         assert_eq!(startup.verified_fmmu_registers(0), None);
+        assert_eq!(startup.verified_sync_manager_registers(0), None);
         assert_eq!(startup.verified_sii(0), None);
         assert!(matches!(
             startup.next_action(now_ns),
@@ -2818,6 +3090,14 @@ mod tests {
         assert_eq!(bank.station_address(), 0x1000);
         assert_eq!(bank.descriptor_count(), 2);
         assert_eq!(bank.descriptor(0).unwrap().logical_start(), 0x1122_3344);
+        let sync_manager_bank = startup.verified_sync_manager_registers(0).unwrap();
+        assert_eq!(sync_manager_bank.position(), 0);
+        assert_eq!(sync_manager_bank.station_address(), 0x1000);
+        assert_eq!(sync_manager_bank.descriptor_count(), 2);
+        assert_eq!(
+            sync_manager_bank.descriptor(0).unwrap().physical_start(),
+            0x1100
+        );
         assert_eq!(startup.verified_sii(0), Some(expected));
 
         let mut table = MappingTable::<0, 1>::new();
@@ -2839,18 +3119,24 @@ mod tests {
             .start_mapping_for_position(0, &mut mapping, 8, now_ns, 1_000, 100, &table)
             .unwrap();
         let action = mapping.next_action(now_ns + 1).unwrap().unwrap();
-        assert_eq!(action.item, crate::MappingConfigItem::FmmuReset(0));
+        assert_eq!(action.item, crate::MappingConfigItem::SyncManagerReset(0));
         assert_eq!(action.operation, RegisterOperation::Write);
     }
 
     #[test]
-    fn startup_discards_staged_fmmu_bank_when_sii_verification_fails() {
+    fn startup_discards_staged_register_banks_when_sii_verification_fails() {
         let expected = startup_sii_signature(0x6040);
         let observed = startup_sii_signature(0x607A);
         let mut startup = prepared_fmmu_register_discovery(expected);
         let mut now_ns = 1;
         drive_fmmu_register_discovery(&mut startup, [[0; crate::FMMU_IMAGE_LEN]; 2], &mut now_ns);
+        drive_sync_manager_register_discovery(
+            &mut startup,
+            [[0; crate::SYNC_MANAGER_IMAGE_LEN]; 2],
+            &mut now_ns,
+        );
         assert!(startup.staged_fmmu_registers.is_some());
+        assert!(startup.staged_sync_manager_registers.is_some());
         assert_eq!(
             drive_sii_configuration(&mut startup, &startup_sii_image(0x607A), &mut now_ns),
             Err(StartupError::SiiConfigurationMismatch {
@@ -2861,7 +3147,9 @@ mod tests {
         );
         assert_eq!(startup.phase(), StartupPhase::Faulted);
         assert_eq!(startup.staged_fmmu_registers, None);
+        assert_eq!(startup.staged_sync_manager_registers, None);
         assert_eq!(startup.verified_fmmu_registers(0), None);
+        assert_eq!(startup.verified_sync_manager_registers(0), None);
         assert_eq!(startup.verified_sii(0), None);
         assert_eq!(startup.verified_dc_mode(0), None);
     }
@@ -2903,6 +3191,30 @@ mod tests {
         );
         assert_eq!(startup.phase(), StartupPhase::Faulted);
         assert_eq!(startup.verified_fmmu_registers(0), None);
+        assert_eq!(startup.verified_sii(0), None);
+        assert_eq!(startup.verified_dc_mode(0), None);
+        assert_eq!(startup.next_action(now_ns), Ok(None));
+    }
+
+    #[test]
+    fn startup_fails_closed_when_sii_sync_manager_count_exceeds_esc_count() {
+        let expected = startup_sii_signature(0x6040);
+        let mut startup = prepared_sii_verification(expected);
+        startup.esc_sync_manager_counts[0] = 1;
+        startup.staged_sync_manager_registers = Some(staged_sync_manager_bank(0, 0x1000, 1));
+        let mut now_ns = 1;
+
+        assert_eq!(
+            drive_sii_configuration(&mut startup, &startup_sii_image(0x6040), &mut now_ns),
+            Err(StartupError::SiiSyncManagerCountExceedsEsc {
+                position: 0,
+                described: 2,
+                reported: 1,
+            })
+        );
+        assert_eq!(startup.phase(), StartupPhase::Faulted);
+        assert_eq!(startup.verified_fmmu_registers(0), None);
+        assert_eq!(startup.verified_sync_manager_registers(0), None);
         assert_eq!(startup.verified_sii(0), None);
         assert_eq!(startup.verified_dc_mode(0), None);
         assert_eq!(startup.next_action(now_ns), Ok(None));
@@ -2965,6 +3277,7 @@ mod tests {
         assert_eq!(startup.verified_sii(0), Some(expected_sii));
         assert_eq!(startup.verified_dc_mode(0), Some(expected_dc));
         assert!(startup.verified_fmmu_registers(0).is_some());
+        assert!(startup.verified_sync_manager_registers(0).is_some());
 
         assert_eq!(
             accept_al_state(&mut startup, EthercatState::Op, now_ns),
@@ -2982,6 +3295,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(startup.verified_dc_modes, [None]);
+        assert_eq!(startup.verified_sync_manager_registers, [None]);
     }
 
     #[test]
@@ -3018,6 +3332,7 @@ mod tests {
         assert_eq!(startup.verified_sii(0), None);
         assert_eq!(startup.verified_dc_mode(0), None);
         assert_eq!(startup.verified_fmmu_registers(0), None);
+        assert_eq!(startup.verified_sync_manager_registers(0), None);
 
         let mut missing = prepared_sii_dc_verification(expected_sii, expectation);
         let mut now_ns = 1;
@@ -3031,6 +3346,7 @@ mod tests {
         assert_eq!(missing.verified_sii(0), None);
         assert_eq!(missing.verified_dc_mode(0), None);
         assert_eq!(missing.verified_fmmu_registers(0), None);
+        assert_eq!(missing.verified_sync_manager_registers(0), None);
     }
 
     #[test]
@@ -3096,6 +3412,7 @@ mod tests {
         assert_eq!(startup.phase(), StartupPhase::ReadingIdentity);
         assert_eq!(startup.current_index(), 1);
         startup.staged_fmmu_registers = Some(staged_fmmu_bank(1, 0x1001, 2));
+        startup.staged_sync_manager_registers = Some(staged_sync_manager_bank(1, 0x1001, 2));
         startup.phase = StartupPhase::ReadingConfiguration;
         assert_eq!(
             drive_sii_configuration(&mut startup, &startup_sii_image(0x607A), &mut now_ns),
@@ -3122,6 +3439,8 @@ mod tests {
         assert_eq!(startup.phase(), StartupPhase::Scanning);
         assert_eq!(startup.verified_sii(0), None);
         assert_eq!(startup.verified_sii(1), None);
+        assert_eq!(startup.verified_fmmu_registers(0), None);
+        assert_eq!(startup.verified_sync_manager_registers(0), None);
     }
 
     #[test]
@@ -4394,6 +4713,7 @@ mod tests {
         match action {
             StartupAction::Scan(action) => action.deadline_ns,
             StartupAction::FmmuRegisters(_)
+            | StartupAction::SyncManagerRegisters(_)
             | StartupAction::Sii(_)
             | StartupAction::SiiMailbox(_)
             | StartupAction::SiiConfiguration(_)

@@ -13,12 +13,15 @@ use crate::mapping::{
     ESC_FMMU_BASE, ESC_FMMU_STRIDE, FMMU_IMAGE_LEN, FmmuConfig, MAX_ESC_FMMUS, MappingError,
     MappingTable, SYNC_MANAGER_IMAGE_LEN, SyncManagerConfig,
 };
-use crate::op_only::OpOnlySyncManagerProfile;
+use crate::op_only::{MAX_ESC_SYNC_MANAGERS, OpOnlySyncManagerProfile};
 use crate::registers::fixed_address;
+use crate::sync_manager_discovery::SyncManagerRegisterBank;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MappingConfigPhase {
     Idle,
+    ClearingSyncManager,
+    VerifyingSyncManagerClear,
     ClearingFmmu,
     VerifyingFmmuClear,
     WritingSyncManager,
@@ -31,6 +34,7 @@ pub enum MappingConfigPhase {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MappingConfigItem {
+    SyncManagerReset(u8),
     FmmuReset(u8),
     SyncManager(u8),
     Fmmu(u8),
@@ -90,6 +94,23 @@ pub enum MappingConfigError {
     UnexpectedWorkingCounter,
     Timeout,
     ReadbackMismatch,
+    SyncManagerBankCapacityExceeded,
+    RegisterBankPositionMismatch {
+        fmmu: u16,
+        sync_manager: u16,
+    },
+    SyncManagerBankStationMismatch {
+        expected: u16,
+        observed: u16,
+    },
+    ConfiguredSyncManagerCountExceedsDiscovered {
+        configured: usize,
+        discovered: usize,
+    },
+    SyncManagerIndexOutsideDiscoveredBank {
+        index: u8,
+        discovered: usize,
+    },
     FmmuBankCapacityExceeded,
     FmmuBankStationMismatch {
         expected: u16,
@@ -117,6 +138,7 @@ pub struct MappingConfigController<const SMS: usize, const FMMUS: usize> {
     sync_manager_count: usize,
     fmmus: [FmmuConfig; FMMUS],
     fmmu_count: usize,
+    discovered_sync_manager_count: usize,
     discovered_fmmu_count: usize,
     op_only_outputs: OpOnlySyncManagerProfile,
     item_index: usize,
@@ -155,6 +177,7 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
                 enable: false,
             }; FMMUS],
             fmmu_count: 0,
+            discovered_sync_manager_count: 0,
             discovered_fmmu_count: 0,
             op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
             item_index: 0,
@@ -201,6 +224,7 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
             timeout_ns,
             request_timeout_ns,
             None,
+            None,
             table,
         )
     }
@@ -223,6 +247,31 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
             timeout_ns,
             request_timeout_ns,
             Some(bank),
+            None,
+            table,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_with_verified_registers(
+        &mut self,
+        station_address: u16,
+        generation: u16,
+        now_ns: u64,
+        timeout_ns: u64,
+        request_timeout_ns: u64,
+        sync_manager_bank: SyncManagerRegisterBank,
+        fmmu_bank: FmmuRegisterBank,
+        table: &MappingTable<SMS, FMMUS>,
+    ) -> Result<(), MappingConfigError> {
+        self.start_inner(
+            station_address,
+            generation,
+            now_ns,
+            timeout_ns,
+            request_timeout_ns,
+            Some(fmmu_bank),
+            Some(sync_manager_bank),
             table,
         )
     }
@@ -235,7 +284,8 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
         now_ns: u64,
         timeout_ns: u64,
         request_timeout_ns: u64,
-        bank: Option<FmmuRegisterBank>,
+        fmmu_bank: Option<FmmuRegisterBank>,
+        sync_manager_bank: Option<SyncManagerRegisterBank>,
         table: &MappingTable<SMS, FMMUS>,
     ) -> Result<(), MappingConfigError> {
         if !matches!(
@@ -247,7 +297,38 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
 
         let sync_manager_count = table.sync_manager_count();
         let fmmu_count = table.fmmu_count();
-        let discovered_fmmu_count = if let Some(bank) = bank {
+        let discovered_sync_manager_count = if let Some(bank) = sync_manager_bank {
+            let discovered = bank.descriptor_count();
+            if discovered > MAX_ESC_SYNC_MANAGERS {
+                return Err(MappingConfigError::SyncManagerBankCapacityExceeded);
+            }
+            if bank.station_address() != station_address {
+                return Err(MappingConfigError::SyncManagerBankStationMismatch {
+                    expected: station_address,
+                    observed: bank.station_address(),
+                });
+            }
+            if sync_manager_count > discovered {
+                return Err(
+                    MappingConfigError::ConfiguredSyncManagerCountExceedsDiscovered {
+                        configured: sync_manager_count,
+                        discovered,
+                    },
+                );
+            }
+            for config in table.sync_managers() {
+                if usize::from(config.index) >= discovered {
+                    return Err(MappingConfigError::SyncManagerIndexOutsideDiscoveredBank {
+                        index: config.index,
+                        discovered,
+                    });
+                }
+            }
+            discovered
+        } else {
+            0
+        };
+        let discovered_fmmu_count = if let Some(bank) = fmmu_bank {
             let discovered = bank.descriptor_count();
             if discovered > MAX_ESC_FMMUS {
                 return Err(MappingConfigError::FmmuBankCapacityExceeded);
@@ -276,9 +357,18 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
         } else {
             0
         };
+        if let (Some(fmmu_bank), Some(sync_manager_bank)) = (fmmu_bank, sync_manager_bank)
+            && fmmu_bank.position() != sync_manager_bank.position()
+        {
+            return Err(MappingConfigError::RegisterBankPositionMismatch {
+                fmmu: fmmu_bank.position(),
+                sync_manager: sync_manager_bank.position(),
+            });
+        }
 
         self.sync_manager_count = sync_manager_count;
         self.fmmu_count = fmmu_count;
+        self.discovered_sync_manager_count = discovered_sync_manager_count;
         self.discovered_fmmu_count = discovered_fmmu_count;
         self.sync_managers[..self.sync_manager_count].copy_from_slice(table.sync_managers());
         self.fmmus[..self.fmmu_count].copy_from_slice(table.fmmus());
@@ -292,11 +382,7 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
         self.next_token = 1;
         self.next_datagram_index = 1;
         self.last_error = None;
-        self.phase = if self.discovered_fmmu_count != 0 {
-            MappingConfigPhase::ClearingFmmu
-        } else {
-            self.initial_mapping_phase()
-        };
+        self.phase = self.initial_reset_phase();
         Ok(())
     }
 
@@ -321,6 +407,41 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
         }
 
         let (item, operation, address, read_len, payload, write_len) = match self.phase {
+            MappingConfigPhase::ClearingSyncManager => {
+                if self.item_index >= self.discovered_sync_manager_count {
+                    self.item_index = 0;
+                    self.phase = self.phase_after_sync_manager_clear();
+                    return self.next_action(now_ns);
+                }
+                let index = self.item_index as u8;
+                (
+                    MappingConfigItem::SyncManagerReset(index),
+                    RegisterOperation::Write,
+                    fixed_address(
+                        self.station_address,
+                        crate::ESC_SYNC_MANAGER_BASE
+                            + u16::from(index) * crate::ESC_SYNC_MANAGER_STRIDE,
+                    ),
+                    0,
+                    [0; FMMU_IMAGE_LEN],
+                    SYNC_MANAGER_IMAGE_LEN,
+                )
+            }
+            MappingConfigPhase::VerifyingSyncManagerClear => {
+                let index = self.item_index as u8;
+                (
+                    MappingConfigItem::SyncManagerReset(index),
+                    RegisterOperation::Read,
+                    fixed_address(
+                        self.station_address,
+                        crate::ESC_SYNC_MANAGER_BASE
+                            + u16::from(index) * crate::ESC_SYNC_MANAGER_STRIDE,
+                    ),
+                    SYNC_MANAGER_IMAGE_LEN,
+                    [0; FMMU_IMAGE_LEN],
+                    0,
+                )
+            }
             MappingConfigPhase::ClearingFmmu => {
                 if self.item_index >= self.discovered_fmmu_count {
                     self.item_index = 0;
@@ -485,6 +606,28 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
         }
 
         let progress = match self.phase {
+            MappingConfigPhase::ClearingSyncManager => {
+                self.phase = MappingConfigPhase::VerifyingSyncManagerClear;
+                MappingConfigProgress::Advanced
+            }
+            MappingConfigPhase::VerifyingSyncManagerClear => {
+                if payload != [0; SYNC_MANAGER_IMAGE_LEN] {
+                    return self.fail(MappingConfigError::ReadbackMismatch);
+                }
+                self.item_index += 1;
+                if self.item_index < self.discovered_sync_manager_count {
+                    self.phase = MappingConfigPhase::ClearingSyncManager;
+                    MappingConfigProgress::Advanced
+                } else {
+                    self.item_index = 0;
+                    self.phase = self.phase_after_sync_manager_clear();
+                    if self.phase == MappingConfigPhase::Complete {
+                        MappingConfigProgress::Complete
+                    } else {
+                        MappingConfigProgress::Advanced
+                    }
+                }
+            }
             MappingConfigPhase::ClearingFmmu => {
                 self.phase = MappingConfigPhase::VerifyingFmmuClear;
                 MappingConfigProgress::Advanced
@@ -671,6 +814,22 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
         }
     }
 
+    const fn initial_reset_phase(&self) -> MappingConfigPhase {
+        if self.discovered_sync_manager_count != 0 {
+            MappingConfigPhase::ClearingSyncManager
+        } else {
+            self.phase_after_sync_manager_clear()
+        }
+    }
+
+    const fn phase_after_sync_manager_clear(&self) -> MappingConfigPhase {
+        if self.discovered_fmmu_count != 0 {
+            MappingConfigPhase::ClearingFmmu
+        } else {
+            self.initial_mapping_phase()
+        }
+    }
+
     fn fail<T>(&mut self, error: MappingConfigError) -> Result<T, MappingConfigError> {
         self.last_error = Some(error);
         self.pending = None;
@@ -690,6 +849,7 @@ mod tests {
     use super::*;
     use crate::fmmu_discovery::FmmuRegisterDescriptor;
     use crate::mapping::{ESC_FMMU_BASE, ESC_SYNC_MANAGER_BASE};
+    use crate::sync_manager_discovery::SyncManagerRegisterDescriptor;
 
     fn verified_bank(
         position: u16,
@@ -701,6 +861,19 @@ mod tests {
             station_address,
             descriptor_count,
             [FmmuRegisterDescriptor::RESET; MAX_ESC_FMMUS],
+        )
+    }
+
+    fn verified_sync_manager_bank(
+        position: u16,
+        station_address: u16,
+        descriptor_count: u8,
+    ) -> SyncManagerRegisterBank {
+        SyncManagerRegisterBank::from_parts(
+            position,
+            station_address,
+            descriptor_count,
+            [SyncManagerRegisterDescriptor::RESET; MAX_ESC_SYNC_MANAGERS],
         )
     }
 
@@ -1019,6 +1192,211 @@ mod tests {
         let read = controller.next_action(3).unwrap().unwrap();
         let mut stale = [0; FMMU_IMAGE_LEN];
         stale[12] = 1;
+        assert_eq!(
+            controller.accept(read, 5, &stale, 1, 4),
+            Err(MappingConfigError::ReadbackMismatch)
+        );
+        assert_eq!(controller.phase(), MappingConfigPhase::Faulted);
+        assert_eq!(controller.next_action(5), Ok(None));
+    }
+
+    #[test]
+    fn verified_register_banks_clear_sync_managers_before_fmmus_and_mapping() {
+        let table = mapping_table();
+        let mut controller = MappingConfigController::<1, 1>::new();
+        controller
+            .start_with_verified_registers(
+                0x1000,
+                5,
+                0,
+                10_000,
+                100,
+                verified_sync_manager_bank(0, 0x1000, 3),
+                verified_bank(0, 0x1000, 2),
+                &table,
+            )
+            .unwrap();
+
+        let mut now = 1;
+        for index in 0..3u8 {
+            let write = controller.next_action(now).unwrap().unwrap();
+            assert_eq!(write.item, MappingConfigItem::SyncManagerReset(index));
+            assert_eq!(write.operation, RegisterOperation::Write);
+            assert_eq!(write.payload(), &[0; SYNC_MANAGER_IMAGE_LEN]);
+            assert_eq!(
+                write.address,
+                fixed_address(
+                    0x1000,
+                    ESC_SYNC_MANAGER_BASE + u16::from(index) * crate::ESC_SYNC_MANAGER_STRIDE,
+                )
+            );
+            controller.accept(write, 5, &[], 1, now + 1).unwrap();
+            now += 2;
+
+            let read = controller.next_action(now).unwrap().unwrap();
+            assert_eq!(read.item, MappingConfigItem::SyncManagerReset(index));
+            assert_eq!(read.operation, RegisterOperation::Read);
+            assert_eq!(read.response_len(), SYNC_MANAGER_IMAGE_LEN);
+            controller
+                .accept(read, 5, &[0; SYNC_MANAGER_IMAGE_LEN], 1, now + 1)
+                .unwrap();
+            now += 2;
+        }
+
+        for index in 0..2u8 {
+            let write = controller.next_action(now).unwrap().unwrap();
+            assert_eq!(write.item, MappingConfigItem::FmmuReset(index));
+            controller.accept(write, 5, &[], 1, now + 1).unwrap();
+            now += 2;
+            let read = controller.next_action(now).unwrap().unwrap();
+            assert_eq!(read.item, MappingConfigItem::FmmuReset(index));
+            controller
+                .accept(read, 5, &[0; FMMU_IMAGE_LEN], 1, now + 1)
+                .unwrap();
+            now += 2;
+        }
+
+        let write_sm = controller.next_action(now).unwrap().unwrap();
+        assert_eq!(write_sm.item, MappingConfigItem::SyncManager(2));
+        controller.accept(write_sm, 5, &[], 1, now + 1).unwrap();
+        now += 2;
+        let read_sm = controller.next_action(now).unwrap().unwrap();
+        let mut sm_image = [0; SYNC_MANAGER_IMAGE_LEN];
+        table
+            .sync_manager(2)
+            .unwrap()
+            .encode(&mut sm_image)
+            .unwrap();
+        controller
+            .accept(read_sm, 5, &sm_image, 1, now + 1)
+            .unwrap();
+        now += 2;
+
+        let write_fmmu = controller.next_action(now).unwrap().unwrap();
+        assert_eq!(write_fmmu.item, MappingConfigItem::Fmmu(0));
+        controller.accept(write_fmmu, 5, &[], 1, now + 1).unwrap();
+        now += 2;
+        let read_fmmu = controller.next_action(now).unwrap().unwrap();
+        let mut fmmu_image = [0; FMMU_IMAGE_LEN];
+        table.fmmu(0).unwrap().encode(&mut fmmu_image).unwrap();
+        assert_eq!(
+            controller.accept(read_fmmu, 5, &fmmu_image, 1, now + 1),
+            Ok(MappingConfigProgress::Complete)
+        );
+    }
+
+    #[test]
+    fn verified_register_bank_preflight_rejects_sync_manager_drift() {
+        let table = mapping_table();
+        let mut controller = MappingConfigController::<1, 1>::new();
+        assert_eq!(
+            controller.start_with_verified_registers(
+                0x1000,
+                5,
+                0,
+                1_000,
+                100,
+                verified_sync_manager_bank(0, 0x1001, 3),
+                verified_bank(0, 0x1000, 2),
+                &table,
+            ),
+            Err(MappingConfigError::SyncManagerBankStationMismatch {
+                expected: 0x1000,
+                observed: 0x1001,
+            })
+        );
+        assert_eq!(controller.phase(), MappingConfigPhase::Idle);
+
+        assert_eq!(
+            controller.start_with_verified_registers(
+                0x1000,
+                5,
+                0,
+                1_000,
+                100,
+                verified_sync_manager_bank(1, 0x1000, 3),
+                verified_bank(0, 0x1000, 2),
+                &table,
+            ),
+            Err(MappingConfigError::RegisterBankPositionMismatch {
+                fmmu: 0,
+                sync_manager: 1,
+            })
+        );
+
+        assert_eq!(
+            controller.start_with_verified_registers(
+                0x1000,
+                5,
+                0,
+                1_000,
+                100,
+                verified_sync_manager_bank(0, 0x1000, 0),
+                verified_bank(0, 0x1000, 2),
+                &table,
+            ),
+            Err(
+                MappingConfigError::ConfiguredSyncManagerCountExceedsDiscovered {
+                    configured: 1,
+                    discovered: 0,
+                }
+            )
+        );
+
+        assert_eq!(
+            controller.start_with_verified_registers(
+                0x1000,
+                5,
+                0,
+                1_000,
+                100,
+                verified_sync_manager_bank(0, 0x1000, 2),
+                verified_bank(0, 0x1000, 2),
+                &table,
+            ),
+            Err(MappingConfigError::SyncManagerIndexOutsideDiscoveredBank {
+                index: 2,
+                discovered: 2,
+            })
+        );
+
+        assert_eq!(
+            controller.start_with_verified_registers(
+                0x1000,
+                5,
+                0,
+                1_000,
+                100,
+                verified_sync_manager_bank(0, 0x1000, (MAX_ESC_SYNC_MANAGERS + 1) as u8,),
+                verified_bank(0, 0x1000, 2),
+                &table,
+            ),
+            Err(MappingConfigError::SyncManagerBankCapacityExceeded)
+        );
+        assert_eq!(controller.phase(), MappingConfigPhase::Idle);
+    }
+
+    #[test]
+    fn sync_manager_clear_readback_mismatch_latches_fault() {
+        let table = mapping_table();
+        let mut controller = MappingConfigController::<1, 1>::new();
+        controller
+            .start_with_verified_registers(
+                0x1000,
+                5,
+                0,
+                1_000,
+                100,
+                verified_sync_manager_bank(0, 0x1000, 3),
+                verified_bank(0, 0x1000, 2),
+                &table,
+            )
+            .unwrap();
+        let write = controller.next_action(1).unwrap().unwrap();
+        controller.accept(write, 5, &[], 1, 2).unwrap();
+        let read = controller.next_action(3).unwrap().unwrap();
+        let mut stale = [0; SYNC_MANAGER_IMAGE_LEN];
+        stale[6] = 1;
         assert_eq!(
             controller.accept(read, 5, &stale, 1, 4),
             Err(MappingConfigError::ReadbackMismatch)

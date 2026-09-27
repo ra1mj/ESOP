@@ -37,6 +37,7 @@ mod sii_stream;
 mod slave;
 mod slave_copy;
 mod startup;
+mod sync_manager_discovery;
 pub mod wire;
 
 pub use al::{
@@ -193,4 +194,9 @@ pub use startup::{
     STARTUP_SII_PDO_ENTRY_CAPACITY, StartupAction, StartupAlFault, StartupConfig,
     StartupConfigurationServices, StartupController, StartupDcRequirement, StartupError,
     StartupPhase, StartupProgress, StartupReferenceClock, StartupSlaveProfile,
+};
+pub use sync_manager_discovery::{
+    SyncManagerRegisterBank, SyncManagerRegisterDescriptor, SyncManagerRegisterDiscoveryAction,
+    SyncManagerRegisterDiscoveryController, SyncManagerRegisterDiscoveryError,
+    SyncManagerRegisterDiscoveryPhase, SyncManagerRegisterDiscoveryProgress,
 };

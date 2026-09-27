@@ -17,13 +17,13 @@
 
 > 追加实现状态（2026-09-04）：`FramePlanSet` 可在固定帧槽内按 datagram 容量和 Ethernet MTU 拆分计划；字节对齐的 SII segment 可自动生成方向正确的 `LWR`/`LRD` datagram。多帧计划与 `DomainRegistry` phase 通过临时副本一起校验，失败不发布部分计划。
 
-> 追加实现状态（2026-09-27）：SII category stream 可从标准 `0x0040` 在固定容量内读取到 END，内部续读保持 token/datagram 游标和一个绝对 deadline；完整镜像可原子投影 ordered FMMU usage 与 signedness-aware SM/RxPDO/TxPDO candidate，并借用解析 Strings/DC category。Startup 会在首个 AL 动作前把 schema-v2 结构签名、ESC FMMU count 及产品选择的 ESI DC OpMode 与在线描述符联合比较；逻辑地址仍由主站生成，FMMU 寄存器自动发现和物理响应资格仍未接入。
+> 追加实现状态（2026-09-27）：SII category stream 可从标准 `0x0040` 在固定容量内读取到 END，内部续读保持 token/datagram 游标和一个绝对 deadline；完整镜像可原子投影 ordered FMMU usage 与 signedness-aware SM/RxPDO/TxPDO candidate，并借用解析 Strings/DC category。Startup 会在首个 AL 动作前把 schema-v2 结构签名、ESC FMMU/SyncManager count 及产品选择的 ESI DC OpMode 与在线描述符联合比较；在 stream 前还会依次发现完整 FMMU 与 SyncManager register bank，并只与 SII/DC 证据原子发布。逻辑地址仍由主站生成，观测 bank 仅作为证据和 reset bound；物理响应资格仍未接入。
 
 > 追加实现状态（2026-09-27）：生成器现通过共享 checked resolver 把已验证 DC OpMode 与产品基准周期转换为绝对 SYNC0/SYNC1 timing，并写入静态产物与配置 hash。`StaticProductConfig` 重算并构造产品顺序固定容量计划；拓扑级 `DcSyncController` 对所有计划从站执行全禁用、全周期、一次参考钟读取、LCM-aligned 共同 epoch、逐站 shift start time 和完整 AssignActivate，且只在全批成功后发布证据。它已接入 DC Clock 后、legacy DC 前的生产调度、PREOP 屏障和生命周期 Configuration gate。外部应用授时、周期漂移补偿、`0x092c` sync-window、物理触发精度、HIL 与 ETG/功能安全资格仍未接入。
 
 ## 1. 决策摘要
 
-当前 SII 配置路径已包含固定容量的精确 range 读取、Startup-owned 自动 category stream、FMMU usage/SM/PDO 类别投影、候选配置原子发布、从生成 FMMU/SM/PDO 字段重建的 schema-v2 结构签名比对、ESC count 门，以及所选 DC 模式的跨 ESI/SII 描述符验证。独立产品/控制器层已拥有 start-time/SYNC 软件策略；该路径仍不是 FMMU 寄存器自动发现、物理响应认证或硬件资格流程。
+当前 SII 配置路径已包含固定容量的精确 range 读取、Startup-owned 自动 category stream、FMMU usage/SM/PDO 类别投影、候选配置原子发布、从生成 FMMU/SM/PDO 字段重建的 schema-v2 结构签名比对、ESC count 门，以及所选 DC 模式的跨 ESI/SII 描述符验证。Startup 还会在 stream 前顺序发现完整 FMMU/SyncManager register bank，Mapping 以其作为完整清理范围。独立产品/控制器层已拥有 start-time/SYNC 软件策略；这些软件证据仍不是物理响应认证或硬件资格流程。
 
 ESOP 采用 IgH 已验证的调用者驱动周期、Domain、外部过程数据内存、帧聚合、轮询收包、异步请求、DC 预分配和 acquire/release 状态交接思想，但不移植 IgH 的 Linux 内核架构、运行期链表调度、周期内线性数据报匹配、字符设备、`ioctl`、`mmap`、通用 socket 驱动或可能重新分配的请求缓冲。
 

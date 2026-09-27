@@ -147,6 +147,12 @@ shift 后的 start time 与完整 AssignActivate，并在全批完成前保持 P
 该广播聚合不能定位单个从站，也不执行自动校时。FMMU 寄存器自动发现、自动周期漂移补偿、真实响应
 真实性、完整周期 WKC、从站互操作和 HIL 仍保持开放。
 
+2026-09-27 的后续增量已补齐上述 FMMU/SyncManager register 软件发现边界：expected-SII
+profile 在 category stream 前顺序读取 ESC 报告的完整 16-byte FMMU bank 和 8-byte
+SyncManager bank，并与 SII/可选 DC 证据原子发布。Mapping 使用两类 bank 作为 reset bound，
+先清零/回读全部 SM page，再处理 FMMU 和期望映射；观测值不成为产品配置。物理响应认证、
+目标 WCET、真实互操作、长时运行和 HIL 缺口不变。
+
 ## 5. ProcBuf：机器人实时数据载体
 
 ### 5.1 目标

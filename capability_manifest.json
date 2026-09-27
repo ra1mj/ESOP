@@ -92,7 +92,7 @@
     {
       "id": "ethercat_sii_category_stream",
       "status": "implemented",
-      "scope": "Allocation-free bounded SII category acquisition from standard word 0x0040 through END, atomic ordered FMMU-usage/SyncManager/RxPDO/TxPDO projection, borrowed Strings and fixed 24-byte DC mode decoding, schema-v2 structural signatures, ESC-reported FMMU-count gating, and Startup-owned generated-versus-live FMMU/structural/DC verification before the first AL action",
+      "scope": "Allocation-free bounded SII category acquisition from standard word 0x0040 through END, atomic ordered FMMU-usage/SyncManager/RxPDO/TxPDO projection, borrowed Strings and fixed 24-byte DC mode decoding, schema-v2 structural signatures, ESC-reported FMMU/SyncManager-count gating, and Startup-owned generated-versus-live register/structural/DC verification before the first AL action",
       "evidence": [
         "crates/esop-ethercat-core/src/sii.rs",
         "crates/esop-ethercat-core/src/sii_stream.rs",
@@ -121,6 +121,21 @@
         ".trellis/spec/backend/product-configuration.md"
       ],
       "limitation": "Deterministic software tests prove bounded ownership, exact register shape/WKC checks, complete-only publication, full discovered-bank clearing and scheduler compatibility for caller-delivered responses. Logical addresses remain master-owned; vendor register extensions, physical response provenance, real-device interoperability, target timing/WCET, long-duration operation, ETG conformance, hardware HIL and functional-safety qualification remain open"
+    },
+    {
+      "id": "ethercat_sync_manager_register_discovery",
+      "status": "implemented",
+      "scope": "Allocation-free fixed-capacity discovery of every ESC-reported standard 8-byte SyncManager register page after FMMU discovery and before SII/AL, position/station-bound complete-bank evidence, atomic FMMU/SyncManager/SII/DC Startup publication, a typed Startup-to-Mapping bridge, complete SyncManager-bank zero-write/readback before FMMU reset and desired SM/FMMU programming, and production scheduler/control-pool integration",
+      "evidence": [
+        "crates/esop-ethercat-core/src/sync_manager_discovery.rs",
+        "crates/esop-ethercat-core/src/mapping_config.rs",
+        "crates/esop-ethercat-core/src/startup.rs",
+        "crates/esop-ethercat-linux-port/tests/scheduled_domains.rs",
+        "docs/esop-software-prd.md",
+        "docs/ethercat-master-requirements.md",
+        ".trellis/spec/backend/product-configuration.md"
+      ],
+      "limitation": "Deterministic software tests prove bounded ownership, exact register shape/WKC checks, atomic complete-only publication, full discovered-bank clearing and scheduler compatibility for caller-delivered responses. Observed pages are evidence and reset bounds rather than desired product mappings; vendor extensions, physical response provenance, real-device interoperability, target timing/WCET, long-duration operation, ETG conformance, hardware HIL and functional-safety qualification remain open"
     },
     {
       "id": "product_config_generator",
@@ -152,7 +167,7 @@
         "config/examples/sim-dual-axis/esi/esop-sim.xml",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Software tests prove bounded generated-versus-live layout comparison for caller-delivered SII responses only; Mailbox Status Bit discovery, full live SM/DC register descriptors, physical response authenticity, target timing, interoperability and HIL remain open"
+      "limitation": "Software tests prove bounded generated-versus-live layout comparison for caller-delivered SII responses only; Mailbox Status Bit discovery, full live DC register descriptors, physical response authenticity, target timing, interoperability and HIL remain open"
     },
     {
       "id": "product_runtime_attachment",
@@ -166,7 +181,7 @@
         "Makefile",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Activation validates static expectations, enforces RxPDO-to-Outputs and TxPDO-to-Inputs FMMU index compatibility, attaches generated mailbox/FMMU/structural SII and selected DC mode expectations to Startup, requires measurable propagation evidence for required DC slaves, and builds bounded ordered PDO and DC SYNC plans; live FMMU banks are discovered and cleared by runtime rather than becoming product-owned desired mappings. Physical response authentication, external application-time discipline, artifact signing/deployment policy, interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
+      "limitation": "Activation validates static expectations, enforces RxPDO-to-Outputs and TxPDO-to-Inputs FMMU index compatibility, attaches generated mailbox/FMMU/structural SII and selected DC mode expectations to Startup, requires measurable propagation evidence for required DC slaves, and builds bounded ordered PDO and DC SYNC plans; live FMMU and SyncManager banks are discovered and cleared by runtime rather than becoming product-owned desired mappings. Physical response authentication, external application-time discipline, artifact signing/deployment policy, interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
     },
     {
       "id": "pdo_configuration_readback",

@@ -151,8 +151,8 @@ SII category stream，原子投影有序 FMMU usage 与 SM/RxPDO/TxPDO candidate
 不超过 ESC 扫描报告的 FMMU 数量，完全匹配前不发出 AL 动作。同一次镜像还会解析
 Strings/DC category，并把产品显式选择的 ESI DC OpMode 与在线 24-byte 描述符逐字段
 比较；全部检查成功后才原子发布 position 证据。产品层同时要求确定性 RxPDO FMMU index
-声明为 Outputs、TxPDO index 声明为 Inputs。逻辑地址仍由主站分配；FMMU 寄存器描述自动
-发现、真实响应来源、物理从站互操作和 HIL 仍未完成，
+声明为 Outputs、TxPDO index 声明为 Inputs。逻辑地址仍由主站分配；完整 FMMU/SyncManager
+寄存器 bank 已作为 Startup 证据和 Mapping reset bound 接入，但真实响应来源、物理从站互操作和 HIL 仍未完成，
 因此 FR-004 的完整产品验收仍保持开放。
 
 FR-006 当前增量由宿主机 `esop-cfggen` 与 `no_std` 的 `esop-product-config` 共同实现：前者严格解析 `esop.product.v1` 和 byte-aligned ESI 子集，通过既有 Domain/Frame Plan/CiA 402/ProcBuf 校验路径，原子输出静态 C/Rust 配置、规范化产品、设备清单、ProcBuf ABI v6 布局和 build input；后者在固件激活时重新校验配置 hash、ProcBuf header/layout、精确从站拓扑、Domain/PDO/datagram/WKC、schedule/frame plan、轴策略和 CiA 402 PDO map，并仅在全部成功后返回冻结配置。同一语义的 JSON/ESI 排版变化不改变 SHA-256 或输出字节。模块化设备、bit-packed PDO、厂商 scaling/quirk、完整 ENI/ESI 和真实 SII/PDO read-back 仍明确拒绝或留待硬件集成，不能被解释为完整 ESI 兼容或 HIL 资格。
@@ -572,6 +572,18 @@ request deadline；零数量直接完成，超容量、短响应、错误 WKC、
 `start` 和无 expected SII profile 保持兼容。主站仍拥有逻辑地址和期望映射。确定性核心与
 Linux 生产调度模拟只证明 caller-delivered 响应下的有界软件行为，不证明物理响应来源、
 真实从站互操作、目标 WCET、长时运行、ETG 一致性、实物 HIL 或功能安全资格。
+
+R2 SyncManager 寄存器发现与全 bank 清理增量：上述 profile 在 FMMU bank 完成后、SII
+category stream 前，继续按 ESC 基础信息报告数量读取 `0x0800 + index * 8` 的全部标准
+SyncManager page。固定容量控制器保留 exact raw bytes，并公开 physical start、length、
+control、status、activation 与 PDI control；读取要求精确 8-byte、WKC 1、generation/action/
+control-pool 所有权和同一类绝对/请求 deadline。Startup 将 SM bank 与 FMMU/SII/可选 DC
+证据一起暂存和原子发布，并拒绝 SII 描述的 SM 数量超过 ESC 报告值。完整 Mapping bridge
+在 FMMU 清理和期望 SM/FMMU 写入前，先逐槽写零并回读全部已发现 SM page，包括产品未使用
+槽位；position/station/count/index 或回读漂移均 fail closed。观测 page 只确定证据和清理范围，
+不成为期望产品映射。确定性 Linux 调度测试证明公共控制器、请求池和生产调度兼容性；物理
+响应来源、厂商扩展、真实互操作、目标 WCET、长时运行、ETG 一致性、实物 HIL 和功能安全
+资格仍保持开放。
 
 R2 受控停车生产接线增量：固定状态 `ControlledStopPlanner` 与 `submit_controlled_stopping_frame` 不改变默认 `step_axis_bank` 将 Hold/Ramp 降级为 Disable 的生产行为。Hold 仅在 CSP 下锁定停车序列第一份已验证实际位置；RampToZero 仅在 CSV/CST 下按冻结的原始单位每周期步长，从当前已验证速度/转矩反馈向零收敛。动作、模式、限幅和 MLG 转换序号在序列中不可变化；输入必须来自同周期完整 Domain，下一代 Domain 只能在成功发送后武装。所有规划先在副本预演，只有端口接受完整帧才提交规划器和 `stop_issued_cycle`。新增调用方持有的 `ControlledStopCycleState` 冻结逐轴限幅，并通过 `run_with_controlled_stop`、共享 RX、控制服务及 `run_service_cycle_with_controlled_stop_until` 接入现有固定容量周期路径；首次映射缺失、模式不符、输入不可验证、周期/序列重放、跨轴别名、构帧或 TX 失败会重置规划器，把当前 MLG 转换序列锁定到默认 QuickStop/Disable，防止后续周期重新启用已失败的受控目标，新的转换序列才允许重新规划。`controlled_axis_stops_to_procbuf` 区分受控 Hold/Ramp 目标与终端 Disable，`StopCycleOutcome` 保留原始受控错误与回退帧结果，`ScheduledProductionRelease` 保留成功使用/回退证据；任务释放仍以 handoff、deadline 和发布完整性为准，要求受控策略成功的产品必须额外检查该证据。软件模拟覆盖成功 Hold、输入失败后同序列不重试、默认回退、后续新鲜反馈确认及 owner 结算；逐产品缩放/限幅、两种驱动与 IO 实物 HIL、制动器/安全链验证和目标硬件 WCET 仍是 R2 发布阻塞项。
 
