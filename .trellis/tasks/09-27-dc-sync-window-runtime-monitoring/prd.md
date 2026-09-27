@@ -95,7 +95,7 @@ observation from the same cycle.
       service scheduling.
 - [x] README, requirements/PRD/architecture docs, backend specs, and capability
       manifest describe runtime sync-window monitoring and its limitations.
-- [ ] Focused tests, workspace all-feature checks/tests/Clippy, AArch64
+- [x] Focused tests, workspace all-feature checks/tests/Clippy, AArch64
       `no_std`, `make ci`, `make bpf`, Trellis validation, capability-manifest
       validation, and exact pushed-SHA GitHub Actions all pass.
 
@@ -135,4 +135,6 @@ Verified locally on 2026-09-27:
 - `make no-std`, `make capability-manifest`, `make ci`, and `make bpf` passed.
 - Trellis task validation, JSON validation, formatting, and `git diff --check`
   passed.
-- Exact pushed-SHA GitHub Actions evidence is recorded after publication.
+- Implementation commit `b91cfb021a8e2dd81dfbf7ba2bb91754adbb852c`
+  passed GitHub Actions run `36287298738`:
+  `https://github.com/ra1mj/ESOP/actions/runs/36287298738`.

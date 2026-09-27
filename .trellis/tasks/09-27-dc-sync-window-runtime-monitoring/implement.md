@@ -30,9 +30,10 @@
 - [x] Run focused tests, format, workspace all-feature checks/tests/Clippy,
       AArch64 `no_std`, `make ci`, `make bpf`, capability validation, Trellis
       validation, and `git diff --check`.
-- [ ] Record acceptance evidence, commit and push implementation, require exact
-      SHA GitHub Actions success, archive the task, journal the session, push
-      housekeeping commits, and require final exact-SHA CI success.
+- [x] Record acceptance evidence, commit and push implementation, and require
+      exact implementation-SHA GitHub Actions success. Task archival, session
+      journaling, and final housekeeping-SHA verification follow through the
+      standard Trellis finish workflow.
 
 ## Risk And Rollback Points
 
