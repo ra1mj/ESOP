@@ -46,7 +46,7 @@
     "max_process_image_bytes": 128,
     "max_schedule_slots": 16
   },
-  "config_sha256": "4fb4315ab4c089fa56d9c8bf979bb37e9568b2ca3c7be1ead4ae1f45dd922f52",
+  "config_sha256": "7f90316cf7747aa9bed0edd7f8ec170a19dd1aa9356ca12e5ba2d787f8912a28",
   "cycle": {
     "base_period_ns": 1000000,
     "deadline_ns": 800000
@@ -442,6 +442,8 @@
     {
       "coe_complete_access_enabled": true,
       "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": true,
+      "coe_sdo_information_supported": true,
       "dc": {
         "op_mode": "DcSync",
         "reference_clock": true,
@@ -456,7 +458,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP simulated CiA 402 drive",
       "esi_label": "esop-sim-drive-v1",
-      "esi_semantic_sha256": "04c8179c2c44e0bedaf6d15406a063ff4af405fd3aba43ad746ea4bc967b6899",
+      "esi_semantic_sha256": "54277de1036c1f23bd2c938381f8fc5eecac78b5c6aec976171913029103e7e2",
       "esi_type_name": "ESOP-SIM-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -499,6 +501,64 @@
       "revision": "0x00000001",
       "rx_pdos": [
         "0x1600"
+      ],
+      "sdo_information_expectations": [
+        {
+          "bit_length": 16,
+          "data_type": "0x0006",
+          "index": "0x603f",
+          "required_access": 9,
+          "slave_position": 0,
+          "subindex": 0
+        },
+        {
+          "bit_length": 16,
+          "data_type": "0x0006",
+          "index": "0x6040",
+          "required_access": 6,
+          "slave_position": 0,
+          "subindex": 0
+        },
+        {
+          "bit_length": 16,
+          "data_type": "0x0006",
+          "index": "0x6041",
+          "required_access": 9,
+          "slave_position": 0,
+          "subindex": 0
+        },
+        {
+          "bit_length": 8,
+          "data_type": "0x0002",
+          "index": "0x6060",
+          "required_access": 6,
+          "slave_position": 0,
+          "subindex": 0
+        },
+        {
+          "bit_length": 8,
+          "data_type": "0x0002",
+          "index": "0x6061",
+          "required_access": 9,
+          "slave_position": 0,
+          "subindex": 0
+        },
+        {
+          "bit_length": 32,
+          "data_type": "0x0004",
+          "index": "0x6064",
+          "required_access": 9,
+          "slave_position": 0,
+          "subindex": 0
+        },
+        {
+          "bit_length": 32,
+          "data_type": "0x0004",
+          "index": "0x607a",
+          "required_access": 6,
+          "slave_position": 0,
+          "subindex": 0
+        }
       ],
       "serial": "0x00000001",
       "sii_dc_mode": {
@@ -551,6 +611,8 @@
     {
       "coe_complete_access_enabled": false,
       "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": true,
       "dc": {
         "op_mode": "DcSync",
         "reference_clock": false,
@@ -565,7 +627,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP simulated CiA 402 drive",
       "esi_label": "esop-sim-drive-v1",
-      "esi_semantic_sha256": "04c8179c2c44e0bedaf6d15406a063ff4af405fd3aba43ad746ea4bc967b6899",
+      "esi_semantic_sha256": "54277de1036c1f23bd2c938381f8fc5eecac78b5c6aec976171913029103e7e2",
       "esi_type_name": "ESOP-SIM-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -609,6 +671,7 @@
       "rx_pdos": [
         "0x1600"
       ],
+      "sdo_information_expectations": [],
       "serial": "0x00000002",
       "sii_dc_mode": {
         "assign_activate": 768,
@@ -660,6 +723,8 @@
     {
       "coe_complete_access_enabled": false,
       "coe_complete_access_supported": false,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": false,
       "dc": {
         "op_mode": null,
         "reference_clock": false,
@@ -669,7 +734,7 @@
       "domain_id": 1,
       "esi_device_name": "ESOP simulated digital IO",
       "esi_label": "esop-sim-io-v1",
-      "esi_semantic_sha256": "0791161f7db266ffb70d4712b43f16ac8af0821fc6def69b25ab4fab0f1a6bfb",
+      "esi_semantic_sha256": "725bbc4c3823dd0192075c652876dcc57b635ef3e0d0d5bf64f06a28ee510ea5",
       "esi_type_name": "ESOP-SIM-IO",
       "kind": "ethercat_io",
       "mailbox": {
@@ -690,6 +755,7 @@
       "rx_pdos": [
         "0x1601"
       ],
+      "sdo_information_expectations": [],
       "serial": null,
       "sii_dc_mode": null,
       "sii_enabled_sync_managers": 15,

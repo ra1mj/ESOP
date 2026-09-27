@@ -69,7 +69,8 @@
       "revision": "0x00000001",
       "serial": "0x00000001",
       "coe": {
-        "complete_access": true
+        "complete_access": true,
+        "sdo_information": true
       },
       "dc": {
         "required": true,

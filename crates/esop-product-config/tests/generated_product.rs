@@ -4,12 +4,12 @@ use esop_ethercat_core::{
     MappingConfigPhase, MappingConfigProgress, MappingTable, SlaveCopyStatus,
 };
 use esop_product_config::{
-    ActivatedProduct, AlTransitionTimeouts, Cia402AxisCommandPolicyError, DomainRegistryError,
-    ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, EscWatchdogConfig, FramePlanSetError,
-    MAX_PRODUCT_SLAVE_COPIES, MailboxConfig, MailboxConfigError, MailboxDirection,
-    MailboxMappedStatusError, MailboxReceiveSyncManager, MailboxStatusBit, OperatingMode,
-    PdoConfigBatchPlanError, PdoConfigPlanError, PdoSdoWrite, ProcBuf, ProcBufHeaderError,
-    ProductActivationError, ProductMailboxBinding, ProductMailboxPolicyError,
+    ActivatedProduct, AlTransitionTimeouts, CanopenDataType, Cia402AxisCommandPolicyError,
+    DomainRegistryError, ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, EscWatchdogConfig,
+    FramePlanSetError, MAX_PRODUCT_SLAVE_COPIES, MailboxConfig, MailboxConfigError,
+    MailboxDirection, MailboxMappedStatusError, MailboxReceiveSyncManager, MailboxStatusBit,
+    OperatingMode, PdoConfigBatchPlanError, PdoConfigPlanError, PdoSdoWrite, ProcBuf,
+    ProcBufHeaderError, ProductActivationError, ProductMailboxBinding, ProductMailboxPolicyError,
     ProductMailboxStatusMappingError, ProductPdoBatchError, ProductPdoPlanError, ProductSlaveKind,
     ProductStartupError, SdoAccessPolicy, SiiConfigurationSignatureError, SiiFmmuUsage,
     SlaveCopyPlanSetError, SlaveRecord, StartupDcRequirement,
@@ -60,9 +60,9 @@ fn checked_in_product_activates_exact_generated_evidence() {
     assert_eq!(
         active.metadata().config_sha256,
         [
-            0x4f, 0xb4, 0x31, 0x5a, 0xb4, 0xc0, 0x89, 0xfa, 0x56, 0xd9, 0xc8, 0xbf, 0x97, 0x9b,
-            0xb3, 0x7e, 0x95, 0x68, 0xb2, 0xca, 0x3c, 0x7b, 0xe1, 0xea, 0xd4, 0xae, 0x1f, 0x45,
-            0xdd, 0x92, 0x2f, 0x52,
+            0x7f, 0x90, 0x31, 0x6c, 0xf7, 0x74, 0x7a, 0xa9, 0xbe, 0xd0, 0xed, 0xd7, 0xf8, 0xec,
+            0x17, 0x0a, 0x19, 0xdd, 0x1a, 0xa9, 0x35, 0x6c, 0xa1, 0x2e, 0x5b, 0xa2, 0xd7, 0x87,
+            0xf8, 0x91, 0x2a, 0x28,
         ]
     );
     assert_eq!(
@@ -76,6 +76,29 @@ fn checked_in_product_activates_exact_generated_evidence() {
     assert_eq!(
         generated::PRODUCT_CONFIG.sdo_access_policy(2),
         Ok(SdoAccessPolicy::new(false))
+    );
+    let sdo_information = generated::PRODUCT_CONFIG.sdo_information_plan(0).unwrap();
+    assert!(sdo_information.policy.enabled());
+    assert_eq!(sdo_information.expectations.len(), 7);
+    assert_eq!(sdo_information.expectations[0].index, 0x603f);
+    assert_eq!(
+        sdo_information.expectations[0].data_type,
+        CanopenDataType::Unsigned16
+    );
+    assert_eq!(sdo_information.expectations[6].index, 0x607a);
+    assert!(
+        !generated::PRODUCT_CONFIG
+            .sdo_information_plan(1)
+            .unwrap()
+            .policy
+            .enabled()
+    );
+    assert!(
+        generated::PRODUCT_CONFIG
+            .sdo_information_plan(1)
+            .unwrap()
+            .expectations
+            .is_empty()
     );
 
     let startup_profiles = generated::PRODUCT_CONFIG.startup_profiles().unwrap();

@@ -56,6 +56,46 @@ def product_input() -> dict:
                     "enabled": False,
                 },
             ],
+            "coe_sdo_information": [
+                {
+                    "name": "drive_left",
+                    "position": 0,
+                    "supported": True,
+                    "enabled": True,
+                    "expectations": [
+                        {
+                            "slave_position": 0,
+                            "index": "0x6040",
+                            "subindex": 0,
+                            "data_type": "0x0006",
+                            "bit_length": 16,
+                            "required_access": 6,
+                        },
+                        {
+                            "slave_position": 0,
+                            "index": "0x6041",
+                            "subindex": 0,
+                            "data_type": "0x0006",
+                            "bit_length": 16,
+                            "required_access": 9,
+                        },
+                    ],
+                },
+                {
+                    "name": "drive_right",
+                    "position": 1,
+                    "supported": True,
+                    "enabled": False,
+                    "expectations": [],
+                },
+                {
+                    "name": "io_block",
+                    "position": 2,
+                    "supported": False,
+                    "enabled": False,
+                    "expectations": [],
+                },
+            ],
             "source": "esop-cfggen validated product manifest and ESI subset",
         },
         "process_data": {
@@ -99,6 +139,7 @@ class RobotBuildReportTests(unittest.TestCase):
         self.assertEqual(report["platform"]["board"], "host-development")
         self.assertEqual(report["devices"]["declared_slaves"], 0)
         self.assertEqual(report["devices"]["coe_complete_access"], [])
+        self.assertEqual(report["devices"]["coe_sdo_information"], [])
         self.assertFalse(report["qualification"]["passed"])
 
     def test_product_input_projects_exact_generated_evidence(self):
@@ -163,6 +204,42 @@ class RobotBuildReportTests(unittest.TestCase):
         missing_complete_access_entry["devices"]["coe_complete_access"].pop()
         cases.append((missing_complete_access_entry, "length must match"))
 
+        unsupported_sdo_information = product_input()
+        unsupported_sdo_information["devices"]["coe_sdo_information"][2][
+            "enabled"
+        ] = True
+        cases.append((unsupported_sdo_information, "cannot enable unsupported"))
+
+        empty_enabled_sdo_information = product_input()
+        empty_enabled_sdo_information["devices"]["coe_sdo_information"][0][
+            "expectations"
+        ] = []
+        cases.append((empty_enabled_sdo_information, "enabled plan must not be empty"))
+
+        wrong_owner_sdo_information = product_input()
+        wrong_owner_sdo_information["devices"]["coe_sdo_information"][0][
+            "expectations"
+        ][0]["slave_position"] = 1
+        cases.append((wrong_owner_sdo_information, "must match position"))
+
+        unordered_sdo_information = product_input()
+        unordered_sdo_information["devices"]["coe_sdo_information"][0][
+            "expectations"
+        ].reverse()
+        cases.append((unordered_sdo_information, "strictly ordered"))
+
+        invalid_sdo_information_type = product_input()
+        invalid_sdo_information_type["devices"]["coe_sdo_information"][0][
+            "expectations"
+        ][0]["data_type"] = "0xffff"
+        cases.append((invalid_sdo_information_type, "data_type is unsupported"))
+
+        invalid_sdo_information_access = product_input()
+        invalid_sdo_information_access["devices"]["coe_sdo_information"][0][
+            "expectations"
+        ][0]["required_access"] = 0x10
+        cases.append((invalid_sdo_information_access, "known nonzero flags"))
+
         for value, reason in cases:
             with self.subTest(reason=reason):
                 self.assert_product_rejected(value, reason)
@@ -178,6 +255,13 @@ class RobotBuildReportTests(unittest.TestCase):
         ] = False
         with self.assertRaisesRegex(ValueError, "cannot enable unsupported"):
             validate_report(invalid_complete_access_report)
+
+        invalid_sdo_information_report = build_report(product_input())
+        invalid_sdo_information_report["devices"]["coe_sdo_information"][0][
+            "expectations"
+        ][0]["index"] = "0x0000"
+        with self.assertRaisesRegex(ValueError, "must be nonzero"):
+            validate_report(invalid_sdo_information_report)
 
     def test_build_report_does_not_mutate_product_input(self):
         source = product_input()

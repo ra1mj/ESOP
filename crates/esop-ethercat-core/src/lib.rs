@@ -30,6 +30,7 @@ mod rx_index;
 mod scan;
 mod schedule;
 mod scheduled_domains;
+mod sdo_information;
 mod sii;
 mod sii_config;
 mod sii_discovery;
@@ -161,6 +162,15 @@ pub use scheduled_domains::{
     ScheduledReceiveError, ScheduledReceiveReport, ScheduledServiceFrameError,
     ScheduledServiceTxError, ScheduledServiceTxFailure, ScheduledServiceTxReport,
     ScheduledSlaveCopyError,
+};
+pub use sdo_information::{
+    CanopenDataType, MAX_SDO_INFORMATION_FRAGMENTS, SDO_INFORMATION_HEADER_LEN,
+    SdoInfoEntryDescription, SdoInfoObjectAccess, SdoInfoObjectCode, SdoInfoObjectDescription,
+    SdoInfoOdListType, SdoInfoOpcode, SdoInfoValueInfo, SdoInformationError,
+    SdoInformationExpectation, SdoInformationPhase, SdoInformationPolicy, SdoInformationProgress,
+    SdoInformationRequiredAccess, SdoInformationResult, SdoInformationTransfer,
+    SdoInformationVerifier, SdoInformationVerifierError, SdoInformationVerifierPhase,
+    SdoInformationVerifierProgress,
 };
 pub use sii::{
     EEPROM_BUSY, EEPROM_ERROR_MASK, EEPROM_READ_COMMAND, MAX_SII_FMMU_USAGES, SII_CATEGORY_DC,

@@ -16,7 +16,7 @@
         <Sm Enable="1" StartAddress="#x1100" DefaultSize="64" ControlByte="#x22">MBoxIn</Sm>
         <Sm Enable="1" OpOnly="true">Outputs</Sm>
         <Sm Enable="1">Inputs</Sm>
-        <Mailbox><CoE CompleteAccess="true"/></Mailbox>
+        <Mailbox><CoE CompleteAccess="true" SdoInfo="true"/></Mailbox>
         <Dc>
           <OpMode>
             <Name>DcSync</Name>

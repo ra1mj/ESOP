@@ -185,14 +185,17 @@ FR-006 当前增量由宿主机 `esop-cfggen` 与 `no_std` 的 `esop-product-con
 | FR-018 | P0 | 系统应识别 DC 能力、选择参考时钟、配置应用时间、SYNC0 周期/相位并监测时钟质量。 | DC 与非 DC 拓扑启动均通过；记录 offset、jitter、last sync、失锁次数和同步窗口状态。 |
 | FR-019 | P0 | 当 DC 未锁定、WKC 无效、命令过期或驱动状态异常时，系统不得发布新的有效运动目标。 | DC 失锁、WKC 异常、命令超时、驱动 fault 联合故障矩阵通过。 |
 
-FR-017 的 Complete Access 软件增量现已完成：核心使用类型化 `SdoAccess` 和默认禁用的
-`SdoAccessPolicy`，仅在 initiate upload/download 中编码规范位 `0x10`，并在状态变更前拒绝
-未授权模式、非法 subindex 和 upload 响应模式不一致。cfggen 只读取直接
-`Device/Mailbox/CoE@CompleteAccess` 能力，并要求产品逐从站显式授权；支持与授权分别进入
-规范化 JSON、inventory、C/Rust、build input、ESI semantic hash 和配置 hash。产品运行时在
-激活前重建策略并拒绝 `enabled && !supported` 篡改，邮箱/主站集成测试检查精确线上字节。
-PDO assignment/mapping 仍固定使用单 subindex。FR-017 仍为部分完成：SDO Information、对象字典
-交叉验证、真实从站互操作、HIL、目标 WCET 和 ETG 一致性证据尚未完成。
+FR-017 的软件边界现已完成。Complete Access 使用类型化 `SdoAccess` 和默认禁用的
+`SdoAccessPolicy`，仅在 initiate upload/download 中编码规范位 `0x10`。SDO Information 使用
+独立、默认禁用的策略和无分配固定容量状态机，支持 OD list、object description、entry
+description、abort 和有界 fragment 校验。cfggen 分别读取直接
+`Device/Mailbox/CoE@CompleteAccess` 与 `@SdoInfo` 能力，并要求产品逐从站显式授权；启用
+SDO Information 时，只为产品实际选择的 RxPDO/TxPDO 条目生成严格排序且去重的对象、类型、
+位宽、读写权和 PDO 可映射性期望。支持、授权和期望进入规范化 JSON、inventory、C/Rust、
+build input、ESI semantic hash 和配置 hash；产品运行时在激活前重建策略并拒绝 capability、
+所有权、容量、形状或顺序篡改。邮箱/主站集成测试检查对象与条目请求的精确线上字节，并且
+仅在完整计划匹配后发布成功。PDO assignment/mapping 仍固定使用单 subindex；本实现不是完整
+对象字典浏览器。真实从站响应真实性、互操作、HIL、目标 WCET、ETG 一致性和功能安全资格仍未完成。
 
 FR-018 的发现与传播延迟边界现已完成：在线扫描精确解码 12-byte ESC 基础块及 Features
 Supported，对 DC-capable 从站按 32/64-bit 读取 `0x0910` System Time，并区分 WKC 1
@@ -593,8 +596,17 @@ subindex 0/1，initiate 命令精确设置 `0x10`，segment 命令保持原格�
 匹配模式，download 继续接受标准 `0x60`。ESI capability 与产品 authorization 独立生成并
 共同进入静态产物、build report 输入和哈希；运行时按 position 暴露经校验策略并在激活前
 拒绝不支持却启用的静态数据。仿真产品覆盖支持且启用、支持但禁用、完全不支持三种状态，
-邮箱/主站路径验证精确请求字节。该增量不实现 SDO Information、自动 PDO Complete Access
-分组或 block transfer，也不证明真实设备响应、互操作、WCET、HIL、ETG 或功能安全资格。
+邮箱/主站路径验证精确请求字节。该增量不实现自动 PDO Complete Access 分组或 block transfer，
+也不证明真实设备响应、互操作、WCET、HIL、ETG 或功能安全资格。
+
+R2 SDO Information 增量：核心新增无分配固定容量的 OD-list/object-description/
+entry-description codec、abort/fragment 状态机和生成计划验证器；任何 service/opcode、保留字节、
+对象身份、fragment countdown、类型、位宽、访问权或 PDO mappability 差异均在发布前闭锁。
+ESI `SdoInfo` capability、产品逐从站授权和从所选 RxPDO/TxPDO 派生的严格排序期望，完整进入
+JSON、inventory、C/Rust、build report 与语义/配置 hash；运行时激活重新校验 capability、计划
+所有权、容量、形状和顺序。仿真产品只为左驱动启用，邮箱/主站测试依次验证精确 object/entry
+请求和完整成功发布。该增量不提供无界对象字典浏览，不自动改写映射，也不证明真实从站响应、
+互操作、目标 WCET、HIL、ETG 一致性或功能安全资格。
 
 R2 SII category stream 增量：`SiiCategoryStreamReader<WORDS>` 复用现有 EEPROM
 寄存器动作与控制请求池，从标准 word `0x0040` 读取两字 category header 和精确

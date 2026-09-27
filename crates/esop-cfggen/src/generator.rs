@@ -12,15 +12,16 @@ use esop_ethercat_core::wire::{
     Command, ETHERCAT_FRAME_HEADER_LEN, ETHERNET_HEADER_LEN, MIN_ETHERNET_FRAME_LEN,
 };
 use esop_ethercat_core::{
-    DcSyncTiming, DomainConfig, DomainDatagramSpec, DomainRegistry, EscWatchdogConfig,
-    FramePlanSet, MAX_SII_FMMU_USAGES, MailboxStatusBit, PdoDirection, PdoEntryHandle,
-    PdoRegistrationRequest, SiiDcMode, SlaveCopyPlan, SlaveCopyPlanSet,
+    CanopenDataType, DcSyncTiming, DomainConfig, DomainDatagramSpec, DomainRegistry,
+    EscWatchdogConfig, FramePlanSet, MAX_SII_FMMU_USAGES, MailboxStatusBit, PdoDirection,
+    PdoEntryHandle, PdoRegistrationRequest, SdoInformationRequiredAccess, SiiDcMode, SlaveCopyPlan,
+    SlaveCopyPlanSet,
 };
 use esop_lifecycle_guard::procbuf::Cia402AxisCommandPolicy;
 use esop_procbuf::{ABI_VERSION, ProcBufDimensions, ProcBufLayoutDescriptor, describe_layout};
 use esop_product_config::{
-    MAX_PRODUCT_AXIS_PDOS, MAX_PRODUCT_PDO_ENTRIES_PER_DOMAIN, MAX_PRODUCT_SLAVE_COPIES,
-    PRODUCT_RUNTIME_SCHEMA,
+    MAX_PRODUCT_AXIS_PDOS, MAX_PRODUCT_PDO_ENTRIES_PER_DOMAIN, MAX_PRODUCT_SDO_INFORMATION_ENTRIES,
+    MAX_PRODUCT_SLAVE_COPIES, PRODUCT_RUNTIME_SCHEMA,
 };
 use esop_profile_cia402::{Cia402PdoMap, OperatingMode};
 use serde::Serialize;
@@ -142,6 +143,9 @@ struct GeneratedSlave {
     transition_timeouts: EsiTransitionTimeouts,
     coe_complete_access_supported: bool,
     coe_complete_access_enabled: bool,
+    coe_sdo_information_supported: bool,
+    coe_sdo_information_enabled: bool,
+    sdo_information_expectations: Vec<GeneratedSdoInformationExpectation>,
     mailbox: GeneratedMailbox,
     #[serde(skip_serializing_if = "Option::is_none")]
     mapped_mailbox_status: Option<GeneratedMailboxMappedStatusBit>,
@@ -152,6 +156,16 @@ struct GeneratedSlave {
     op_only_outputs: Vec<GeneratedOpOnlySyncManager>,
     rx_pdos: Vec<HexU16>,
     tx_pdos: Vec<HexU16>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+struct GeneratedSdoInformationExpectation {
+    slave_position: u16,
+    index: HexU16,
+    subindex: u8,
+    data_type: HexU16,
+    bit_length: u16,
+    required_access: u8,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -282,6 +296,7 @@ struct ResolvedSlave {
     mailbox: EsiMailbox,
     rx_pdos: Vec<EsiPdo>,
     tx_pdos: Vec<EsiPdo>,
+    sdo_information_expectations: Vec<GeneratedSdoInformationExpectation>,
     selected_dc_mode: Option<EsiDcMode>,
     semantic_sha256: String,
 }
@@ -447,6 +462,9 @@ fn build_artifacts(input: &Path) -> Result<GeneratedArtifacts> {
                 transition_timeouts: slave.device.transition_timeouts,
                 coe_complete_access_supported: slave.device.coe_complete_access_supported,
                 coe_complete_access_enabled: slave.manifest.coe.complete_access,
+                coe_sdo_information_supported: slave.device.coe_sdo_information_supported,
+                coe_sdo_information_enabled: slave.manifest.coe.sdo_information,
+                sdo_information_expectations: slave.sdo_information_expectations.clone(),
                 mailbox,
                 mapped_mailbox_status: mapped_mailbox_status.get(&slave.manifest.position).copied(),
                 sii_fmmu_count: slave.device.fmmu_usages.len() as u8,
@@ -828,11 +846,23 @@ fn resolve_slaves(base: &Path, slaves: &[SlaveManifest]) -> Result<Vec<ResolvedS
                 manifest.name
             )));
         }
+        if manifest.coe.sdo_information && !device.coe_sdo_information_supported {
+            return Err(GeneratorError::Invalid(format!(
+                "slave {} enables CoE SDO Information but its ESI does not advertise support",
+                manifest.name
+            )));
+        }
         let selected_dc_mode = select_dc_mode(manifest, &device)?;
         let rx_pdos = select_pdos(&device.rx_pdos, &manifest.rx_pdos, &manifest.name, "Rx")?;
         let tx_pdos = select_pdos(&device.tx_pdos, &manifest.tx_pdos, &manifest.name, "Tx")?;
         validate_selected_entries(&manifest.name, GeneratedDirection::Rx, &rx_pdos)?;
         validate_selected_entries(&manifest.name, GeneratedDirection::Tx, &tx_pdos)?;
+        let sdo_information_expectations = derive_sdo_information_expectations(
+            manifest.position,
+            manifest.coe.sdo_information,
+            &rx_pdos,
+            &tx_pdos,
+        )?;
         validate_op_only_outputs(&manifest.name, &device, &rx_pdos, &tx_pdos)?;
         let mailbox = validate_product_mailbox(&manifest.name, &device)?;
         let semantic_sha256 = sha256_json(&json!({
@@ -855,11 +885,75 @@ fn resolve_slaves(base: &Path, slaves: &[SlaveManifest]) -> Result<Vec<ResolvedS
             mailbox,
             rx_pdos,
             tx_pdos,
+            sdo_information_expectations,
             selected_dc_mode,
             semantic_sha256,
         });
     }
     Ok(resolved)
+}
+
+fn derive_sdo_information_expectations(
+    slave_position: u16,
+    enabled: bool,
+    rx_pdos: &[EsiPdo],
+    tx_pdos: &[EsiPdo],
+) -> Result<Vec<GeneratedSdoInformationExpectation>> {
+    if !enabled {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = BTreeMap::<(u16, u8), (CanopenDataType, u16, u8)>::new();
+    for (pdos, required_access) in [
+        (rx_pdos, SdoInformationRequiredAccess::RX_PDO_ENTRY),
+        (tx_pdos, SdoInformationRequiredAccess::TX_PDO_ENTRY),
+    ] {
+        for entry in pdos.iter().flat_map(|pdo| pdo.entries.iter()) {
+            let key = (entry.index, entry.subindex);
+            let bit_length = u16::from(entry.bit_length);
+            match entries.entry(key) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert((entry.data_type, bit_length, required_access.raw()));
+                }
+                std::collections::btree_map::Entry::Occupied(mut slot) => {
+                    let (data_type, existing_bit_length, access) = slot.get_mut();
+                    if *data_type != entry.data_type || *existing_bit_length != bit_length {
+                        return Err(GeneratorError::Invalid(format!(
+                            "slave position {slave_position} selected object 0x{:04x}:{} with inconsistent SDO Information type or width",
+                            entry.index, entry.subindex
+                        )));
+                    }
+                    *access |= required_access.raw();
+                }
+            }
+        }
+    }
+    if entries.is_empty() {
+        return Err(GeneratorError::Invalid(format!(
+            "slave position {slave_position} enables CoE SDO Information without selected PDO entries"
+        )));
+    }
+    if entries.len() > MAX_PRODUCT_SDO_INFORMATION_ENTRIES {
+        return Err(GeneratorError::Invalid(format!(
+            "slave position {slave_position} SDO Information plan has {} entries, exceeding runtime capacity {MAX_PRODUCT_SDO_INFORMATION_ENTRIES}",
+            entries.len()
+        )));
+    }
+    Ok(entries
+        .into_iter()
+        .map(
+            |((index, subindex), (data_type, bit_length, required_access))| {
+                GeneratedSdoInformationExpectation {
+                    slave_position,
+                    index: HexU16(index),
+                    subindex,
+                    data_type: HexU16(data_type.raw()),
+                    bit_length,
+                    required_access,
+                }
+            },
+        )
+        .collect())
 }
 
 fn select_dc_mode(manifest: &SlaveManifest, device: &EsiDevice) -> Result<Option<EsiDcMode>> {
@@ -1691,6 +1785,17 @@ fn semantic_identity(
             .iter()
             .map(|slave| (slave.position, slave.mapped_mailbox_status))
             .collect::<BTreeMap<_, _>>(),
+        "sdo_information": slaves
+            .iter()
+            .map(|slave| (
+                slave.position,
+                (
+                    slave.coe_sdo_information_supported,
+                    slave.coe_sdo_information_enabled,
+                    &slave.sdo_information_expectations,
+                ),
+            ))
+            .collect::<BTreeMap<_, _>>(),
         "domains": domains,
         "pdo_entries": pdos,
         "datagrams": datagrams,
@@ -1750,6 +1855,16 @@ fn robot_build_input(
                     "enabled": slave.coe_complete_access_enabled,
                 }))
                 .collect::<Vec<_>>(),
+            "coe_sdo_information": slaves
+                .iter()
+                .map(|slave| json!({
+                    "name": slave.name,
+                    "position": slave.position,
+                    "supported": slave.coe_sdo_information_supported,
+                    "enabled": slave.coe_sdo_information_enabled,
+                    "expectations": slave.sdo_information_expectations,
+                }))
+                .collect::<Vec<_>>(),
             "source": "esop-cfggen validated product manifest and ESI subset",
         },
         "process_data": metrics,
@@ -1791,7 +1906,8 @@ fn render_header(
         "#ifndef ESOP_PRODUCT_CONFIG_H\n#define ESOP_PRODUCT_CONFIG_H\n\n#include <stdint.h>\n\n",
     );
     header.push_str("#define ESOP_SII_FMMU_CAPACITY 16u\n\n");
-    header.push_str("typedef struct { const char *name; uint16_t position; uint16_t station_address; uint8_t domain_id; uint8_t kind; uint32_t vendor_id; uint32_t product_code; uint32_t revision; uint32_t serial; uint8_t has_serial; uint8_t dc_required; uint8_t dc_reference_clock; const char *dc_op_mode; uint8_t has_dc_op_mode; uint32_t dc_cycle_time0_ns; int32_t dc_shift_time0_ns; int32_t dc_shift_time1_ns; int16_t dc_sync1_cycle_factor; uint16_t dc_assign_activate; int16_t dc_sync0_cycle_factor; uint8_t has_dc_sync_timing; uint32_t dc_sync_cycle_time0_ns; uint32_t dc_sync_cycle_time1_ns; int32_t dc_sync_shift_time0_ns; uint16_t dc_sync_assign_activate; uint16_t mailbox_send_address; uint16_t mailbox_send_capacity; uint16_t mailbox_receive_address; uint16_t mailbox_receive_capacity; uint8_t mailbox_send_sync_manager; uint8_t mailbox_send_control_byte; uint8_t mailbox_receive_sync_manager; uint8_t mailbox_receive_control_byte; uint8_t has_mailbox_status_bit; uint16_t mailbox_status_bit_address; uint8_t mailbox_status_bit_mask; uint8_t mailbox_status_bit_active_high; uint8_t sii_sync_manager_count; uint16_t sii_enabled_sync_managers; uint8_t sii_fmmu_count; uint8_t sii_fmmu_usages[ESOP_SII_FMMU_CAPACITY]; uint8_t has_watchdog; uint8_t has_watchdog_divider; uint16_t watchdog_divider; uint8_t has_process_data_watchdog; uint16_t process_data_watchdog_intervals; uint8_t coe_complete_access_supported; uint8_t coe_complete_access_enabled; } esop_slave_config_t;\n");
+    header.push_str("typedef struct { const char *name; uint16_t position; uint16_t station_address; uint8_t domain_id; uint8_t kind; uint32_t vendor_id; uint32_t product_code; uint32_t revision; uint32_t serial; uint8_t has_serial; uint8_t dc_required; uint8_t dc_reference_clock; const char *dc_op_mode; uint8_t has_dc_op_mode; uint32_t dc_cycle_time0_ns; int32_t dc_shift_time0_ns; int32_t dc_shift_time1_ns; int16_t dc_sync1_cycle_factor; uint16_t dc_assign_activate; int16_t dc_sync0_cycle_factor; uint8_t has_dc_sync_timing; uint32_t dc_sync_cycle_time0_ns; uint32_t dc_sync_cycle_time1_ns; int32_t dc_sync_shift_time0_ns; uint16_t dc_sync_assign_activate; uint16_t mailbox_send_address; uint16_t mailbox_send_capacity; uint16_t mailbox_receive_address; uint16_t mailbox_receive_capacity; uint8_t mailbox_send_sync_manager; uint8_t mailbox_send_control_byte; uint8_t mailbox_receive_sync_manager; uint8_t mailbox_receive_control_byte; uint8_t has_mailbox_status_bit; uint16_t mailbox_status_bit_address; uint8_t mailbox_status_bit_mask; uint8_t mailbox_status_bit_active_high; uint8_t sii_sync_manager_count; uint16_t sii_enabled_sync_managers; uint8_t sii_fmmu_count; uint8_t sii_fmmu_usages[ESOP_SII_FMMU_CAPACITY]; uint8_t has_watchdog; uint8_t has_watchdog_divider; uint16_t watchdog_divider; uint8_t has_process_data_watchdog; uint16_t process_data_watchdog_intervals; uint8_t coe_complete_access_supported; uint8_t coe_complete_access_enabled; uint8_t coe_sdo_information_supported; uint8_t coe_sdo_information_enabled; uint32_t sdo_information_offset; uint32_t sdo_information_count; } esop_slave_config_t;\n");
+    header.push_str("typedef struct { uint16_t slave_position; uint16_t index; uint8_t subindex; uint16_t data_type; uint16_t bit_length; uint8_t required_access; } esop_sdo_information_expectation_t;\n");
     header.push_str("typedef struct { const char *name; uint8_t id; uint32_t logical_address; uint32_t image_offset; uint32_t image_bytes; uint32_t output_bytes; uint32_t input_bytes; uint32_t period_ticks; uint32_t phase_ticks; uint16_t expected_wkc; } esop_domain_config_t;\n");
     header.push_str("typedef struct { uint16_t slave_position; uint8_t present; uint8_t domain_id; uint32_t domain_bit_offset; uint32_t max_age_cycles; uint8_t fmmu_index; uint32_t logical_start; uint8_t logical_start_bit; uint8_t logical_end_bit; uint16_t physical_start; uint8_t physical_start_bit; uint8_t fmmu_type; uint8_t enable; } esop_mailbox_status_mapping_t;\n");
     header.push_str("typedef struct { uint8_t domain_id; uint16_t slave_position; uint16_t assignment_index; uint8_t sync_manager; uint16_t object_index; uint8_t subindex; uint8_t direction; uint32_t bit_offset; uint8_t bit_length; uint8_t is_signed; } esop_pdo_config_t;\n");
@@ -1806,15 +1922,19 @@ fn render_header(
         manifest.product.policy_version,
     ));
     header.push_str(&format!(
-        "#define ESOP_SLAVE_COUNT {}u\n#define ESOP_DOMAIN_COUNT {}u\n#define ESOP_PDO_COUNT {}u\n#define ESOP_DATAGRAM_COUNT {}u\n#define ESOP_SLAVE_COPY_COUNT {}u\n#define ESOP_AXIS_COUNT {}u\n",
+        "#define ESOP_SLAVE_COUNT {}u\n#define ESOP_DOMAIN_COUNT {}u\n#define ESOP_PDO_COUNT {}u\n#define ESOP_DATAGRAM_COUNT {}u\n#define ESOP_SLAVE_COPY_COUNT {}u\n#define ESOP_SDO_INFORMATION_COUNT {}u\n#define ESOP_AXIS_COUNT {}u\n",
         slaves.len(),
         domains.len(),
         pdos.len(),
         datagrams.len(),
         slave_copies.len(),
+        slaves
+            .iter()
+            .map(|slave| slave.sdo_information_expectations.len())
+            .sum::<usize>(),
         axes.len(),
     ));
-    header.push_str("#define ESOP_SLAVE_STORAGE_COUNT (ESOP_SLAVE_COUNT ? ESOP_SLAVE_COUNT : 1u)\n#define ESOP_DOMAIN_STORAGE_COUNT (ESOP_DOMAIN_COUNT ? ESOP_DOMAIN_COUNT : 1u)\n#define ESOP_PDO_STORAGE_COUNT (ESOP_PDO_COUNT ? ESOP_PDO_COUNT : 1u)\n#define ESOP_DATAGRAM_STORAGE_COUNT (ESOP_DATAGRAM_COUNT ? ESOP_DATAGRAM_COUNT : 1u)\n#define ESOP_SLAVE_COPY_STORAGE_COUNT (ESOP_SLAVE_COPY_COUNT ? ESOP_SLAVE_COPY_COUNT : 1u)\n#define ESOP_AXIS_STORAGE_COUNT (ESOP_AXIS_COUNT ? ESOP_AXIS_COUNT : 1u)\n\n");
+    header.push_str("#define ESOP_SLAVE_STORAGE_COUNT (ESOP_SLAVE_COUNT ? ESOP_SLAVE_COUNT : 1u)\n#define ESOP_DOMAIN_STORAGE_COUNT (ESOP_DOMAIN_COUNT ? ESOP_DOMAIN_COUNT : 1u)\n#define ESOP_PDO_STORAGE_COUNT (ESOP_PDO_COUNT ? ESOP_PDO_COUNT : 1u)\n#define ESOP_DATAGRAM_STORAGE_COUNT (ESOP_DATAGRAM_COUNT ? ESOP_DATAGRAM_COUNT : 1u)\n#define ESOP_SLAVE_COPY_STORAGE_COUNT (ESOP_SLAVE_COPY_COUNT ? ESOP_SLAVE_COPY_COUNT : 1u)\n#define ESOP_SDO_INFORMATION_STORAGE_COUNT (ESOP_SDO_INFORMATION_COUNT ? ESOP_SDO_INFORMATION_COUNT : 1u)\n#define ESOP_AXIS_STORAGE_COUNT (ESOP_AXIS_COUNT ? ESOP_AXIS_COUNT : 1u)\n\n");
     header.push_str(&format!(
         "static const uint16_t esop_procbuf_abi_version = {}u;\nstatic const uint32_t esop_procbuf_region_bytes = {}u;\nstatic const uint64_t esop_procbuf_layout_hash = UINT64_C(0x{:016x});\n\n",
         ABI_VERSION, procbuf.region_bytes, procbuf.layout_hash
@@ -1824,6 +1944,7 @@ fn render_header(
     if slaves.is_empty() {
         header.push_str("  {0},\n");
     } else {
+        let mut sdo_information_offset = 0usize;
         for slave in slaves {
             let dc_mode = slave.sii_dc_mode.as_ref();
             let dc_sync_timing = slave.dc_sync_timing;
@@ -1839,7 +1960,7 @@ fn render_header(
                     .join(", ")
             );
             header.push_str(&format!(
-                "  {{{}, {}u, UINT16_C(0x{:04x}), {}u, {}u, UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), {}u, {}u, {}u, {}, {}u, UINT32_C({}), INT32_C({}), INT32_C({}), INT16_C({}), UINT16_C(0x{:04x}), INT16_C({}), {}u, UINT32_C({}), UINT32_C({}), INT32_C({}), UINT16_C(0x{:04x}), UINT16_C(0x{:04x}), UINT16_C({}), UINT16_C(0x{:04x}), UINT16_C({}), {}u, UINT8_C(0x{:02x}), {}u, UINT8_C(0x{:02x}), {}u, UINT16_C(0x{:04x}), UINT8_C(0x{:02x}), {}u, {}u, UINT16_C(0x{:04x}), {}u, {}, {}u, {}u, UINT16_C({}), {}u, UINT16_C({}), {}u, {}u}},\n",
+                "  {{{}, {}u, UINT16_C(0x{:04x}), {}u, {}u, UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), {}u, {}u, {}u, {}, {}u, UINT32_C({}), INT32_C({}), INT32_C({}), INT16_C({}), UINT16_C(0x{:04x}), INT16_C({}), {}u, UINT32_C({}), UINT32_C({}), INT32_C({}), UINT16_C(0x{:04x}), UINT16_C(0x{:04x}), UINT16_C({}), UINT16_C(0x{:04x}), UINT16_C({}), {}u, UINT8_C(0x{:02x}), {}u, UINT8_C(0x{:02x}), {}u, UINT16_C(0x{:04x}), UINT8_C(0x{:02x}), {}u, {}u, UINT16_C(0x{:04x}), {}u, {}, {}u, {}u, UINT16_C({}), {}u, UINT16_C({}), {}u, {}u, {}u, {}u, {}u, {}u}},\n",
                 c_string(&slave.name),
                 slave.position,
                 slave.station_address.0,
@@ -1894,8 +2015,33 @@ fn render_header(
                     .unwrap_or(0),
                 u8::from(slave.coe_complete_access_supported),
                 u8::from(slave.coe_complete_access_enabled),
+                u8::from(slave.coe_sdo_information_supported),
+                u8::from(slave.coe_sdo_information_enabled),
+                sdo_information_offset,
+                slave.sdo_information_expectations.len(),
             ));
+            sdo_information_offset += slave.sdo_information_expectations.len();
         }
+    }
+    header.push_str("};\n\nstatic const esop_sdo_information_expectation_t esop_sdo_information_expectations[ESOP_SDO_INFORMATION_STORAGE_COUNT] = {\n");
+    let mut wrote_sdo_information = false;
+    for expectation in slaves
+        .iter()
+        .flat_map(|slave| slave.sdo_information_expectations.iter())
+    {
+        wrote_sdo_information = true;
+        header.push_str(&format!(
+            "  {{{}u, UINT16_C(0x{:04x}), {}u, UINT16_C(0x{:04x}), {}u, UINT8_C(0x{:02x})}},\n",
+            expectation.slave_position,
+            expectation.index.0,
+            expectation.subindex,
+            expectation.data_type.0,
+            expectation.bit_length,
+            expectation.required_access,
+        ));
+    }
+    if !wrote_sdo_information {
+        header.push_str("  {0},\n");
     }
     header.push_str(
         "};\n\nstatic const esop_mailbox_status_mapping_t esop_mailbox_status_mappings[ESOP_SLAVE_STORAGE_COUNT] = {\n",
@@ -2021,14 +2167,15 @@ fn render_rust_module(
     let mut output = String::from(
         "// @generated by esop-cfggen; do not edit.\n\
 use esop_product_config::{\n\
-    AlTransitionTimeouts, Cia402AxisCommandPolicy, Command, DcSyncTiming, DomainConfig,\n\
+    AlTransitionTimeouts, CanopenDataType, Cia402AxisCommandPolicy, Command, DcSyncTiming, DomainConfig,\n\
     DomainDatagramSpec, FmmuConfig, MailboxConfig, MailboxMappedStatusBit,\n\
     MailboxReceiveSyncManager, MailboxStatusBit,\n\
     OpOnlySyncManagerProfile, OperatingMode, PdoDirection,\n\
     PdoRegistrationRequest,\n\
     ProcBufDimensions, ProcBufLayoutDescriptor, ProductAxisConfig, ProductDatagramConfig,\n\
     ProductDomainConfig, ProductMetadata, ProductPdoConfig, ProductSlaveConfig, ProductSlaveCopyConfig,\n\
-    ProductSlaveKind, EscWatchdogConfig, SiiDcMode, SiiDcModeExpectation, SlaveIdentity, StaticProductConfig,\n\
+    ProductSlaveKind, EscWatchdogConfig, SdoInformationExpectation, SdoInformationRequiredAccess,\n\
+    SiiDcMode, SiiDcModeExpectation, SlaveIdentity, StaticProductConfig,\n\
 };\n\n",
     );
 
@@ -2088,6 +2235,27 @@ use esop_product_config::{\n\
     }
     output.push_str("];\n\n");
 
+    for (slave_index, slave) in slaves.iter().enumerate() {
+        output.push_str(&format!(
+            "static PRODUCT_SDO_INFORMATION_{slave_index}: [SdoInformationExpectation; {}] = [\n",
+            slave.sdo_information_expectations.len()
+        ));
+        for expectation in &slave.sdo_information_expectations {
+            let data_type = CanopenDataType::from_raw(expectation.data_type.0)
+                .expect("generated SDO Information data type is known");
+            output.push_str(&format!(
+                "    SdoInformationExpectation {{ slave_position: {}, index: 0x{:04x}, subindex: {}, data_type: CanopenDataType::{}, bit_length: {}, required_access: SdoInformationRequiredAccess::from_raw(0x{:02x}) }},\n",
+                expectation.slave_position,
+                expectation.index.0,
+                expectation.subindex,
+                rust_canopen_data_type(data_type),
+                expectation.bit_length,
+                expectation.required_access,
+            ));
+        }
+        output.push_str("];\n\n");
+    }
+
     output.push_str(&format!(
         "#[allow(clippy::approx_constant)]\npub static PRODUCT_CONFIG: StaticProductConfig<'static, {}, {}, {}> = StaticProductConfig {{\n",
         slaves.len(),
@@ -2131,7 +2299,7 @@ use esop_product_config::{\n\
     ));
 
     output.push_str("    slaves: [\n");
-    for slave in slaves {
+    for (slave_index, slave) in slaves.iter().enumerate() {
         let mut op_only_activation = [0u8; esop_ethercat_core::MAX_ESC_SYNC_MANAGERS];
         let mut op_only_mask = 0u16;
         for sync_manager in &slave.op_only_outputs {
@@ -2229,7 +2397,7 @@ use esop_product_config::{\n\
             },
         );
         output.push_str(&format!(
-            "        ProductSlaveConfig {{ name: {}, position: {}, station_address: 0x{:04x}, domain_id: {}, kind: ProductSlaveKind::{}, identity: SlaveIdentity {{ vendor_id: 0x{:08x}, product_code: 0x{:08x}, revision: 0x{:08x}, serial: 0x{:08x} }}, dc_required: {}, dc_reference_clock: {}, sii_dc_mode: {}, dc_sync_timing: {}, watchdog: {}, transition_timeouts: AlTransitionTimeouts::new({}, {}, {}, {}), coe_complete_access_supported: {}, coe_complete_access_enabled: {}, mailbox_config: {}, mailbox_send_sync_manager: {}, mailbox_send_control_byte: 0x{:02x}, mailbox_receive_sync_manager: MailboxReceiveSyncManager::new({}, 0x{:04x}, {}, 0x{:02x}), mapped_mailbox_status: {}, op_only_outputs: OpOnlySyncManagerProfile::from_raw(0x{:04x}, [{}]), sii_sync_manager_count: {}, sii_enabled_sync_managers: 0x{:04x}, sii_fmmu_count: {}, sii_fmmu_usages: [{}] }},\n",
+            "        ProductSlaveConfig {{ name: {}, position: {}, station_address: 0x{:04x}, domain_id: {}, kind: ProductSlaveKind::{}, identity: SlaveIdentity {{ vendor_id: 0x{:08x}, product_code: 0x{:08x}, revision: 0x{:08x}, serial: 0x{:08x} }}, dc_required: {}, dc_reference_clock: {}, sii_dc_mode: {}, dc_sync_timing: {}, watchdog: {}, transition_timeouts: AlTransitionTimeouts::new({}, {}, {}, {}), coe_complete_access_supported: {}, coe_complete_access_enabled: {}, coe_sdo_information_supported: {}, coe_sdo_information_enabled: {}, sdo_information_expectations: &PRODUCT_SDO_INFORMATION_{}, mailbox_config: {}, mailbox_send_sync_manager: {}, mailbox_send_control_byte: 0x{:02x}, mailbox_receive_sync_manager: MailboxReceiveSyncManager::new({}, 0x{:04x}, {}, 0x{:02x}), mapped_mailbox_status: {}, op_only_outputs: OpOnlySyncManagerProfile::from_raw(0x{:04x}, [{}]), sii_sync_manager_count: {}, sii_enabled_sync_managers: 0x{:04x}, sii_fmmu_count: {}, sii_fmmu_usages: [{}] }},\n",
             rust_string(&slave.name),
             slave.position,
             slave.station_address.0,
@@ -2250,6 +2418,9 @@ use esop_product_config::{\n\
             slave.transition_timeouts.back_to_safeop_ns,
             slave.coe_complete_access_supported,
             slave.coe_complete_access_enabled,
+            slave.coe_sdo_information_supported,
+            slave.coe_sdo_information_enabled,
+            slave_index,
             mailbox_config,
             slave.mailbox.send_sync_manager,
             slave.mailbox.send_control_byte,
@@ -2315,6 +2486,44 @@ fn rust_direction(direction: &GeneratedDirection) -> &'static str {
     match direction {
         GeneratedDirection::Rx => "Rx",
         GeneratedDirection::Tx => "Tx",
+    }
+}
+
+const fn rust_canopen_data_type(data_type: CanopenDataType) -> &'static str {
+    match data_type {
+        CanopenDataType::Boolean => "Boolean",
+        CanopenDataType::Integer8 => "Integer8",
+        CanopenDataType::Integer16 => "Integer16",
+        CanopenDataType::Integer32 => "Integer32",
+        CanopenDataType::Unsigned8 => "Unsigned8",
+        CanopenDataType::Unsigned16 => "Unsigned16",
+        CanopenDataType::Unsigned32 => "Unsigned32",
+        CanopenDataType::Real32 => "Real32",
+        CanopenDataType::VisibleString => "VisibleString",
+        CanopenDataType::OctetString => "OctetString",
+        CanopenDataType::UnicodeString => "UnicodeString",
+        CanopenDataType::TimeOfDay => "TimeOfDay",
+        CanopenDataType::TimeDifference => "TimeDifference",
+        CanopenDataType::Domain => "Domain",
+        CanopenDataType::Integer24 => "Integer24",
+        CanopenDataType::Real64 => "Real64",
+        CanopenDataType::Integer40 => "Integer40",
+        CanopenDataType::Integer48 => "Integer48",
+        CanopenDataType::Integer56 => "Integer56",
+        CanopenDataType::Integer64 => "Integer64",
+        CanopenDataType::Unsigned24 => "Unsigned24",
+        CanopenDataType::Unsigned40 => "Unsigned40",
+        CanopenDataType::Unsigned48 => "Unsigned48",
+        CanopenDataType::Unsigned56 => "Unsigned56",
+        CanopenDataType::Unsigned64 => "Unsigned64",
+        CanopenDataType::Bit1 => "Bit1",
+        CanopenDataType::Bit2 => "Bit2",
+        CanopenDataType::Bit3 => "Bit3",
+        CanopenDataType::Bit4 => "Bit4",
+        CanopenDataType::Bit5 => "Bit5",
+        CanopenDataType::Bit6 => "Bit6",
+        CanopenDataType::Bit7 => "Bit7",
+        CanopenDataType::Bit8 => "Bit8",
     }
 }
 

@@ -445,10 +445,16 @@ label-to-semantic-ESI-hash map. It excludes timestamps, host paths, compiler,
 output directory, JSON key order, and XML formatting.
 
 `robot_build_input.json` uses `esop.product-build-input.v1`. Its devices object
-contains one exact Complete Access record per declared slave with name,
-position, ESI support and product enablement. The report boundary rejects
-length mismatch, duplicate name/position, non-boolean fields and enablement
-without support. Optional build report projection copies the config hash, platform, devices,
+contains one exact Complete Access record and one exact SDO Information record
+per declared slave with matching name/position, ESI support and product
+enablement. An enabled SDO Information record also carries the strictly ordered,
+deduplicated selected-PDO expectation list: owner position, object/subindex,
+exact CANopen data type, bit length and required read/write/PDO-mappability flags.
+The report boundary rejects length or identity mismatch, duplicate
+name/position, non-boolean fields, enablement without support, disabled/nonempty
+or enabled/empty plans, malformed hexadecimal values, unknown data types/access
+flags, wrong ownership and duplicate/unordered expectations. Optional build
+report projection copies the config hash, platform, devices,
 PDO/frame/wire/WKC/copy metrics, cycle budget, and resources while preserving
 `qualification.passed=false`. Default build-report generation without a
 product input retains its host-placeholder shape.
@@ -474,7 +480,9 @@ datagrams, FCS, and inter-packet gap respectively.
 | Nested/misplaced ESI DC OpMode or wrapped DC field | Reject before mode or device metadata publication. |
 | Zero/malformed/overflowing ESM timeout or non-output OpOnly SM | Reject before staging or hash publication. |
 | Missing CoE, partial/duplicate/disabled ESI mailbox SM, or invalid mailbox range | Reject before staging or hash publication. |
-| Malformed ESI Complete Access capability, product enablement without support, or duplicate/malformed build-input policy evidence | Reject before staging, runtime mutation, or build-report publication. |
+| Malformed ESI Complete Access/SDO Information capability, product enablement without support, or duplicate/malformed build-input policy evidence | Reject before staging, runtime mutation, or build-report publication. |
+| Empty/over-capacity/conflicting generated SDO Information expectation, wrong runtime owner, invalid type/width/access, or duplicate/unordered plan | Reject before artifact publication, runtime activation, mailbox request, or build-report publication. |
+| Malformed, out-of-order, over-capacity, wrong-service/opcode/object/subindex/value-info SDO Information response, or abort | Latch the typed transfer/verifier fault, clear pending publication, and never report a partially verified plan. |
 | Duplicate Domain/slave/axis identity or overlapping range | Reject before registry mutation/publication. |
 | Capacity, schedule, raw policy, or ProcBuf layout overflow | Reject with the owning contract error. |
 | Generation failure with an existing output | Preserve the previous six-file directory byte-for-byte. |
@@ -509,7 +517,7 @@ datagrams, FCS, and inter-packet gap respectively.
 | PDO upload readback length or byte mismatch | Latch controller fault and keep the current operation index. |
 | PDO mailbox terminal failure | Latch the exact typed transport fault and keep the current operation index. |
 | Substituted PDO mailbox/controller binding | Reject before TX without consuming or advancing the PDO action. |
-| Product build input with unknown fields, invalid hash/budget, invalid Complete Access evidence, or `passed=true` | Reject before report write. |
+| Product build input with unknown fields, invalid hash/budget, invalid Complete Access/SDO Information evidence, or `passed=true` | Reject before report write. |
 | Missing target/HIL/WCET/resource evidence | Keep report unqualified. |
 
 ## 5. Good / Base / Bad Cases
@@ -522,12 +530,14 @@ datagrams, FCS, and inter-packet gap respectively.
   measurable propagation-delay evidence for both required drives, and a
   two-entry 1 ms DC SYNC plan with exact `AssignActivate=0x0300`; both drives
   also carry divider 2500 and process-data interval 100 while the IO slave
-  preserves ESC watchdog defaults. Both drives advertise Complete Access, but
-  only the left drive is product-authorized; the IO slave is unsupported and
-  disabled.
+  preserves ESC watchdog defaults. Both drives advertise Complete Access and
+  SDO Information, but only the left drive is product-authorized for each; its
+  seven selected PDO entries form a sorted typed verification plan. The right
+  drive remains supported/disabled and the IO slave remains unsupported/disabled.
 - Base: no `PRODUCT_INPUT` produces the existing unqualified host build
   report; an omitted slave `dc` object produces no Startup DC requirement, and
-  optional unmeasurable DC evidence remains explicitly `None`; an omitted
+  optional unmeasurable DC evidence remains explicitly `None`; omitted CoE
+  policy fields disable Complete Access and SDO Information with empty plans; an omitted
   `watchdog` object produces an empty watchdog plan and no ESC requests. A
   product with no slave-copy plans keeps the existing static auxiliary-output
   owner path and reports zero applied copies.
@@ -535,7 +545,9 @@ datagrams, FCS, and inter-packet gap respectively.
   duplicate object, a path escape, zero product limit, reference-without-
   required, duplicate reference, wrapped/misplaced DC mode field, malformed
   port tree, required unmeasurable DC, empty/zero watchdog declaration,
-  watchdog readback mismatch, motion-Domain copy target, replayed copy cycle,
+  watchdog readback mismatch, unsupported SDO Information enablement, wrong
+  expectation owner/type/access/order, SDO Information abort or malformed
+  fragment, motion-Domain copy target, replayed copy cycle,
   substituted publication page, or forged qualification fails without partial
   publication.
 

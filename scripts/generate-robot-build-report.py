@@ -15,6 +15,35 @@ from datetime import datetime, timezone
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PRODUCT_INPUT_SCHEMA = "esop.product-build-input.v1"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+HEX_U16 = re.compile(r"^0x[0-9a-f]{4}$")
+CANOPEN_DATA_TYPES = {
+    0x0001,
+    0x0002,
+    0x0003,
+    0x0004,
+    0x0005,
+    0x0006,
+    0x0007,
+    0x0008,
+    0x0009,
+    0x000A,
+    0x000B,
+    0x000C,
+    0x000D,
+    0x000F,
+    0x0010,
+    0x0011,
+    0x0012,
+    0x0013,
+    0x0014,
+    0x0015,
+    0x0016,
+    0x0018,
+    0x0019,
+    0x001A,
+    0x001B,
+    *range(0x0030, 0x0038),
+}
 
 
 def require_exact_object(value: object, keys: set[str], path: str) -> dict:
@@ -83,6 +112,111 @@ def validate_complete_access_devices(
     return checked
 
 
+def require_hex_u16(value: object, path: str, *, nonzero: bool = False) -> int:
+    if not isinstance(value, str) or not HEX_U16.fullmatch(value):
+        raise ValueError(f"{path} must be a lowercase 0x-prefixed u16")
+    parsed = int(value, 16)
+    if nonzero and parsed == 0:
+        raise ValueError(f"{path} must be nonzero")
+    return parsed
+
+
+def validate_sdo_information_devices(
+    value: object, declared_slaves: int, path: str
+) -> list[dict]:
+    if not isinstance(value, list):
+        raise ValueError(f"{path} must be a list")
+    if len(value) != declared_slaves:
+        raise ValueError(f"{path} length must match declared_slaves")
+
+    names: set[str] = set()
+    positions: set[int] = set()
+    checked: list[dict] = []
+    for index, entry in enumerate(value):
+        item_path = f"{path}[{index}]"
+        item = require_exact_object(
+            entry,
+            {"name", "position", "supported", "enabled", "expectations"},
+            item_path,
+        )
+        name = require_nonempty_string(item["name"], f"{item_path}.name")
+        position = require_nonnegative_int(item["position"], f"{item_path}.position")
+        if position > 0xFFFF:
+            raise ValueError(f"{item_path}.position must fit in u16")
+        if type(item["supported"]) is not bool:
+            raise ValueError(f"{item_path}.supported must be a boolean")
+        if type(item["enabled"]) is not bool:
+            raise ValueError(f"{item_path}.enabled must be a boolean")
+        if item["enabled"] and not item["supported"]:
+            raise ValueError(f"{item_path} cannot enable unsupported SDO Information")
+        if name in names:
+            raise ValueError(f"{path} contains duplicate name: {name}")
+        if position in positions:
+            raise ValueError(f"{path} contains duplicate position: {position}")
+
+        expectations = item["expectations"]
+        if not isinstance(expectations, list):
+            raise ValueError(f"{item_path}.expectations must be a list")
+        if item["enabled"] and not expectations:
+            raise ValueError(f"{item_path} enabled plan must not be empty")
+        if not item["enabled"] and expectations:
+            raise ValueError(f"{item_path} disabled plan must be empty")
+        previous: tuple[int, int] | None = None
+        for expectation_index, expectation in enumerate(expectations):
+            expectation_path = f"{item_path}.expectations[{expectation_index}]"
+            expected = require_exact_object(
+                expectation,
+                {
+                    "slave_position",
+                    "index",
+                    "subindex",
+                    "data_type",
+                    "bit_length",
+                    "required_access",
+                },
+                expectation_path,
+            )
+            owner = require_nonnegative_int(
+                expected["slave_position"], f"{expectation_path}.slave_position"
+            )
+            if owner != position:
+                raise ValueError(f"{expectation_path}.slave_position must match position")
+            object_index = require_hex_u16(
+                expected["index"], f"{expectation_path}.index", nonzero=True
+            )
+            subindex = require_nonnegative_int(
+                expected["subindex"], f"{expectation_path}.subindex"
+            )
+            if subindex > 0xFF:
+                raise ValueError(f"{expectation_path}.subindex must fit in u8")
+            data_type = require_hex_u16(
+                expected["data_type"], f"{expectation_path}.data_type", nonzero=True
+            )
+            if data_type not in CANOPEN_DATA_TYPES:
+                raise ValueError(f"{expectation_path}.data_type is unsupported")
+            bit_length = require_nonnegative_int(
+                expected["bit_length"], f"{expectation_path}.bit_length"
+            )
+            if not 1 <= bit_length <= 64:
+                raise ValueError(f"{expectation_path}.bit_length must be in 1..64")
+            required_access = require_nonnegative_int(
+                expected["required_access"], f"{expectation_path}.required_access"
+            )
+            if required_access == 0 or required_access & ~0x0F:
+                raise ValueError(
+                    f"{expectation_path}.required_access must contain known nonzero flags"
+                )
+            identity = (object_index, subindex)
+            if previous is not None and identity <= previous:
+                raise ValueError(f"{item_path}.expectations must be strictly ordered")
+            previous = identity
+
+        names.add(name)
+        positions.add(position)
+        checked.append(item)
+    return checked
+
+
 def validate_product_input(value: object) -> dict:
     product = require_exact_object(
         value,
@@ -119,6 +253,7 @@ def validate_product_input(value: object) -> dict:
             "declared_axes",
             "declared_io_channels",
             "coe_complete_access",
+            "coe_sdo_information",
             "source",
         },
         "product input devices",
@@ -127,11 +262,20 @@ def validate_product_input(value: object) -> dict:
         require_nonnegative_int(devices[key], f"product input devices.{key}")
     if devices["declared_slaves"] == 0:
         raise ValueError("product input devices.declared_slaves must be positive")
-    validate_complete_access_devices(
+    complete_access = validate_complete_access_devices(
         devices["coe_complete_access"],
         devices["declared_slaves"],
         "product input devices.coe_complete_access",
     )
+    sdo_information = validate_sdo_information_devices(
+        devices["coe_sdo_information"],
+        devices["declared_slaves"],
+        "product input devices.coe_sdo_information",
+    )
+    if [
+        (entry["name"], entry["position"]) for entry in complete_access
+    ] != [(entry["name"], entry["position"]) for entry in sdo_information]:
+        raise ValueError("product input CoE device identities must match")
     require_nonempty_string(devices["source"], "product input devices.source")
 
     process_data = require_exact_object(
@@ -251,6 +395,7 @@ def build_report(product_input: object | None = None) -> dict:
             "declared_axes": 0,
             "declared_io_channels": 0,
             "coe_complete_access": [],
+            "coe_sdo_information": [],
             "source": "no hardware topology supplied",
         },
         "process_data": {

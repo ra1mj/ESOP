@@ -1,11 +1,12 @@
 use crate::error::{GeneratorError, Result};
 use esop_ethercat_core::{
-    ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, MAX_ESC_SYNC_MANAGERS, MAX_SII_FMMU_USAGES,
-    MailboxConfig, MailboxReceiveSyncManager, SYNC_MANAGER_ENABLE_FLAG, SYNC_MANAGER_OP_ONLY_FLAG,
+    CanopenDataType, ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, MAX_ESC_SYNC_MANAGERS,
+    MAX_SII_FMMU_USAGES, MailboxConfig, MailboxReceiveSyncManager, SYNC_MANAGER_ENABLE_FLAG,
+    SYNC_MANAGER_OP_ONLY_FLAG,
 };
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use std::fs;
 use std::path::Path;
 
@@ -27,6 +28,7 @@ pub struct EsiDevice {
     pub mailbox: Option<EsiMailbox>,
     pub coe_supported: bool,
     pub coe_complete_access_supported: bool,
+    pub coe_sdo_information_supported: bool,
     pub dc_modes: Vec<EsiDcMode>,
     pub rx_pdos: Vec<EsiPdo>,
     pub tx_pdos: Vec<EsiPdo>,
@@ -169,8 +171,20 @@ pub struct EsiEntry {
     pub index: u16,
     pub subindex: u8,
     pub bit_length: u8,
+    #[serde(serialize_with = "serialize_canopen_data_type")]
+    pub data_type: CanopenDataType,
     pub signed: bool,
     pub name: String,
+}
+
+fn serialize_canopen_data_type<S>(
+    data_type: &CanopenDataType,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_u16(data_type.raw())
 }
 
 #[derive(Default)]
@@ -184,6 +198,7 @@ struct DeviceBuilder {
     sync_managers: Vec<EsiSyncManager>,
     coe_supported: bool,
     coe_complete_access_supported: bool,
+    coe_sdo_information_supported: bool,
     dc_modes: Vec<EsiDcMode>,
     rx_pdos: Vec<EsiPdo>,
     tx_pdos: Vec<EsiPdo>,
@@ -219,6 +234,7 @@ impl DeviceBuilder {
             mailbox,
             coe_supported: self.coe_supported,
             coe_complete_access_supported: self.coe_complete_access_supported,
+            coe_sdo_information_supported: self.coe_sdo_information_supported,
             dc_modes: self.dc_modes,
             rx_pdos: self.rx_pdos,
             tx_pdos: self.tx_pdos,
@@ -406,19 +422,21 @@ struct EntryBuilder {
     index: Option<u16>,
     subindex: Option<u8>,
     bit_length: Option<u8>,
-    signed: Option<bool>,
+    data_type: Option<CanopenDataType>,
     name: Option<String>,
 }
 
 impl EntryBuilder {
     fn finish(self) -> std::result::Result<EsiEntry, String> {
+        let data_type = self
+            .data_type
+            .ok_or("Entry DataType is missing or unsupported")?;
         Ok(EsiEntry {
             index: self.index.ok_or("Entry Index is missing")?,
             subindex: self.subindex.unwrap_or(0),
             bit_length: self.bit_length.ok_or("Entry BitLen is missing")?,
-            signed: self
-                .signed
-                .ok_or("Entry DataType is missing or unsupported")?,
+            data_type,
+            signed: data_type.is_signed(),
             name: self.name.unwrap_or_default(),
         })
     }
@@ -591,10 +609,11 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                             && pdo.is_none()
                             && stack_ends_with(&stack, &["Mailbox", "CoE"]) =>
                     {
-                        let complete_access = parse_coe_complete_access(&start, path)?;
+                        let capabilities = parse_coe_capabilities(&start, path)?;
                         let device = device.as_mut().expect("device exists");
                         device.coe_supported = true;
-                        device.coe_complete_access_supported = complete_access;
+                        device.coe_complete_access_supported = capabilities.complete_access;
+                        device.coe_sdo_information_supported = capabilities.sdo_information;
                     }
                     "Entry" if pdo.is_some() => {
                         if entry.is_some() {
@@ -612,9 +631,10 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                     && stack_ends_with(&stack, &["Device", "Mailbox"])
                     && let Some(device) = device.as_mut()
                 {
-                    let complete_access = parse_coe_complete_access(&start, path)?;
+                    let capabilities = parse_coe_capabilities(&start, path)?;
                     device.coe_supported = true;
-                    device.coe_complete_access_supported = complete_access;
+                    device.coe_complete_access_supported = capabilities.complete_access;
+                    device.coe_sdo_information_supported = capabilities.sdo_information;
                 }
                 if matches!(
                     name.as_str(),
@@ -795,10 +815,12 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                         entry.as_mut().expect("entry exists").bit_length = Some(bits);
                     }
                     "DataType" if entry.is_some() => {
-                        entry.as_mut().expect("entry exists").signed =
-                            Some(data_type_signed(value).ok_or_else(|| GeneratorError::Xml {
-                                path: path.to_owned(),
-                                detail: format!("unsupported Entry DataType {value:?}"),
+                        entry.as_mut().expect("entry exists").data_type =
+                            Some(parse_canopen_data_type(value).ok_or_else(|| {
+                                GeneratorError::Xml {
+                                    path: path.to_owned(),
+                                    detail: format!("unsupported Entry DataType {value:?}"),
+                                }
                             })?);
                     }
                     "PreopTimeout"
@@ -1065,15 +1087,33 @@ fn optional_u8_attribute(start: &BytesStart<'_>, name: &str, path: &Path) -> Res
         })
 }
 
-fn parse_coe_complete_access(start: &BytesStart<'_>, path: &Path) -> Result<bool> {
-    optional_attribute(start, "CompleteAccess", path)?
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CoeCapabilities {
+    complete_access: bool,
+    sdo_information: bool,
+}
+
+fn parse_coe_capabilities(start: &BytesStart<'_>, path: &Path) -> Result<CoeCapabilities> {
+    let complete_access = optional_attribute(start, "CompleteAccess", path)?
         .map(|value| parse_bool(&value))
         .transpose()
         .map_err(|detail| GeneratorError::Xml {
             path: path.to_owned(),
             detail: format!("invalid CoE CompleteAccess: {detail}"),
         })
-        .map(|value| value.unwrap_or(false))
+        .map(|value| value.unwrap_or(false))?;
+    let sdo_information = optional_attribute(start, "SdoInfo", path)?
+        .map(|value| parse_bool(&value))
+        .transpose()
+        .map_err(|detail| GeneratorError::Xml {
+            path: path.to_owned(),
+            detail: format!("invalid CoE SdoInfo: {detail}"),
+        })
+        .map(|value| value.unwrap_or(false))?;
+    Ok(CoeCapabilities {
+        complete_access,
+        sdo_information,
+    })
 }
 
 fn parse_number(value: &str) -> std::result::Result<u64, String> {
@@ -1153,34 +1193,44 @@ fn parse_timeout_ns(value: &str, field: &str, path: &Path) -> Result<u64> {
         })
 }
 
-fn data_type_signed(value: &str) -> Option<bool> {
+fn parse_canopen_data_type(value: &str) -> Option<CanopenDataType> {
     let normalized = value.trim().to_ascii_uppercase();
-    if matches!(
-        normalized.as_str(),
-        "SINT" | "INT" | "DINT" | "LINT" | "INTEGER8" | "INTEGER16" | "INTEGER32" | "INTEGER64"
-    ) {
-        return Some(true);
-    }
-    if matches!(
-        normalized.as_str(),
-        "BOOL"
-            | "BIT"
-            | "BYTE"
-            | "WORD"
-            | "DWORD"
-            | "LWORD"
-            | "USINT"
-            | "UINT"
-            | "UDINT"
-            | "ULINT"
-            | "UNSIGNED8"
-            | "UNSIGNED16"
-            | "UNSIGNED32"
-            | "UNSIGNED64"
-    ) {
-        return Some(false);
-    }
-    None
+    Some(match normalized.as_str() {
+        "BOOL" | "BIT" | "BOOLEAN" => CanopenDataType::Boolean,
+        "SINT" | "INTEGER8" => CanopenDataType::Integer8,
+        "INT" | "INTEGER16" => CanopenDataType::Integer16,
+        "INTEGER24" => CanopenDataType::Integer24,
+        "DINT" | "INTEGER32" => CanopenDataType::Integer32,
+        "INTEGER40" => CanopenDataType::Integer40,
+        "INTEGER48" => CanopenDataType::Integer48,
+        "INTEGER56" => CanopenDataType::Integer56,
+        "LINT" | "INTEGER64" => CanopenDataType::Integer64,
+        "BYTE" | "USINT" | "UNSIGNED8" => CanopenDataType::Unsigned8,
+        "WORD" | "UINT" | "UNSIGNED16" => CanopenDataType::Unsigned16,
+        "UNSIGNED24" => CanopenDataType::Unsigned24,
+        "DWORD" | "UDINT" | "UNSIGNED32" => CanopenDataType::Unsigned32,
+        "UNSIGNED40" => CanopenDataType::Unsigned40,
+        "UNSIGNED48" => CanopenDataType::Unsigned48,
+        "UNSIGNED56" => CanopenDataType::Unsigned56,
+        "LWORD" | "ULINT" | "UNSIGNED64" => CanopenDataType::Unsigned64,
+        "REAL" | "REAL32" => CanopenDataType::Real32,
+        "LREAL" | "REAL64" => CanopenDataType::Real64,
+        "VISIBLE_STRING" => CanopenDataType::VisibleString,
+        "OCTET_STRING" => CanopenDataType::OctetString,
+        "UNICODE_STRING" => CanopenDataType::UnicodeString,
+        "TIME_OF_DAY" => CanopenDataType::TimeOfDay,
+        "TIME_DIFFERENCE" => CanopenDataType::TimeDifference,
+        "DOMAIN" => CanopenDataType::Domain,
+        "BIT1" => CanopenDataType::Bit1,
+        "BIT2" => CanopenDataType::Bit2,
+        "BIT3" => CanopenDataType::Bit3,
+        "BIT4" => CanopenDataType::Bit4,
+        "BIT5" => CanopenDataType::Bit5,
+        "BIT6" => CanopenDataType::Bit6,
+        "BIT7" => CanopenDataType::Bit7,
+        "BIT8" => CanopenDataType::Bit8,
+        _ => return None,
+    })
 }
 
 fn xml_error<T>(path: &Path, detail: impl Into<String>) -> Result<T> {
@@ -1219,6 +1269,10 @@ mod tests {
         assert_eq!(catalog.devices[0].rx_pdos[0].sync_manager, Some(2));
         assert!(!catalog.devices[0].rx_pdos[0].entries[0].signed);
         assert_eq!(
+            catalog.devices[0].rx_pdos[0].entries[0].data_type,
+            CanopenDataType::Unsigned16
+        );
+        assert_eq!(
             catalog.devices[0].transition_timeouts,
             EsiTransitionTimeouts::default()
         );
@@ -1232,7 +1286,7 @@ mod tests {
 <Sm StartAddress="#x1000" DefaultSize="64" ControlByte="#x26" Enable="1">MBoxOut</Sm>
 <Sm StartAddress="#x1100" DefaultSize="32" ControlByte="#x22" Enable="1">MBoxIn</Sm>
 <Sm Enable="true" OpOnly="1">Outputs</Sm><Sm Enable="1">Inputs</Sm>
-<Mailbox><CoE CompleteAccess="true"/></Mailbox>
+<Mailbox><CoE CompleteAccess="true" SdoInfo="true"/></Mailbox>
 <StateMachine><Timeout><PreopTimeout>11</PreopTimeout><SafeopOpTimeout>22</SafeopOpTimeout>
 <BackToInitTimeout>33</BackToInitTimeout><BackToSafeopTimeout>44</BackToSafeopTimeout>
 </Timeout></StateMachine>
@@ -1259,6 +1313,7 @@ mod tests {
         assert_eq!(device.sync_managers[2].activation, 0x09);
         assert!(device.coe_supported);
         assert!(device.coe_complete_access_supported);
+        assert!(device.coe_sdo_information_supported);
         assert_eq!(
             device.mailbox,
             Some(EsiMailbox {
@@ -1304,6 +1359,30 @@ mod tests {
     }
 
     #[test]
+    fn coe_sdo_information_is_strict_for_empty_and_paired_elements() {
+        let base = r##"<EtherCATInfo><Vendor><Id>1</Id></Vendor><Descriptions><Devices><Device>
+<Type ProductCode="1" RevisionNo="1">Drive</Type><Name>Drive</Name>
+<Mailbox>{coe}</Mailbox>
+</Device></Devices></Descriptions></EtherCATInfo>"##;
+        for coe in [r#"<CoE SdoInfo="true"/>"#, r#"<CoE SdoInfo="1"></CoE>"#] {
+            let catalog =
+                parse_text(Path::new("fixture.xml"), &base.replace("{coe}", coe)).unwrap();
+            assert!(catalog.devices[0].coe_supported);
+            assert!(catalog.devices[0].coe_sdo_information_supported);
+        }
+
+        for coe in [
+            r#"<CoE/>"#,
+            r#"<CoE SdoInfo="false"/>"#,
+            r#"<CoE SdoInfo="0"></CoE>"#,
+        ] {
+            let catalog =
+                parse_text(Path::new("fixture.xml"), &base.replace("{coe}", coe)).unwrap();
+            assert!(!catalog.devices[0].coe_sdo_information_supported);
+        }
+    }
+
+    #[test]
     fn malformed_coe_complete_access_is_rejected() {
         let xml = r##"<EtherCATInfo><Vendor><Id>1</Id></Vendor><Descriptions><Devices><Device>
 <Type ProductCode="1" RevisionNo="1">Drive</Type><Name>Drive</Name>
@@ -1313,6 +1392,31 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("invalid CoE CompleteAccess"), "{error}");
+    }
+
+    #[test]
+    fn malformed_coe_sdo_information_is_rejected() {
+        let xml = r##"<EtherCATInfo><Vendor><Id>1</Id></Vendor><Descriptions><Devices><Device>
+<Type ProductCode="1" RevisionNo="1">Drive</Type><Name>Drive</Name>
+<Mailbox><CoE SdoInfo="sometimes"/></Mailbox>
+</Device></Devices></Descriptions></EtherCATInfo>"##;
+        let error = parse_text(Path::new("fixture.xml"), xml)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid CoE SdoInfo"), "{error}");
+    }
+
+    #[test]
+    fn unsupported_entry_data_type_is_rejected() {
+        let xml = r##"<EtherCATInfo><Vendor><Id>1</Id></Vendor><Descriptions><Devices><Device>
+<Type ProductCode="1" RevisionNo="1">Drive</Type><Name>Drive</Name>
+<RxPdo><Index>#x1600</Index><Entry><Index>#x6040</Index><SubIndex>0</SubIndex>
+<BitLen>16</BitLen><DataType>NOT_A_CANOPEN_TYPE</DataType></Entry></RxPdo>
+</Device></Devices></Descriptions></EtherCATInfo>"##;
+        let error = parse_text(Path::new("fixture.xml"), xml)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unsupported Entry DataType"), "{error}");
     }
 
     #[test]

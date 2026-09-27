@@ -8,8 +8,8 @@
 
 pub use esop_ethercat_core::wire::Command;
 pub use esop_ethercat_core::{
-    AlTransitionTimeouts, DcSyncPlan, DcSyncPlanEntry, DcSyncPlanError, DcSyncTiming,
-    DcSyncTimingError, DomainConfig, DomainDatagramSpec, DomainInfo, DomainRegistry,
+    AlTransitionTimeouts, CanopenDataType, DcSyncPlan, DcSyncPlanEntry, DcSyncPlanError,
+    DcSyncTiming, DcSyncTimingError, DomainConfig, DomainDatagramSpec, DomainInfo, DomainRegistry,
     DomainRegistryError, ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, EscWatchdogConfig,
     EscWatchdogConfigError, ExpectedSlave, FmmuConfig, FramePlanSet, FramePlanSetError,
     MAX_SII_FMMU_USAGES, MailboxConfig, MailboxConfigError, MailboxDirection,
@@ -18,11 +18,12 @@ pub use esop_ethercat_core::{
     PdoConfigBatch, PdoConfigBatchError, PdoConfigBatchPhase, PdoConfigBatchPlan,
     PdoConfigBatchPlanError, PdoConfigBatchStatus, PdoConfigJob, PdoConfigPlan, PdoConfigPlanError,
     PdoDirection, PdoEntry, PdoEntrySpec, PdoRegistrationRequest, PdoSdoWrite, ScheduleTable,
-    SdoAccessPolicy, SiiConfigurationSignature, SiiConfigurationSignatureBuilder,
-    SiiConfigurationSignatureError, SiiDcMode, SiiDcModeExpectation, SiiFmmuUsage, SlaveCopyError,
-    SlaveCopyPlan, SlaveCopyPlanSet, SlaveCopyPlanSetError, SlaveIdentity, SlaveRecord,
-    StartupConfig, StartupController, StartupDcRequirement, StartupError, StartupSlaveProfile,
-    WatchdogPlan, WatchdogPlanEntry, WatchdogPlanError,
+    SdoAccessPolicy, SdoInformationExpectation, SdoInformationPolicy, SdoInformationRequiredAccess,
+    SiiConfigurationSignature, SiiConfigurationSignatureBuilder, SiiConfigurationSignatureError,
+    SiiDcMode, SiiDcModeExpectation, SiiFmmuUsage, SlaveCopyError, SlaveCopyPlan, SlaveCopyPlanSet,
+    SlaveCopyPlanSetError, SlaveIdentity, SlaveRecord, StartupConfig, StartupController,
+    StartupDcRequirement, StartupError, StartupSlaveProfile, WatchdogPlan, WatchdogPlanEntry,
+    WatchdogPlanError,
 };
 pub use esop_lifecycle_guard::procbuf::{Cia402AxisCommandPolicy, Cia402AxisCommandPolicyError};
 pub use esop_procbuf::{
@@ -37,6 +38,7 @@ pub const MAX_PRODUCT_AXIS_PDOS: usize = 32;
 pub const MAX_PRODUCT_PDO_ENTRIES_PER_DOMAIN: usize = 256;
 pub const MAX_PRODUCT_SLAVE_COPIES: usize = 32;
 pub const MAX_PRODUCT_MAILBOX_STATUS_MAPPINGS: usize = 32;
+pub const MAX_PRODUCT_SDO_INFORMATION_ENTRIES: usize = 256;
 const MAX_PRODUCT_SYNC_MANAGERS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,6 +74,9 @@ pub struct ProductSlaveConfig {
     pub transition_timeouts: AlTransitionTimeouts,
     pub coe_complete_access_supported: bool,
     pub coe_complete_access_enabled: bool,
+    pub coe_sdo_information_supported: bool,
+    pub coe_sdo_information_enabled: bool,
+    pub sdo_information_expectations: &'static [SdoInformationExpectation],
     pub mailbox_config: MailboxConfig,
     pub mailbox_send_sync_manager: u8,
     pub mailbox_send_control_byte: u8,
@@ -101,6 +106,111 @@ fn validated_sdo_access_policy(
         );
     }
     Ok(SdoAccessPolicy::new(slave.coe_complete_access_enabled))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProductSdoInformationPlan {
+    pub policy: SdoInformationPolicy,
+    pub expectations: &'static [SdoInformationExpectation],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductSdoInformationError {
+    UnknownSlave {
+        position: u16,
+    },
+    EnabledWithoutSupport {
+        position: u16,
+    },
+    DisabledPlanNotEmpty {
+        position: u16,
+    },
+    EnabledPlanEmpty {
+        position: u16,
+    },
+    CapacityExceeded {
+        position: u16,
+        count: usize,
+    },
+    WrongOwner {
+        position: u16,
+        entry: usize,
+        actual: u16,
+    },
+    InvalidExpectation {
+        position: u16,
+        entry: usize,
+    },
+    DuplicateOrUnorderedExpectation {
+        position: u16,
+        entry: usize,
+    },
+}
+
+fn validated_sdo_information_plan(
+    slave: ProductSlaveConfig,
+) -> Result<ProductSdoInformationPlan, ProductSdoInformationError> {
+    if slave.coe_sdo_information_enabled && !slave.coe_sdo_information_supported {
+        return Err(ProductSdoInformationError::EnabledWithoutSupport {
+            position: slave.position,
+        });
+    }
+    let expectations = slave.sdo_information_expectations;
+    if expectations.len() > MAX_PRODUCT_SDO_INFORMATION_ENTRIES {
+        return Err(ProductSdoInformationError::CapacityExceeded {
+            position: slave.position,
+            count: expectations.len(),
+        });
+    }
+    if !slave.coe_sdo_information_enabled {
+        if !expectations.is_empty() {
+            return Err(ProductSdoInformationError::DisabledPlanNotEmpty {
+                position: slave.position,
+            });
+        }
+        return Ok(ProductSdoInformationPlan {
+            policy: SdoInformationPolicy::new(false),
+            expectations,
+        });
+    }
+    if expectations.is_empty() {
+        return Err(ProductSdoInformationError::EnabledPlanEmpty {
+            position: slave.position,
+        });
+    }
+    for (entry, expectation) in expectations.iter().copied().enumerate() {
+        if expectation.slave_position != slave.position {
+            return Err(ProductSdoInformationError::WrongOwner {
+                position: slave.position,
+                entry,
+                actual: expectation.slave_position,
+            });
+        }
+        if expectation.index == 0
+            || expectation.bit_length == 0
+            || !expectation.required_access.valid()
+        {
+            return Err(ProductSdoInformationError::InvalidExpectation {
+                position: slave.position,
+                entry,
+            });
+        }
+        if entry > 0 {
+            let previous = expectations[entry - 1];
+            if (expectation.index, expectation.subindex) <= (previous.index, previous.subindex) {
+                return Err(
+                    ProductSdoInformationError::DuplicateOrUnorderedExpectation {
+                        position: slave.position,
+                        entry,
+                    },
+                );
+            }
+        }
+    }
+    Ok(ProductSdoInformationPlan {
+        policy: SdoInformationPolicy::new(true),
+        expectations,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -528,6 +638,7 @@ pub enum ProductActivationError {
     },
     MailboxStatusCapacityExceeded,
     SdoAccessPolicy(ProductSdoAccessPolicyError),
+    SdoInformation(ProductSdoInformationError),
     SlaveCopyPdoIndexOutOfRange {
         copy_index: usize,
         pdo_index: usize,
@@ -708,6 +819,21 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                 position: slave_position,
             })?;
         validated_sdo_access_policy(slave)
+    }
+
+    pub fn sdo_information_plan(
+        &self,
+        slave_position: u16,
+    ) -> Result<ProductSdoInformationPlan, ProductSdoInformationError> {
+        let slave = self
+            .slaves
+            .iter()
+            .copied()
+            .find(|slave| slave.position == slave_position)
+            .ok_or(ProductSdoInformationError::UnknownSlave {
+                position: slave_position,
+            })?;
+        validated_sdo_information_plan(slave)
     }
 
     pub fn watchdog_plan(&self) -> Result<WatchdogPlan<SLAVES>, ProductStartupError> {
@@ -1580,6 +1706,7 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
     > {
         self.validate_identity(expected_config_sha256)?;
         self.validate_sdo_access_policies()?;
+        self.validate_sdo_information_plans()?;
         self.validate_procbuf::<IO, EVENTS>(procbuf, boot_id)?;
         self.validate_topology(observed_slaves)?;
         let (mapped_mailbox_status, mapped_mailbox_status_count) =
@@ -1712,6 +1839,14 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
     fn validate_sdo_access_policies(&self) -> Result<(), ProductActivationError> {
         for slave in self.slaves.iter().copied() {
             validated_sdo_access_policy(slave).map_err(ProductActivationError::SdoAccessPolicy)?;
+        }
+        Ok(())
+    }
+
+    fn validate_sdo_information_plans(&self) -> Result<(), ProductActivationError> {
+        for slave in self.slaves.iter().copied() {
+            validated_sdo_information_plan(slave)
+                .map_err(ProductActivationError::SdoInformation)?;
         }
         Ok(())
     }
@@ -2027,6 +2162,9 @@ mod tests {
                 transition_timeouts: ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
                 coe_complete_access_supported: false,
                 coe_complete_access_enabled: false,
+                coe_sdo_information_supported: false,
+                coe_sdo_information_enabled: false,
+                sdo_information_expectations: &[],
                 mailbox_config: MailboxConfig::new(0x1000, 32, 0x1100, 32),
                 mailbox_send_sync_manager: 0,
                 mailbox_send_control_byte: 0x26,
@@ -2137,6 +2275,129 @@ mod tests {
                 ProductSdoAccessPolicyError::CompleteAccessEnabledWithoutSupport { position: 0 }
             ))
         ));
+    }
+
+    #[test]
+    fn product_sdo_information_plan_is_typed_and_fails_closed() {
+        const VALID: SdoInformationExpectation = SdoInformationExpectation {
+            slave_position: 0,
+            index: 0x6040,
+            subindex: 0,
+            data_type: CanopenDataType::Unsigned16,
+            bit_length: 16,
+            required_access: SdoInformationRequiredAccess::RX_PDO_ENTRY,
+        };
+        static VALID_PLAN: [SdoInformationExpectation; 2] = [
+            VALID,
+            SdoInformationExpectation {
+                index: 0x6041,
+                required_access: SdoInformationRequiredAccess::TX_PDO_ENTRY,
+                ..VALID
+            },
+        ];
+        static WRONG_OWNER: [SdoInformationExpectation; 1] = [SdoInformationExpectation {
+            slave_position: 1,
+            ..VALID
+        }];
+        static INVALID: [SdoInformationExpectation; 1] = [SdoInformationExpectation {
+            index: 0,
+            bit_length: 0,
+            required_access: SdoInformationRequiredAccess::from_raw(0),
+            ..VALID
+        }];
+        static DUPLICATE: [SdoInformationExpectation; 2] = [VALID, VALID];
+        static OVER_CAPACITY: [SdoInformationExpectation; MAX_PRODUCT_SDO_INFORMATION_ENTRIES + 1] =
+            [VALID; MAX_PRODUCT_SDO_INFORMATION_ENTRIES + 1];
+
+        let mut product = config();
+        assert_eq!(
+            product.sdo_information_plan(0),
+            Ok(ProductSdoInformationPlan {
+                policy: SdoInformationPolicy::new(false),
+                expectations: &[],
+            })
+        );
+        assert_eq!(
+            product.sdo_information_plan(9),
+            Err(ProductSdoInformationError::UnknownSlave { position: 9 })
+        );
+
+        product.slaves[0].coe_sdo_information_supported = true;
+        product.slaves[0].coe_sdo_information_enabled = true;
+        product.slaves[0].sdo_information_expectations = &VALID_PLAN;
+        assert_eq!(
+            product.sdo_information_plan(0),
+            Ok(ProductSdoInformationPlan {
+                policy: SdoInformationPolicy::new(true),
+                expectations: &VALID_PLAN,
+            })
+        );
+
+        product.slaves[0].coe_sdo_information_supported = false;
+        assert_eq!(
+            product.sdo_information_plan(0),
+            Err(ProductSdoInformationError::EnabledWithoutSupport { position: 0 })
+        );
+        let procbuf = ProcBuf::<1, 0, 1, 8>::new(7, 11);
+        assert!(matches!(
+            activate(&product, &[observed()], &procbuf),
+            Err(ProductActivationError::SdoInformation(
+                ProductSdoInformationError::EnabledWithoutSupport { position: 0 }
+            ))
+        ));
+
+        product.slaves[0].coe_sdo_information_supported = true;
+        product.slaves[0].coe_sdo_information_enabled = false;
+        assert_eq!(
+            product.sdo_information_plan(0),
+            Err(ProductSdoInformationError::DisabledPlanNotEmpty { position: 0 })
+        );
+
+        product.slaves[0].coe_sdo_information_enabled = true;
+        product.slaves[0].sdo_information_expectations = &[];
+        assert_eq!(
+            product.sdo_information_plan(0),
+            Err(ProductSdoInformationError::EnabledPlanEmpty { position: 0 })
+        );
+
+        product.slaves[0].sdo_information_expectations = &WRONG_OWNER;
+        assert_eq!(
+            product.sdo_information_plan(0),
+            Err(ProductSdoInformationError::WrongOwner {
+                position: 0,
+                entry: 0,
+                actual: 1,
+            })
+        );
+
+        product.slaves[0].sdo_information_expectations = &INVALID;
+        assert_eq!(
+            product.sdo_information_plan(0),
+            Err(ProductSdoInformationError::InvalidExpectation {
+                position: 0,
+                entry: 0,
+            })
+        );
+
+        product.slaves[0].sdo_information_expectations = &DUPLICATE;
+        assert_eq!(
+            product.sdo_information_plan(0),
+            Err(
+                ProductSdoInformationError::DuplicateOrUnorderedExpectation {
+                    position: 0,
+                    entry: 1,
+                }
+            )
+        );
+
+        product.slaves[0].sdo_information_expectations = &OVER_CAPACITY;
+        assert_eq!(
+            product.sdo_information_plan(0),
+            Err(ProductSdoInformationError::CapacityExceeded {
+                position: 0,
+                count: MAX_PRODUCT_SDO_INFORMATION_ENTRIES + 1,
+            })
+        );
     }
 
     #[test]

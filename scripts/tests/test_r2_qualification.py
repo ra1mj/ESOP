@@ -137,6 +137,66 @@ class R2QualificationTests(unittest.TestCase):
                 "declared_axes": 32,
                 "declared_io_channels": 8,
                 "source": "product-a-hil",
+                "coe_complete_access": [
+                    {
+                        "name": "drive-a",
+                        "position": 0,
+                        "supported": True,
+                        "enabled": True,
+                    },
+                    {
+                        "name": "drive-b",
+                        "position": 1,
+                        "supported": True,
+                        "enabled": False,
+                    },
+                    {
+                        "name": "io-a",
+                        "position": 2,
+                        "supported": False,
+                        "enabled": False,
+                    },
+                ],
+                "coe_sdo_information": [
+                    {
+                        "name": "drive-a",
+                        "position": 0,
+                        "supported": True,
+                        "enabled": True,
+                        "expectations": [
+                            {
+                                "slave_position": 0,
+                                "index": "0x6040",
+                                "subindex": 0,
+                                "data_type": "0x0006",
+                                "bit_length": 16,
+                                "required_access": 6,
+                            },
+                            {
+                                "slave_position": 0,
+                                "index": "0x6041",
+                                "subindex": 0,
+                                "data_type": "0x0006",
+                                "bit_length": 16,
+                                "required_access": 9,
+                            },
+                        ],
+                    },
+                    {
+                        "name": "drive-b",
+                        "position": 1,
+                        "supported": True,
+                        "enabled": False,
+                        "expectations": [],
+                    },
+                    {
+                        "name": "io-a",
+                        "position": 2,
+                        "supported": False,
+                        "enabled": False,
+                        "expectations": [],
+                    },
+                ],
             },
             "process_data": {
                 "pdo_bytes_per_cycle": 1024,

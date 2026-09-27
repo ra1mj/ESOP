@@ -99,6 +99,38 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
         build_input["devices"]["coe_complete_access"][1]["enabled"],
         false
     );
+    assert_eq!(
+        build_input["devices"]["coe_sdo_information"][0],
+        serde_json::json!({
+            "name": "drive_left",
+            "position": 0,
+            "supported": true,
+            "enabled": true,
+            "expectations": [
+                {"slave_position": 0, "index": "0x603f", "subindex": 0, "data_type": "0x0006", "bit_length": 16, "required_access": 9},
+                {"slave_position": 0, "index": "0x6040", "subindex": 0, "data_type": "0x0006", "bit_length": 16, "required_access": 6},
+                {"slave_position": 0, "index": "0x6041", "subindex": 0, "data_type": "0x0006", "bit_length": 16, "required_access": 9},
+                {"slave_position": 0, "index": "0x6060", "subindex": 0, "data_type": "0x0002", "bit_length": 8, "required_access": 6},
+                {"slave_position": 0, "index": "0x6061", "subindex": 0, "data_type": "0x0002", "bit_length": 8, "required_access": 9},
+                {"slave_position": 0, "index": "0x6064", "subindex": 0, "data_type": "0x0004", "bit_length": 32, "required_access": 9},
+                {"slave_position": 0, "index": "0x607a", "subindex": 0, "data_type": "0x0004", "bit_length": 32, "required_access": 6},
+            ],
+        })
+    );
+    assert_eq!(
+        build_input["devices"]["coe_sdo_information"][1],
+        serde_json::json!({
+            "name": "drive_right",
+            "position": 1,
+            "supported": true,
+            "enabled": false,
+            "expectations": [],
+        })
+    );
+    assert_eq!(
+        build_input["devices"]["coe_sdo_information"][2]["supported"],
+        false
+    );
 
     let inventory: Value =
         serde_json::from_slice(&fs::read(first.join("device_inventory.json")).unwrap()).unwrap();
@@ -120,6 +152,30 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     );
     assert_eq!(
         inventory["devices"][2]["coe_complete_access_supported"],
+        false
+    );
+    assert_eq!(
+        inventory["devices"][0]["coe_sdo_information_supported"],
+        true
+    );
+    assert_eq!(inventory["devices"][0]["coe_sdo_information_enabled"], true);
+    assert_eq!(
+        inventory["devices"][0]["sdo_information_expectations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        7
+    );
+    assert_eq!(
+        inventory["devices"][1]["coe_sdo_information_supported"],
+        true
+    );
+    assert_eq!(
+        inventory["devices"][1]["coe_sdo_information_enabled"],
+        false
+    );
+    assert_eq!(
+        inventory["devices"][2]["coe_sdo_information_supported"],
         false
     );
     assert_eq!(
@@ -159,6 +215,16 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert_eq!(product["slaves"][0]["mailbox"]["receive_capacity"], 64);
     assert_eq!(product["slaves"][0]["coe_complete_access_enabled"], true);
     assert_eq!(product["slaves"][1]["coe_complete_access_enabled"], false);
+    assert_eq!(product["slaves"][0]["coe_sdo_information_enabled"], true);
+    assert_eq!(product["slaves"][1]["coe_sdo_information_enabled"], false);
+    assert_eq!(
+        product["slaves"][0]["sdo_information_expectations"][0]["index"],
+        "0x603f"
+    );
+    assert_eq!(
+        product["slaves"][0]["sdo_information_expectations"][6]["index"],
+        "0x607a"
+    );
     assert_eq!(product["slaves"][2]["mailbox"]["send_capacity"], 32);
     assert_eq!(product["slaves"][0]["sii_sync_manager_count"], 4);
     assert_eq!(product["slaves"][0]["sii_enabled_sync_managers"], 15);
@@ -273,6 +339,11 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(header.contains("uint16_t process_data_watchdog_intervals"));
     assert!(header.contains("uint8_t coe_complete_access_supported"));
     assert!(header.contains("uint8_t coe_complete_access_enabled"));
+    assert!(header.contains("uint8_t coe_sdo_information_supported"));
+    assert!(header.contains("uint8_t coe_sdo_information_enabled"));
+    assert!(header.contains("esop_sdo_information_expectation_t"));
+    assert!(header.contains("#define ESOP_SDO_INFORMATION_COUNT 7u"));
+    assert!(header.contains("UINT16_C(0x603f), 0u, UINT16_C(0x0006), 16u, UINT8_C(0x09)"));
     assert!(header.contains("esop_slave_copy_config_t"));
     assert!(header.contains("#define ESOP_SLAVE_COPY_COUNT 1u"));
     assert!(header.contains("\"left_position_to_io\", 9u, 15u, 16u"));
@@ -313,6 +384,11 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(
         rust.contains("coe_complete_access_supported: true, coe_complete_access_enabled: false")
     );
+    assert!(rust.contains("static PRODUCT_SDO_INFORMATION_0: [SdoInformationExpectation; 7]"));
+    assert!(rust.contains("index: 0x603f, subindex: 0, data_type: CanopenDataType::Unsigned16"));
+    assert!(rust.contains("required_access: SdoInformationRequiredAccess::from_raw(0x09)"));
+    assert!(rust.contains("coe_sdo_information_supported: true, coe_sdo_information_enabled: true, sdo_information_expectations: &PRODUCT_SDO_INFORMATION_0"));
+    assert!(rust.contains("coe_sdo_information_supported: true, coe_sdo_information_enabled: false, sdo_information_expectations: &PRODUCT_SDO_INFORMATION_1"));
     assert!(rust.contains("ProductSlaveCopyConfig"));
     assert!(rust.contains("name: \"left_position_to_io\", source_pdo_index: 9"));
 
@@ -387,6 +463,96 @@ fn complete_access_capability_policy_and_hashes_are_strict() {
     assert_ne!(
         supported_inventory["devices"][0]["esi_semantic_sha256"],
         unsupported_inventory["devices"][0]["esi_semantic_sha256"]
+    );
+}
+
+#[test]
+fn sdo_information_capability_policy_expectations_and_hashes_are_strict() {
+    let fixture = Fixture::new();
+    let enabled = generate(&fixture.product, &fixture.output("sdoi-enabled")).unwrap();
+    fixture.edit_product(|product| {
+        product["slaves"][0]["coe"]["sdo_information"] = Value::Bool(false);
+    });
+    let disabled_output = fixture.output("sdoi-disabled");
+    let disabled = generate(&fixture.product, &disabled_output).unwrap();
+    assert_ne!(enabled.config_sha256, disabled.config_sha256);
+    let product: Value =
+        serde_json::from_slice(&fs::read(disabled_output.join("product_config.json")).unwrap())
+            .unwrap();
+    assert_eq!(product["slaves"][0]["coe_sdo_information_supported"], true);
+    assert_eq!(product["slaves"][0]["coe_sdo_information_enabled"], false);
+    assert_eq!(
+        product["slaves"][0]["sdo_information_expectations"],
+        serde_json::json!([])
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_esi(|xml| xml.replace(" SdoInfo=\"true\"", ""));
+    let error = generate(&fixture.product, &fixture.output("sdoi-unsupported"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("enables CoE SDO Information but its ESI does not advertise support"),
+        "{error}"
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        product["slaves"][0]["coe"]["sdo_information"] = Value::Bool(false);
+    });
+    let supported_output = fixture.output("sdoi-supported-hash");
+    let supported = generate(&fixture.product, &supported_output).unwrap();
+    let supported_inventory: Value =
+        serde_json::from_slice(&fs::read(supported_output.join("device_inventory.json")).unwrap())
+            .unwrap();
+    fixture.edit_esi(|xml| xml.replace(" SdoInfo=\"true\"", ""));
+    let unsupported_output = fixture.output("sdoi-unsupported-hash");
+    let unsupported = generate(&fixture.product, &unsupported_output).unwrap();
+    let unsupported_inventory: Value = serde_json::from_slice(
+        &fs::read(unsupported_output.join("device_inventory.json")).unwrap(),
+    )
+    .unwrap();
+    assert_ne!(supported.config_sha256, unsupported.config_sha256);
+    assert_ne!(
+        supported_inventory["devices"][0]["esi_semantic_sha256"],
+        unsupported_inventory["devices"][0]["esi_semantic_sha256"]
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_esi(|xml| {
+        xml.replace(
+            "<Mailbox><CoE/></Mailbox>",
+            "<Mailbox><CoE SdoInfo=\"true\"/></Mailbox>",
+        )
+    });
+    fixture.edit_product(|product| {
+        product["slaves"][2]["coe"] = serde_json::json!({"sdo_information": true});
+    });
+    let baseline_output = fixture.output("sdoi-type-baseline");
+    let baseline = generate(&fixture.product, &baseline_output).unwrap();
+    fixture.edit_esi(|xml| {
+        xml.replacen(
+            "<Name>Outputs</Name><DataType>UINT</DataType>",
+            "<Name>Outputs</Name><DataType>INT</DataType>",
+            1,
+        )
+    });
+    let changed_output = fixture.output("sdoi-type-changed");
+    let changed = generate(&fixture.product, &changed_output).unwrap();
+    assert_ne!(baseline.config_sha256, changed.config_sha256);
+    let baseline_product: Value =
+        serde_json::from_slice(&fs::read(baseline_output.join("product_config.json")).unwrap())
+            .unwrap();
+    let changed_product: Value =
+        serde_json::from_slice(&fs::read(changed_output.join("product_config.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        baseline_product["slaves"][2]["sdo_information_expectations"][1]["data_type"],
+        "0x0006"
+    );
+    assert_eq!(
+        changed_product["slaves"][2]["sdo_information_expectations"][1]["data_type"],
+        "0x0003"
     );
 }
 

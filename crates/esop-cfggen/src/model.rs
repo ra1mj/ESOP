@@ -188,6 +188,8 @@ pub struct SlaveManifest {
 pub struct SlaveCoeManifest {
     #[serde(default)]
     pub complete_access: bool,
+    #[serde(default)]
+    pub sdo_information: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
