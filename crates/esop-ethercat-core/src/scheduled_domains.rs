@@ -567,7 +567,10 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
         dc: &mut DcCyclicSync,
         controls: &mut ControlRequestPool<REQUESTS>,
     ) -> Result<ScheduledReceiveReport<P::Error, DOMAINS>, ScheduledReceiveError> {
-        if let Some(index) = self.control_index_conflict(dc.datagram_plan().index, controls, None) {
+        if let Some(index) = self.dc_domain_index_conflict(dc) {
+            return Err(ScheduledReceiveError::DcIndexConflict(index));
+        }
+        if let Some(index) = self.control_index_conflict(dc, controls, None) {
             return Err(ScheduledReceiveError::ControlIndexConflict(index));
         }
         let mut received = {
@@ -927,9 +930,8 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
         {
             return Err(ScheduledServiceTxError::InvalidDeadline);
         }
-        let dc_index = dc.datagram_plan().index;
-        if self.index_owner[dc_index as usize] != 0 {
-            return Err(ScheduledServiceTxError::DcIndexConflict(dc_index));
+        if let Some(index) = self.dc_domain_index_conflict(dc) {
+            return Err(ScheduledServiceTxError::DcIndexConflict(index));
         }
         if dc.pending_generation().is_some() {
             return Err(ScheduledServiceTxError::Dc(DcCyclicError::Busy));
@@ -948,13 +950,18 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
         } else {
             None
         };
-        if let Some(index) = self.control_index_conflict(dc_index, controls, request) {
+        if let Some(index) = self.control_index_conflict(dc, controls, request) {
             return Err(ScheduledServiceTxError::ControlIndexConflict(index));
         }
-        let mut dc_plan = FramePlan::<1>::new();
+        let mut dc_plan = FramePlan::<2>::new();
         dc_plan
             .push(dc.datagram_plan())
             .map_err(|_| ScheduledServiceTxError::Dc(DcCyclicError::InvalidConfiguration))?;
+        if let Some(sync_window) = dc.sync_window_datagram_plan() {
+            dc_plan
+                .push(sync_window)
+                .map_err(|_| ScheduledServiceTxError::Dc(DcCyclicError::InvalidConfiguration))?;
+        }
         dc.prepare(generation, application_time_ns, dc_image)
             .map_err(ScheduledServiceTxError::Dc)?;
         master.reap_expired_rx_before_tx(now_ns);
@@ -1015,7 +1022,7 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
 
     fn control_index_conflict<const REQUESTS: usize>(
         &self,
-        dc_index: u8,
+        dc: &DcCyclicSync,
         controls: &ControlRequestPool<REQUESTS>,
         prepared: Option<RequestHandle>,
     ) -> Option<u8> {
@@ -1031,12 +1038,22 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
                 continue;
             }
             let index = request.datagram_index as usize;
-            if self.index_owner[index] != 0 || index == dc_index as usize || claimed[index] {
+            if self.index_owner[index] != 0 || dc.uses_datagram_index(index as u8) || claimed[index]
+            {
                 return Some(index as u8);
             }
             claimed[index] = true;
         }
         None
+    }
+
+    fn dc_domain_index_conflict(&self, dc: &DcCyclicSync) -> Option<u8> {
+        let reference = dc.datagram_plan().index;
+        if self.index_owner[reference as usize] != 0 {
+            return Some(reference);
+        }
+        let window = dc.sync_window_datagram_plan()?.index;
+        (self.index_owner[window as usize] != 0).then_some(window)
     }
 
     fn receive_with_dc_consumer<
@@ -1053,9 +1070,8 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
         dc: &mut DcCyclicSync,
         control: &mut C,
     ) -> Result<ScheduledReceiveReport<P::Error, DOMAINS>, ScheduledReceiveError> {
-        let dc_index = dc.datagram_plan().index;
-        if self.index_owner[dc_index as usize] != 0 {
-            return Err(ScheduledReceiveError::DcIndexConflict(dc_index));
+        if let Some(index) = self.dc_domain_index_conflict(dc) {
+            return Err(ScheduledReceiveError::DcIndexConflict(index));
         }
         if dc.pending_generation() != Some(generation) {
             return Err(ScheduledReceiveError::DcGenerationMismatch);
@@ -1505,12 +1521,17 @@ fn mailbox_request_matches<const REQUESTS: usize>(
     )
 }
 
-fn submit_dc_frame<P: EthercatPort, const FRAMES: usize, const MTU: usize>(
+fn submit_dc_frame<
+    P: EthercatPort,
+    const FRAMES: usize,
+    const MTU: usize,
+    const DATAGRAMS: usize,
+>(
     master: &mut EthercatMaster<FRAMES, MTU>,
     port: &mut P,
     generation: u16,
     rx_deadline_ns: u64,
-    plan: &FramePlan<1>,
+    plan: &FramePlan<DATAGRAMS>,
     image: &[u8],
 ) -> Result<(), ScheduledServiceFrameError<P::Error>> {
     let frame = master

@@ -1768,7 +1768,10 @@ mod feedback_tests {
 mod tests {
     use super::*;
     use esop_ethercat_core::wire::{Command, DatagramHeader};
-    use esop_ethercat_core::{DcCyclicConfig, DcMonitor, RxMatch};
+    use esop_ethercat_core::{
+        DcCyclicConfig, DcMonitor, DcSyncWindowConfig, ESC_DC_SYSTEM_DIFF, ESC_DC_SYSTEM_TIME,
+        RxMatch, fixed_address,
+    };
 
     #[test]
     fn scheduled_domains_only_qualify_but_all_domain_ages_advance() {
@@ -1897,5 +1900,93 @@ mod tests {
         assert_eq!(state.quality.dc_locked, 0);
         assert_eq!(state.quality.dc_offset_ns, 20);
         assert_eq!(state.ecat_time_ns, 100);
+    }
+
+    #[test]
+    fn procbuf_dc_quality_rejects_a_bad_sync_window_sample() {
+        let mut dc = DcCyclicSync::new(
+            DcCyclicConfig::new(0x1000, 13, 0),
+            DcMonitor::new(50, 10, 1, 2),
+        )
+        .with_sync_window(DcSyncWindowConfig::new(14, 8, 1, 100, 1, 1).unwrap())
+        .unwrap();
+        let mut image = [0; 12];
+        dc.prepare(1, 120, &mut image).unwrap();
+        for (index, command, address, payload) in [
+            (
+                13,
+                Command::Frmw,
+                fixed_address(0x1000, ESC_DC_SYSTEM_TIME),
+                100u64.to_le_bytes(),
+            ),
+            (
+                14,
+                Command::Brd,
+                ESC_DC_SYSTEM_DIFF as u32,
+                101u64.to_le_bytes(),
+            ),
+        ] {
+            let length = if index == 13 { 8 } else { 4 };
+            dc.complete(
+                5,
+                100,
+                RxMatch {
+                    slot_id: 0,
+                    generation: 1,
+                    working_counter: 1,
+                },
+                DatagramHeader {
+                    command,
+                    index,
+                    address,
+                    length,
+                    last: index == 14,
+                },
+                &payload[..length as usize],
+            )
+            .unwrap();
+        }
+        let report = CycleReport {
+            cycle: 5,
+            received_frames: 1,
+            received_bytes: 64,
+            parsed_datagrams: 2,
+            unmatched_datagrams: 0,
+            corrupt_frames: 0,
+            wkc_mismatches: 0,
+            timed_out_datagrams: 0,
+            consumer_rejections: 0,
+            budget_exhausted: false,
+            link_down: false,
+        };
+        let domains = [EthercatDomainQuality {
+            expected_wkc: 1,
+            actual_wkc: 1,
+            valid: true,
+            complete: true,
+            last_valid_cycle: 5,
+            input_age_cycles: 0,
+        }];
+        let mut state = StatePage::<0, 0, 1>::new(7);
+        let quality = ethercat_cycle_to_procbuf(
+            &mut state,
+            report,
+            &domains,
+            &[true],
+            &dc,
+            OtherCycleFacts {
+                platform_ready: true,
+                coe_ready: true,
+                topology_valid: true,
+                drive_ready: true,
+                command_current: true,
+                supervisor_healthy: true,
+                external_safety_clear: true,
+                deadline_met: true,
+            },
+        );
+        assert!(!quality.distributed_clock_locked);
+        assert_eq!(state.quality.dc_locked, 0);
+        assert_eq!(state.quality.dc_offset_ns, 20);
     }
 }

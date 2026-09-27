@@ -244,6 +244,18 @@ Public per-slave evidence remains empty until every final activation succeeds;
 restart clears all staged and public evidence without claiming accepted
 hardware writes were rolled back.
 
+Runtime sync-window monitoring is an activation-time attachment, not another
+product artifact. Build `DcSyncWindowConfig` only after Startup has published
+the immutable `DcTopology`; the topology helper derives the exact nonzero BRD
+WKC from its slave count. Its datagram index and four-byte process-image region
+must be disjoint from the reference FRMW and from every Domain/control owner
+before `prepare` mutates state. The cyclic owner stages reference time and the
+`0x092c/4` broadcast word under one generation and publishes neither monitor
+until both validate. The lower 31 bits are an aggregate maximum difference,
+not per-slave identity. A product may freeze threshold and hysteresis values in
+its integration layer, but this increment does not add them to the generated
+schema, change ProcBuf layout, or authorize automatic clock correction.
+
 Per-slave PDO startup-plan construction uses the same generated order and the
 shared 256-entry cfggen bound. For each SyncManager it clears assignment
 subindex zero, writes each mapping object, then publishes the ordered mapping

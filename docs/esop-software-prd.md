@@ -199,9 +199,13 @@ C、Rust 和配置 hash。`StaticProductConfig` 在 Startup mutation 前重算�
 全 AssignActivate 的有界顺序。共同未移位 epoch 严格位于未来并对所有重复周期的 checked LCM
 对齐，公开证据仅在最后一站激活成功后发布。该服务位于 DC Clock 与 legacy DC 之间，并持续关闭
 PREOP Configuration/lifecycle gate，直到完整批次真实 Complete。
+运行时 cyclic DC 现可选启用 `0x092c/4` BRD 同步窗口。期望 WKC 可由不可变 `DcTopology`
+精确推导；参考钟 FRMW 与窗口 BRD 使用不同 index 和同一 generation，任一缺失或校验失败都不会
+发布部分样本。窗口 lower 31-bit 聚合差值经阈值与滞回生成锁定、退化、失锁和恢复计数，生命周期
+DC 门同时要求本周期完整 FRMW/BRD 证据与组合锁定。广播聚合不能定位单个从站，ProcBuf
+`dc_offset_ns` 仍表示参考钟 offset，不改变 ABI。
 当前测试只验证调用方交付响应和软件计算边界，不证明应用时间真实性、物理来源或时序精度；
-外部应用授时、运行时全从站漂移补偿、`0x092c` sync-window、锁定/恢复策略和完整质量资格
-仍属于 FR-018 后续边界。
+外部应用授时、自动运行时全从站漂移补偿、逐站差值归因和完整质量资格仍属于 FR-018 后续边界。
 
 ### 7.4 CiA 402 与设备模型
 
@@ -518,7 +522,9 @@ R2 统一生产服务调度增量：`ScheduledProductionServiceScheduler` 在固
 
 R2 PREOP 激活屏障增量：`StartupConfig` 可冻结 PDO Configuration、Mapping、DC Clock Configuration、DC Configuration 的必需集合。启用后，扫描和精确身份核对保持不变，所有期望从站必须先确认 PREOP，随后 Startup 进入无控制动作的 `AwaitingConfiguration`。生产调度器在该阶段按原固定顺序选择第一个未 Complete 的必需服务；缺失绑定返回 `MissingController`，Idle、执行中、重试和 Faulted 均保持屏障关闭，且故障服务仍要求显式重启。对于 PDO 批模式，当前控制器 Complete 只会启动下一 job，不能提前释放屏障；仅当整个批次及其他必需控制器的真实 phase 为 Complete 时，调度器才重置 Startup 的 AL 游标并保留已验证 `SlaveTable`，逐站经过观测到的 SAFEOP 再到最终 SAFEOP/OP，不重新扫描、读取 SII 或接受调用方 readiness boolean。每个生产报告额外携带实际 Startup phase 和可选 PDO 批状态，即使正在运行配置服务，生命周期投影也会让 PREOP 屏障持续清除 Topology；只有最终 Startup Ready 才放行。核心与 Linux 仿真覆盖两 job 自动推进、单/多从站 Startup、PDO 精确回读、缺失/Idle/Faulted 服务、AL code/timeout、显式重启、无重扫和 SAFEOP/OP 顺序。产品静态 MailboxConfig 由经校验的 ESI CoE 邮箱对生成，并在身份后、AL 前与实时 SII 标准邮箱布局交叉验证；显式绑定仍只作为 PDO 批次覆盖。完整 SM-FMMU/DC 描述自动发现、外部应用授时、完整 start time/全从站 SYNC 策略、完整周期 WKC、真实响应来源、逐产品资格、目标 WCET 与实物 HIL 仍是 R2 发布阻塞项。
 
-R2 DC SYNC 增量：`DcSyncTiming` 统一解析直接/正负 factor、SYNC1 relation、signed shift 与完整 AssignActivate；cfggen 将绝对值写入 JSON/inventory/C/Rust 和配置 hash，产品运行时重算并构造固定容量顺序计划。`DcSyncController` 在不可变拓扑上先校验全计划，再执行全禁用、全周期、一次参考钟读取、严格未来且按重复周期 checked LCM 对齐的共同 epoch、逐站 shift start time 和完整激活字。生产调度固定放在 DC Clock 后、legacy DC 前，缺失、执行中、超时或故障均保持 PREOP/lifecycle Configuration gate 关闭；模拟 Linux 共享请求/RX 路径只在双驱动完整证据发布后放行。该增量不证明外部应用授时、周期漂移补偿、`0x092c` sync-window、物理精度、WCET、HIL 或功能安全。
+R2 DC SYNC 增量：`DcSyncTiming` 统一解析直接/正负 factor、SYNC1 relation、signed shift 与完整 AssignActivate；cfggen 将绝对值写入 JSON/inventory/C/Rust 和配置 hash，产品运行时重算并构造固定容量顺序计划。`DcSyncController` 在不可变拓扑上先校验全计划，再执行全禁用、全周期、一次参考钟读取、严格未来且按重复周期 checked LCM 对齐的共同 epoch、逐站 shift start time 和完整激活字。生产调度固定放在 DC Clock 后、legacy DC 前，缺失、执行中、超时或故障均保持 PREOP/lifecycle Configuration gate 关闭；模拟 Linux 共享请求/RX 路径只在双驱动完整证据发布后放行。该增量不证明外部应用授时、自动周期漂移补偿、物理精度、WCET、HIL 或功能安全。
+
+R2 DC 同步窗口运行时增量：`DcCyclicSync` 可选增加 `0x092c/4` BRD，并从不可变拓扑推导精确期望 WKC。参考钟 FRMW 与窗口 BRD 的 index、process-image 区间和 Domain/control 所有权在 mutation 前校验；两份响应按同一 generation 分阶段接收，任一缺失、WKC/shape 错误或端口失败都会关闭该代且不发布部分证据。`DcSyncWindowMonitor` 解码 lower 31-bit 聚合差值，以固定阈值与连续周期滞回记录锁定、失锁、缺失和恢复；生命周期与 ProcBuf 投影要求本周期完整双响应及组合锁定。Linux 模拟端证明共享 Domain/DC/control 路径的阈值越界和恢复。该聚合不能归因到单个从站，不执行自动时钟修正，也不证明物理响应、纳秒精度、WCET、HIL、ETG 或功能安全。
 
 R2 AL 错误确认与 Device Emulation 增量：在线扫描在分配固定站地址后对每个从站读取 ESC Configuration `0x0141`，精确响应的 bit 0 决定 AL 错误策略；短响应、WKC、世代或超时错误不得回退到默认策略。普通 ESC 在初始或转换期间报告 Error Indication 时，`AlTransitionController` 冻结首个 AL 状态、最终请求状态和 status code，写入“实际状态 + bit 4”并在原转换截止时间内轮询。错误位清除只把 ACK 结果标记为完成，Startup 仍进入 Faulted，不自动重试状态转换。Device Emulation 从站从策略层禁止 ACK 写入，错误直接闭锁。`StartupAlFault` 保留 position、固定站地址、请求/实际状态、status code、能力和 ACK 阶段；后续 ACK 超时或畸形响应不能覆盖首个 AL 证据，显式 Startup restart 才清除并重新扫描。核心和 Linux 仿真证明有界请求序列、控制池/调度兼容及 fail-closed 结果；真实 ESC 响应、互操作、目标 WCET 和实物 HIL 仍是发布阻塞项。
 

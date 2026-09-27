@@ -60,7 +60,8 @@ pub use dc::{
     DcMonitor, DcPhase, DcProgress, DcSample, DcSyncAction, DcSyncActionKind, DcSyncConfig,
     DcSyncController, DcSyncError, DcSyncMode, DcSyncPhase, DcSyncPlan, DcSyncPlanEntry,
     DcSyncPlanError, DcSyncProgrammedSlave, DcSyncProgress, DcSyncTiming, DcSyncTimingError,
-    DcTopology, DcTopologyError, DcTopologyPort, DcTopologySlave,
+    DcSyncWindowConfig, DcSyncWindowMonitor, DcSyncWindowSample, DcTopology, DcTopologyError,
+    DcTopologyPort, DcTopologySlave,
 };
 pub use diag::{
     CoeEmergencyEvent, CoeEmergencyQueue, DiagnosticConsumer, Diagnostics, EmergencySink,

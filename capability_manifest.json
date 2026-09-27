@@ -71,7 +71,23 @@
         "docs/esop-product-configuration.md",
         ".trellis/spec/backend/product-configuration.md"
       ],
-      "limitation": "Software tests prove timing conversion, bounded request ownership, exact register shape/WKC checks, common-epoch arithmetic, scheduler ordering, fail-closed gating and complete-only publication for deterministic caller-delivered responses. External application-time discipline, periodic all-slave drift compensation, 0x092c sync-window monitoring, runtime lock/recovery proof, physical timing precision, interoperability, target WCET, HIL, ETG conformance and functional-safety qualification remain open"
+      "limitation": "Software tests prove timing conversion, bounded request ownership, exact register shape/WKC checks, common-epoch arithmetic, scheduler ordering, fail-closed gating and complete-only publication for deterministic caller-delivered responses. External application-time discipline, automatic periodic all-slave drift compensation, physical timing precision, interoperability, target WCET, HIL, ETG conformance and functional-safety qualification remain open"
+    },
+    {
+      "id": "ethercat_dc_sync_window_monitoring",
+      "status": "implemented",
+      "scope": "Allocation-free optional cyclic 0x092c/4 BRD synchronization-window monitoring with topology-derived exact WKC, atomic same-generation FRMW/BRD publication, fixed hysteresis and lock/loss/recovery diagnostics, shared Domain/DC/control scheduling, and fail-closed lifecycle/ProcBuf DC qualification",
+      "evidence": [
+        "crates/esop-ethercat-core/src/dc.rs",
+        "crates/esop-ethercat-core/src/scheduled_domains.rs",
+        "crates/esop-ethercat-linux-port/tests/scheduled_domains.rs",
+        "crates/esop-lifecycle-guard/src/ethercat.rs",
+        "crates/esop-lifecycle-guard/src/procbuf.rs",
+        "docs/ethercat-master-requirements.md",
+        "docs/esop-motion-lifecycle-guard.md",
+        ".trellis/spec/backend/quality-guidelines.md"
+      ],
+      "limitation": "Deterministic software tests prove exact wire shape/WKC, same-generation atomicity, missing-response handling, threshold hysteresis and lifecycle loss/recovery for caller-delivered responses. The broadcast value is an aggregate and does not identify one slave; automatic clock correction, physical response provenance and timing accuracy, interoperability, target WCET, HIL, ETG conformance and functional-safety qualification remain open"
     },
     {
       "id": "ethercat_sii_category_stream",

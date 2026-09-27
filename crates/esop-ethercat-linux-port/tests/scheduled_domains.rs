@@ -5,19 +5,20 @@ use esop_ethercat_core::wire::{
 use esop_ethercat_core::{
     AlStatus, CoeHeader, CoeService, ControlError, ControlRequestPool, CycleError, DatagramPlan,
     DcClockConfig, DcClockController, DcClockProgress, DcCyclicConfig, DcCyclicError, DcCyclicSync,
-    DcMonitor, DcSyncConfig, DcSyncController, DcSyncProgress, DcTopology, Domain, DomainSegment,
-    ESC_AL_STATUS, ESC_CONFIGURATION, ESC_DC_SYSTEM_TIME, ESC_FEATURE_DC_SUPPORTED, EscDcRange,
-    EthercatMaster, EthercatPort, EthercatState, ExpectedSlave, FramePlan, FramePlanSet, LinkState,
-    MAX_MAILBOX_BYTES, MailboxConfig, MailboxController, MailboxError, MailboxHeader, MailboxPhase,
-    MailboxProgress, MailboxProtocol, MailboxRetryPolicy, MappingConfigController,
-    MappingConfigPhase, MappingConfigProgress, MappingTable, MasterConfig, PdoConfigAction,
-    PdoConfigBatch, PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigController, PdoConfigError,
-    PdoConfigJob, PdoConfigPhase, PdoConfigPlan, PdoConfigProgress, PdoConfigStep, PdoSdoWrite,
-    PortError, RegisterOperation, RequestHandle, RequestState, RxPoll, RxSlotState,
-    ScanDcCapabilities, ScanPortLink, ScanRecord, ScheduleDomain, ScheduleTable,
-    ScheduledControlCycleError, ScheduledDomainBank, ScheduledDomainEntry,
-    ScheduledPdoConfiguration, ScheduledPdoConfigurationProgress, ScheduledProcessInputEntry,
-    ScheduledProcessInputs, ScheduledProductionServiceCycleError, ScheduledProductionServiceFault,
+    DcMonitor, DcSyncConfig, DcSyncController, DcSyncProgress, DcSyncWindowConfig, DcTopology,
+    Domain, DomainSegment, ESC_AL_STATUS, ESC_CONFIGURATION, ESC_DC_SYSTEM_DIFF,
+    ESC_DC_SYSTEM_TIME, ESC_FEATURE_DC_SUPPORTED, EscDcRange, EthercatMaster, EthercatPort,
+    EthercatState, ExpectedSlave, FramePlan, FramePlanSet, LinkState, MAX_MAILBOX_BYTES,
+    MailboxConfig, MailboxController, MailboxError, MailboxHeader, MailboxPhase, MailboxProgress,
+    MailboxProtocol, MailboxRetryPolicy, MappingConfigController, MappingConfigPhase,
+    MappingConfigProgress, MappingTable, MasterConfig, PdoConfigAction, PdoConfigBatch,
+    PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigController, PdoConfigError, PdoConfigJob,
+    PdoConfigPhase, PdoConfigPlan, PdoConfigProgress, PdoConfigStep, PdoSdoWrite, PortError,
+    RegisterOperation, RequestHandle, RequestState, RxPoll, RxSlotState, ScanDcCapabilities,
+    ScanPortLink, ScanRecord, ScheduleDomain, ScheduleTable, ScheduledControlCycleError,
+    ScheduledDomainBank, ScheduledDomainEntry, ScheduledPdoConfiguration,
+    ScheduledPdoConfigurationProgress, ScheduledProcessInputEntry, ScheduledProcessInputs,
+    ScheduledProductionServiceCycleError, ScheduledProductionServiceFault,
     ScheduledProductionServiceKind, ScheduledProductionServiceProgress,
     ScheduledProductionServiceRecovery, ScheduledProductionServiceScheduler,
     ScheduledProductionServices, ScheduledReceiveError, ScheduledServiceFrameError,
@@ -3464,6 +3465,220 @@ fn non_mailbox_control_cycle_advances_mapping_without_retransmitting_in_flight_r
     assert_eq!(controls.in_use(), 0);
 }
 
+#[test]
+fn public_sync_window_cycle_drives_loss_and_recovery_through_shared_rx() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<1, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 14, 0),
+        DcMonitor::new(50, 10, 1, 1),
+    )
+    .with_sync_window(DcSyncWindowConfig::new(15, 8, 1, 100, 1, 1).unwrap())
+    .unwrap();
+    let mut controls = ControlRequestPool::<1>::new();
+    let mut port = TwoFrameSimPort::new();
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let domain_image = [0x40, 0];
+    let mut dc_image = [0u8; 12];
+    let mut plan = FramePlan::<1>::new();
+    plan.push(DatagramPlan {
+        command: Command::Lrw,
+        index: 12,
+        address: 0x1000,
+        payload_offset: 0,
+        payload_len: 2,
+        expected_wkc: 1,
+    })
+    .unwrap();
+    let other = OtherCycleFacts {
+        platform_ready: true,
+        coe_ready: true,
+        topology_valid: true,
+        drive_ready: true,
+        command_current: true,
+        supervisor_healthy: true,
+        external_safety_clear: true,
+        deadline_met: true,
+    };
+
+    for (generation, difference_ns, expected_locked) in
+        [(1u16, 25u32, true), (2, 101, false), (3, 50, true)]
+    {
+        let now_ns = u64::from(generation) * 100_000;
+        port.set_now_ns(now_ns);
+        port.set_sync_window_difference(difference_ns);
+        let frame = master.acquire_frame(generation, now_ns + 50_000).unwrap();
+        master
+            .build_and_arm_frame_from_plan(frame, &plan, &domain_image)
+            .unwrap();
+        master.submit_frame(&mut port, frame).unwrap();
+
+        let cycle = bank
+            .run_dc_and_control_cycle(
+                &mut master,
+                &mut port,
+                &mut scratch,
+                &mut dc,
+                &mut dc_image,
+                now_ns,
+                &mut controls,
+                None,
+                generation,
+                now_ns + 50_000,
+                now_ns + 50_000,
+            )
+            .unwrap();
+        assert!(cycle.service().dc_sent);
+        assert_eq!(cycle.received().dc_result, Ok(()));
+        assert_eq!(cycle.received().report.parsed_datagrams, 3);
+        assert_eq!(
+            dc.sync_window_monitor().unwrap().difference_ns(),
+            difference_ns
+        );
+        assert_eq!(dc.is_locked(), expected_locked);
+
+        let snapshots = [ScheduledDomainQuality {
+            id: 9,
+            quality: cycle.received().qualities[0],
+        }];
+        let quality = cyclic_quality_from_schedule(
+            cycle.received().report,
+            &schedule,
+            &snapshots,
+            &dc,
+            other,
+        );
+        assert_eq!(quality.distributed_clock_locked, expected_locked);
+    }
+
+    let monitor = dc.sync_window_monitor().unwrap();
+    assert_eq!(monitor.loss_count(), 1);
+    assert_eq!(monitor.recovery_count(), 1);
+}
+
+#[test]
+fn sync_window_indices_are_partitioned_from_domains_and_controls_before_prepare() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<1, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut port = TwoFrameSimPort::new();
+    port.set_now_ns(100_000);
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut image = [0u8; 12];
+    let mut controls = ControlRequestPool::<1>::new();
+
+    let mut domain_conflict = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 14, 0),
+        DcMonitor::new(50, 10, 1, 1),
+    )
+    .with_sync_window(DcSyncWindowConfig::new(12, 8, 1, 100, 1, 1).unwrap())
+    .unwrap();
+    assert!(matches!(
+        bank.run_dc_and_control_cycle(
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut domain_conflict,
+            &mut image,
+            100_000,
+            &mut controls,
+            None,
+            1,
+            150_000,
+            150_000,
+        ),
+        Err(ScheduledControlCycleError::Submit(
+            ScheduledServiceTxError::DcIndexConflict(12)
+        ))
+    ));
+    assert_eq!(domain_conflict.pending_generation(), None);
+
+    let mut control_conflict = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 14, 0),
+        DcMonitor::new(50, 10, 1, 1),
+    )
+    .with_sync_window(DcSyncWindowConfig::new(15, 8, 1, 100, 1, 1).unwrap())
+    .unwrap();
+    let handle = controls
+        .acquire(15, 9, 0x5000, RegisterOperation::Read, &[0; 4], 150_000)
+        .unwrap();
+    assert!(matches!(
+        bank.run_dc_and_control_cycle(
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut control_conflict,
+            &mut image,
+            100_000,
+            &mut controls,
+            Some(handle),
+            1,
+            150_000,
+            150_000,
+        ),
+        Err(ScheduledControlCycleError::Submit(
+            ScheduledServiceTxError::ControlIndexConflict(15)
+        ))
+    ));
+    assert_eq!(control_conflict.pending_generation(), None);
+    controls.release(handle).unwrap();
+}
+
 struct TwoFrameSimPort {
     inner: SimulatedPort,
     frames: [[u8; MAX_ETHERNET_FRAME_LEN]; 4],
@@ -3482,6 +3697,7 @@ struct TwoFrameSimPort {
     control_response_address: Option<u32>,
     control_response: [u8; MAX_MAILBOX_BYTES],
     control_response_len: usize,
+    sync_window_difference: Option<u32>,
 }
 
 impl TwoFrameSimPort {
@@ -3504,6 +3720,7 @@ impl TwoFrameSimPort {
             control_response_address: None,
             control_response: [0; MAX_MAILBOX_BYTES],
             control_response_len: 0,
+            sync_window_difference: None,
         }
     }
 
@@ -3538,6 +3755,10 @@ impl TwoFrameSimPort {
         self.control_response[..payload.len()].copy_from_slice(payload);
         self.control_response_address = Some(address);
         self.control_response_len = payload.len();
+    }
+
+    fn set_sync_window_difference(&mut self, difference_ns: u32) {
+        self.sync_window_difference = Some(difference_ns);
     }
 
     fn set_now_ns(&mut self, now_ns: u64) {
@@ -3625,6 +3846,13 @@ impl EthercatPort for TwoFrameSimPort {
                         .copy_from_slice(&self.control_response[..response_len]);
                     self.control_response_address = None;
                     self.control_response_len = 0;
+                } else if header.command == Command::Brd
+                    && header.address == ESC_DC_SYSTEM_DIFF as u32
+                    && header.length == 4
+                    && let Some(difference_ns) = self.sync_window_difference
+                {
+                    self.frames[self.count][header_end..payload_end]
+                        .copy_from_slice(&difference_ns.to_le_bytes());
                 }
                 offset = payload_end + WORKING_COUNTER_LEN;
                 if header.last {

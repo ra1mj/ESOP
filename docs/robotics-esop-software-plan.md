@@ -142,7 +142,10 @@ SII category stream/candidate 路径已成为独立 Startup 动作，并与
 发布结构或 DC 验证证据。产品层现通过共享 resolver 冻结绝对 SYNC0/SYNC1 timing，并按产品
 顺序生成固定容量计划；拓扑级控制器用一次参考钟读取选择 LCM-aligned 共同 epoch，写入每站
 shift 后的 start time 与完整 AssignActivate，并在全批完成前保持 PREOP/lifecycle gate 关闭。
-FMMU 自动发现、周期漂移补偿、`0x092c` sync-window、真实响应真实性、完整周期 WKC、从站互操作和 HIL 仍保持开放。
+运行时 cyclic DC 现可在参考钟 FRMW 旁启用 `0x092c/4` BRD，同一 generation 的两份响应
+完整后才发布，并以 lower 31-bit 聚合差值的阈值/滞回驱动生命周期 DC 门的失锁与恢复。
+该广播聚合不能定位单个从站，也不执行自动校时。FMMU 自动发现、自动周期漂移补偿、真实响应
+真实性、完整周期 WKC、从站互操作和 HIL 仍保持开放。
 
 ## 5. ProcBuf：机器人实时数据载体
 

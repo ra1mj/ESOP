@@ -253,6 +253,15 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   Domain image or the DC monitor's previously locked state. The cycle owner
   must explicitly supply the other safety facts and final deadline result;
   the simulator's synthetic facts are not device qualification evidence.
+- When optional DC sync-window monitoring is enabled, treat reference FRMW and
+  `0x092c/4` BRD as one atomic observation. Derive the BRD's exact nonzero WKC
+  from the immutable topology, reserve distinct datagram indices and
+  non-overlapping process-image ranges, and reject Domain/control aliases
+  before `prepare`. Stage both responses under the same generation and publish
+  neither monitor until both exact command/address/length/WKC checks pass.
+  Missing or rejected responses count as bad window observations and cannot
+  reuse previous-cycle lock evidence. Decode only the lower 31-bit aggregate
+  magnitude; never claim per-slave attribution or automatic clock correction.
 - For ProcBuf diagnostics, keep Domain slot order and the due mask aligned with
   the frozen schedule. Project every configured Domain's WKC and age, but only
   qualify scheduled Domains as current; do not overwrite AL, command, or

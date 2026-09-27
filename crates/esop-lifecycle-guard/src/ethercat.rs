@@ -1138,7 +1138,7 @@ fn quality_from_domain_health(
             && dc.last_sync_cycle() == report.cycle
             && dc.last_error().is_none()
             && dc.pending_generation().is_none()
-            && dc.monitor().is_locked(),
+            && dc.is_locked(),
         drive_ready: other.drive_ready,
         domain_valid,
         wkc_valid: rx_valid && domain_valid,
@@ -1154,8 +1154,9 @@ mod tests {
     use super::*;
     use esop_ethercat_core::wire::{Command, DatagramHeader};
     use esop_ethercat_core::{
-        DcCyclicConfig, DcMonitor, RxMatch, ScheduleDomain, ScheduledProcessFrameError,
-        ScheduledProcessTxFailure,
+        DcCyclicConfig, DcCyclicError, DcMonitor, DcSyncWindowConfig, ESC_DC_SYSTEM_DIFF,
+        ESC_DC_SYSTEM_TIME, RxMatch, ScheduleDomain, ScheduledProcessFrameError,
+        ScheduledProcessTxFailure, fixed_address,
     };
 
     fn report() -> CycleReport {
@@ -1257,12 +1258,112 @@ mod tests {
         sync
     }
 
+    fn dc_with_sync_window(cycle: u64, generation: u16, raw_difference: u32) -> DcCyclicSync {
+        let mut sync = DcCyclicSync::new(
+            DcCyclicConfig::new(0x1000, 13, 0),
+            DcMonitor::new(50, 10, 1, 2),
+        )
+        .with_sync_window(DcSyncWindowConfig::new(14, 8, 1, 100, 1, 1).unwrap())
+        .unwrap();
+        let mut image = [0; 12];
+        sync.prepare(generation, 120, &mut image).unwrap();
+        sync.complete(
+            cycle,
+            100,
+            RxMatch {
+                slot_id: 0,
+                generation,
+                working_counter: 1,
+            },
+            DatagramHeader {
+                command: Command::Frmw,
+                index: 13,
+                address: fixed_address(0x1000, ESC_DC_SYSTEM_TIME),
+                length: 8,
+                last: false,
+            },
+            &100u64.to_le_bytes(),
+        )
+        .unwrap();
+        sync.complete(
+            cycle,
+            101,
+            RxMatch {
+                slot_id: 1,
+                generation,
+                working_counter: 1,
+            },
+            DatagramHeader {
+                command: Command::Brd,
+                index: 14,
+                address: ESC_DC_SYSTEM_DIFF as u32,
+                length: 4,
+                last: true,
+            },
+            &raw_difference.to_le_bytes(),
+        )
+        .unwrap();
+        sync
+    }
+
     #[test]
     fn fresh_verified_cycle_produces_complete_good_facts() {
         let facts =
             cyclic_quality_from_ethercat(report(), &[domain(), domain()], &locked_dc(), other());
         assert!(facts.domain_valid && facts.wkc_valid && facts.distributed_clock_locked);
         assert!(facts.cycle_within_budget && facts.command_current);
+    }
+
+    #[test]
+    fn sync_window_sample_is_required_for_the_current_dc_gate() {
+        let good = dc_with_sync_window(7, 3, 25);
+        assert!(
+            cyclic_quality_from_ethercat(report(), &[domain()], &good, other())
+                .distributed_clock_locked
+        );
+
+        let bad = dc_with_sync_window(7, 3, 101);
+        assert!(!bad.is_locked());
+        assert!(
+            !cyclic_quality_from_ethercat(report(), &[domain()], &bad, other())
+                .distributed_clock_locked
+        );
+
+        let mut missing = DcCyclicSync::new(
+            DcCyclicConfig::new(0x1000, 13, 0),
+            DcMonitor::new(50, 10, 1, 2),
+        )
+        .with_sync_window(DcSyncWindowConfig::new(14, 8, 1, 100, 1, 1).unwrap())
+        .unwrap();
+        let mut image = [0; 12];
+        missing.prepare(3, 120, &mut image).unwrap();
+        missing
+            .complete(
+                7,
+                100,
+                RxMatch {
+                    slot_id: 0,
+                    generation: 3,
+                    working_counter: 1,
+                },
+                DatagramHeader {
+                    command: Command::Frmw,
+                    index: 13,
+                    address: fixed_address(0x1000, ESC_DC_SYSTEM_TIME),
+                    length: 8,
+                    last: true,
+                },
+                &100u64.to_le_bytes(),
+            )
+            .unwrap();
+        assert_eq!(
+            missing.finish_receive(7, 3),
+            Err(DcCyclicError::MissingResponse)
+        );
+        assert!(
+            !cyclic_quality_from_ethercat(report(), &[domain()], &missing, other())
+                .distributed_clock_locked
+        );
     }
 
     #[test]

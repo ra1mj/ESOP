@@ -14,7 +14,7 @@ use crate::engine::RxDatagramConsumer;
 use crate::plan::DatagramPlan;
 use crate::registers::{
     ESC_DC_CUC, ESC_DC_CYCLE0, ESC_DC_CYCLE1, ESC_DC_START0, ESC_DC_SYNC_ACTIVATION,
-    ESC_DC_SYSTEM_OFFSET, ESC_DC_SYSTEM_TIME, ESC_PORT_COUNT, fixed_address,
+    ESC_DC_SYSTEM_DIFF, ESC_DC_SYSTEM_OFFSET, ESC_DC_SYSTEM_TIME, ESC_PORT_COUNT, fixed_address,
 };
 use crate::rx_index::RxMatch;
 use crate::scan::{EscDcRange, ScanPortLink, ScanRecord};
@@ -25,6 +25,7 @@ pub const DC_SYNC_DELAY_NS: u64 = 100_000_000;
 const DC_DOWNSTREAM_PORTS: [usize; 3] = [3, 1, 2];
 const DC_REVERSE_PORT_ORDER: [usize; ESC_PORT_COUNT] = [2, 3, 1, 0];
 const DC_SYSTEM_TIME_LEN: usize = 8;
+const DC_SYSTEM_DIFF_LEN: usize = 4;
 const DC_CYCLE_LEN: usize = 4;
 const DC_ACTIVATION_LEN: usize = 1;
 const DC_MAX_ACTION_PAYLOAD: usize = DC_SYSTEM_TIME_LEN;
@@ -2491,6 +2492,80 @@ pub struct DcCyclicConfig {
     pub expected_wkc: u16,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DcSyncWindowConfig {
+    pub datagram_index: u8,
+    pub payload_offset: usize,
+    pub expected_wkc: u16,
+    pub max_difference_ns: u32,
+    pub lock_good_cycles: u16,
+    pub unlock_bad_cycles: u16,
+}
+
+impl DcSyncWindowConfig {
+    pub fn new(
+        datagram_index: u8,
+        payload_offset: usize,
+        expected_wkc: u16,
+        max_difference_ns: u32,
+        lock_good_cycles: u16,
+        unlock_bad_cycles: u16,
+    ) -> Result<Self, DcCyclicError> {
+        let config = Self {
+            datagram_index,
+            payload_offset,
+            expected_wkc,
+            max_difference_ns,
+            lock_good_cycles,
+            unlock_bad_cycles,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn for_topology<const MAX_SLAVES: usize>(
+        datagram_index: u8,
+        payload_offset: usize,
+        max_difference_ns: u32,
+        lock_good_cycles: u16,
+        unlock_bad_cycles: u16,
+        topology: &DcTopology<MAX_SLAVES>,
+    ) -> Result<Self, DcCyclicError> {
+        let expected_wkc =
+            u16::try_from(topology.len()).map_err(|_| DcCyclicError::InvalidConfiguration)?;
+        Self::new(
+            datagram_index,
+            payload_offset,
+            expected_wkc,
+            max_difference_ns,
+            lock_good_cycles,
+            unlock_bad_cycles,
+        )
+    }
+
+    pub const fn datagram_plan(self) -> DatagramPlan {
+        DatagramPlan {
+            command: Command::Brd,
+            index: self.datagram_index,
+            address: ESC_DC_SYSTEM_DIFF as u32,
+            payload_offset: self.payload_offset,
+            payload_len: DC_SYSTEM_DIFF_LEN,
+            expected_wkc: self.expected_wkc,
+        }
+    }
+
+    fn validate(self) -> Result<(), DcCyclicError> {
+        if self.expected_wkc == 0
+            || self.max_difference_ns == 0
+            || self.lock_good_cycles == 0
+            || self.unlock_bad_cycles == 0
+        {
+            return Err(DcCyclicError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
 impl DcCyclicConfig {
     pub const fn new(reference_station: u16, datagram_index: u8, payload_offset: usize) -> Self {
         Self {
@@ -2524,17 +2599,30 @@ pub enum DcCyclicError {
     GenerationMismatch,
     PayloadLengthMismatch,
     WorkingCounterMismatch,
+    DuplicateDatagramIndex,
+    ProcessImageOverlap,
+    DuplicateResponse,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DcCyclicPending {
     generation: u16,
     application_time_ns: u64,
+    reference_time_ns: Option<u64>,
+    reference_received_at_ns: u64,
+    sync_window_raw: Option<u32>,
+    sync_window_received_at_ns: u64,
+}
+
+struct DcSyncWindowState {
+    config: DcSyncWindowConfig,
+    monitor: DcSyncWindowMonitor,
 }
 
 pub struct DcCyclicSync {
     config: DcCyclicConfig,
     monitor: DcMonitor,
+    sync_window: Option<DcSyncWindowState>,
     pending: Option<DcCyclicPending>,
     has_last_application_time: bool,
     last_application_time_ns: u64,
@@ -2550,6 +2638,7 @@ impl DcCyclicSync {
         Self {
             config,
             monitor,
+            sync_window: None,
             pending: None,
             has_last_application_time: false,
             last_application_time_ns: 0,
@@ -2561,12 +2650,55 @@ impl DcCyclicSync {
         }
     }
 
+    pub fn with_sync_window(mut self, config: DcSyncWindowConfig) -> Result<Self, DcCyclicError> {
+        config.validate()?;
+        if config.datagram_index == self.config.datagram_index {
+            return Err(DcCyclicError::DuplicateDatagramIndex);
+        }
+        let reference_end = self
+            .config
+            .payload_offset
+            .checked_add(DC_SYSTEM_TIME_LEN)
+            .ok_or(DcCyclicError::InvalidConfiguration)?;
+        let window_end = config
+            .payload_offset
+            .checked_add(DC_SYSTEM_DIFF_LEN)
+            .ok_or(DcCyclicError::InvalidConfiguration)?;
+        if self.config.payload_offset < window_end && config.payload_offset < reference_end {
+            return Err(DcCyclicError::ProcessImageOverlap);
+        }
+        self.sync_window = Some(DcSyncWindowState {
+            config,
+            monitor: DcSyncWindowMonitor::new(
+                config.max_difference_ns,
+                config.lock_good_cycles,
+                config.unlock_bad_cycles,
+            ),
+        });
+        Ok(self)
+    }
+
     pub const fn config(&self) -> DcCyclicConfig {
         self.config
     }
 
     pub const fn datagram_plan(&self) -> DatagramPlan {
         self.config.datagram_plan()
+    }
+
+    pub const fn sync_window_datagram_plan(&self) -> Option<DatagramPlan> {
+        match &self.sync_window {
+            Some(window) => Some(window.config.datagram_plan()),
+            None => None,
+        }
+    }
+
+    pub fn uses_datagram_index(&self, index: u8) -> bool {
+        self.config.datagram_index == index
+            || self
+                .sync_window
+                .as_ref()
+                .is_some_and(|window| window.config.datagram_index == index)
     }
 
     pub const fn pending_generation(&self) -> Option<u16> {
@@ -2582,6 +2714,22 @@ impl DcCyclicSync {
 
     pub fn monitor_mut(&mut self) -> &mut DcMonitor {
         &mut self.monitor
+    }
+
+    pub fn sync_window_monitor(&self) -> Option<&DcSyncWindowMonitor> {
+        self.sync_window.as_ref().map(|window| &window.monitor)
+    }
+
+    pub fn sync_window_monitor_mut(&mut self) -> Option<&mut DcSyncWindowMonitor> {
+        self.sync_window.as_mut().map(|window| &mut window.monitor)
+    }
+
+    pub fn is_locked(&self) -> bool {
+        self.monitor.is_locked()
+            && self
+                .sync_window
+                .as_ref()
+                .is_none_or(|window| window.monitor.is_locked())
     }
 
     pub const fn last_application_time_ns(&self) -> u64 {
@@ -2619,6 +2767,12 @@ impl DcCyclicSync {
         if self.config.expected_wkc == 0 {
             return self.fail(DcCyclicError::InvalidConfiguration);
         }
+        if let Some(window) = &self.sync_window {
+            window.config.validate()?;
+            if window.config.datagram_index == self.config.datagram_index {
+                return self.fail(DcCyclicError::DuplicateDatagramIndex);
+            }
+        }
         if self.pending.is_some() {
             return self.fail(DcCyclicError::Busy);
         }
@@ -2632,11 +2786,30 @@ impl DcCyclicSync {
         if end > process_image.len() {
             return self.fail(DcCyclicError::ProcessImageOutOfBounds);
         }
+        let sync_window_range = if let Some(window) = &self.sync_window {
+            let window_end = match window.config.payload_offset.checked_add(DC_SYSTEM_DIFF_LEN) {
+                Some(end) => end,
+                None => return self.fail(DcCyclicError::ProcessImageOutOfBounds),
+            };
+            if window_end > process_image.len() {
+                return self.fail(DcCyclicError::ProcessImageOutOfBounds);
+            }
+            Some(window.config.payload_offset..window_end)
+        } else {
+            None
+        };
         process_image[self.config.payload_offset..end]
             .copy_from_slice(&application_time_ns.to_le_bytes());
+        if let Some(range) = sync_window_range {
+            process_image[range].fill(0);
+        }
         self.pending = Some(DcCyclicPending {
             generation,
             application_time_ns,
+            reference_time_ns: None,
+            reference_received_at_ns: 0,
+            sync_window_raw: None,
+            sync_window_received_at_ns: 0,
         });
         self.last_application_time_ns = application_time_ns;
         self.has_last_application_time = true;
@@ -2652,48 +2825,25 @@ impl DcCyclicSync {
         header: DatagramHeader,
         payload: &[u8],
     ) -> Result<(), DcCyclicError> {
-        let pending = match self.pending {
-            Some(pending) => pending,
+        let pending_generation = match self.pending {
+            Some(pending) => pending.generation,
             None => return self.fail(DcCyclicError::Busy),
         };
-        let expected = self.config.datagram_plan();
-        if header.index != expected.index
-            || header.command != expected.command
-            || header.address != expected.address
-        {
-            return self.fail(DcCyclicError::UnexpectedDatagram);
-        }
-        if completion.generation != pending.generation {
+        if completion.generation != pending_generation {
             return self.fail(DcCyclicError::GenerationMismatch);
         }
-        if completion.working_counter != self.config.expected_wkc {
-            return self.fail(DcCyclicError::WorkingCounterMismatch);
-        }
-        if header.length as usize != DC_SYSTEM_TIME_LEN {
-            return self.fail(DcCyclicError::PayloadLengthMismatch);
-        }
-        let reference_time: [u8; DC_SYSTEM_TIME_LEN] = match payload.try_into() {
-            Ok(bytes) => bytes,
-            Err(_) => return self.fail(DcCyclicError::PayloadLengthMismatch),
-        };
-
-        let previous_state = self.monitor.state();
-        let reference_time_ns = u64::from_le_bytes(reference_time);
-        self.monitor.observe(
-            received_at_ns,
-            reference_time_ns,
-            pending.application_time_ns,
-        );
-        if self.monitor.state() == DcLockState::Unlocked && previous_state != DcLockState::Unlocked
+        if header.index == self.config.datagram_index {
+            self.stage_reference_response(received_at_ns, completion, header, payload)?;
+        } else if self
+            .sync_window
+            .as_ref()
+            .is_some_and(|window| header.index == window.config.datagram_index)
         {
-            self.unlock_count = self.unlock_count.saturating_add(1);
+            self.stage_sync_window_response(received_at_ns, completion, header, payload)?;
+        } else {
+            return self.fail(DcCyclicError::UnexpectedDatagram);
         }
-        self.last_reference_time_ns = reference_time_ns;
-        self.last_sync_cycle = cycle;
-        self.sync_count = self.sync_count.saturating_add(1);
-        self.pending = None;
-        self.last_error = None;
-        Ok(())
+        self.commit_if_complete(cycle)
     }
 
     /// Close an RX generation even if its FRMW response was lost or rejected
@@ -2712,7 +2862,108 @@ impl DcCyclicSync {
         self.fail(DcCyclicError::GenerationMismatch)
     }
 
+    fn stage_reference_response(
+        &mut self,
+        received_at_ns: u64,
+        completion: RxMatch,
+        header: DatagramHeader,
+        payload: &[u8],
+    ) -> Result<(), DcCyclicError> {
+        let expected = self.config.datagram_plan();
+        if header.command != expected.command || header.address != expected.address {
+            return self.fail(DcCyclicError::UnexpectedDatagram);
+        }
+        if completion.working_counter != self.config.expected_wkc {
+            return self.fail(DcCyclicError::WorkingCounterMismatch);
+        }
+        if header.length as usize != DC_SYSTEM_TIME_LEN || payload.len() != DC_SYSTEM_TIME_LEN {
+            return self.fail(DcCyclicError::PayloadLengthMismatch);
+        }
+        let pending = self.pending.as_mut().ok_or(DcCyclicError::Busy)?;
+        if pending.reference_time_ns.is_some() {
+            return self.fail(DcCyclicError::DuplicateResponse);
+        }
+        let bytes: [u8; DC_SYSTEM_TIME_LEN] = match payload.try_into() {
+            Ok(bytes) => bytes,
+            Err(_) => return self.fail(DcCyclicError::PayloadLengthMismatch),
+        };
+        pending.reference_time_ns = Some(u64::from_le_bytes(bytes));
+        pending.reference_received_at_ns = received_at_ns;
+        Ok(())
+    }
+
+    fn stage_sync_window_response(
+        &mut self,
+        received_at_ns: u64,
+        completion: RxMatch,
+        header: DatagramHeader,
+        payload: &[u8],
+    ) -> Result<(), DcCyclicError> {
+        let config = match &self.sync_window {
+            Some(window) => window.config,
+            None => return self.fail(DcCyclicError::UnexpectedDatagram),
+        };
+        let expected = config.datagram_plan();
+        if header.command != expected.command || header.address != expected.address {
+            return self.fail(DcCyclicError::UnexpectedDatagram);
+        }
+        if completion.working_counter != config.expected_wkc {
+            return self.fail(DcCyclicError::WorkingCounterMismatch);
+        }
+        if header.length as usize != DC_SYSTEM_DIFF_LEN || payload.len() != DC_SYSTEM_DIFF_LEN {
+            return self.fail(DcCyclicError::PayloadLengthMismatch);
+        }
+        let pending = self.pending.as_mut().ok_or(DcCyclicError::Busy)?;
+        if pending.sync_window_raw.is_some() {
+            return self.fail(DcCyclicError::DuplicateResponse);
+        }
+        let bytes: [u8; DC_SYSTEM_DIFF_LEN] = match payload.try_into() {
+            Ok(bytes) => bytes,
+            Err(_) => return self.fail(DcCyclicError::PayloadLengthMismatch),
+        };
+        pending.sync_window_raw = Some(u32::from_le_bytes(bytes));
+        pending.sync_window_received_at_ns = received_at_ns;
+        Ok(())
+    }
+
+    fn commit_if_complete(&mut self, cycle: u64) -> Result<(), DcCyclicError> {
+        let pending = self.pending.ok_or(DcCyclicError::Busy)?;
+        let Some(reference_time_ns) = pending.reference_time_ns else {
+            return Ok(());
+        };
+        if self.sync_window.is_some() && pending.sync_window_raw.is_none() {
+            return Ok(());
+        }
+
+        let previous_state = self.monitor.state();
+        self.monitor.observe(
+            pending.reference_received_at_ns,
+            reference_time_ns,
+            pending.application_time_ns,
+        );
+        if self.monitor.state() == DcLockState::Unlocked && previous_state != DcLockState::Unlocked
+        {
+            self.unlock_count = self.unlock_count.saturating_add(1);
+        }
+        if let (Some(window), Some(raw)) = (&mut self.sync_window, pending.sync_window_raw) {
+            window
+                .monitor
+                .observe(pending.sync_window_received_at_ns, raw);
+        }
+        self.last_reference_time_ns = reference_time_ns;
+        self.last_sync_cycle = cycle;
+        self.sync_count = self.sync_count.saturating_add(1);
+        self.pending = None;
+        self.last_error = None;
+        Ok(())
+    }
+
     fn fail<T>(&mut self, error: DcCyclicError) -> Result<T, DcCyclicError> {
+        if self.pending.is_some()
+            && let Some(window) = &mut self.sync_window
+        {
+            window.monitor.observe_missing();
+        }
         self.pending = None;
         self.last_error = Some(error);
         Err(error)
@@ -2728,7 +2979,7 @@ impl RxDatagramConsumer for DcCyclicSync {
         header: DatagramHeader,
         payload: &[u8],
     ) -> bool {
-        if header.index != self.config.datagram_index {
+        if !self.uses_datagram_index(header.index) {
             return false;
         }
         self.complete(cycle, received_at_ns, completion, header, payload)
@@ -2900,6 +3151,171 @@ impl DcMonitor {
 impl Default for DcMonitor {
     fn default() -> Self {
         Self::new(1_000, 500, 3, 3)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DcSyncWindowSample {
+    pub timestamp_ns: u64,
+    pub raw_difference: u32,
+    pub difference_ns: u32,
+    pub within_limits: bool,
+}
+
+pub struct DcSyncWindowMonitor {
+    state: DcLockState,
+    max_difference_ns: u32,
+    lock_good_cycles: u16,
+    unlock_bad_cycles: u16,
+    good_cycles: u16,
+    bad_cycles: u16,
+    sample_count: u64,
+    missing_count: u64,
+    loss_count: u64,
+    recovery_count: u64,
+    raw_difference: u32,
+    difference_ns: u32,
+    last_sample_timestamp_ns: u64,
+    recovering: bool,
+}
+
+impl DcSyncWindowMonitor {
+    pub const fn new(
+        max_difference_ns: u32,
+        lock_good_cycles: u16,
+        unlock_bad_cycles: u16,
+    ) -> Self {
+        Self {
+            state: DcLockState::Unknown,
+            max_difference_ns,
+            lock_good_cycles: if lock_good_cycles == 0 {
+                1
+            } else {
+                lock_good_cycles
+            },
+            unlock_bad_cycles: if unlock_bad_cycles == 0 {
+                1
+            } else {
+                unlock_bad_cycles
+            },
+            good_cycles: 0,
+            bad_cycles: 0,
+            sample_count: 0,
+            missing_count: 0,
+            loss_count: 0,
+            recovery_count: 0,
+            raw_difference: 0,
+            difference_ns: 0,
+            last_sample_timestamp_ns: 0,
+            recovering: false,
+        }
+    }
+
+    pub const fn state(&self) -> DcLockState {
+        self.state
+    }
+
+    pub fn is_locked(&self) -> bool {
+        self.state == DcLockState::Locked
+    }
+
+    pub const fn max_difference_ns(&self) -> u32 {
+        self.max_difference_ns
+    }
+
+    pub const fn raw_difference(&self) -> u32 {
+        self.raw_difference
+    }
+
+    pub const fn difference_ns(&self) -> u32 {
+        self.difference_ns
+    }
+
+    pub const fn good_cycles(&self) -> u16 {
+        self.good_cycles
+    }
+
+    pub const fn bad_cycles(&self) -> u16 {
+        self.bad_cycles
+    }
+
+    pub const fn sample_count(&self) -> u64 {
+        self.sample_count
+    }
+
+    pub const fn missing_count(&self) -> u64 {
+        self.missing_count
+    }
+
+    pub const fn loss_count(&self) -> u64 {
+        self.loss_count
+    }
+
+    pub const fn recovery_count(&self) -> u64 {
+        self.recovery_count
+    }
+
+    pub const fn last_sample_timestamp_ns(&self) -> u64 {
+        self.last_sample_timestamp_ns
+    }
+
+    pub fn observe(&mut self, timestamp_ns: u64, raw_difference: u32) -> DcSyncWindowSample {
+        let difference_ns = raw_difference & 0x7FFF_FFFF;
+        let within_limits = difference_ns <= self.max_difference_ns;
+        self.raw_difference = raw_difference;
+        self.difference_ns = difference_ns;
+        self.last_sample_timestamp_ns = timestamp_ns;
+        self.sample_count = self.sample_count.saturating_add(1);
+        if within_limits {
+            if self.state == DcLockState::Unlocked {
+                self.recovering = true;
+            }
+            self.good_cycles = self.good_cycles.saturating_add(1);
+            self.bad_cycles = 0;
+            if self.good_cycles >= self.lock_good_cycles {
+                self.state = DcLockState::Locked;
+                if self.recovering {
+                    self.recovery_count = self.recovery_count.saturating_add(1);
+                    self.recovering = false;
+                }
+            } else {
+                self.state = DcLockState::Locking;
+            }
+        } else {
+            self.apply_bad_observation();
+        }
+        DcSyncWindowSample {
+            timestamp_ns,
+            raw_difference,
+            difference_ns,
+            within_limits,
+        }
+    }
+
+    pub fn observe_missing(&mut self) {
+        self.missing_count = self.missing_count.saturating_add(1);
+        self.apply_bad_observation();
+    }
+
+    pub fn reset(&mut self) {
+        let max_difference_ns = self.max_difference_ns;
+        let lock_good_cycles = self.lock_good_cycles;
+        let unlock_bad_cycles = self.unlock_bad_cycles;
+        *self = Self::new(max_difference_ns, lock_good_cycles, unlock_bad_cycles);
+    }
+
+    fn apply_bad_observation(&mut self) {
+        self.good_cycles = 0;
+        self.bad_cycles = self.bad_cycles.saturating_add(1);
+        if self.bad_cycles >= self.unlock_bad_cycles {
+            if self.state != DcLockState::Unlocked {
+                self.loss_count = self.loss_count.saturating_add(1);
+            }
+            self.state = DcLockState::Unlocked;
+            self.recovering = true;
+        } else {
+            self.state = DcLockState::Degraded;
+        }
     }
 }
 
@@ -4125,6 +4541,408 @@ mod tests {
         assert_eq!(monitor.state(), DcLockState::Locking);
         monitor.observe(7, 7_000, 7_020);
         assert!(monitor.is_locked());
+    }
+
+    #[test]
+    fn sync_window_config_derives_topology_wkc_and_exact_broadcast_plan() {
+        let (topology, _) = two_slave_sync_fixture();
+        let config = DcSyncWindowConfig::for_topology(14, 8, 1_000, 2, 3, &topology).unwrap();
+        assert_eq!(config.expected_wkc, 2);
+        assert_eq!(
+            config.datagram_plan(),
+            DatagramPlan {
+                command: Command::Brd,
+                index: 14,
+                address: ESC_DC_SYSTEM_DIFF as u32,
+                payload_offset: 8,
+                payload_len: 4,
+                expected_wkc: 2,
+            }
+        );
+
+        let empty = DcTopology::<1>::empty();
+        assert_eq!(
+            DcSyncWindowConfig::for_topology(14, 8, 1_000, 2, 3, &empty),
+            Err(DcCyclicError::InvalidConfiguration)
+        );
+        assert_eq!(
+            DcSyncWindowConfig::new(14, 8, 0, 1_000, 2, 3),
+            Err(DcCyclicError::InvalidConfiguration)
+        );
+        let duplicate = DcSyncWindowConfig::new(13, 8, 2, 1_000, 2, 3).unwrap();
+        assert_eq!(
+            DcCyclicSync::new(DcCyclicConfig::new(0x1000, 13, 0), DcMonitor::default())
+                .with_sync_window(duplicate)
+                .map(|_| ()),
+            Err(DcCyclicError::DuplicateDatagramIndex)
+        );
+        let overlap = DcSyncWindowConfig::new(14, 7, 2, 1_000, 2, 3).unwrap();
+        assert_eq!(
+            DcCyclicSync::new(DcCyclicConfig::new(0x1000, 13, 0), DcMonitor::default())
+                .with_sync_window(overlap)
+                .map(|_| ()),
+            Err(DcCyclicError::ProcessImageOverlap)
+        );
+    }
+
+    #[test]
+    fn sync_window_monitor_tracks_sign_magnitude_loss_and_recovery() {
+        let mut monitor = DcSyncWindowMonitor::new(100, 2, 2);
+        let first = monitor.observe(10, 0x8000_0032);
+        assert_eq!(first.difference_ns, 50);
+        assert!(first.within_limits);
+        assert_eq!(monitor.state(), DcLockState::Locking);
+        monitor.observe(20, 75);
+        assert!(monitor.is_locked());
+
+        monitor.observe(30, 101);
+        assert_eq!(monitor.state(), DcLockState::Degraded);
+        monitor.observe_missing();
+        assert_eq!(monitor.state(), DcLockState::Unlocked);
+        assert_eq!(monitor.loss_count(), 1);
+        assert_eq!(monitor.missing_count(), 1);
+
+        monitor.observe(40, 90);
+        assert_eq!(monitor.state(), DcLockState::Locking);
+        monitor.observe(50, 80);
+        assert_eq!(monitor.state(), DcLockState::Locked);
+        assert_eq!(monitor.recovery_count(), 1);
+        assert_eq!(monitor.sample_count(), 5);
+        assert_eq!(monitor.raw_difference(), 80);
+        assert_eq!(monitor.last_sample_timestamp_ns(), 50);
+    }
+
+    #[test]
+    fn cyclic_sync_window_commits_both_responses_atomically_in_either_order() {
+        let config = DcCyclicConfig::new(0x1000, 13, 0);
+        let window = DcSyncWindowConfig::new(14, 8, 2, 100, 1, 1).unwrap();
+        let mut sync = DcCyclicSync::new(config, DcMonitor::new(50, 10, 1, 1))
+            .with_sync_window(window)
+            .unwrap();
+        let mut image = [0xFFu8; 12];
+
+        sync.prepare(7, 1_020, &mut image).unwrap();
+        assert_eq!(&image[..8], &1_020u64.to_le_bytes());
+        assert_eq!(&image[8..], &[0; 4]);
+        sync.complete(
+            42,
+            90,
+            RxMatch {
+                slot_id: 1,
+                generation: 7,
+                working_counter: 2,
+            },
+            DatagramHeader {
+                command: Command::Brd,
+                index: 14,
+                address: ESC_DC_SYSTEM_DIFF as u32,
+                length: 4,
+                last: false,
+            },
+            &0x8000_0019u32.to_le_bytes(),
+        )
+        .unwrap();
+        assert_eq!(sync.sync_count(), 0);
+        assert_eq!(sync.monitor().sample_count(), 0);
+        assert_eq!(sync.sync_window_monitor().unwrap().sample_count(), 0);
+        assert_eq!(sync.pending_generation(), Some(7));
+
+        sync.complete(
+            42,
+            100,
+            RxMatch {
+                slot_id: 0,
+                generation: 7,
+                working_counter: 1,
+            },
+            DatagramHeader {
+                command: Command::Frmw,
+                index: 13,
+                address: fixed_address(0x1000, ESC_DC_SYSTEM_TIME),
+                length: 8,
+                last: true,
+            },
+            &1_000u64.to_le_bytes(),
+        )
+        .unwrap();
+        assert_eq!(sync.sync_count(), 1);
+        assert_eq!(sync.last_sync_cycle(), 42);
+        assert_eq!(sync.sync_window_monitor().unwrap().difference_ns(), 25);
+        assert!(sync.is_locked());
+
+        sync.prepare(8, 2_020, &mut image).unwrap();
+        sync.complete(
+            43,
+            110,
+            RxMatch {
+                slot_id: 0,
+                generation: 8,
+                working_counter: 1,
+            },
+            DatagramHeader {
+                command: Command::Frmw,
+                index: 13,
+                address: fixed_address(0x1000, ESC_DC_SYSTEM_TIME),
+                length: 8,
+                last: false,
+            },
+            &2_000u64.to_le_bytes(),
+        )
+        .unwrap();
+        assert_eq!(sync.sync_count(), 1);
+        sync.complete(
+            43,
+            120,
+            RxMatch {
+                slot_id: 1,
+                generation: 8,
+                working_counter: 2,
+            },
+            DatagramHeader {
+                command: Command::Brd,
+                index: 14,
+                address: ESC_DC_SYSTEM_DIFF as u32,
+                length: 4,
+                last: true,
+            },
+            &101u32.to_le_bytes(),
+        )
+        .unwrap();
+        assert!(!sync.is_locked());
+        assert_eq!(
+            sync.sync_window_monitor().unwrap().state(),
+            DcLockState::Unlocked
+        );
+        assert_eq!(sync.sync_window_monitor().unwrap().loss_count(), 1);
+
+        sync.prepare(9, 3_020, &mut image).unwrap();
+        for (header, payload, wkc, timestamp) in [
+            (
+                DatagramHeader {
+                    command: Command::Brd,
+                    index: 14,
+                    address: ESC_DC_SYSTEM_DIFF as u32,
+                    length: 4,
+                    last: false,
+                },
+                50u64.to_le_bytes(),
+                2,
+                130,
+            ),
+            (
+                DatagramHeader {
+                    command: Command::Frmw,
+                    index: 13,
+                    address: fixed_address(0x1000, ESC_DC_SYSTEM_TIME),
+                    length: 8,
+                    last: true,
+                },
+                3_000u64.to_le_bytes(),
+                1,
+                140,
+            ),
+        ] {
+            let payload = if header.index == 14 {
+                &payload[..4]
+            } else {
+                &payload[..]
+            };
+            sync.complete(
+                44,
+                timestamp,
+                RxMatch {
+                    slot_id: 0,
+                    generation: 9,
+                    working_counter: wkc,
+                },
+                header,
+                payload,
+            )
+            .unwrap();
+        }
+        assert!(sync.is_locked());
+        assert_eq!(sync.sync_window_monitor().unwrap().recovery_count(), 1);
+    }
+
+    #[test]
+    fn cyclic_sync_window_missing_or_bad_response_publishes_no_partial_sample() {
+        let window = DcSyncWindowConfig::new(14, 8, 2, 100, 1, 1).unwrap();
+        let mut sync = DcCyclicSync::new(
+            DcCyclicConfig::new(0x1000, 13, 0),
+            DcMonitor::new(50, 10, 1, 1),
+        )
+        .with_sync_window(window)
+        .unwrap();
+        let mut image = [0u8; 12];
+        let mut short_image = [0xA5u8; 11];
+        assert_eq!(
+            sync.prepare(0, 20, &mut short_image),
+            Err(DcCyclicError::ProcessImageOutOfBounds)
+        );
+        assert_eq!(short_image, [0xA5; 11]);
+        assert_eq!(sync.pending_generation(), None);
+
+        sync.prepare(1, 1_020, &mut image).unwrap();
+        sync.complete(
+            1,
+            10,
+            RxMatch {
+                slot_id: 0,
+                generation: 1,
+                working_counter: 1,
+            },
+            DatagramHeader {
+                command: Command::Frmw,
+                index: 13,
+                address: fixed_address(0x1000, ESC_DC_SYSTEM_TIME),
+                length: 8,
+                last: true,
+            },
+            &1_000u64.to_le_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            sync.finish_receive(1, 1),
+            Err(DcCyclicError::MissingResponse)
+        );
+        assert_eq!(sync.monitor().sample_count(), 0);
+        assert_eq!(sync.sync_count(), 0);
+        assert_eq!(sync.sync_window_monitor().unwrap().missing_count(), 1);
+
+        sync.prepare(2, 2_020, &mut image).unwrap();
+        assert_eq!(
+            sync.complete(
+                2,
+                20,
+                RxMatch {
+                    slot_id: 0,
+                    generation: 2,
+                    working_counter: 1,
+                },
+                DatagramHeader {
+                    command: Command::Brd,
+                    index: 14,
+                    address: ESC_DC_SYSTEM_DIFF as u32,
+                    length: 4,
+                    last: true,
+                },
+                &25u32.to_le_bytes(),
+            ),
+            Err(DcCyclicError::WorkingCounterMismatch)
+        );
+        assert_eq!(sync.sync_count(), 0);
+        assert_eq!(sync.sync_window_monitor().unwrap().missing_count(), 2);
+
+        sync.prepare(3, 3_020, &mut image).unwrap();
+        assert_eq!(
+            sync.complete(
+                3,
+                30,
+                RxMatch {
+                    slot_id: 0,
+                    generation: 4,
+                    working_counter: 2,
+                },
+                DatagramHeader {
+                    command: Command::Brd,
+                    index: 14,
+                    address: ESC_DC_SYSTEM_DIFF as u32,
+                    length: 4,
+                    last: true,
+                },
+                &25u32.to_le_bytes(),
+            ),
+            Err(DcCyclicError::GenerationMismatch)
+        );
+
+        sync.prepare(4, 4_020, &mut image).unwrap();
+        assert_eq!(
+            sync.complete(
+                4,
+                40,
+                RxMatch {
+                    slot_id: 0,
+                    generation: 4,
+                    working_counter: 2,
+                },
+                DatagramHeader {
+                    command: Command::Brd,
+                    index: 15,
+                    address: ESC_DC_SYSTEM_DIFF as u32,
+                    length: 4,
+                    last: true,
+                },
+                &25u32.to_le_bytes(),
+            ),
+            Err(DcCyclicError::UnexpectedDatagram)
+        );
+
+        sync.prepare(5, 5_020, &mut image).unwrap();
+        assert_eq!(
+            sync.complete(
+                5,
+                50,
+                RxMatch {
+                    slot_id: 0,
+                    generation: 5,
+                    working_counter: 2,
+                },
+                DatagramHeader {
+                    command: Command::Fprd,
+                    index: 14,
+                    address: ESC_DC_SYSTEM_DIFF as u32,
+                    length: 4,
+                    last: true,
+                },
+                &25u32.to_le_bytes(),
+            ),
+            Err(DcCyclicError::UnexpectedDatagram)
+        );
+
+        sync.prepare(6, 6_020, &mut image).unwrap();
+        assert_eq!(
+            sync.complete(
+                6,
+                60,
+                RxMatch {
+                    slot_id: 0,
+                    generation: 6,
+                    working_counter: 2,
+                },
+                DatagramHeader {
+                    command: Command::Brd,
+                    index: 14,
+                    address: ESC_DC_SYSTEM_DIFF as u32,
+                    length: 3,
+                    last: true,
+                },
+                &[25, 0, 0],
+            ),
+            Err(DcCyclicError::PayloadLengthMismatch)
+        );
+
+        sync.prepare(7, 7_020, &mut image).unwrap();
+        let window_header = DatagramHeader {
+            command: Command::Brd,
+            index: 14,
+            address: ESC_DC_SYSTEM_DIFF as u32,
+            length: 4,
+            last: true,
+        };
+        let window_match = RxMatch {
+            slot_id: 0,
+            generation: 7,
+            working_counter: 2,
+        };
+        sync.complete(7, 70, window_match, window_header, &25u32.to_le_bytes())
+            .unwrap();
+        assert_eq!(
+            sync.complete(7, 71, window_match, window_header, &25u32.to_le_bytes(),),
+            Err(DcCyclicError::DuplicateResponse)
+        );
+        assert_eq!(sync.monitor().sample_count(), 0);
+        assert_eq!(sync.sync_window_monitor().unwrap().sample_count(), 0);
+        assert_eq!(sync.sync_window_monitor().unwrap().missing_count(), 7);
     }
 
     #[test]
