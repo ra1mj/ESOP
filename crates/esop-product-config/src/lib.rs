@@ -8,7 +8,8 @@
 
 pub use esop_ethercat_core::wire::Command;
 pub use esop_ethercat_core::{
-    AlTransitionTimeouts, DomainConfig, DomainDatagramSpec, DomainInfo, DomainRegistry,
+    AlTransitionTimeouts, DcSyncPlan, DcSyncPlanEntry, DcSyncPlanError, DcSyncTiming,
+    DcSyncTimingError, DomainConfig, DomainDatagramSpec, DomainInfo, DomainRegistry,
     DomainRegistryError, ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, ExpectedSlave, FramePlanSet,
     FramePlanSetError, MailboxConfig, MailboxConfigError, MailboxDirection, OpOnlyProfileError,
     OpOnlySyncManagerProfile, PdoConfigBatch, PdoConfigBatchError, PdoConfigBatchPhase,
@@ -59,6 +60,7 @@ pub struct ProductSlaveConfig {
     pub dc_required: bool,
     pub dc_reference_clock: bool,
     pub sii_dc_mode: Option<SiiDcModeExpectation>,
+    pub dc_sync_timing: Option<DcSyncTiming>,
     pub transition_timeouts: AlTransitionTimeouts,
     pub mailbox_config: MailboxConfig,
     pub op_only_outputs: OpOnlySyncManagerProfile,
@@ -81,6 +83,21 @@ pub enum ProductStartupError {
     UnexpectedDcMode {
         position: u16,
     },
+    DcSyncTimingRequired {
+        position: u16,
+    },
+    UnexpectedDcSyncTiming {
+        position: u16,
+    },
+    InvalidDcSyncTiming {
+        position: u16,
+        error: DcSyncTimingError,
+    },
+    DcSyncTimingMismatch {
+        position: u16,
+    },
+    DcSyncReferenceRequired,
+    DcSyncPlan(DcSyncPlanError),
     InvalidTransitionTimeoutProfile {
         position: u16,
     },
@@ -423,7 +440,77 @@ type ActivatedAxes<const AXES: usize> = (
 impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
     StaticProductConfig<'a, SLAVES, DOMAINS, AXES>
 {
+    pub fn dc_sync_plan(&self) -> Result<DcSyncPlan<SLAVES>, ProductStartupError> {
+        let mut reference_position = None;
+        for slave in self.slaves.iter().copied() {
+            if slave.dc_reference_clock && !slave.dc_required {
+                return Err(ProductStartupError::DcReferenceRequiresRequired {
+                    position: slave.position,
+                });
+            }
+            if slave.dc_reference_clock {
+                if let Some(first_position) = reference_position {
+                    return Err(ProductStartupError::MultipleDcReferenceClocks {
+                        first_position,
+                        second_position: slave.position,
+                    });
+                }
+                reference_position = Some(slave.position);
+            }
+        }
+
+        let mut plan = DcSyncPlan::new(reference_position);
+        for slave in self.slaves.iter().copied() {
+            let (expected_mode, generated_timing) =
+                match (slave.dc_required, slave.sii_dc_mode, slave.dc_sync_timing) {
+                    (true, None, _) => {
+                        return Err(ProductStartupError::DcModeRequired {
+                            position: slave.position,
+                        });
+                    }
+                    (true, Some(_), None) => {
+                        return Err(ProductStartupError::DcSyncTimingRequired {
+                            position: slave.position,
+                        });
+                    }
+                    (true, Some(mode), Some(timing)) => (mode, timing),
+                    (false, Some(_), _) => {
+                        return Err(ProductStartupError::UnexpectedDcMode {
+                            position: slave.position,
+                        });
+                    }
+                    (false, None, Some(_)) => {
+                        return Err(ProductStartupError::UnexpectedDcSyncTiming {
+                            position: slave.position,
+                        });
+                    }
+                    (false, None, None) => continue,
+                };
+            let resolved = DcSyncTiming::resolve(self.metadata.base_period_ns, expected_mode.mode)
+                .map_err(|error| ProductStartupError::InvalidDcSyncTiming {
+                    position: slave.position,
+                    error,
+                })?;
+            if resolved != generated_timing {
+                return Err(ProductStartupError::DcSyncTimingMismatch {
+                    position: slave.position,
+                });
+            }
+            plan.push(DcSyncPlanEntry {
+                position: slave.position,
+                station_address: slave.station_address,
+                timing: resolved,
+            })
+            .map_err(ProductStartupError::DcSyncPlan)?;
+        }
+        if !plan.is_empty() && plan.reference_position().is_none() {
+            return Err(ProductStartupError::DcSyncReferenceRequired);
+        }
+        Ok(plan)
+    }
+
     pub fn startup_profiles(&self) -> Result<[StartupSlaveProfile; SLAVES], ProductStartupError> {
+        let _ = self.dc_sync_plan()?;
         let mut reference_position = None;
         for slave in self.slaves.iter().copied() {
             match (slave.dc_required, slave.sii_dc_mode.is_some()) {
@@ -1248,6 +1335,7 @@ mod tests {
                 dc_required: false,
                 dc_reference_clock: false,
                 sii_dc_mode: None,
+                dc_sync_timing: None,
                 transition_timeouts: ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
                 mailbox_config: MailboxConfig::new(0x1000, 32, 0x1100, 32),
                 op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
@@ -1346,6 +1434,24 @@ mod tests {
                 sync0_cycle_factor: 1,
             },
         });
+        config.slaves[0].dc_sync_timing = Some(DcSyncTiming {
+            cycle_time0_ns: 1_000_000,
+            cycle_time1_ns: 0,
+            shift_time0_ns: 0,
+            assign_activate: 0x0300,
+        });
+
+        let dc_sync_plan = config.dc_sync_plan().unwrap();
+        assert_eq!(dc_sync_plan.reference_position(), Some(0));
+        assert_eq!(dc_sync_plan.entries().len(), 1);
+        assert_eq!(
+            dc_sync_plan.entries()[0],
+            DcSyncPlanEntry {
+                position: 0,
+                station_address: 0x1000,
+                timing: config.slaves[0].dc_sync_timing.unwrap(),
+            }
+        );
 
         let profiles = config.startup_profiles().unwrap();
         assert_eq!(profiles[0].position, 0);
@@ -1428,12 +1534,19 @@ mod tests {
                     sync0_cycle_factor: 1,
                 },
             }),
+            dc_sync_timing: Some(DcSyncTiming {
+                cycle_time0_ns: 1_000_000,
+                cycle_time1_ns: 0,
+                shift_time0_ns: 0,
+                assign_activate: 0x0300,
+            }),
             ..base.slaves[0]
         };
         let mut first = base.slaves[0];
         first.dc_required = true;
         first.dc_reference_clock = true;
         first.sii_dc_mode = second.sii_dc_mode;
+        first.dc_sync_timing = second.dc_sync_timing;
         let duplicate = StaticProductConfig {
             metadata: base.metadata,
             procbuf_layout: base.procbuf_layout,
@@ -1476,6 +1589,54 @@ mod tests {
         assert_eq!(
             unexpected.startup_profiles(),
             Err(ProductStartupError::UnexpectedDcMode { position: 0 })
+        );
+    }
+
+    #[test]
+    fn product_dc_sync_plan_rebuilds_and_rejects_tampered_timing() {
+        let mut config = config();
+        config.slaves[0].dc_required = true;
+        config.slaves[0].dc_reference_clock = true;
+        config.slaves[0].sii_dc_mode = Some(SiiDcModeExpectation {
+            name: "DcSync",
+            mode: SiiDcMode {
+                cycle_time0_ns: 0,
+                shift_time0_ns: 25,
+                shift_time1_ns: 0,
+                sync1_cycle_factor: 0,
+                assign_activate: 0x0300,
+                sync0_cycle_factor: 2,
+            },
+        });
+        assert_eq!(
+            config.dc_sync_plan(),
+            Err(ProductStartupError::DcSyncTimingRequired { position: 0 })
+        );
+
+        config.slaves[0].dc_sync_timing = Some(DcSyncTiming {
+            cycle_time0_ns: 1_000_000,
+            cycle_time1_ns: 0,
+            shift_time0_ns: 25,
+            assign_activate: 0x0300,
+        });
+        assert_eq!(
+            config.startup_profiles(),
+            Err(ProductStartupError::DcSyncTimingMismatch { position: 0 })
+        );
+
+        config.slaves[0].dc_sync_timing = Some(DcSyncTiming {
+            cycle_time0_ns: 2_000_000,
+            cycle_time1_ns: 0,
+            shift_time0_ns: 25,
+            assign_activate: 0x0300,
+        });
+        let plan = config.dc_sync_plan().unwrap();
+        assert_eq!(plan.entries()[0].timing.cycle_time0_ns, 2_000_000);
+
+        config.slaves[0].dc_reference_clock = false;
+        assert_eq!(
+            config.dc_sync_plan(),
+            Err(ProductStartupError::DcSyncReferenceRequired)
         );
     }
 

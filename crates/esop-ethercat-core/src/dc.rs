@@ -18,6 +18,7 @@ use crate::registers::{
 };
 use crate::rx_index::RxMatch;
 use crate::scan::{EscDcRange, ScanPortLink, ScanRecord};
+use crate::sii::SiiDcMode;
 use crate::wire::{Command, DatagramHeader};
 
 pub const DC_SYNC_DELAY_NS: u64 = 100_000_000;
@@ -30,6 +31,10 @@ const DC_MAX_ACTION_PAYLOAD: usize = DC_SYSTEM_TIME_LEN;
 const DC_CLOCK_SAMPLE_LEN: usize = 24;
 const DC_CLOCK_WRITE_LEN: usize = 12;
 const DC_CLOCK_MAX_ACTION_PAYLOAD: usize = DC_CLOCK_SAMPLE_LEN;
+const DC_SYNC_ASSIGN_LEN: usize = 2;
+const DC_SYNC_CYCLE_PAIR_LEN: usize = 8;
+const DC_SYNC_REQUIRED_ACTIVATION_MASK: u8 = 0x03;
+const DC_SYNC1_ACTIVATION_MASK: u8 = 0x04;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DcTopologyPort {
@@ -1019,6 +1024,918 @@ impl<const MAX_SLAVES: usize> Default for DcClockController<MAX_SLAVES> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DcSyncTiming {
+    pub cycle_time0_ns: u32,
+    pub cycle_time1_ns: u32,
+    pub shift_time0_ns: i32,
+    pub assign_activate: u16,
+}
+
+impl DcSyncTiming {
+    pub fn resolve(base_period_ns: u64, mode: SiiDcMode) -> Result<Self, DcSyncTimingError> {
+        if base_period_ns == 0 {
+            return Err(DcSyncTimingError::InvalidBasePeriod);
+        }
+
+        let activation = (mode.assign_activate >> 8) as u8;
+        if activation & DC_SYNC_REQUIRED_ACTIVATION_MASK != DC_SYNC_REQUIRED_ACTIVATION_MASK {
+            return Err(DcSyncTimingError::InvalidActivation(activation));
+        }
+
+        let cycle_time0_ns = if mode.cycle_time0_ns != 0 {
+            mode.cycle_time0_ns
+        } else if mode.sync0_cycle_factor > 0 {
+            checked_u32(
+                base_period_ns
+                    .checked_mul(mode.sync0_cycle_factor as u64)
+                    .ok_or(DcSyncTimingError::Cycle0Overflow)?,
+                DcSyncTimingError::Cycle0Overflow,
+            )?
+        } else if mode.sync0_cycle_factor < 0 {
+            let divisor = i32::from(mode.sync0_cycle_factor).unsigned_abs() as u64;
+            if base_period_ns % divisor != 0 {
+                return Err(DcSyncTimingError::InexactCycle0Division);
+            }
+            checked_u32(base_period_ns / divisor, DcSyncTimingError::Cycle0Overflow)?
+        } else {
+            return Err(DcSyncTimingError::MissingCycle0);
+        };
+
+        if cycle_time0_ns == 0 {
+            return Err(DcSyncTimingError::MissingCycle0);
+        }
+
+        let sync1_enabled = activation & DC_SYNC1_ACTIVATION_MASK != 0;
+        let cycle_time1_ns = if !sync1_enabled {
+            if mode.sync1_cycle_factor != 0 || mode.shift_time1_ns != 0 {
+                return Err(DcSyncTimingError::UnexpectedSync1Parameters);
+            }
+            0
+        } else {
+            let sync1_period_ns = if mode.sync1_cycle_factor > 0 {
+                u64::from(cycle_time0_ns)
+                    .checked_mul(mode.sync1_cycle_factor as u64)
+                    .ok_or(DcSyncTimingError::Sync1Overflow)?
+            } else if mode.sync1_cycle_factor < 0 {
+                base_period_ns
+                    .checked_mul(i32::from(mode.sync1_cycle_factor).unsigned_abs() as u64)
+                    .ok_or(DcSyncTimingError::Sync1Overflow)?
+            } else {
+                base_period_ns.max(u64::from(cycle_time0_ns))
+            };
+            let register_value = i128::from(sync1_period_ns) - i128::from(cycle_time0_ns)
+                + i128::from(mode.shift_time1_ns);
+            if register_value < 0 {
+                return Err(DcSyncTimingError::Sync1Underflow);
+            }
+            u32::try_from(register_value).map_err(|_| DcSyncTimingError::Sync1Overflow)?
+        };
+
+        Ok(Self {
+            cycle_time0_ns,
+            cycle_time1_ns,
+            shift_time0_ns: mode.shift_time0_ns,
+            assign_activate: mode.assign_activate,
+        })
+    }
+
+    pub const fn cuc(self) -> u8 {
+        self.assign_activate as u8
+    }
+
+    pub const fn activation(self) -> u8 {
+        (self.assign_activate >> 8) as u8
+    }
+
+    pub const fn repeat_period_ns(self) -> u64 {
+        self.cycle_time0_ns as u64 + self.cycle_time1_ns as u64
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DcSyncTimingError {
+    InvalidBasePeriod,
+    MissingCycle0,
+    InexactCycle0Division,
+    Cycle0Overflow,
+    InvalidActivation(u8),
+    UnexpectedSync1Parameters,
+    Sync1Underflow,
+    Sync1Overflow,
+}
+
+fn checked_u32(value: u64, error: DcSyncTimingError) -> Result<u32, DcSyncTimingError> {
+    u32::try_from(value).map_err(|_| error)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DcSyncPlanEntry {
+    pub position: u16,
+    pub station_address: u16,
+    pub timing: DcSyncTiming,
+}
+
+impl DcSyncPlanEntry {
+    const EMPTY: Self = Self {
+        position: 0,
+        station_address: 0,
+        timing: DcSyncTiming {
+            cycle_time0_ns: 0,
+            cycle_time1_ns: 0,
+            shift_time0_ns: 0,
+            assign_activate: 0,
+        },
+    };
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DcSyncPlanError {
+    CapacityExceeded,
+    DuplicatePosition(u16),
+    DuplicateStationAddress(u16),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DcSyncPlan<const MAX_SLAVES: usize> {
+    entries: [DcSyncPlanEntry; MAX_SLAVES],
+    len: usize,
+    reference_position: Option<u16>,
+}
+
+impl<const MAX_SLAVES: usize> DcSyncPlan<MAX_SLAVES> {
+    pub const fn new(reference_position: Option<u16>) -> Self {
+        Self {
+            entries: [DcSyncPlanEntry::EMPTY; MAX_SLAVES],
+            len: 0,
+            reference_position,
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub const fn reference_position(&self) -> Option<u16> {
+        self.reference_position
+    }
+
+    pub fn entries(&self) -> &[DcSyncPlanEntry] {
+        &self.entries[..self.len]
+    }
+
+    pub fn push(&mut self, entry: DcSyncPlanEntry) -> Result<(), DcSyncPlanError> {
+        if self.len == MAX_SLAVES {
+            return Err(DcSyncPlanError::CapacityExceeded);
+        }
+        if self
+            .entries()
+            .iter()
+            .any(|current| current.position == entry.position)
+        {
+            return Err(DcSyncPlanError::DuplicatePosition(entry.position));
+        }
+        if self
+            .entries()
+            .iter()
+            .any(|current| current.station_address == entry.station_address)
+        {
+            return Err(DcSyncPlanError::DuplicateStationAddress(
+                entry.station_address,
+            ));
+        }
+        self.entries[self.len] = entry;
+        self.len += 1;
+        Ok(())
+    }
+}
+
+impl<const MAX_SLAVES: usize> Default for DcSyncPlan<MAX_SLAVES> {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DcSyncConfig {
+    pub sync_delay_ns: u64,
+    pub timeout_ns: u64,
+    pub request_timeout_ns: u64,
+}
+
+impl DcSyncConfig {
+    pub const fn new() -> Self {
+        Self {
+            sync_delay_ns: DC_SYNC_DELAY_NS,
+            timeout_ns: 1_000_000_000,
+            request_timeout_ns: 1_000_000,
+        }
+    }
+
+    pub const fn validate(self) -> Result<(), DcSyncError> {
+        if self.timeout_ns == 0 || self.request_timeout_ns == 0 {
+            return Err(DcSyncError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
+impl Default for DcSyncConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum DcSyncActionKind {
+    DisableSync = 0,
+    WriteCycles = 1,
+    ReadReferenceTime = 2,
+    WriteStartTime = 3,
+    AssignActivate = 4,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DcSyncAction {
+    pub token: u8,
+    pub datagram_index: u8,
+    pub generation: u16,
+    pub position: u16,
+    pub station_address: u16,
+    pub kind: DcSyncActionKind,
+    pub operation: RegisterOperation,
+    pub address: u32,
+    pub read_len: u16,
+    pub write_payload: [u8; DC_SYNC_CYCLE_PAIR_LEN],
+    pub write_len: u8,
+    pub deadline_ns: u64,
+    pub expected_wkc: u16,
+}
+
+impl DcSyncAction {
+    pub fn payload(&self) -> &[u8] {
+        &self.write_payload[..self.write_len as usize]
+    }
+
+    pub const fn datagram_len(&self) -> usize {
+        let read_len = self.read_len as usize;
+        let write_len = self.write_len as usize;
+        if read_len > write_len {
+            read_len
+        } else {
+            write_len
+        }
+    }
+
+    pub const fn response_len(&self) -> usize {
+        self.read_len as usize
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DcSyncPhase {
+    Idle,
+    DisablingSync,
+    WritingCycles,
+    ReadingReferenceTime,
+    WritingStartTimes,
+    AssigningActivation,
+    Complete,
+    Faulted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DcSyncProgress {
+    Advanced,
+    Complete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DcSyncError {
+    Busy,
+    NotStarted,
+    NoPendingAction,
+    InvalidConfiguration,
+    DeadlineOverflow,
+    MissingReference,
+    ReferenceMismatch {
+        plan: Option<u16>,
+        topology: Option<u16>,
+    },
+    InvalidReference(u16),
+    UnknownPosition(u16),
+    StationAddressMismatch {
+        position: u16,
+        expected: u16,
+        actual: u16,
+    },
+    UnsupportedClock(u16),
+    InvalidTiming(u16),
+    RepeatPeriodOverflow,
+    StartTimeOutOfRange(u16),
+    ActionMismatch,
+    GenerationMismatch,
+    PayloadLengthMismatch,
+    UnexpectedWorkingCounter,
+    Timeout,
+    Control(ControlError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DcSyncProgrammedSlave {
+    pub position: u16,
+    pub station_address: u16,
+    pub timing: DcSyncTiming,
+    pub start_time_ns: u64,
+}
+
+impl DcSyncProgrammedSlave {
+    const EMPTY: Self = Self {
+        position: 0,
+        station_address: 0,
+        timing: DcSyncPlanEntry::EMPTY.timing,
+        start_time_ns: 0,
+    };
+}
+
+pub struct DcSyncController<const MAX_SLAVES: usize> {
+    phase: DcSyncPhase,
+    config: DcSyncConfig,
+    generation: u16,
+    configuration_deadline_ns: u64,
+    plan: [DcSyncPlanEntry; MAX_SLAVES],
+    plan_len: usize,
+    current_index: usize,
+    reference_index: usize,
+    common_repeat_period_ns: u64,
+    sampled_reference_time_ns: u64,
+    effective_lead_ns: u64,
+    common_epoch_ns: u64,
+    staged: [DcSyncProgrammedSlave; MAX_SLAVES],
+    published_len: usize,
+    completed_action_count: usize,
+    pending: Option<DcSyncAction>,
+    next_token: u8,
+    next_datagram_index: u8,
+    last_error: Option<DcSyncError>,
+}
+
+impl<const MAX_SLAVES: usize> DcSyncController<MAX_SLAVES> {
+    pub const fn new() -> Self {
+        Self {
+            phase: DcSyncPhase::Idle,
+            config: DcSyncConfig::new(),
+            generation: 0,
+            configuration_deadline_ns: 0,
+            plan: [DcSyncPlanEntry::EMPTY; MAX_SLAVES],
+            plan_len: 0,
+            current_index: 0,
+            reference_index: 0,
+            common_repeat_period_ns: 0,
+            sampled_reference_time_ns: 0,
+            effective_lead_ns: 0,
+            common_epoch_ns: 0,
+            staged: [DcSyncProgrammedSlave::EMPTY; MAX_SLAVES],
+            published_len: 0,
+            completed_action_count: 0,
+            pending: None,
+            next_token: 1,
+            next_datagram_index: 1,
+            last_error: None,
+        }
+    }
+
+    pub const fn phase(&self) -> DcSyncPhase {
+        self.phase
+    }
+
+    pub const fn pending(&self) -> Option<DcSyncAction> {
+        self.pending
+    }
+
+    pub const fn last_error(&self) -> Option<DcSyncError> {
+        self.last_error
+    }
+
+    pub const fn planned_count(&self) -> usize {
+        self.plan_len
+    }
+
+    pub const fn completed_action_count(&self) -> usize {
+        self.completed_action_count
+    }
+
+    pub const fn sampled_reference_time_ns(&self) -> u64 {
+        self.sampled_reference_time_ns
+    }
+
+    pub const fn effective_lead_ns(&self) -> u64 {
+        self.effective_lead_ns
+    }
+
+    pub const fn common_epoch_ns(&self) -> u64 {
+        self.common_epoch_ns
+    }
+
+    pub const fn common_repeat_period_ns(&self) -> u64 {
+        self.common_repeat_period_ns
+    }
+
+    pub fn programmed_slaves(&self) -> &[DcSyncProgrammedSlave] {
+        &self.staged[..self.published_len]
+    }
+
+    pub fn programmed_slave(&self, position: u16) -> Option<&DcSyncProgrammedSlave> {
+        self.programmed_slaves()
+            .iter()
+            .find(|slave| slave.position == position)
+    }
+
+    pub fn start(
+        &mut self,
+        config: DcSyncConfig,
+        plan: &DcSyncPlan<MAX_SLAVES>,
+        topology: &DcTopology<MAX_SLAVES>,
+        generation: u16,
+        now_ns: u64,
+    ) -> Result<(), DcSyncError> {
+        if !matches!(
+            self.phase,
+            DcSyncPhase::Idle | DcSyncPhase::Complete | DcSyncPhase::Faulted
+        ) {
+            return Err(DcSyncError::Busy);
+        }
+        if let Err(error) = config.validate() {
+            return self.start_failed(error);
+        }
+        let configuration_deadline_ns = match now_ns.checked_add(config.timeout_ns) {
+            Some(deadline) => deadline,
+            None => return self.start_failed(DcSyncError::DeadlineOverflow),
+        };
+
+        if plan.is_empty() {
+            self.reset_for_start(config, generation, configuration_deadline_ns);
+            self.phase = DcSyncPhase::Complete;
+            return Ok(());
+        }
+
+        let reference_position = match plan.reference_position() {
+            Some(position) => position,
+            None => return self.start_failed(DcSyncError::MissingReference),
+        };
+        if topology.reference_position() != Some(reference_position) {
+            return self.start_failed(DcSyncError::ReferenceMismatch {
+                plan: plan.reference_position(),
+                topology: topology.reference_position(),
+            });
+        }
+
+        let mut copied_plan = [DcSyncPlanEntry::EMPTY; MAX_SLAVES];
+        let mut reference_index = None;
+        let mut common_repeat_period_ns = 1u64;
+        for (index, entry) in plan.entries().iter().copied().enumerate() {
+            let Some(topology_slave) = topology.slave(entry.position) else {
+                return self.start_failed(DcSyncError::UnknownPosition(entry.position));
+            };
+            if topology_slave.station_address != entry.station_address {
+                return self.start_failed(DcSyncError::StationAddressMismatch {
+                    position: entry.position,
+                    expected: topology_slave.station_address,
+                    actual: entry.station_address,
+                });
+            }
+            if !topology_slave.system_time_capable {
+                return self.start_failed(DcSyncError::UnsupportedClock(entry.position));
+            }
+            if entry.timing.cycle_time0_ns == 0
+                || entry.timing.activation() & DC_SYNC_REQUIRED_ACTIVATION_MASK
+                    != DC_SYNC_REQUIRED_ACTIVATION_MASK
+                || (entry.timing.activation() & DC_SYNC1_ACTIVATION_MASK == 0
+                    && entry.timing.cycle_time1_ns != 0)
+            {
+                return self.start_failed(DcSyncError::InvalidTiming(entry.position));
+            }
+            if entry.position == reference_position {
+                reference_index = Some(index);
+            }
+            common_repeat_period_ns =
+                match checked_lcm(common_repeat_period_ns, entry.timing.repeat_period_ns()) {
+                    Some(period) => period,
+                    None => return self.start_failed(DcSyncError::RepeatPeriodOverflow),
+                };
+            copied_plan[index] = entry;
+        }
+        let Some(reference_index) = reference_index else {
+            return self.start_failed(DcSyncError::InvalidReference(reference_position));
+        };
+
+        self.reset_for_start(config, generation, configuration_deadline_ns);
+        self.phase = DcSyncPhase::DisablingSync;
+        self.plan = copied_plan;
+        self.plan_len = plan.len();
+        self.reference_index = reference_index;
+        self.common_repeat_period_ns = common_repeat_period_ns;
+        Ok(())
+    }
+
+    pub fn next_action(&mut self, now_ns: u64) -> Result<Option<DcSyncAction>, DcSyncError> {
+        if self.phase == DcSyncPhase::Idle {
+            return Err(DcSyncError::NotStarted);
+        }
+        if matches!(self.phase, DcSyncPhase::Complete | DcSyncPhase::Faulted) {
+            return Ok(None);
+        }
+        if let Some(action) = self.pending {
+            return Ok(Some(action));
+        }
+        if now_ns >= self.configuration_deadline_ns {
+            return self.fail(DcSyncError::Timeout);
+        }
+        let request_deadline_ns = match now_ns.checked_add(self.config.request_timeout_ns) {
+            Some(deadline) => deadline.min(self.configuration_deadline_ns),
+            None => return self.fail(DcSyncError::DeadlineOverflow),
+        };
+
+        let entry_index = if self.phase == DcSyncPhase::ReadingReferenceTime {
+            self.reference_index
+        } else {
+            self.current_index
+        };
+        let entry = self.plan[entry_index];
+        let mut payload = [0; DC_SYNC_CYCLE_PAIR_LEN];
+        let (kind, operation, register, read_len, write_len) = match self.phase {
+            DcSyncPhase::DisablingSync => {
+                payload[0] = 0;
+                (
+                    DcSyncActionKind::DisableSync,
+                    RegisterOperation::Write,
+                    ESC_DC_SYNC_ACTIVATION,
+                    0,
+                    DC_ACTIVATION_LEN,
+                )
+            }
+            DcSyncPhase::WritingCycles => {
+                payload[..4].copy_from_slice(&entry.timing.cycle_time0_ns.to_le_bytes());
+                payload[4..8].copy_from_slice(&entry.timing.cycle_time1_ns.to_le_bytes());
+                (
+                    DcSyncActionKind::WriteCycles,
+                    RegisterOperation::Write,
+                    ESC_DC_CYCLE0,
+                    0,
+                    DC_SYNC_CYCLE_PAIR_LEN,
+                )
+            }
+            DcSyncPhase::ReadingReferenceTime => (
+                DcSyncActionKind::ReadReferenceTime,
+                RegisterOperation::Read,
+                ESC_DC_SYSTEM_TIME,
+                DC_SYSTEM_TIME_LEN,
+                0,
+            ),
+            DcSyncPhase::WritingStartTimes => {
+                payload
+                    .copy_from_slice(&self.staged[self.current_index].start_time_ns.to_le_bytes());
+                (
+                    DcSyncActionKind::WriteStartTime,
+                    RegisterOperation::Write,
+                    ESC_DC_START0,
+                    0,
+                    DC_SYSTEM_TIME_LEN,
+                )
+            }
+            DcSyncPhase::AssigningActivation => {
+                payload[..DC_SYNC_ASSIGN_LEN]
+                    .copy_from_slice(&entry.timing.assign_activate.to_le_bytes());
+                (
+                    DcSyncActionKind::AssignActivate,
+                    RegisterOperation::Write,
+                    ESC_DC_CUC,
+                    0,
+                    DC_SYNC_ASSIGN_LEN,
+                )
+            }
+            DcSyncPhase::Idle | DcSyncPhase::Complete | DcSyncPhase::Faulted => return Ok(None),
+        };
+
+        let action = DcSyncAction {
+            token: self.next_token,
+            datagram_index: self.next_datagram_index,
+            generation: self.generation,
+            position: entry.position,
+            station_address: entry.station_address,
+            kind,
+            operation,
+            address: fixed_address(entry.station_address, register),
+            read_len: read_len as u16,
+            write_payload: payload,
+            write_len: write_len as u8,
+            deadline_ns: request_deadline_ns,
+            expected_wkc: 1,
+        };
+        self.next_token = self.next_token.wrapping_add(1).max(1);
+        self.next_datagram_index = self.next_datagram_index.wrapping_add(1).max(1);
+        self.pending = Some(action);
+        Ok(Some(action))
+    }
+
+    pub fn enqueue_pending<const REQUESTS: usize>(
+        &self,
+        pool: &mut ControlRequestPool<REQUESTS>,
+    ) -> Result<RequestHandle, ControlError> {
+        let action = self.pending.ok_or(ControlError::InvalidState)?;
+        pool.acquire_with_response_len(
+            action.datagram_index,
+            action.generation,
+            action.address,
+            action.operation,
+            action.payload(),
+            action.datagram_len(),
+            action.deadline_ns,
+        )
+    }
+
+    pub fn accept(
+        &mut self,
+        action: DcSyncAction,
+        generation: u16,
+        payload: &[u8],
+        working_counter: u16,
+        now_ns: u64,
+    ) -> Result<DcSyncProgress, DcSyncError> {
+        if self.pending != Some(action) {
+            return self.fail(DcSyncError::ActionMismatch);
+        }
+        if action.generation != generation {
+            return self.fail(DcSyncError::GenerationMismatch);
+        }
+        if now_ns > action.deadline_ns {
+            return self.fail(DcSyncError::Timeout);
+        }
+        if working_counter != action.expected_wkc {
+            return self.fail(DcSyncError::UnexpectedWorkingCounter);
+        }
+        if payload.len() != action.response_len() {
+            return self.fail(DcSyncError::PayloadLengthMismatch);
+        }
+
+        self.completed_action_count += 1;
+        let progress = match self.phase {
+            DcSyncPhase::DisablingSync => {
+                self.advance_batch(DcSyncPhase::WritingCycles);
+                DcSyncProgress::Advanced
+            }
+            DcSyncPhase::WritingCycles => {
+                self.current_index += 1;
+                if self.current_index == self.plan_len {
+                    self.current_index = 0;
+                    self.phase = DcSyncPhase::ReadingReferenceTime;
+                }
+                DcSyncProgress::Advanced
+            }
+            DcSyncPhase::ReadingReferenceTime => {
+                let sampled_reference_time_ns = u64::from_le_bytes(match payload.try_into() {
+                    Ok(bytes) => bytes,
+                    Err(_) => return self.fail(DcSyncError::PayloadLengthMismatch),
+                });
+                if let Err(error) = self.stage_start_times(sampled_reference_time_ns) {
+                    return self.fail(error);
+                }
+                self.current_index = 0;
+                self.phase = DcSyncPhase::WritingStartTimes;
+                DcSyncProgress::Advanced
+            }
+            DcSyncPhase::WritingStartTimes => {
+                self.advance_batch(DcSyncPhase::AssigningActivation);
+                DcSyncProgress::Advanced
+            }
+            DcSyncPhase::AssigningActivation => {
+                self.current_index += 1;
+                if self.current_index == self.plan_len {
+                    self.phase = DcSyncPhase::Complete;
+                    self.published_len = self.plan_len;
+                    DcSyncProgress::Complete
+                } else {
+                    DcSyncProgress::Advanced
+                }
+            }
+            DcSyncPhase::Idle | DcSyncPhase::Complete | DcSyncPhase::Faulted => {
+                return self.fail(DcSyncError::NoPendingAction);
+            }
+        };
+        self.pending = None;
+        Ok(progress)
+    }
+
+    pub fn accept_completed<const REQUESTS: usize>(
+        &mut self,
+        pool: &mut ControlRequestPool<REQUESTS>,
+        handle: RequestHandle,
+        now_ns: u64,
+    ) -> Result<DcSyncProgress, DcSyncError> {
+        let action = match self.pending {
+            Some(action) => action,
+            None => return self.fail(DcSyncError::NoPendingAction),
+        };
+        let (generation, actual_wkc, response) = match pool.get(handle) {
+            Some(request) if request.state == RequestState::Complete => {
+                if !request.matches_action(
+                    action.datagram_index,
+                    action.generation,
+                    action.address,
+                    action.operation,
+                    action.payload(),
+                    action.datagram_len(),
+                    action.deadline_ns,
+                ) {
+                    let _ = pool.release(handle);
+                    return self.fail(DcSyncError::ActionMismatch);
+                }
+                let mut response = [0; MAX_CONTROL_PAYLOAD];
+                response[..request.length].copy_from_slice(request.payload());
+                (request.generation, request.actual_wkc, response)
+            }
+            Some(request) if request.state == RequestState::Failed => {
+                if !request.matches_action(
+                    action.datagram_index,
+                    action.generation,
+                    action.address,
+                    action.operation,
+                    action.payload(),
+                    action.datagram_len(),
+                    action.deadline_ns,
+                ) {
+                    let _ = pool.release(handle);
+                    return self.fail(DcSyncError::ActionMismatch);
+                }
+                let error = request.last_error().unwrap_or(ControlError::InvalidState);
+                if let Err(release_error) = pool.release(handle) {
+                    return self.fail(DcSyncError::Control(release_error));
+                }
+                if error == ControlError::Timeout {
+                    return self.timeout(action, now_ns);
+                }
+                return self.fail(DcSyncError::Control(error));
+            }
+            Some(_) => return Err(DcSyncError::Control(ControlError::InvalidState)),
+            None => return self.fail(DcSyncError::Control(ControlError::InvalidHandle)),
+        };
+        let progress = self.accept(
+            action,
+            generation,
+            &response[..action.response_len()],
+            actual_wkc,
+            now_ns,
+        );
+        let release = pool.release(handle);
+        match (progress, release) {
+            (Ok(progress), Ok(())) => Ok(progress),
+            (Ok(_), Err(error)) => self.fail(DcSyncError::Control(error)),
+            (Err(error), _) => Err(error),
+        }
+    }
+
+    pub fn timeout(
+        &mut self,
+        action: DcSyncAction,
+        now_ns: u64,
+    ) -> Result<DcSyncProgress, DcSyncError> {
+        if self.pending != Some(action) {
+            return self.fail(DcSyncError::ActionMismatch);
+        }
+        if now_ns < action.deadline_ns {
+            return Err(DcSyncError::Timeout);
+        }
+        self.fail(DcSyncError::Timeout)
+    }
+
+    fn reset_for_start(
+        &mut self,
+        config: DcSyncConfig,
+        generation: u16,
+        configuration_deadline_ns: u64,
+    ) {
+        self.config = config;
+        self.generation = generation;
+        self.configuration_deadline_ns = configuration_deadline_ns;
+        self.plan = [DcSyncPlanEntry::EMPTY; MAX_SLAVES];
+        self.plan_len = 0;
+        self.current_index = 0;
+        self.reference_index = 0;
+        self.common_repeat_period_ns = 0;
+        self.sampled_reference_time_ns = 0;
+        self.effective_lead_ns = 0;
+        self.common_epoch_ns = 0;
+        self.staged = [DcSyncProgrammedSlave::EMPTY; MAX_SLAVES];
+        self.published_len = 0;
+        self.completed_action_count = 0;
+        self.pending = None;
+        self.next_token = 1;
+        self.next_datagram_index = 1;
+        self.last_error = None;
+    }
+
+    fn advance_batch(&mut self, next_phase: DcSyncPhase) {
+        self.current_index += 1;
+        if self.current_index == self.plan_len {
+            self.current_index = 0;
+            self.phase = next_phase;
+        }
+    }
+
+    fn stage_start_times(&mut self, sampled_reference_time_ns: u64) -> Result<(), DcSyncError> {
+        let plan_len = u64::try_from(self.plan_len).map_err(|_| DcSyncError::DeadlineOverflow)?;
+        let remaining_budget_ns = plan_len
+            .checked_mul(2)
+            .and_then(|count| count.checked_mul(self.config.request_timeout_ns))
+            .ok_or(DcSyncError::DeadlineOverflow)?;
+        let effective_lead_ns = self.config.sync_delay_ns.max(remaining_budget_ns);
+        let base_ns = sampled_reference_time_ns
+            .checked_add(effective_lead_ns)
+            .ok_or(DcSyncError::DeadlineOverflow)?;
+        let common_epoch_ns = next_strict_multiple(base_ns, self.common_repeat_period_ns)
+            .ok_or(DcSyncError::RepeatPeriodOverflow)?;
+
+        for (index, entry) in self.plan[..self.plan_len].iter().copied().enumerate() {
+            let shifted = i128::from(common_epoch_ns) + i128::from(entry.timing.shift_time0_ns);
+            let start_time_ns = u64::try_from(shifted)
+                .map_err(|_| DcSyncError::StartTimeOutOfRange(entry.position))?;
+            self.staged[index] = DcSyncProgrammedSlave {
+                position: entry.position,
+                station_address: entry.station_address,
+                timing: entry.timing,
+                start_time_ns,
+            };
+        }
+        self.sampled_reference_time_ns = sampled_reference_time_ns;
+        self.effective_lead_ns = effective_lead_ns;
+        self.common_epoch_ns = common_epoch_ns;
+        Ok(())
+    }
+
+    fn start_failed<T>(&mut self, error: DcSyncError) -> Result<T, DcSyncError> {
+        self.phase = DcSyncPhase::Faulted;
+        self.plan = [DcSyncPlanEntry::EMPTY; MAX_SLAVES];
+        self.plan_len = 0;
+        self.current_index = 0;
+        self.reference_index = 0;
+        self.common_repeat_period_ns = 0;
+        self.sampled_reference_time_ns = 0;
+        self.effective_lead_ns = 0;
+        self.common_epoch_ns = 0;
+        self.staged = [DcSyncProgrammedSlave::EMPTY; MAX_SLAVES];
+        self.published_len = 0;
+        self.completed_action_count = 0;
+        self.pending = None;
+        self.last_error = Some(error);
+        Err(error)
+    }
+
+    fn fail<T>(&mut self, error: DcSyncError) -> Result<T, DcSyncError> {
+        self.phase = DcSyncPhase::Faulted;
+        self.pending = None;
+        self.published_len = 0;
+        if self.last_error.is_none() {
+            self.last_error = Some(error);
+        }
+        Err(error)
+    }
+}
+
+impl<const MAX_SLAVES: usize> Default for DcSyncController<MAX_SLAVES> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn checked_lcm(left: u64, right: u64) -> Option<u64> {
+    if left == 0 || right == 0 {
+        return None;
+    }
+    left.checked_div(greatest_common_divisor(left, right))?
+        .checked_mul(right)
+}
+
+fn greatest_common_divisor(mut left: u64, mut right: u64) -> u64 {
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left
+}
+
+fn next_strict_multiple(value: u64, period: u64) -> Option<u64> {
+    value
+        .checked_div(period)?
+        .checked_add(1)?
+        .checked_mul(period)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2082,6 +2999,442 @@ mod tests {
         payload[..8].copy_from_slice(&system_time_ns.to_le_bytes());
         payload[16..24].copy_from_slice(&old_offset.to_le_bytes());
         payload
+    }
+
+    fn dc_mode(
+        cycle_time0_ns: u32,
+        shift_time0_ns: i32,
+        shift_time1_ns: i32,
+        sync1_cycle_factor: i16,
+        assign_activate: u16,
+        sync0_cycle_factor: i16,
+    ) -> SiiDcMode {
+        SiiDcMode {
+            cycle_time0_ns,
+            shift_time0_ns,
+            shift_time1_ns,
+            sync1_cycle_factor,
+            assign_activate,
+            sync0_cycle_factor,
+        }
+    }
+
+    fn sync_timing(cycle_time0_ns: u32, shift_time0_ns: i32, assign_activate: u16) -> DcSyncTiming {
+        DcSyncTiming {
+            cycle_time0_ns,
+            cycle_time1_ns: 0,
+            shift_time0_ns,
+            assign_activate,
+        }
+    }
+
+    fn two_slave_sync_fixture() -> (DcTopology<2>, DcSyncPlan<2>) {
+        let records = [
+            topology_record(0, &[3], true, true, [0, 0, 0, 200]),
+            topology_record(1, &[], true, true, [0; 4]),
+        ];
+        let topology = DcTopology::<2>::build(&records, Some(0)).unwrap();
+        let mut plan = DcSyncPlan::new(Some(0));
+        plan.push(DcSyncPlanEntry {
+            position: 0,
+            station_address: 0x1000,
+            timing: sync_timing(1_000_000, 0, 0x8301),
+        })
+        .unwrap();
+        plan.push(DcSyncPlanEntry {
+            position: 1,
+            station_address: 0x1001,
+            timing: sync_timing(2_000_000, -100, 0x0300),
+        })
+        .unwrap();
+        (topology, plan)
+    }
+
+    #[test]
+    fn dc_sync_timing_resolves_direct_and_factor_based_cycles() {
+        assert_eq!(
+            DcSyncTiming::resolve(1_000_000, dc_mode(500_000, 7, 0, 0, 0x0300, 99)),
+            Ok(sync_timing(500_000, 7, 0x0300))
+        );
+        assert_eq!(
+            DcSyncTiming::resolve(1_000_000, dc_mode(0, 0, 0, 0, 0x0300, 3)),
+            Ok(sync_timing(3_000_000, 0, 0x0300))
+        );
+        assert_eq!(
+            DcSyncTiming::resolve(1_000_000, dc_mode(0, -9, 0, 0, 0x0300, -4)),
+            Ok(sync_timing(250_000, -9, 0x0300))
+        );
+    }
+
+    #[test]
+    fn dc_sync_timing_resolves_sync1_register_semantics() {
+        assert_eq!(
+            DcSyncTiming::resolve(1_000_000, dc_mode(1_000_000, 0, 100, 2, 0x0700, 0)),
+            Ok(DcSyncTiming {
+                cycle_time0_ns: 1_000_000,
+                cycle_time1_ns: 1_000_100,
+                shift_time0_ns: 0,
+                assign_activate: 0x0700,
+            })
+        );
+        assert_eq!(
+            DcSyncTiming::resolve(1_000_000, dc_mode(1_000_000, 0, 0, -2, 0x0700, 0)),
+            Ok(DcSyncTiming {
+                cycle_time0_ns: 1_000_000,
+                cycle_time1_ns: 1_000_000,
+                shift_time0_ns: 0,
+                assign_activate: 0x0700,
+            })
+        );
+        assert_eq!(
+            DcSyncTiming::resolve(2_000_000, dc_mode(1_000_000, 0, 0, 0, 0x0700, 0)),
+            Ok(DcSyncTiming {
+                cycle_time0_ns: 1_000_000,
+                cycle_time1_ns: 1_000_000,
+                shift_time0_ns: 0,
+                assign_activate: 0x0700,
+            })
+        );
+    }
+
+    #[test]
+    fn dc_sync_timing_rejects_ambiguous_or_unrepresentable_modes() {
+        assert_eq!(
+            DcSyncTiming::resolve(0, dc_mode(1, 0, 0, 0, 0x0300, 0)),
+            Err(DcSyncTimingError::InvalidBasePeriod)
+        );
+        assert_eq!(
+            DcSyncTiming::resolve(1_000_000, dc_mode(0, 0, 0, 0, 0x0300, 0)),
+            Err(DcSyncTimingError::MissingCycle0)
+        );
+        assert_eq!(
+            DcSyncTiming::resolve(1_000_000, dc_mode(0, 0, 0, 0, 0x0300, -3)),
+            Err(DcSyncTimingError::InexactCycle0Division)
+        );
+        assert_eq!(
+            DcSyncTiming::resolve(u64::from(u32::MAX) + 1, dc_mode(0, 0, 0, 0, 0x0300, 1)),
+            Err(DcSyncTimingError::Cycle0Overflow)
+        );
+        assert_eq!(
+            DcSyncTiming::resolve(1_000_000, dc_mode(1_000_000, 0, 0, 0, 0x0100, 0)),
+            Err(DcSyncTimingError::InvalidActivation(1))
+        );
+        assert_eq!(
+            DcSyncTiming::resolve(1_000_000, dc_mode(1_000_000, 0, 1, 0, 0x0300, 0)),
+            Err(DcSyncTimingError::UnexpectedSync1Parameters)
+        );
+        assert_eq!(
+            DcSyncTiming::resolve(1_000_000, dc_mode(1_000_000, 0, -1_000_001, 0, 0x0700, 0),),
+            Err(DcSyncTimingError::Sync1Underflow)
+        );
+        assert_eq!(
+            DcSyncTiming::resolve(u64::from(u32::MAX), dc_mode(1, 0, 0, i16::MIN, 0x0700, 0),),
+            Err(DcSyncTimingError::Sync1Overflow)
+        );
+    }
+
+    #[test]
+    fn dc_sync_plan_is_bounded_and_rejects_duplicate_ownership() {
+        let timing = sync_timing(1_000_000, 0, 0x0300);
+        let mut plan = DcSyncPlan::<2>::new(Some(0));
+        plan.push(DcSyncPlanEntry {
+            position: 0,
+            station_address: 0x1000,
+            timing,
+        })
+        .unwrap();
+        assert_eq!(
+            plan.push(DcSyncPlanEntry {
+                position: 0,
+                station_address: 0x1001,
+                timing,
+            }),
+            Err(DcSyncPlanError::DuplicatePosition(0))
+        );
+        assert_eq!(
+            plan.push(DcSyncPlanEntry {
+                position: 1,
+                station_address: 0x1000,
+                timing,
+            }),
+            Err(DcSyncPlanError::DuplicateStationAddress(0x1000))
+        );
+        plan.push(DcSyncPlanEntry {
+            position: 1,
+            station_address: 0x1001,
+            timing,
+        })
+        .unwrap();
+        assert_eq!(
+            plan.push(DcSyncPlanEntry {
+                position: 2,
+                station_address: 0x1002,
+                timing,
+            }),
+            Err(DcSyncPlanError::CapacityExceeded)
+        );
+        assert_eq!(plan.reference_position(), Some(0));
+        assert_eq!(plan.entries().len(), 2);
+    }
+
+    #[test]
+    fn dc_sync_controller_programs_all_slaves_on_one_common_epoch() {
+        let (topology, plan) = two_slave_sync_fixture();
+        let mut controller = DcSyncController::new();
+        controller
+            .start(DcSyncConfig::new(), &plan, &topology, 9, 0)
+            .unwrap();
+
+        for expected_position in [0, 1] {
+            let action = controller.next_action(1).unwrap().unwrap();
+            assert_eq!(action.kind, DcSyncActionKind::DisableSync);
+            assert_eq!(action.position, expected_position);
+            assert_eq!(action.payload(), &[0]);
+            assert_eq!(action.expected_wkc, 1);
+            controller
+                .accept(action, action.generation, &[], 1, 2)
+                .unwrap();
+        }
+        for (expected_position, cycle0) in [(0, 1_000_000u32), (1, 2_000_000u32)] {
+            let action = controller.next_action(3).unwrap().unwrap();
+            assert_eq!(action.kind, DcSyncActionKind::WriteCycles);
+            assert_eq!(action.position, expected_position);
+            assert_eq!(
+                action.address,
+                fixed_address(0x1000 + expected_position, ESC_DC_CYCLE0)
+            );
+            assert_eq!(&action.payload()[..4], &cycle0.to_le_bytes());
+            assert_eq!(&action.payload()[4..], &0u32.to_le_bytes());
+            controller
+                .accept(action, action.generation, &[], 1, 4)
+                .unwrap();
+        }
+
+        let read = controller.next_action(5).unwrap().unwrap();
+        assert_eq!(read.kind, DcSyncActionKind::ReadReferenceTime);
+        assert_eq!(read.position, 0);
+        assert_eq!(read.response_len(), DC_SYSTEM_TIME_LEN);
+        controller
+            .accept(read, read.generation, &3_100_000u64.to_le_bytes(), 1, 6)
+            .unwrap();
+        assert_eq!(controller.sampled_reference_time_ns(), 3_100_000);
+        assert_eq!(controller.effective_lead_ns(), DC_SYNC_DELAY_NS);
+        assert_eq!(controller.common_repeat_period_ns(), 2_000_000);
+        assert_eq!(controller.common_epoch_ns(), 104_000_000);
+        assert!(controller.programmed_slaves().is_empty());
+
+        for (expected_position, start_time_ns) in [(0, 104_000_000u64), (1, 103_999_900u64)] {
+            let action = controller.next_action(7).unwrap().unwrap();
+            assert_eq!(action.kind, DcSyncActionKind::WriteStartTime);
+            assert_eq!(action.position, expected_position);
+            assert_eq!(action.payload(), &start_time_ns.to_le_bytes());
+            controller
+                .accept(action, action.generation, &[], 1, 8)
+                .unwrap();
+        }
+
+        for (index, expected_word) in [0x8301u16, 0x0300u16].into_iter().enumerate() {
+            let action = controller.next_action(9).unwrap().unwrap();
+            assert_eq!(action.kind, DcSyncActionKind::AssignActivate);
+            assert_eq!(action.position, index as u16);
+            assert_eq!(
+                action.address,
+                fixed_address(0x1000 + index as u16, ESC_DC_CUC)
+            );
+            assert_eq!(action.payload(), &expected_word.to_le_bytes());
+            let progress = controller
+                .accept(action, action.generation, &[], 1, 10)
+                .unwrap();
+            if index == 0 {
+                assert_eq!(progress, DcSyncProgress::Advanced);
+                assert!(controller.programmed_slaves().is_empty());
+            } else {
+                assert_eq!(progress, DcSyncProgress::Complete);
+            }
+        }
+
+        assert_eq!(controller.phase(), DcSyncPhase::Complete);
+        assert_eq!(controller.completed_action_count(), 9);
+        assert_eq!(controller.programmed_slaves().len(), 2);
+        assert_eq!(
+            controller.programmed_slave(1),
+            Some(&DcSyncProgrammedSlave {
+                position: 1,
+                station_address: 0x1001,
+                timing: sync_timing(2_000_000, -100, 0x0300),
+                start_time_ns: 103_999_900,
+            })
+        );
+    }
+
+    #[test]
+    fn dc_sync_controller_fails_closed_and_can_restart() {
+        let (topology, plan) = two_slave_sync_fixture();
+        let mut controller = DcSyncController::new();
+        controller
+            .start(DcSyncConfig::new(), &plan, &topology, 1, 0)
+            .unwrap();
+        let first = controller.next_action(0).unwrap().unwrap();
+        controller
+            .accept(first, first.generation, &[], 1, 0)
+            .unwrap();
+        let second = controller.next_action(1).unwrap().unwrap();
+        assert_eq!(
+            controller.accept(second, second.generation, &[], 0, 1),
+            Err(DcSyncError::UnexpectedWorkingCounter)
+        );
+        assert_eq!(controller.phase(), DcSyncPhase::Faulted);
+        assert_eq!(controller.completed_action_count(), 1);
+        assert!(controller.programmed_slaves().is_empty());
+
+        controller
+            .start(DcSyncConfig::new(), &plan, &topology, 2, 10)
+            .unwrap();
+        assert_eq!(controller.phase(), DcSyncPhase::DisablingSync);
+        assert_eq!(controller.completed_action_count(), 0);
+        assert_eq!(controller.common_epoch_ns(), 0);
+        assert!(controller.programmed_slaves().is_empty());
+    }
+
+    #[test]
+    fn dc_sync_controller_rejects_topology_mismatch_before_actions() {
+        let (topology, mut plan) = two_slave_sync_fixture();
+        plan.entries[1].station_address = 0x2000;
+        let mut controller = DcSyncController::new();
+        assert_eq!(
+            controller.start(DcSyncConfig::new(), &plan, &topology, 1, 0),
+            Err(DcSyncError::StationAddressMismatch {
+                position: 1,
+                expected: 0x1001,
+                actual: 0x2000,
+            })
+        );
+        assert_eq!(controller.phase(), DcSyncPhase::Faulted);
+        assert_eq!(controller.next_action(0), Ok(None));
+
+        let empty = DcSyncPlan::<2>::new(None);
+        controller
+            .start(DcSyncConfig::new(), &empty, &topology, 2, 1)
+            .unwrap();
+        assert_eq!(controller.phase(), DcSyncPhase::Complete);
+        assert_eq!(controller.planned_count(), 0);
+    }
+
+    #[test]
+    fn dc_sync_controller_validates_pending_action_contract() {
+        let (topology, plan) = two_slave_sync_fixture();
+        let mut controller = DcSyncController::new();
+
+        controller
+            .start(DcSyncConfig::new(), &plan, &topology, 7, 0)
+            .unwrap();
+        let action = controller.next_action(0).unwrap().unwrap();
+        let mut foreign_action = action;
+        foreign_action.token = foreign_action.token.wrapping_add(1);
+        assert_eq!(
+            controller.accept(foreign_action, action.generation, &[], 1, 0),
+            Err(DcSyncError::ActionMismatch)
+        );
+
+        controller
+            .start(DcSyncConfig::new(), &plan, &topology, 8, 10)
+            .unwrap();
+        let action = controller.next_action(10).unwrap().unwrap();
+        assert_eq!(
+            controller.accept(action, action.generation.wrapping_add(1), &[], 1, 10),
+            Err(DcSyncError::GenerationMismatch)
+        );
+
+        controller
+            .start(DcSyncConfig::new(), &plan, &topology, 9, 20)
+            .unwrap();
+        let action = controller.next_action(20).unwrap().unwrap();
+        assert_eq!(
+            controller.accept(action, action.generation, &[0], 1, 20),
+            Err(DcSyncError::PayloadLengthMismatch)
+        );
+
+        controller
+            .start(DcSyncConfig::new(), &plan, &topology, 10, 30)
+            .unwrap();
+        let action = controller.next_action(30).unwrap().unwrap();
+        assert_eq!(
+            controller.timeout(action, action.deadline_ns - 1),
+            Err(DcSyncError::Timeout)
+        );
+        assert_eq!(controller.pending(), Some(action));
+        assert_eq!(
+            controller.timeout(action, action.deadline_ns),
+            Err(DcSyncError::Timeout)
+        );
+        assert_eq!(controller.phase(), DcSyncPhase::Faulted);
+        assert_eq!(controller.last_error(), Some(DcSyncError::Timeout));
+        assert_eq!(
+            controller.accept(action, action.generation, &[], 1, action.deadline_ns),
+            Err(DcSyncError::ActionMismatch)
+        );
+        assert_eq!(controller.last_error(), Some(DcSyncError::Timeout));
+    }
+
+    #[test]
+    fn dc_sync_arithmetic_guards_and_lead_budget_are_checked() {
+        assert_eq!(checked_lcm(u64::MAX, 2), None);
+        assert_eq!(next_strict_multiple(7, 4), Some(8));
+        assert_eq!(next_strict_multiple(u64::MAX, 1), None);
+
+        let records = [topology_record(0, &[], true, true, [0; 4])];
+        let topology = DcTopology::<1>::build(&records, Some(0)).unwrap();
+        let mut plan = DcSyncPlan::new(Some(0));
+        plan.push(DcSyncPlanEntry {
+            position: 0,
+            station_address: 0x1000,
+            timing: sync_timing(100, 0, 0x0300),
+        })
+        .unwrap();
+        let config = DcSyncConfig {
+            sync_delay_ns: 0,
+            timeout_ns: 1_000,
+            request_timeout_ns: 100,
+        };
+        let mut controller = DcSyncController::new();
+        controller.start(config, &plan, &topology, 1, 0).unwrap();
+
+        for _ in 0..2 {
+            let action = controller.next_action(0).unwrap().unwrap();
+            controller
+                .accept(action, action.generation, &[], 1, 0)
+                .unwrap();
+        }
+        let read = controller.next_action(0).unwrap().unwrap();
+        controller
+            .accept(read, read.generation, &0u64.to_le_bytes(), 1, 0)
+            .unwrap();
+        assert_eq!(controller.effective_lead_ns(), 200);
+        assert_eq!(controller.common_epoch_ns(), 300);
+
+        plan.entries[0].timing = sync_timing(1, i32::MIN, 0x0300);
+        let short_config = DcSyncConfig {
+            sync_delay_ns: 0,
+            timeout_ns: 100,
+            request_timeout_ns: 1,
+        };
+        let mut underflow_controller = DcSyncController::new();
+        underflow_controller
+            .start(short_config, &plan, &topology, 2, 10)
+            .unwrap();
+        for _ in 0..2 {
+            let action = underflow_controller.next_action(10).unwrap().unwrap();
+            underflow_controller
+                .accept(action, action.generation, &[], 1, 10)
+                .unwrap();
+        }
+        let read = underflow_controller.next_action(10).unwrap().unwrap();
+        assert_eq!(
+            underflow_controller.accept(read, read.generation, &0u64.to_le_bytes(), 1, 10),
+            Err(DcSyncError::StartTimeOutOfRange(0))
+        );
+        assert_eq!(underflow_controller.phase(), DcSyncPhase::Faulted);
+        assert!(underflow_controller.programmed_slaves().is_empty());
     }
 
     #[test]

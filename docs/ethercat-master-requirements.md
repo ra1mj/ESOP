@@ -279,8 +279,13 @@ identity 前闭锁且不发布参考钟或拓扑。没有可用 DC 且产品未�
 计算 32-bit 回绕或 64-bit 有符号修正，并把新 64-bit offset 与 32-bit 累计传播延迟作为一个
 `0x0920/12` 写入提交。参考钟写入 delay 0；缺少参考钟/传播延迟、WKC/长度/动作/generation/
 期限或算术错误均在统一生产调度和可选 PREOP 屏障中 fail-closed，完整批次只在所有从站成功后
-发布。该证据来自调用方交付的寄存器响应，不证明物理来源、应用时间真实性或纳秒精度；外部
-授时源、start time、生成式全从站 SYNC0/SYNC1、周期漂移补偿及完整硬件时钟质量仍未实现。
+发布。生成产品还通过共享 resolver 冻结绝对 SYNC0/SYNC1 周期、signed SYNC0 shift 与完整
+AssignActivate，并在运行时重算后形成产品顺序固定容量计划。拓扑级控制器先关闭所有计划从站，
+再写所有周期、读取一次参考钟、选择严格未来且按所有重复周期 checked LCM 对齐的共同 epoch、
+写每站 shift 后的 start time，最后写每站完整激活字。该服务在 DC Clock 后、legacy DC 前运行，
+完整激活前不发布证据并保持 PREOP/lifecycle Configuration gate 关闭。该证据来自调用方交付的
+寄存器响应，不证明物理来源、应用时间真实性或纳秒精度；外部授时、周期漂移补偿、`0x092c`
+sync-window、运行时锁定/恢复及完整硬件时钟质量仍未实现。
 
 ### 5.6 邮箱、CoE 和扩展协议
 

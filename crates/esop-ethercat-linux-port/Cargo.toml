@@ -16,6 +16,7 @@ libc = "0.2.189"
 
 [dev-dependencies]
 esop-lifecycle-guard = { path = "../esop-lifecycle-guard", features = ["ethercat", "procbuf"] }
+esop-product-config = { path = "../esop-product-config" }
 esop-procbuf = { path = "../esop-procbuf" }
 
 [lib]

@@ -110,6 +110,15 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
         product["slaves"][0]["sii_dc_mode"]["assign_activate"],
         0x0300
     );
+    assert_eq!(
+        product["slaves"][0]["dc_sync_timing"]["cycle_time0_ns"],
+        1_000_000
+    );
+    assert_eq!(product["slaves"][0]["dc_sync_timing"]["cycle_time1_ns"], 0);
+    assert_eq!(
+        product["slaves"][0]["dc_sync_timing"]["assign_activate"],
+        0x0300
+    );
     assert_eq!(product["slaves"][1]["dc"]["required"], true);
     assert_eq!(product["slaves"][1]["dc"]["reference_clock"], false);
     assert_eq!(product["slaves"][2]["dc"]["required"], false);
@@ -122,6 +131,8 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(header.contains("uint8_t dc_reference_clock"));
     assert!(header.contains("const char *dc_op_mode"));
     assert!(header.contains("uint16_t dc_assign_activate"));
+    assert!(header.contains("uint8_t has_dc_sync_timing"));
+    assert!(header.contains("uint32_t dc_sync_cycle_time1_ns"));
     assert!(header.contains("UINT16_C(0x1000), UINT16_C(64), UINT16_C(0x1100), UINT16_C(64)"));
     assert!(header.contains("4u, UINT16_C(0x000f)"));
 
@@ -134,6 +145,8 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(rust.contains("dc_required: false, dc_reference_clock: false"));
     assert!(rust.contains("name: \"DcSync\", mode: SiiDcMode"));
     assert!(rust.contains("assign_activate: 0x0300"));
+    assert!(rust.contains("dc_sync_timing: Some(DcSyncTiming"));
+    assert!(rust.contains("cycle_time1_ns: 0"));
 
     fixture.edit_product(|_| {});
     let xml = fs::read_to_string(&fixture.esi).unwrap();
@@ -250,6 +263,15 @@ fn dc_policy_defaults_hashes_and_invalid_references_are_strict() {
             .unwrap_err()
             .to_string()
             .contains("unknown field")
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_esi(|xml| xml.replacen("#x0300", "#x0100", 1));
+    assert!(
+        generate(&fixture.product, &fixture.output("dc-invalid-activation"))
+            .unwrap_err()
+            .to_string()
+            .contains("InvalidActivation(1)")
     );
 }
 

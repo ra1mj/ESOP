@@ -61,8 +61,24 @@ pub fn DcClockController::<MAX_SLAVES>::start(
     application_time_ns: u64,
     monotonic_now_ns: u64,
 ) -> Result<(), DcClockError>;
+pub fn DcSyncTiming::resolve(
+    base_period_ns: u64,
+    mode: SiiDcMode,
+) -> Result<DcSyncTiming, DcSyncTimingError>;
+pub fn StaticProductConfig::dc_sync_plan() ->
+    Result<DcSyncPlan<SLAVES>, ProductStartupError>;
+pub fn DcSyncController::<MAX_SLAVES>::start(
+    config: DcSyncConfig,
+    plan: &DcSyncPlan<MAX_SLAVES>,
+    topology: &DcTopology<MAX_SLAVES>,
+    generation: u16,
+    monotonic_now_ns: u64,
+) -> Result<(), DcSyncError>;
 pub fn ScheduledProductionServices::with_dc_clock_configuration(
     controller: &mut DcClockController<MAX_SLAVES>,
+) -> ScheduledProductionServices<...>;
+pub fn ScheduledProductionServices::with_dc_sync_configuration(
+    controller: &mut DcSyncController<MAX_SLAVES>,
 ) -> ScheduledProductionServices<...>;
 ```
 
@@ -117,8 +133,12 @@ milliseconds converted to checked nanoseconds; missing values use the named
 `ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1`. Mailbox data, timeout profiles, and
 activation templates participate in ESI semantic and configuration hashes.
 All ordered ESI DC mode metadata participates in the ESI semantic hash. The
-product-selected mode and its exact SII-representable descriptor participate
-in the normalized product, inventory, generated C/Rust and configuration hash.
+product-selected mode, its exact SII-representable descriptor, and the resolved
+absolute SYNC0/SYNC1 cycle, signed SYNC0 shift, and exact 16-bit
+`AssignActivate` participate in the normalized product, inventory, generated
+C/Rust and configuration hash. One shared `DcSyncTiming::resolve` contract owns
+the checked direct/factor arithmetic; cfggen and the `no_std` runtime boundary
+must not implement private timing formulas.
 
 The core SII parser accepts only the exact five-word standard mailbox header,
 checks CoE support and the same address/capacity rules, and performs the same
@@ -208,9 +228,21 @@ every other programmed delay comes from topology evidence. Exact action,
 generation, response length, WKC 1 and deadline checks are mandatory. Public
 programmed evidence remains empty until the whole plan completes, while a
 fault may retain only a diagnostic completed count because accepted ESC writes
-cannot be rolled back. The controller does not authenticate the application
-time, choose complete start-time/SYNC policy, prove runtime lock, or prove
-physical response origin or timing precision.
+cannot be rolled back. This controller does not authenticate the application
+time, prove runtime lock, or prove physical response origin or timing precision.
+
+`StaticProductConfig::dc_sync_plan()` rebuilds every generated timing value
+through the shared resolver before Startup mutation, rejects raw/resolved mode
+drift, preserves product position/station order, omits non-DC slaves, and
+requires the unique configured reference to belong to the plan and immutable
+Startup topology. `DcSyncController` validates the complete plan before its
+first action, disables `0x0981` on every planned slave, writes the two cycle
+registers at `0x09a0`, reads reference `0x0910` once, computes a strictly-future
+LCM-aligned common epoch with bounded request lead, writes each shifted start at
+`0x0990`, and finally writes the exact `AssignActivate` word at `0x0980`.
+Public per-slave evidence remains empty until every final activation succeeds;
+restart clears all staged and public evidence without claiming accepted
+hardware writes were rolled back.
 
 Per-slave PDO startup-plan construction uses the same generated order and the
 shared 256-entry cfggen bound. For each SyncManager it clears assignment
@@ -229,14 +261,13 @@ the static job capacity; faults retain the exact job until explicit restart.
 The caller still owns batch start timing, while the production scheduler owns
 mailbox transport, retry policy, batch
 advancement, and CONFIGURING lifecycle admission. The caller may opt
-`StartupConfig` into a PREOP barrier for PDO Configuration, Mapping, and/or DC
-Configuration. The scheduler releases Startup only after the whole PDO batch
-and other required controllers reach real Complete phases, then resumes the
-retained topology through SAFEOP/OP. Full mapping/DC descriptor discovery,
-physical response authenticity and hardware qualification remain caller work.
-Selected DC descriptor discovery is already complete in Startup; common SYNC
-start-time calculation and topology-wide SYNC register programming remain
-caller work.
+`StartupConfig` into a PREOP barrier for PDO Configuration, Mapping, DC Clock
+Configuration, topology-wide DC SYNC Configuration, and/or legacy DC
+Configuration. The scheduler orders these services as PDO, Mapping, DC Clock,
+DC SYNC, legacy DC, then Startup. It releases Startup only after the whole PDO
+batch and other required controllers reach real Complete phases, then resumes
+the retained topology through SAFEOP/OP. Full mapping/FMMU discovery, physical
+response authenticity and hardware qualification remain caller work.
 
 The configuration SHA-256 covers normalized product semantics and a sorted
 label-to-semantic-ESI-hash map. It excludes timestamps, host paths, compiler,
@@ -282,6 +313,7 @@ datagrams, FCS, and inter-packet gap respectively.
 | Receive-time/Data Link Status WKC other than one, malformed payload, stale generation, ownership mismatch, or timeout | Latch the first typed scan fault; publish no partial slave record. |
 | Duplicate/unreachable/overrun topology, missing DC receive times, invalid reference, delay underflow, or aggregate overflow | Latch typed topology failure before identity and publish neither reference nor topology. |
 | Product-required DC slave has no measurable reference-relative delay | Latch `DcPropagationDelayRequired` before identity and publish neither reference nor topology. |
+| Generated/raw DC timing mismatch, invalid factor/activation, plan/topology/reference mismatch, or common-epoch overflow | Reject before the first SYNC action or latch the first typed controller fault; publish no programmed evidence. |
 | Runtime Domain/axis evidence or capacity mismatch | Reject with typed owning-contract evidence and return no partial configuration. |
 | PDO plan owner/SM/group/capacity mismatch | Reject before returning any startup plan. |
 | Invalid generated mailbox or invalid/missing/duplicate/unknown override binding | Reject before returning any batch. |
@@ -297,8 +329,9 @@ datagrams, FCS, and inter-packet gap respectively.
 - Good: the checked-in dual-drive plus IO example generates six artifacts, a
   C11-clean header, a byte-identical compiled Rust module, 36 PDO bytes, 2
   frames, WKC 6, 20 copy bytes, 180 wire bytes, a 4144-byte ProcBuf region,
-  two DC-required drives, one explicit left-drive reference, and Startup-owned
-  measurable propagation-delay evidence for both required drives.
+  two DC-required drives, one explicit left-drive reference, Startup-owned
+  measurable propagation-delay evidence for both required drives, and a
+  two-entry 1 ms DC SYNC plan with exact `AssignActivate=0x0300`.
 - Base: no `PRODUCT_INPUT` produces the existing unqualified host build
   report; an omitted slave `dc` object produces no Startup DC requirement, and
   optional unmeasurable DC evidence remains explicitly `None`.
@@ -332,6 +365,13 @@ datagrams, FCS, and inter-packet gap respectively.
   transactional clearing. Include public master/control integration tests
   proving both WKC 0 and the 16-byte receive-time response traverse the normal
   RX ownership path.
+- Cover direct and factor-derived DC cycles, signed shifts, SYNC1 relation,
+  invalid activation, inexact division and arithmetic limits in the shared
+  resolver. Prove generated JSON/inventory/C/Rust and configuration hashes carry
+  resolved values, the runtime rebuilds an ordered product plan, and the
+  all-slave controller uses one reference read, one LCM-aligned common epoch,
+  exact register ordering, request ownership, complete-only publication,
+  restart clearing and PREOP/lifecycle gating through the simulated Linux path.
 - Cover explicit/default ESM timeouts, invalid values, ESI/SII OpOnly flag
   separation, PREOP-disabled mapping, enable-after-OP, disable-before-leaving,
   shared deadlines, uniform-override precedence, exact readback failure and

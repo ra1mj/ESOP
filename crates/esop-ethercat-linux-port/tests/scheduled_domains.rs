@@ -5,19 +5,19 @@ use esop_ethercat_core::wire::{
 use esop_ethercat_core::{
     AlStatus, CoeHeader, CoeService, ControlError, ControlRequestPool, CycleError, DatagramPlan,
     DcClockConfig, DcClockController, DcClockProgress, DcCyclicConfig, DcCyclicError, DcCyclicSync,
-    DcMonitor, DcTopology, Domain, DomainSegment, ESC_AL_STATUS, ESC_CONFIGURATION,
-    ESC_DC_SYSTEM_TIME, ESC_FEATURE_DC_SUPPORTED, EscDcRange, EthercatMaster, EthercatPort,
-    EthercatState, ExpectedSlave, FramePlan, FramePlanSet, LinkState, MAX_MAILBOX_BYTES,
-    MailboxConfig, MailboxController, MailboxError, MailboxHeader, MailboxPhase, MailboxProgress,
-    MailboxProtocol, MailboxRetryPolicy, MappingConfigController, MappingConfigPhase,
-    MappingConfigProgress, MappingTable, MasterConfig, PdoConfigAction, PdoConfigBatch,
-    PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigController, PdoConfigError, PdoConfigJob,
-    PdoConfigPhase, PdoConfigPlan, PdoConfigProgress, PdoConfigStep, PdoSdoWrite, PortError,
-    RegisterOperation, RequestHandle, RequestState, RxPoll, RxSlotState, ScanDcCapabilities,
-    ScanPortLink, ScanRecord, ScheduleDomain, ScheduleTable, ScheduledControlCycleError,
-    ScheduledDomainBank, ScheduledDomainEntry, ScheduledPdoConfiguration,
-    ScheduledPdoConfigurationProgress, ScheduledProcessInputEntry, ScheduledProcessInputs,
-    ScheduledProductionServiceCycleError, ScheduledProductionServiceFault,
+    DcMonitor, DcSyncConfig, DcSyncController, DcSyncProgress, DcTopology, Domain, DomainSegment,
+    ESC_AL_STATUS, ESC_CONFIGURATION, ESC_DC_SYSTEM_TIME, ESC_FEATURE_DC_SUPPORTED, EscDcRange,
+    EthercatMaster, EthercatPort, EthercatState, ExpectedSlave, FramePlan, FramePlanSet, LinkState,
+    MAX_MAILBOX_BYTES, MailboxConfig, MailboxController, MailboxError, MailboxHeader, MailboxPhase,
+    MailboxProgress, MailboxProtocol, MailboxRetryPolicy, MappingConfigController,
+    MappingConfigPhase, MappingConfigProgress, MappingTable, MasterConfig, PdoConfigAction,
+    PdoConfigBatch, PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigController, PdoConfigError,
+    PdoConfigJob, PdoConfigPhase, PdoConfigPlan, PdoConfigProgress, PdoConfigStep, PdoSdoWrite,
+    PortError, RegisterOperation, RequestHandle, RequestState, RxPoll, RxSlotState,
+    ScanDcCapabilities, ScanPortLink, ScanRecord, ScheduleDomain, ScheduleTable,
+    ScheduledControlCycleError, ScheduledDomainBank, ScheduledDomainEntry,
+    ScheduledPdoConfiguration, ScheduledPdoConfigurationProgress, ScheduledProcessInputEntry,
+    ScheduledProcessInputs, ScheduledProductionServiceCycleError, ScheduledProductionServiceFault,
     ScheduledProductionServiceKind, ScheduledProductionServiceProgress,
     ScheduledProductionServiceRecovery, ScheduledProductionServiceScheduler,
     ScheduledProductionServices, ScheduledReceiveError, ScheduledServiceFrameError,
@@ -34,6 +34,13 @@ use esop_lifecycle_guard::stop_cycle::{
     ScheduledAuxiliaryOutputs, ScheduledProductionCycleOwner, ScheduledProductionPhase,
 };
 use esop_lifecycle_guard::{GateId, GuardPolicy, LifecycleAction, LifecycleGuard, MotionPermit};
+
+mod generated_product {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../config/examples/sim-dual-axis/expected/esop_product_config.rs"
+    ));
+}
 
 #[test]
 fn real_multi_domain_receive_quality_revokes_motion_on_a_missing_due_sample() {
@@ -527,6 +534,231 @@ fn production_service_scheduler_prioritizes_mapping_and_accepts_its_own_generati
         ScheduledProductionServiceProgress::Mailbox(MailboxProgress::Advanced)
     );
     assert!(fifth.service_ready());
+    assert_eq!(controls.in_use(), 0);
+}
+
+#[test]
+fn topology_wide_dc_sync_runs_through_linux_simulated_service_path() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<2, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let topology = DcTopology::<3>::build(
+        &[
+            ScanRecord {
+                position: 0,
+                station_address: 0x1001,
+                esc_type: 0,
+                revision: 0,
+                build: 0,
+                fmmu_count: 0,
+                sync_manager_count: 0,
+                ram_size: 0,
+                port_descriptor: 0,
+                dl_status: 0,
+                port_links: [
+                    ScanPortLink {
+                        link_up: false,
+                        loop_closed: true,
+                        signal_detected: false,
+                    },
+                    ScanPortLink {
+                        link_up: false,
+                        loop_closed: true,
+                        signal_detected: false,
+                    },
+                    ScanPortLink {
+                        link_up: false,
+                        loop_closed: true,
+                        signal_detected: false,
+                    },
+                    ScanPortLink {
+                        link_up: true,
+                        loop_closed: false,
+                        signal_detected: true,
+                    },
+                ],
+                dc: ScanDcCapabilities {
+                    raw_features: ESC_FEATURE_DC_SUPPORTED,
+                    fmmu_bit_operation: false,
+                    supported: true,
+                    range: EscDcRange::Bits64,
+                    has_system_time: true,
+                    system_time: Some(0),
+                    receive_times: Some([0, 0, 0, 200]),
+                },
+                device_emulation: false,
+                al_status: AlStatus::new(EthercatState::Init as u16, 0),
+                online: true,
+            },
+            ScanRecord {
+                position: 1,
+                station_address: 0x1002,
+                esc_type: 0,
+                revision: 0,
+                build: 0,
+                fmmu_count: 0,
+                sync_manager_count: 0,
+                ram_size: 0,
+                port_descriptor: 0,
+                dl_status: 0,
+                port_links: [ScanPortLink {
+                    link_up: false,
+                    loop_closed: true,
+                    signal_detected: false,
+                }; 4],
+                dc: ScanDcCapabilities {
+                    raw_features: ESC_FEATURE_DC_SUPPORTED,
+                    fmmu_bit_operation: false,
+                    supported: true,
+                    range: EscDcRange::Bits64,
+                    has_system_time: true,
+                    system_time: Some(0),
+                    receive_times: Some([0; 4]),
+                },
+                device_emulation: false,
+                al_status: AlStatus::new(EthercatState::Init as u16, 0),
+                online: true,
+            },
+        ],
+        Some(0),
+    )
+    .unwrap();
+    let plan = generated_product::PRODUCT_CONFIG.dc_sync_plan().unwrap();
+    assert_eq!(plan.entries().len(), 2);
+    let mut dc_sync = DcSyncController::new();
+    dc_sync
+        .start(
+            DcSyncConfig {
+                sync_delay_ns: 100_000,
+                timeout_ns: 2_000_000,
+                request_timeout_ns: 100_000,
+            },
+            &plan,
+            &topology,
+            77,
+            100_000,
+        )
+        .unwrap();
+
+    let process_image = [0x40, 0];
+    let mut process_plan = FramePlan::<1>::new();
+    process_plan
+        .push(DatagramPlan {
+            command: Command::Lrw,
+            index: 12,
+            address: 0x1000,
+            payload_offset: 0,
+            payload_len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut process_plans = FramePlanSet::<1, 1>::new();
+    process_plans.push(process_plan.datagrams()[0]).unwrap();
+    let process_inputs = ScheduledProcessInputs::new(
+        &bank,
+        &schedule,
+        [ScheduledProcessInputEntry {
+            id: 9,
+            image: &process_image,
+            plans: &process_plans,
+        }],
+    )
+    .unwrap();
+    let mut scheduler = ScheduledProductionServiceScheduler::new();
+    let mut controls = ControlRequestPool::<1>::new();
+    let mut port = TwoFrameSimPort::new();
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut dc_image = [0; 8];
+
+    port.set_now_ns(100_000);
+    bank.submit_due_process_inputs(&process_inputs, &mut master, &mut port, 1, 150_000, 150_000)
+        .unwrap();
+
+    for action_index in 0..9u16 {
+        let now_ns = 100_000 + u64::from(action_index) * 100_000;
+        port.set_now_ns(now_ns);
+        if action_index == 4 {
+            port.set_next_control_response(
+                fixed_address(0x1001, ESC_DC_SYSTEM_TIME),
+                &3_100_000u64.to_le_bytes(),
+            );
+        }
+        let report = scheduler
+            .run_cycle(
+                &mut bank,
+                &mut master,
+                &mut port,
+                &mut scratch,
+                &mut dc,
+                &mut dc_image,
+                now_ns,
+                &mut controls,
+                &mut ScheduledProductionServices::<3, 0, 0>::new(None, None, None, None)
+                    .with_dc_sync_configuration(&mut dc_sync),
+                action_index + 1,
+                now_ns + 50_000,
+                now_ns + 50_000,
+            )
+            .unwrap();
+        assert_eq!(
+            report.selected(),
+            ScheduledProductionServiceKind::DcSyncConfiguration
+        );
+        let expected_progress = if action_index == 8 {
+            DcSyncProgress::Complete
+        } else {
+            DcSyncProgress::Advanced
+        };
+        assert_eq!(
+            report.progress(),
+            ScheduledProductionServiceProgress::DcSyncConfiguration(expected_progress)
+        );
+        assert_eq!(report.service_ready(), action_index == 8);
+        assert_eq!(
+            other_cycle_facts_from_production_service_cycle(&report, ready_other_cycle_facts(),)
+                .coe_ready,
+            action_index == 8
+        );
+        assert_eq!(
+            dc_sync.programmed_slaves().len(),
+            if action_index == 8 { 2 } else { 0 }
+        );
+    }
+
+    assert_eq!(dc_sync.common_epoch_ns(), 4_000_000);
+    assert_eq!(dc_sync.programmed_slaves()[0].start_time_ns, 4_000_000);
+    assert_eq!(dc_sync.programmed_slaves()[1].start_time_ns, 4_000_000);
     assert_eq!(controls.in_use(), 0);
 }
 

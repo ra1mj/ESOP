@@ -192,9 +192,16 @@ Startup 在 identity/SII/AL 前事务式校验并发布参考钟/拓扑，必需
 产品生成器现要求每个 DC-required 从站显式选择一个 ESI `Dc/OpMode`，Startup 在同一次
 SII category stream 中解析 Strings 与 DC `0x003c`，并在首个 AL 动作前比较 cycle、shift、
 factor 和 AssignActivate；DC 差异不会留下已计算的 SM/PDO 部分证据。
+生成阶段现复用同一 checked resolver，把选定模式与产品基准周期转换为绝对 SYNC0/SYNC1
+寄存器值、signed SYNC0 shift 和完整 16-bit AssignActivate，并把这些值写入 JSON、inventory、
+C、Rust 和配置 hash。`StaticProductConfig` 在 Startup mutation 前重算并按产品顺序构造固定容量
+计划；独立 `DcSyncController` 对全计划从站执行全禁用、全周期、一次参考钟读取、全 start time、
+全 AssignActivate 的有界顺序。共同未移位 epoch 严格位于未来并对所有重复周期的 checked LCM
+对齐，公开证据仅在最后一站激活成功后发布。该服务位于 DC Clock 与 legacy DC 之间，并持续关闭
+PREOP Configuration/lifecycle gate，直到完整批次真实 Complete。
 当前测试只验证调用方交付响应和软件计算边界，不证明应用时间真实性、物理来源或时序精度；
-完整 start time、生成式全从站 SYNC0/SYNC1、运行时漂移补偿和完整质量资格仍属于 FR-018
-后续边界。
+外部应用授时、运行时全从站漂移补偿、`0x092c` sync-window、锁定/恢复策略和完整质量资格
+仍属于 FR-018 后续边界。
 
 ### 7.4 CiA 402 与设备模型
 
@@ -510,6 +517,8 @@ R2 非邮箱控制服务周期增量：`ScheduledDomainBank::run_dc_and_control_
 R2 统一生产服务调度增量：`ScheduledProductionServiceScheduler` 在固定容量周期路径中统一接管 Startup、PDO Configuration、Mapping、DC Clock Configuration、DC Configuration 和 Mailbox 的选择与单请求所有权，固定优先级依次为上述顺序。PDO 绑定既支持原有单 `PdoConfigController`/`MailboxController`/`MailboxConfig`，也支持拥有这些控制器的 `PdoConfigBatch`；批模式只选择当前冻结 job，不复制 CoE 或邮箱逻辑。每笔不可变 PDO 动作先核对控制器 pending，再核对邮箱事务的站地址、generation、CoE 协议和原始负载，随后只经既有邮箱/DC/共享 RX 路径发送、轮询和消费，邮箱完成后才把响应交回 PDO 精确 upload 回读。当前 job Complete 后，调度器在释放屏障或选择低优先级服务前自动启动下一 job；只有整批 Complete 才报告 PDO ready。调度器只允许当前最高优先级服务持有请求；请求池条目必须与该 FSM 的不可变 pending action 在 index、generation、地址、操作、长度、期限和待发负载上完全匹配。控制请求允许以自身已武装 generation 跨后续生产周期等待，但只有 `ControlRxConsumer` 能在同一 InFlight 槽位和数据报索引仍匹配时授权该旧 generation；Domain/DC 仍严格使用当前周期 generation。DC/期限失败留下的 Prepared 请求会被释放并标记 `RebuildRequest`；若原动作在重建前已过期，则不再申请池槽而直接由所属 FSM 消费 Timeout，提交预检拒绝也只释放尚未上线的 Prepared 句柄。丢响应的 InFlight 请求保持 `AwaitingResponse` 且后续周期不重发，终态邮箱错误被保留为类型化 PDO transport fault，job/操作索引不推进；故障服务阻止低优先级服务直到外部重启。`ScheduledProductionServiceCycleReport` 由 Bank 校验底层控制或邮箱周期，并额外携带可选批 phase/index/count/current station；`StopCycleContext` 的统一入口直接把 Startup 映射到 Topology，PDO Configuration、Mapping、DC Clock Configuration、DC Configuration 和 Mailbox 映射到 Configuration。软件模拟覆盖两 job 自动切换、精确 download/upload 回读、跨 generation 完成、事务替换拒绝、固定优先级、故障阻塞/显式重启、Prepared 重建及过期回交、提交拒绝清理、InFlight 无重发和严格超时释放；可选受控停车现可由同一统一生产报告入口执行并把成功/回退证据交给周期所有者。
 
 R2 PREOP 激活屏障增量：`StartupConfig` 可冻结 PDO Configuration、Mapping、DC Clock Configuration、DC Configuration 的必需集合。启用后，扫描和精确身份核对保持不变，所有期望从站必须先确认 PREOP，随后 Startup 进入无控制动作的 `AwaitingConfiguration`。生产调度器在该阶段按原固定顺序选择第一个未 Complete 的必需服务；缺失绑定返回 `MissingController`，Idle、执行中、重试和 Faulted 均保持屏障关闭，且故障服务仍要求显式重启。对于 PDO 批模式，当前控制器 Complete 只会启动下一 job，不能提前释放屏障；仅当整个批次及其他必需控制器的真实 phase 为 Complete 时，调度器才重置 Startup 的 AL 游标并保留已验证 `SlaveTable`，逐站经过观测到的 SAFEOP 再到最终 SAFEOP/OP，不重新扫描、读取 SII 或接受调用方 readiness boolean。每个生产报告额外携带实际 Startup phase 和可选 PDO 批状态，即使正在运行配置服务，生命周期投影也会让 PREOP 屏障持续清除 Topology；只有最终 Startup Ready 才放行。核心与 Linux 仿真覆盖两 job 自动推进、单/多从站 Startup、PDO 精确回读、缺失/Idle/Faulted 服务、AL code/timeout、显式重启、无重扫和 SAFEOP/OP 顺序。产品静态 MailboxConfig 由经校验的 ESI CoE 邮箱对生成，并在身份后、AL 前与实时 SII 标准邮箱布局交叉验证；显式绑定仍只作为 PDO 批次覆盖。完整 SM-FMMU/DC 描述自动发现、外部应用授时、完整 start time/全从站 SYNC 策略、完整周期 WKC、真实响应来源、逐产品资格、目标 WCET 与实物 HIL 仍是 R2 发布阻塞项。
+
+R2 DC SYNC 增量：`DcSyncTiming` 统一解析直接/正负 factor、SYNC1 relation、signed shift 与完整 AssignActivate；cfggen 将绝对值写入 JSON/inventory/C/Rust 和配置 hash，产品运行时重算并构造固定容量顺序计划。`DcSyncController` 在不可变拓扑上先校验全计划，再执行全禁用、全周期、一次参考钟读取、严格未来且按重复周期 checked LCM 对齐的共同 epoch、逐站 shift start time 和完整激活字。生产调度固定放在 DC Clock 后、legacy DC 前，缺失、执行中、超时或故障均保持 PREOP/lifecycle Configuration gate 关闭；模拟 Linux 共享请求/RX 路径只在双驱动完整证据发布后放行。该增量不证明外部应用授时、周期漂移补偿、`0x092c` sync-window、物理精度、WCET、HIL 或功能安全。
 
 R2 AL 错误确认与 Device Emulation 增量：在线扫描在分配固定站地址后对每个从站读取 ESC Configuration `0x0141`，精确响应的 bit 0 决定 AL 错误策略；短响应、WKC、世代或超时错误不得回退到默认策略。普通 ESC 在初始或转换期间报告 Error Indication 时，`AlTransitionController` 冻结首个 AL 状态、最终请求状态和 status code，写入“实际状态 + bit 4”并在原转换截止时间内轮询。错误位清除只把 ACK 结果标记为完成，Startup 仍进入 Faulted，不自动重试状态转换。Device Emulation 从站从策略层禁止 ACK 写入，错误直接闭锁。`StartupAlFault` 保留 position、固定站地址、请求/实际状态、status code、能力和 ACK 阶段；后续 ACK 超时或畸形响应不能覆盖首个 AL 证据，显式 Startup restart 才清除并重新扫描。核心和 Linux 仿真证明有界请求序列、控制池/调度兼容及 fail-closed 结果；真实 ESC 响应、互操作、目标 WCET 和实物 HIL 仍是发布阻塞项。
 

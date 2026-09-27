@@ -84,7 +84,9 @@ index/subindex/bit length/DataType。未提供 timeout 时使用版本化的 ETG
 | `robot_build_input.json` | 设备数、PDO/frame/wire/WKC/copy、周期和资源输入。 |
 
 生成的 inventory、JSON、C 和 Rust product slave 均携带精确主站发送/接收邮箱
-地址与容量、显式 DC requirement/reference policy 及所选 OpMode 的 SII 可表示描述符；规范化 JSON、C 和 Rust 还携带 SII SyncManager 数量与 enabled mask，
+地址与容量、显式 DC requirement/reference policy、所选 OpMode 的 SII 可表示描述符，
+以及由产品基准周期解析出的绝对 SYNC0/SYNC1 周期、signed SYNC0 shift 和完整
+16-bit `AssignActivate`；规范化 JSON、C 和 Rust 还携带 SII SyncManager 数量与 enabled mask，
 ESI inventory 保留两侧 control byte。ESI mailbox、timeout profile、`OpOnly` mask 及
 activation template 参与 ESI semantic hash 和配置 SHA-256；显式 DC policy 属于产品
 语义，只参与配置 SHA-256，不反向改写 ESI 内容 hash。配置 SHA-256 只依赖规范化产品语义和排序后的 ESI 语义内容，不依赖 JSON
@@ -108,11 +110,13 @@ ProcBuf。激活按以下顺序 fail-closed：
 5. 通过既有 API 生成多速率 schedule 与每 Domain `FramePlanSet`；
 6. 逐轴校验连续索引、驱动归属、冻结策略和选定模式的 `Cia402PdoMap`。
 
-`PRODUCT_CONFIG.startup_profiles()` 会在任何 Startup 动作发出前校验每个从站的
+`PRODUCT_CONFIG.dc_sync_plan()` 和 `startup_profiles()` 会在任何 Startup 动作发出前校验每个从站的
 DC reference 必须同时 required、全产品最多一个 reference、DC-required 从站必须且只有一个模式期望、非 DC 从站不得携带模式期望、timeout 非零、position 一一对应、生成邮箱范围有效、SII SyncManager count/enabled
 mask 有界、`OpOnly` mask/flag 有效，并要求每个 `OpOnly` SyncManager 只关联所选
 RxPDO、每个 PDO 分组连续。运行时从这些静态字段重新构建版本化 SII 结构签名，而不是
-信任预生成摘要。DC booleans 分别映射为 `StartupDcRequirement::None`、`SystemTime`
+信任预生成摘要。共享 `DcSyncTiming` resolver 还会按产品基准周期重新计算绝对寄存器值，
+要求与生成值逐字段相等，并按产品从站顺序构造固定容量计划；非 DC 从站不得携带 timing，
+唯一 reference 必须属于计划。DC booleans 分别映射为 `StartupDcRequirement::None`、`SystemTime`
 或 `ReferenceClock`。`start_startup()` 将这些 profile 与精确
 从站拓扑一起交给 `StartupController`。在线扫描完成后、任何身份读取之前，Startup 以
 position-keyed 扫描证据验证所有 DC 要求：显式 reference 合格时选中它，否则选择扫描顺序
@@ -146,11 +150,11 @@ count，并返回固定站地址。核心 `PdoConfigController` 对每个写值�
 和同对象 upload 回读，只有长度与字节完全一致才推进；分段 upload、代际、
 动作、超时和 mismatch 均沿类型化故障路径 fail-closed。调用方可通过
 `ScheduledPdoConfiguration` 把该控制器、`MailboxController` 和运行期
-`MailboxConfig` 绑定到 `ScheduledProductionServiceScheduler`；调度器按
-Startup、PDO Configuration、Mapping、DC Clock Configuration、DC Configuration、Mailbox 的固定顺序，
+`MailboxConfig` 绑定到 `ScheduledProductionServiceScheduler`；配置屏障内调度器按
+PDO Configuration、Mapping、DC Clock Configuration、DC SYNC Configuration、legacy DC Configuration、Startup 的固定顺序，
 把每笔 CoE 请求交给现有邮箱/DC/共享 RX 路径，并在精确 upload 回读完成后才
 放行 Configuration/CoE 生命周期门。调用方可在 `StartupConfig` 中冻结所需的
-PDO Configuration、Mapping、DC Clock Configuration 和 DC Configuration 集合：所有期望从站先确认
+PDO Configuration、Mapping、DC Clock Configuration、DC SYNC Configuration 和 legacy DC Configuration 集合：所有期望从站先确认
 PREOP，Startup 进入 `AwaitingConfiguration` 后只向这些服务让出优先级；调度器
 仅在所有必需控制器真实进入 `Complete` 后释放屏障，并复用已验证从站表逐站经过
 SAFEOP 到最终 SAFEOP/OP，不重新扫描或读取 SII。
@@ -180,8 +184,12 @@ payload，直到 END 才公开完整镜像；`SiiStreamDiscoveryController` 使�
 拓扑构造固定容量计划，逐个精确读取 `0x0910/24`，以调用方应用时间样本和响应时单调时间
 计算 32-bit 回绕或 64-bit 有符号 offset 修正，并把新 offset 与累计 delay 作为一个
 `0x0920/12` 写入；参考钟 delay 为零，完整批次仅在所有精确 WKC 1 写入成功后发布，并可作为
-独立必需服务接入上述 PREOP 屏障。FMMU 自动发现、DC factor 到产品调度周期的策略换算、
-外部应用授时源、完整 start time、生成式全从站 SYNC 配置、物理响应真实性与时序精度和 HIL 仍待完成。
+独立必需服务接入上述 PREOP 屏障。其后 `DcSyncController` 先对所有计划从站关闭 `0x0981`，
+逐站写入 `0x09a0` 的 SYNC0/SYNC1 周期对，只读取一次参考钟 `0x0910`，按所有重复周期的
+checked LCM 选择严格未来的共同未移位 epoch，再把每站 signed shift 加到 `0x0990` start time，
+最后逐站把完整 `AssignActivate` 写入 `0x0980`。软件证据仅在所有激活写入成功后原子发布；
+已接受的硬件写入不会被描述为回滚。外部应用授时、周期性全从站漂移补偿、`0x092c`
+sync-window、运行时锁定/恢复、物理响应真实性与时序精度和 HIL 仍待完成。
 
 ## 6. 构建报告接入
 
@@ -208,7 +216,8 @@ make build-report \
 布局比对、完整 category stream/candidate 投影和生成结构签名的 AL 前精确比较，以及调用方
 交付 ESC/System Time 响应的能力判断和参考时钟选择；它不证明
 该响应来自真实目标从站，也不等于真实从站 PDO
-assignment/mapping、ESM timeout、SyncManager 或 DC 时钟响应证据，更不证明驱动
+assignment/mapping、ESM timeout、SyncManager 或 DC 时钟响应证据；模拟端口覆盖生成
+双驱动计划的完整 DC SYNC 请求/RX/屏障路径，但不证明真实 ESC 定时行为。该证据更不证明驱动
 接受映射、完整周期 WKC、实际线缆时间、WCET、DMA/cache 正确性、制动/机械适配、
 STO/FSoE 或功能安全。生成示例和构建报告必须保持
 `passed: false`，直到独立的目标构建、HIL、周期测量和发布审核提供证据。

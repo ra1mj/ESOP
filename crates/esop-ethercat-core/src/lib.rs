@@ -57,8 +57,10 @@ pub use dc::{
     DC_SYNC_DELAY_NS, DcAction, DcActionKind, DcClockAction, DcClockActionKind, DcClockConfig,
     DcClockController, DcClockError, DcClockPhase, DcClockProgrammedSlave, DcClockProgress,
     DcConfig, DcController, DcCyclicConfig, DcCyclicError, DcCyclicSync, DcError, DcLockState,
-    DcMonitor, DcPhase, DcProgress, DcSample, DcSyncMode, DcTopology, DcTopologyError,
-    DcTopologyPort, DcTopologySlave,
+    DcMonitor, DcPhase, DcProgress, DcSample, DcSyncAction, DcSyncActionKind, DcSyncConfig,
+    DcSyncController, DcSyncError, DcSyncMode, DcSyncPhase, DcSyncPlan, DcSyncPlanEntry,
+    DcSyncPlanError, DcSyncProgrammedSlave, DcSyncProgress, DcSyncTiming, DcSyncTimingError,
+    DcTopology, DcTopologyError, DcTopologyPort, DcTopologySlave,
 };
 pub use diag::{
     CoeEmergencyEvent, CoeEmergencyQueue, DiagnosticConsumer, Diagnostics, EmergencySink,

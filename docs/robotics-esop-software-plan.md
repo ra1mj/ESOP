@@ -139,7 +139,10 @@ Platform layer
 
 SII category stream/candidate 路径已成为独立 Startup 动作，并与
 `esop-product-config` 从冻结 PDO/SM 字段重建的结构签名及选定 ESI DC OpMode 描述比较；匹配前不允许 AL，失败不
-发布结构或 DC 验证证据。FMMU 自动发现、共同 SYNC 起始时刻计算、全从站 SYNC 寄存器编程、真实响应真实性、完整周期 WKC、从站互操作和 HIL 仍保持开放。
+发布结构或 DC 验证证据。产品层现通过共享 resolver 冻结绝对 SYNC0/SYNC1 timing，并按产品
+顺序生成固定容量计划；拓扑级控制器用一次参考钟读取选择 LCM-aligned 共同 epoch，写入每站
+shift 后的 start time 与完整 AssignActivate，并在全批完成前保持 PREOP/lifecycle gate 关闭。
+FMMU 自动发现、周期漂移补偿、`0x092c` sync-window、真实响应真实性、完整周期 WKC、从站互操作和 HIL 仍保持开放。
 
 ## 5. ProcBuf：机器人实时数据载体
 

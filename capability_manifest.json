@@ -34,7 +34,7 @@
         "docs/ethercat-master-requirements.md",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Software tests cover caller-delivered register responses, bounded physical-tree reconstruction and deterministic propagation-delay projection only; this discovery capability does not establish application-time authenticity, start-time/SYNC policy, all-slave runtime synchronization, complete clock-quality qualification, physical response authenticity and timing precision, interoperability, target WCET, HIL or functional safety"
+      "limitation": "Software tests cover caller-delivered register responses, bounded physical-tree reconstruction and deterministic propagation-delay projection only; this discovery capability does not establish application-time authenticity, periodic all-slave runtime synchronization, complete clock-quality qualification, physical response authenticity and timing precision, interoperability, target WCET, HIL or functional safety"
     },
     {
       "id": "ethercat_dc_clock_programming",
@@ -51,7 +51,27 @@
         "docs/esop-product-configuration.md",
         ".trellis/spec/backend/product-configuration.md"
       ],
-      "limitation": "Software tests prove bounded request ownership, arithmetic, exact WKC/shape checks, scheduler ordering and complete-only publication for caller-delivered responses. The caller-supplied application-time sample is not authenticated; complete start-time policy, generated all-slave SYNC0/SYNC1 setup, periodic drift compensation and lock proof, physical timing accuracy, interoperability, target WCET, HIL, ETG conformance and functional-safety qualification remain open"
+      "limitation": "Software tests prove bounded request ownership, arithmetic, exact WKC/shape checks, scheduler ordering and complete-only publication for caller-delivered responses. The caller-supplied application-time sample is not authenticated; periodic drift compensation and lock proof, physical timing accuracy, interoperability, target WCET, HIL, ETG conformance and functional-safety qualification remain open"
+    },
+    {
+      "id": "ethercat_dc_sync_programming",
+      "status": "implemented",
+      "scope": "Allocation-free generated topology-wide DC SYNC0/SYNC1 programming with one shared checked ESI/SII timing resolver, hashed absolute register values, fixed-capacity product-order plans, exact all-slave disable/cycle/reference/start/AssignActivate sequencing, one LCM-aligned common epoch, complete-only evidence publication, fixed-priority production scheduling and PREOP lifecycle gating",
+      "evidence": [
+        "crates/esop-ethercat-core/src/dc.rs",
+        "crates/esop-ethercat-core/src/production_service.rs",
+        "crates/esop-ethercat-core/src/startup.rs",
+        "crates/esop-cfggen/src/generator.rs",
+        "crates/esop-cfggen/tests/generation.rs",
+        "crates/esop-product-config/src/lib.rs",
+        "crates/esop-product-config/tests/generated_product.rs",
+        "crates/esop-ethercat-linux-port/tests/scheduled_domains.rs",
+        "crates/esop-lifecycle-guard/src/ethercat.rs",
+        "config/examples/sim-dual-axis/expected/esop_product_config.rs",
+        "docs/esop-product-configuration.md",
+        ".trellis/spec/backend/product-configuration.md"
+      ],
+      "limitation": "Software tests prove timing conversion, bounded request ownership, exact register shape/WKC checks, common-epoch arithmetic, scheduler ordering, fail-closed gating and complete-only publication for deterministic caller-delivered responses. External application-time discipline, periodic all-slave drift compensation, 0x092c sync-window monitoring, runtime lock/recovery proof, physical timing precision, interoperability, target WCET, HIL, ETG conformance and functional-safety qualification remain open"
     },
     {
       "id": "ethercat_sii_category_stream",
@@ -70,12 +90,12 @@
         "config/examples/sim-dual-axis/esi/esop-sim.xml",
         ".trellis/spec/backend/product-configuration.md"
       ],
-      "limitation": "Software tests cover caller-delivered EEPROM responses and exact structural/DC descriptor comparison only; FMMU auto-discovery, cycle-factor policy, common start time, all-slave SYNC programming, physical response authenticity, target timing, interoperability and hardware HIL remain open"
+      "limitation": "Software tests cover caller-delivered EEPROM responses and exact structural/DC descriptor comparison only; FMMU auto-discovery, physical response authenticity, target timing, interoperability and hardware HIL remain open"
     },
     {
       "id": "product_config_generator",
       "status": "implemented",
-      "scope": "Deterministic host-only esop.product.v1 and bounded ESI-subset compilation into static C/Rust, normalized Domain/PDO/Frame Plan, per-slave CoE mailbox, structural SII SM evidence, ESM timeout, OpOnly, explicit DC System Time/reference-clock policy and selected ESI DC OpMode descriptors, device inventory, exact ProcBuf v6 layout and fail-closed build input",
+      "scope": "Deterministic host-only esop.product.v1 and bounded ESI-subset compilation into static C/Rust, normalized Domain/PDO/Frame Plan, per-slave CoE mailbox, structural SII SM evidence, ESM timeout, OpOnly, explicit DC System Time/reference-clock policy, selected ESI DC OpMode descriptors and resolved absolute DC SYNC timing, device inventory, exact ProcBuf v6 layout and fail-closed build input",
       "evidence": [
         "crates/esop-cfggen/src/lib.rs",
         "crates/esop-cfggen/src/generator.rs",
@@ -84,7 +104,7 @@
         "scripts/tests/test_robot_build_report.py",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "The supported ESI subset is byte-aligned and explicit; modular devices, bit-packed PDOs, vendor scaling/quirks, artifact signing/distribution, complete mapping, FMMU auto-discovery, start-time/all-slave SYNC generation, physical slave interoperability and response authenticity, measured wire timing, target resource/WCET and safety qualification remain open"
+      "limitation": "The supported ESI subset is byte-aligned and explicit; modular devices, bit-packed PDOs, vendor scaling/quirks, artifact signing/distribution, complete mapping, FMMU auto-discovery, physical slave interoperability and response authenticity, measured wire timing, target resource/WCET and safety qualification remain open"
     },
     {
       "id": "ethercat_product_mailbox_config",
@@ -107,7 +127,7 @@
     {
       "id": "product_runtime_attachment",
       "status": "implemented",
-      "scope": "Allocation-free no_std activation of generated Rust product configuration with exact hash, ProcBuf v6, observed topology, Domain/PDO/datagram/WKC, schedule/frame-plan, per-slave ESM timeout, OpOnly, mailbox, structural SII and selected DC mode startup profiles, CiA 402 map and axis-policy validation plus deterministic all-slave PDO batch construction",
+      "scope": "Allocation-free no_std activation of generated Rust product configuration with exact hash, ProcBuf v6, observed topology, Domain/PDO/datagram/WKC, schedule/frame-plan, per-slave ESM timeout, OpOnly, mailbox, structural SII and selected DC mode startup profiles, ordered resolved DC SYNC plan, CiA 402 map and axis-policy validation plus deterministic all-slave PDO batch construction",
       "evidence": [
         "crates/esop-product-config/src/lib.rs",
         "crates/esop-product-config/tests/generated_product.rs",
@@ -116,7 +136,7 @@
         "Makefile",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Activation validates static expectations, attaches generated mailbox, structural SII and selected DC mode expectations to Startup, requires measurable propagation evidence for required DC slaves, and builds a bounded ordered PDO batch; comparison does not authenticate physical responses, and product-generated complete mapping/FMMU, application-time/start-time/all-slave SYNC policy, artifact signing/deployment policy, interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
+      "limitation": "Activation validates static expectations, attaches generated mailbox, structural SII and selected DC mode expectations to Startup, requires measurable propagation evidence for required DC slaves, and builds bounded ordered PDO and DC SYNC plans; comparison does not authenticate physical responses, and product-generated complete mapping/FMMU, external application-time discipline, artifact signing/deployment policy, interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
     },
     {
       "id": "pdo_configuration_readback",

@@ -182,6 +182,21 @@ fn checked_in_product_builds_exact_per_slave_pdo_startup_plans() {
 }
 
 #[test]
+fn checked_in_product_builds_ordered_dc_sync_plan() {
+    let plan = generated::PRODUCT_CONFIG.dc_sync_plan().unwrap();
+    assert_eq!(plan.reference_position(), Some(0));
+    assert_eq!(plan.entries().len(), 2);
+    assert_eq!(plan.entries()[0].position, 0);
+    assert_eq!(plan.entries()[0].station_address, 0x1001);
+    assert_eq!(plan.entries()[0].timing.cycle_time0_ns, 1_000_000);
+    assert_eq!(plan.entries()[0].timing.cycle_time1_ns, 0);
+    assert_eq!(plan.entries()[0].timing.assign_activate, 0x0300);
+    assert_eq!(plan.entries()[1].position, 1);
+    assert_eq!(plan.entries()[1].station_address, 0x1002);
+    assert_eq!(plan.entries()[1].timing, plan.entries()[0].timing);
+}
+
+#[test]
 fn checked_in_product_builds_one_exact_ordered_pdo_batch() {
     let batch = generated::PRODUCT_CONFIG
         .build_generated_pdo_configuration_batch::<3, 17>()

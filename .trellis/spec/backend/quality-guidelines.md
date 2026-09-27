@@ -52,7 +52,13 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   SII string and 24-byte DC entry from the existing complete category image.
   Stage structural and DC observations before publishing either, clear both on
   restart, and do not infer start time or all-slave SYNC programming from a
-  successful descriptor comparison.
+  successful descriptor comparison alone. Only the shared checked timing
+  resolver may convert that verified mode and product base period; cfggen must
+  hash the absolute values, product runtime must rebuild an ordered fixed-size
+  plan, and the topology controller must validate the whole plan before its
+  first register action. Keep public programmed evidence empty until every
+  final `AssignActivate` write succeeds; never describe accepted ESC writes as
+  rolled back after a later fault.
 - Preserve the existing `EthercatPort` copy-compatible path while adding a
   separate DMA trait for zero-copy platform adapters.
 - Keep ProcBuf as a standalone `no_std` ABI layer. Use its header/layout hash
