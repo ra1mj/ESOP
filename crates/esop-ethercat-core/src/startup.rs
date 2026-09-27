@@ -45,6 +45,10 @@ use crate::sii_stream::{SiiCategoryStreamProgress, SiiCategoryStreamRequest};
 use crate::slave::{
     EthercatState, SlaveIdentity, SlaveRecord, SlaveTable, SlaveTableError, next_state,
 };
+use crate::state_request::{
+    StateRequestConfig, StateRequestController, StateRequestError, StateRequestHandle,
+    StateRequestObservation, StateRequestStatus,
+};
 use crate::sync_manager_discovery::{
     SyncManagerRegisterBank, SyncManagerRegisterDiscoveryAction,
     SyncManagerRegisterDiscoveryController, SyncManagerRegisterDiscoveryError,
@@ -873,6 +877,145 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
 
     pub fn records(&self) -> &[SlaveRecord] {
         self.table.records()
+    }
+
+    pub fn start_state_request(
+        &self,
+        controller: &mut StateRequestController,
+        position: u16,
+        target: EthercatState,
+        generation: u16,
+        now_ns: u64,
+        deadline_ns: u64,
+    ) -> Result<StateRequestHandle, StateRequestError> {
+        if self.phase != StartupPhase::Ready {
+            return Err(StateRequestError::StartupNotReady);
+        }
+        let index = self
+            .table
+            .records()
+            .iter()
+            .position(|record| record.position == position)
+            .ok_or(StateRequestError::UnknownPosition(position))?;
+        let record = self.table.records()[index];
+        if !record.online {
+            return Err(StateRequestError::SlaveOffline(position));
+        }
+        if !record.configured {
+            return Err(StateRequestError::SlaveUnconfigured(position));
+        }
+        let profile = self
+            .profiles
+            .iter()
+            .take(self.expected_count)
+            .find(|profile| profile.position == position)
+            .copied()
+            .ok_or(StateRequestError::UnknownPosition(position))?;
+        if target != record.al_status.state && !profile.op_only_outputs.is_empty() {
+            return Err(StateRequestError::OpOnlyUnsupported(position));
+        }
+        let error_acknowledge_policy = if self.device_emulation[index] {
+            AlErrorAcknowledgePolicy::Disabled
+        } else {
+            AlErrorAcknowledgePolicy::Enabled
+        };
+        controller.start(StateRequestConfig {
+            position,
+            station_address: record.station_address,
+            observed_status: record.al_status,
+            requested_state: target,
+            generation,
+            now_ns,
+            deadline_ns,
+            request_timeout_ns: self.config.request_timeout_ns,
+            transition_timeouts: profile.transition_timeouts,
+            error_acknowledge_policy,
+        })
+    }
+
+    pub fn validate_state_request_status(
+        &self,
+        status: StateRequestStatus,
+    ) -> Result<(), StateRequestError> {
+        if self.phase != StartupPhase::Ready {
+            return Err(StateRequestError::StartupNotReady);
+        }
+        let record = self
+            .table
+            .records()
+            .iter()
+            .find(|record| record.position == status.position)
+            .copied()
+            .ok_or(StateRequestError::UnknownPosition(status.position))?;
+        if !record.online {
+            return Err(StateRequestError::SlaveOffline(status.position));
+        }
+        if !record.configured {
+            return Err(StateRequestError::SlaveUnconfigured(status.position));
+        }
+        if record.station_address != status.station_address {
+            return Err(StateRequestError::RetainedStationMismatch {
+                position: status.position,
+                expected: status.station_address,
+                observed: record.station_address,
+            });
+        }
+        if record.al_status != status.observed_status {
+            return Err(StateRequestError::RetainedStatusMismatch {
+                position: status.position,
+                expected: status.observed_status,
+                observed: record.al_status,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn reconcile_state_request_observation(
+        &mut self,
+        observation: StateRequestObservation,
+        cycle: u64,
+    ) -> Result<(), StateRequestError> {
+        if self.phase != StartupPhase::Ready {
+            return Err(StateRequestError::StartupNotReady);
+        }
+        let record = self
+            .table
+            .records()
+            .iter()
+            .find(|record| record.position == observation.position)
+            .copied()
+            .ok_or(StateRequestError::UnknownPosition(observation.position))?;
+        if record.station_address != observation.station_address {
+            return Err(StateRequestError::RetainedStationMismatch {
+                position: observation.position,
+                expected: observation.station_address,
+                observed: record.station_address,
+            });
+        }
+        let expected_step = if record.al_status.state == observation.requested_state {
+            record.al_status.state
+        } else {
+            next_state(record.al_status.state, observation.requested_state).ok_or(
+                StateRequestError::RetainedResultMismatch(observation.position),
+            )?
+        };
+        if observation.observed_status.state != record.al_status.state
+            && observation.observed_status.state != expected_step
+        {
+            return Err(StateRequestError::RetainedResultMismatch(
+                observation.position,
+            ));
+        }
+        self.table
+            .request_state(
+                observation.position,
+                observation.requested_state,
+                observation.deadline_ns,
+            )
+            .map_err(|_| StateRequestError::RetainedResultMismatch(observation.position))?;
+        self.table
+            .observe_status(observation.position, observation.observed_status, cycle)
+            .map_err(|_| StateRequestError::UnknownPosition(observation.position))
     }
 
     pub fn scan_records(&self) -> &[crate::scan::ScanRecord] {
@@ -2670,6 +2813,37 @@ mod tests {
         startup
     }
 
+    fn prepared_runtime_state_request(
+        current: EthercatState,
+        profile: StartupSlaveProfile,
+        device_emulation: bool,
+    ) -> StartupController<1> {
+        let identity = SlaveIdentity {
+            vendor_id: 1,
+            product_code: 2,
+            revision: 3,
+            serial: 4,
+        };
+        let mut startup = StartupController::<1>::new(0x1000);
+        startup.phase = StartupPhase::Ready;
+        startup.config = StartupConfig::new(EthercatState::Op);
+        startup.expected[0] = ExpectedSlave {
+            position: 0,
+            station_address: 0x1000,
+            identity,
+        };
+        startup.profiles[0] = profile;
+        startup.expected_count = 1;
+        startup.device_emulation[0] = device_emulation;
+        startup.table.add(0, 0x1000, identity).unwrap();
+        startup
+            .table
+            .observe_status(0, crate::slave::AlStatus::new(current as u16, 0), 0)
+            .unwrap();
+        startup.table.verify_identity(0, identity).unwrap();
+        startup
+    }
+
     fn accept_op_only<const MAX_SLAVES: usize>(
         startup: &mut StartupController<MAX_SLAVES>,
         activation: u8,
@@ -4410,6 +4584,156 @@ mod tests {
         assert_eq!(startup.selected_reference_clock(), None);
         assert_eq!(startup.dc_topology(), None);
         assert_eq!(startup.dc_capabilities(0), None);
+    }
+
+    #[test]
+    fn runtime_state_request_requires_ready_online_configured_retained_state() {
+        let profile = StartupSlaveProfile::new(0);
+        let mut controller = StateRequestController::new();
+        let mut not_ready = prepared_runtime_state_request(EthercatState::Op, profile, false);
+        not_ready.phase = StartupPhase::TransitioningAl;
+        assert_eq!(
+            not_ready.start_state_request(&mut controller, 0, EthercatState::SafeOp, 9, 10, 1_000,),
+            Err(StateRequestError::StartupNotReady)
+        );
+
+        let ready = prepared_runtime_state_request(EthercatState::Op, profile, false);
+        assert_eq!(
+            ready.start_state_request(&mut controller, 1, EthercatState::SafeOp, 9, 10, 1_000,),
+            Err(StateRequestError::UnknownPosition(1))
+        );
+
+        let mut offline = prepared_runtime_state_request(EthercatState::Op, profile, false);
+        offline.table.get_mut(0).unwrap().online = false;
+        assert_eq!(
+            offline.start_state_request(&mut controller, 0, EthercatState::SafeOp, 9, 10, 1_000,),
+            Err(StateRequestError::SlaveOffline(0))
+        );
+
+        let mut unconfigured = prepared_runtime_state_request(EthercatState::Op, profile, false);
+        unconfigured.table.get_mut(0).unwrap().configured = false;
+        assert_eq!(
+            unconfigured.start_state_request(
+                &mut controller,
+                0,
+                EthercatState::SafeOp,
+                9,
+                10,
+                1_000,
+            ),
+            Err(StateRequestError::SlaveUnconfigured(0))
+        );
+    }
+
+    #[test]
+    fn runtime_state_request_uses_profile_timeout_and_device_emulation_policy() {
+        let timeouts = AlTransitionTimeouts::new(300, 777, 500, 200);
+        let profile = StartupSlaveProfile::new(0).with_transition_timeouts(timeouts);
+        let startup = prepared_runtime_state_request(EthercatState::SafeOp, profile, false);
+        let mut controller = StateRequestController::new();
+        startup
+            .start_state_request(&mut controller, 0, EthercatState::Op, 11, 1_000, 10_000)
+            .unwrap();
+        assert_eq!(
+            controller.next_action(1_000).unwrap().unwrap().deadline_ns,
+            1_777
+        );
+
+        let mut normal = prepared_runtime_state_request(EthercatState::SafeOp, profile, false);
+        normal.table.get_mut(0).unwrap().al_status =
+            crate::slave::AlStatus::new((EthercatState::SafeOp as u16) | AL_ERROR_FLAG, 0x001B);
+        let mut normal_controller = StateRequestController::new();
+        normal
+            .start_state_request(
+                &mut normal_controller,
+                0,
+                EthercatState::Op,
+                12,
+                2_000,
+                10_000,
+            )
+            .unwrap();
+        assert_eq!(
+            normal_controller
+                .next_action(2_000)
+                .unwrap()
+                .unwrap()
+                .payload(),
+            &((EthercatState::SafeOp as u16) | AL_ERROR_FLAG).to_le_bytes()
+        );
+
+        let mut emulated = prepared_runtime_state_request(EthercatState::SafeOp, profile, true);
+        emulated.table.get_mut(0).unwrap().al_status =
+            crate::slave::AlStatus::new((EthercatState::SafeOp as u16) | AL_ERROR_FLAG, 0x001B);
+        let mut emulated_controller = StateRequestController::new();
+        assert_eq!(
+            emulated.start_state_request(
+                &mut emulated_controller,
+                0,
+                EthercatState::Op,
+                12,
+                2_000,
+                10_000,
+            ),
+            Err(StateRequestError::Al(AlError::AlErrorCode(0x001B)))
+        );
+    }
+
+    #[test]
+    fn runtime_state_request_rejects_op_only_and_reconciles_verified_observations() {
+        let profile = op_only_profile(0, AlTransitionTimeouts::uniform(1_000));
+        let startup = prepared_runtime_state_request(EthercatState::Op, profile, false);
+        let mut controller = StateRequestController::new();
+        assert_eq!(
+            startup.start_state_request(&mut controller, 0, EthercatState::SafeOp, 13, 10, 1_000,),
+            Err(StateRequestError::OpOnlyUnsupported(0))
+        );
+
+        let profile = StartupSlaveProfile::new(0);
+        let mut startup = prepared_runtime_state_request(EthercatState::Op, profile, false);
+        let handle = startup
+            .start_state_request(&mut controller, 0, EthercatState::SafeOp, 14, 20, 2_000)
+            .unwrap();
+        let request_status = controller.status(handle).unwrap();
+        startup
+            .validate_state_request_status(request_status)
+            .unwrap();
+        startup.table.get_mut(0).unwrap().al_status =
+            crate::slave::AlStatus::new(EthercatState::PreOp as u16, 0);
+        assert_eq!(
+            startup.validate_state_request_status(request_status),
+            Err(StateRequestError::RetainedStatusMismatch {
+                position: 0,
+                expected: request_status.observed_status,
+                observed: crate::slave::AlStatus::new(EthercatState::PreOp as u16, 0),
+            })
+        );
+        startup.table.get_mut(0).unwrap().al_status = request_status.observed_status;
+
+        let write = controller.next_action(21).unwrap().unwrap();
+        controller.accept(write, 14, &[], 1, 22).unwrap();
+        let read = controller.next_action(23).unwrap().unwrap();
+        let progress = controller
+            .accept(read, 14, &status(EthercatState::SafeOp), 1, 24)
+            .unwrap();
+        let observation = progress.observation().unwrap();
+        startup
+            .reconcile_state_request_observation(observation, 77)
+            .unwrap();
+        assert_eq!(startup.records()[0].al_status.state, EthercatState::SafeOp);
+        assert_eq!(startup.records()[0].requested_state, EthercatState::SafeOp);
+        assert_eq!(startup.records()[0].last_seen_cycle, 77);
+
+        let mut wrong_station = observation;
+        wrong_station.station_address = 0x2000;
+        assert_eq!(
+            startup.reconcile_state_request_observation(wrong_station, 78),
+            Err(StateRequestError::RetainedStationMismatch {
+                position: 0,
+                expected: 0x2000,
+                observed: 0x1000,
+            })
+        );
     }
 
     #[test]

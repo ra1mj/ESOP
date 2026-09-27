@@ -366,6 +366,17 @@ RxPDO/TxPDO 可映射性；任何 malformed、fragment 顺序、abort、身份�
 | REC-002 | P1 | 自动恢复必须是应用配置的策略，默认关闭；策略可规定安全输出、重试次数和是否允许回到 OP。 | 策略矩阵测试。 |
 | SAF-001 | P0 | 主站不替代功能安全系统；任何通信异常的安全输出和 STO 行为由应用/设备安全链路负责。 | API/文档审查无错误安全承诺。 |
 
+REC-001 当前完成了 `request_state` 软件增量。固定容量单槽控制器使用稳定 handle，按合法
+ESM 路径逐步复用现有 AL 状态机，并从 Ready Startup 中复制已验证站地址、当前 AL 状态、
+ESI/ETG timeout、request timeout 和 Device Emulation 错误确认策略。生产调度优先完成本周期
+Domain/DC 后，才在 Startup/配置服务之后、Mailbox 和普通异步寄存器请求之前接纳最多一个
+状态请求数据报；`InFlight` 跨周期保留且不重发，终态再次核对 action/generation/address/
+length/deadline/WKC。活动或锁存故障会清除 Topology lifecycle gate；成功 observation 会按真实
+master cycle 更新 retained slave 状态，但不会绕过 drive、DC、command age、CiA 402 或 motion
+permit 门槛，也不会自动回到 OP。带非空 `OpOnly` 输出规则的运行时状态变更继续拒绝，直至后续
+任务提取共享的有界 OpOnly 顺序。`rescan`、`reconfigure_slave`、统一恢复 API、目标 WCET 与
+实物 HIL 仍未完成，因此 REC-001 保持部分实现。
+
 ### 5.9 能力声明与一致性边界
 
 | ID | 优先级 | 需求 | 验收证据 |

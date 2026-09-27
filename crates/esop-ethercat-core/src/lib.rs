@@ -40,6 +40,7 @@ mod sii_stream;
 mod slave;
 mod slave_copy;
 mod startup;
+mod state_request;
 mod sync_manager_discovery;
 mod watchdog;
 pub mod wire;
@@ -224,6 +225,11 @@ pub use startup::{
     STARTUP_SII_PDO_ENTRY_CAPACITY, StartupAction, StartupAlFault, StartupConfig,
     StartupConfigurationServices, StartupController, StartupDcRequirement, StartupError,
     StartupPhase, StartupProgress, StartupReferenceClock, StartupSlaveProfile,
+};
+pub use state_request::{
+    StateRequestConfig, StateRequestController, StateRequestError, StateRequestHandle,
+    StateRequestObservation, StateRequestPhase, StateRequestProgress, StateRequestResult,
+    StateRequestStatus,
 };
 pub use sync_manager_discovery::{
     SyncManagerRegisterBank, SyncManagerRegisterDescriptor, SyncManagerRegisterDiscoveryAction,

@@ -239,6 +239,13 @@ P0 诊断至少提供：
 
 恢复必须由应用策略明确允许。默认不在拓扑变化或 WKC 异常后自动恢复运动输出并返回 OP。
 
+当前受预算恢复 API 先完成了显式 `request_state`：固定容量状态请求控制器复用现有 AL
+转换、ESI timeout、Device Emulation 与控制请求校验，按生产调度在 Domain/DC 周期工作之后
+逐周期执行；延迟响应保持唯一 `InFlight` 所有权且不重发。请求活动或故障时 Topology gate
+fail-closed，完成只更新经核验的 retained AL observation，不自动重新使能运动或返回 OP。
+运行时 `OpOnly` 输出顺序、显式 `rescan`、单从站 `reconfigure_slave`、目标 WCET 和实物 HIL
+仍是开放项。
+
 ## 5. ETG.1500 Class B 对照
 
 下表只给出产品决策，详细协议行为仍以适用规范为准。

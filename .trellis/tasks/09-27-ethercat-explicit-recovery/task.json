@@ -1,0 +1,28 @@
+{
+  "id": "ethercat-explicit-recovery",
+  "name": "ethercat-explicit-recovery",
+  "title": "EtherCAT explicit recovery control plane",
+  "description": "",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P2",
+  "creator": "mj",
+  "assignee": "mj",
+  "createdAt": "2026-09-27",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "09-27-ethercat-runtime-state-requests"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

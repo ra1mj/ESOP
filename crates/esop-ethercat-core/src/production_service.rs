@@ -1,10 +1,10 @@
 //! Fixed-priority production service scheduling over the shared cyclic RX.
 //!
-//! Startup, PDO configuration, mapping, DC configuration, and mailbox
-//! controllers retain their own state machines. This scheduler owns the single
-//! request handle admitted to the production service slot, keeps it across
-//! cycles while it is in flight, and consumes or rebuilds it without allowing
-//! a lower-priority service to overtake the active transaction.
+//! Startup, PDO configuration, mapping, DC configuration, runtime state, and
+//! mailbox controllers retain their own state machines. This scheduler owns
+//! the single request handle admitted to the production service slot, keeps it
+//! across cycles while it is in flight, and consumes or rebuilds it without
+//! allowing another service to overtake the active transaction.
 
 use crate::control::{ControlError, ControlRequestPool, RequestHandle, RequestState};
 use crate::dc::{
@@ -32,6 +32,9 @@ use crate::scheduled_domains::{
     ScheduledMailboxCycleError, ScheduledMailboxCycleReport, ScheduledReceiveReport,
 };
 use crate::startup::{StartupController, StartupError, StartupPhase, StartupProgress};
+use crate::state_request::{
+    StateRequestController, StateRequestError, StateRequestPhase, StateRequestProgress,
+};
 use crate::watchdog::{WatchdogController, WatchdogError, WatchdogPhase, WatchdogProgress};
 use crate::wire::MAX_ETHERNET_FRAME_LEN;
 
@@ -45,6 +48,7 @@ pub enum ScheduledProductionServiceKind {
     DcClockConfiguration,
     DcSyncConfiguration,
     DcConfiguration,
+    StateRequest,
     Mailbox,
     RegisterRequest,
 }
@@ -66,6 +70,7 @@ pub enum ScheduledProductionServiceProgress {
     DcClockConfiguration(DcClockProgress),
     DcSyncConfiguration(DcSyncProgress),
     DcConfiguration(DcProgress),
+    StateRequest(StateRequestProgress),
     Mailbox(MailboxProgress),
     RegisterRequest(EscRegisterRequestProgress),
 }
@@ -80,6 +85,7 @@ pub enum ScheduledProductionServiceFault {
     DcClockConfiguration(DcClockError),
     DcSyncConfiguration(DcSyncError),
     DcConfiguration(DcError),
+    StateRequest(StateRequestError),
     Mailbox(MailboxError),
     RegisterRequest(EscRegisterRequestError),
 }
@@ -220,6 +226,7 @@ pub struct ScheduledProductionServices<
     pub dc_clock_configuration: Option<&'a mut DcClockController<MAX_SLAVES>>,
     pub dc_sync_configuration: Option<&'a mut DcSyncController<MAX_SLAVES>>,
     pub dc_configuration: Option<&'a mut DcController>,
+    state_request: Option<&'a mut StateRequestController>,
     pub mailbox: Option<&'a mut MailboxController>,
     register_requests: Option<&'a mut EscRegisterRequestController<REGISTER_REQUESTS>>,
     mapped_mailbox_status: Option<MailboxMappedStatusBit>,
@@ -248,6 +255,7 @@ impl<
             dc_clock_configuration: None,
             dc_sync_configuration: None,
             dc_configuration,
+            state_request: None,
             mailbox,
             register_requests: None,
             mapped_mailbox_status: None,
@@ -267,6 +275,7 @@ impl<
             dc_clock_configuration: self.dc_clock_configuration,
             dc_sync_configuration: self.dc_sync_configuration,
             dc_configuration: self.dc_configuration,
+            state_request: self.state_request,
             mailbox: self.mailbox,
             register_requests: Some(register_requests),
             mapped_mailbox_status: self.mapped_mailbox_status,
@@ -313,6 +322,11 @@ impl<
         dc_sync_configuration: &'a mut DcSyncController<MAX_SLAVES>,
     ) -> Self {
         self.dc_sync_configuration = Some(dc_sync_configuration);
+        self
+    }
+
+    pub fn with_state_request(mut self, state_request: &'a mut StateRequestController) -> Self {
+        self.state_request = Some(state_request);
         self
     }
 
@@ -789,7 +803,13 @@ impl ScheduledProductionServiceScheduler {
         if let Some(handle) = self.request {
             match controls.get(handle).map(|request| request.state) {
                 Some(RequestState::Complete | RequestState::Failed) => {
-                    let result = self.consume_terminal(controls, services, handle, port.now_ns());
+                    let result = self.consume_terminal(
+                        controls,
+                        services,
+                        handle,
+                        port.now_ns(),
+                        cycle.received().report.cycle,
+                    );
                     self.request = None;
                     match result {
                         Ok(value) => progress = value,
@@ -1047,6 +1067,7 @@ impl ScheduledProductionServiceScheduler {
             ScheduledProductionServiceKind::DcClockConfiguration,
             ScheduledProductionServiceKind::DcSyncConfiguration,
             ScheduledProductionServiceKind::DcConfiguration,
+            ScheduledProductionServiceKind::StateRequest,
             ScheduledProductionServiceKind::Mailbox,
             ScheduledProductionServiceKind::RegisterRequest,
         ]
@@ -1132,6 +1153,14 @@ impl ScheduledProductionServiceScheduler {
                 .is_some_and(|controller| {
                     !matches!(controller.phase(), DcPhase::Idle | DcPhase::Complete)
                 }),
+            ScheduledProductionServiceKind::StateRequest => {
+                services.state_request.as_deref().is_some_and(|controller| {
+                    matches!(
+                        controller.phase(),
+                        StateRequestPhase::Transitioning | StateRequestPhase::Faulted
+                    )
+                })
+            }
             ScheduledProductionServiceKind::Mailbox => {
                 services.mailbox.as_deref().is_some_and(|controller| {
                     !matches!(
@@ -1285,6 +1314,21 @@ impl ScheduledProductionServiceScheduler {
                 .dc_configuration
                 .as_deref()
                 .and_then(DcController::pending)
+                .is_some_and(|action| {
+                    request.matches_action(
+                        action.datagram_index,
+                        action.generation,
+                        action.address,
+                        action.operation,
+                        action.payload(),
+                        action.datagram_len(),
+                        action.deadline_ns,
+                    )
+                }),
+            ScheduledProductionServiceKind::StateRequest => services
+                .state_request
+                .as_deref()
+                .and_then(StateRequestController::pending)
                 .is_some_and(|action| {
                     request.matches_action(
                         action.datagram_index,
@@ -1700,6 +1744,79 @@ impl ScheduledProductionServiceScheduler {
                     ..ScheduledProductionEnqueueOutcome::EMPTY
                 })
             }
+            ScheduledProductionServiceKind::StateRequest => {
+                let status = {
+                    let controller = services
+                        .state_request
+                        .as_deref()
+                        .ok_or(ControlError::InvalidState)?;
+                    let handle = controller
+                        .active_handle()
+                        .ok_or(ControlError::InvalidState)?;
+                    match controller.status(handle) {
+                        Ok(status) => status,
+                        Err(error) => {
+                            return Ok(ScheduledProductionEnqueueOutcome {
+                                fault: Some(ScheduledProductionServiceFault::StateRequest(error)),
+                                ..ScheduledProductionEnqueueOutcome::EMPTY
+                            });
+                        }
+                    }
+                };
+                if let Some(startup) = services.startup.as_deref()
+                    && let Err(error) = startup.validate_state_request_status(status)
+                {
+                    let error = services
+                        .state_request
+                        .as_deref_mut()
+                        .ok_or(ControlError::InvalidState)?
+                        .abort(error);
+                    return Ok(ScheduledProductionEnqueueOutcome {
+                        fault: Some(ScheduledProductionServiceFault::StateRequest(error)),
+                        ..ScheduledProductionEnqueueOutcome::EMPTY
+                    });
+                }
+                let controller = services
+                    .state_request
+                    .as_deref_mut()
+                    .ok_or(ControlError::InvalidState)?;
+                let action = match controller.next_action(now_ns) {
+                    Ok(action) => action,
+                    Err(error) => {
+                        return Ok(ScheduledProductionEnqueueOutcome {
+                            fault: Some(ScheduledProductionServiceFault::StateRequest(error)),
+                            ..ScheduledProductionEnqueueOutcome::EMPTY
+                        });
+                    }
+                };
+                let Some(action) = action else {
+                    return Ok(ScheduledProductionEnqueueOutcome::EMPTY);
+                };
+                if action.deadline_ns <= now_ns {
+                    return Ok(match controller.timeout(action, now_ns) {
+                        Ok(progress) => ScheduledProductionEnqueueOutcome {
+                            progress: Some(ScheduledProductionServiceProgress::StateRequest(
+                                progress,
+                            )),
+                            ..ScheduledProductionEnqueueOutcome::EMPTY
+                        },
+                        Err(error) => ScheduledProductionEnqueueOutcome {
+                            fault: Some(ScheduledProductionServiceFault::StateRequest(error)),
+                            ..ScheduledProductionEnqueueOutcome::EMPTY
+                        },
+                    });
+                }
+                match controller.enqueue_pending(controls) {
+                    Ok(request) => Ok(ScheduledProductionEnqueueOutcome {
+                        request: Some(request),
+                        ..ScheduledProductionEnqueueOutcome::EMPTY
+                    }),
+                    Err(error) => Ok(ScheduledProductionEnqueueOutcome {
+                        fault: Some(ScheduledProductionServiceFault::StateRequest(error)),
+                        ..ScheduledProductionEnqueueOutcome::EMPTY
+                    }),
+                }
+            }
             ScheduledProductionServiceKind::Mailbox => {
                 let controller = services
                     .mailbox
@@ -1854,6 +1971,7 @@ impl ScheduledProductionServiceScheduler {
         >,
         handle: RequestHandle,
         now_ns: u64,
+        cycle: u64,
     ) -> Result<ScheduledProductionServiceProgress, ScheduledProductionServiceFault> {
         match self.active {
             ScheduledProductionServiceKind::Startup => services
@@ -1910,6 +2028,36 @@ impl ScheduledProductionServiceScheduler {
                 .accept_completed(controls, handle, now_ns)
                 .map(ScheduledProductionServiceProgress::DcConfiguration)
                 .map_err(ScheduledProductionServiceFault::DcConfiguration),
+            ScheduledProductionServiceKind::StateRequest => {
+                let result = services
+                    .state_request
+                    .as_deref_mut()
+                    .ok_or(ScheduledProductionServiceFault::Control(
+                        ControlError::InvalidState,
+                    ))?
+                    .accept_completed(controls, handle, now_ns);
+                let observation = services
+                    .state_request
+                    .as_deref_mut()
+                    .and_then(StateRequestController::take_observation);
+                if let (Some(startup), Some(observation)) =
+                    (services.startup.as_deref_mut(), observation)
+                    && let Err(error) =
+                        startup.reconcile_state_request_observation(observation, cycle)
+                {
+                    let error = services
+                        .state_request
+                        .as_deref_mut()
+                        .ok_or(ScheduledProductionServiceFault::Control(
+                            ControlError::InvalidState,
+                        ))?
+                        .abort(error);
+                    return Err(ScheduledProductionServiceFault::StateRequest(error));
+                }
+                result
+                    .map(ScheduledProductionServiceProgress::StateRequest)
+                    .map_err(ScheduledProductionServiceFault::StateRequest)
+            }
             ScheduledProductionServiceKind::RegisterRequest => services
                 .register_requests
                 .as_deref_mut()
@@ -1983,6 +2131,11 @@ impl ScheduledProductionServiceScheduler {
                 .as_deref()
                 .and_then(DcController::last_error)
                 .map(ScheduledProductionServiceFault::DcConfiguration),
+            ScheduledProductionServiceKind::StateRequest => services
+                .state_request
+                .as_deref()
+                .and_then(StateRequestController::last_error)
+                .map(ScheduledProductionServiceFault::StateRequest),
             ScheduledProductionServiceKind::Mailbox => services
                 .mailbox
                 .as_deref()
@@ -2041,6 +2194,10 @@ impl ScheduledProductionServiceScheduler {
                 .dc_configuration
                 .as_deref()
                 .is_some_and(|controller| controller.phase() == DcPhase::Complete),
+            ScheduledProductionServiceKind::StateRequest => services
+                .state_request
+                .as_deref()
+                .is_some_and(|controller| controller.phase() == StateRequestPhase::Complete),
             ScheduledProductionServiceKind::Mailbox => services
                 .mailbox
                 .as_deref()
@@ -2137,8 +2294,8 @@ mod tests {
     };
     use crate::wire::{Command, DatagramHeader};
     use crate::{
-        Domain, DomainSegment, FmmuConfig, MailboxMappedStatusBit, RegisterOperation,
-        ScheduledDomainEntry,
+        AlErrorAcknowledgePolicy, AlTransitionTimeouts, Domain, DomainSegment, FmmuConfig,
+        MailboxMappedStatusBit, RegisterOperation, ScheduledDomainEntry, StateRequestConfig,
     };
 
     const EXPECTED: [ExpectedSlave; 1] = [ExpectedSlave {
@@ -2211,6 +2368,219 @@ mod tests {
         })
         .unwrap();
         plan
+    }
+
+    fn state_request_config(generation: u16) -> StateRequestConfig {
+        StateRequestConfig {
+            position: 0,
+            station_address: 0x1000,
+            observed_status: AlStatus::new(EthercatState::SafeOp as u16, 0),
+            requested_state: EthercatState::Op,
+            generation,
+            now_ns: 0,
+            deadline_ns: 1_000,
+            request_timeout_ns: 100,
+            transition_timeouts: AlTransitionTimeouts::uniform(500),
+            error_acknowledge_policy: AlErrorAcknowledgePolicy::Enabled,
+        }
+    }
+
+    #[test]
+    fn state_request_priority_is_fixed_and_in_flight_ownership_prevents_preemption() {
+        let mut state_request = StateRequestController::new();
+        state_request.start(state_request_config(7)).unwrap();
+        let mut mailbox = MailboxController::new();
+        mailbox
+            .start(
+                MailboxConfig::new(0x1000, 32, 0x1100, 32),
+                0x1000,
+                8,
+                0,
+                MailboxProtocol::CoE,
+                &[1],
+            )
+            .unwrap();
+        let mut registers = EscRegisterRequestController::<1>::new(42);
+        registers
+            .submit_read(0x1000, crate::ESC_AL_STATUS, 2, 0, 1_000)
+            .unwrap();
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+        {
+            let services =
+                ScheduledProductionServices::<0, 1, 0>::new(None, None, None, Some(&mut mailbox))
+                    .with_state_request(&mut state_request)
+                    .with_register_requests(&mut registers);
+            scheduler.refresh_selection(&services);
+        }
+        assert_eq!(
+            scheduler.active(),
+            ScheduledProductionServiceKind::StateRequest
+        );
+
+        let mut controls = ControlRequestPool::<1>::new();
+        let request = {
+            let mut services =
+                ScheduledProductionServices::<0, 1, 0>::new(None, None, None, Some(&mut mailbox))
+                    .with_state_request(&mut state_request)
+                    .with_register_requests(&mut registers);
+            scheduler
+                .enqueue_due(1, &mut controls, &mut services)
+                .unwrap()
+                .request
+                .unwrap()
+        };
+        scheduler.request = Some(request);
+        {
+            let services =
+                ScheduledProductionServices::<0, 1, 0>::new(None, None, None, Some(&mut mailbox))
+                    .with_state_request(&mut state_request)
+                    .with_register_requests(&mut registers);
+            assert_eq!(
+                scheduler.ensure_request_matches(&controls, &services),
+                Ok(())
+            );
+        }
+
+        let mut mapping = MappingConfigController::<1, 0>::new();
+        let mut table = MappingTable::<1, 0>::new();
+        table
+            .add_sync_manager(crate::SyncManagerConfig {
+                index: 2,
+                physical_start: 0x1000,
+                length: 2,
+                control: 0x24,
+                status: 0,
+                enable: true,
+            })
+            .unwrap();
+        mapping.start(0x1000, 9, 1, 1_000, 100, &table).unwrap();
+        {
+            let services = ScheduledProductionServices::<0, 1, 0>::new(
+                None,
+                Some(&mut mapping),
+                None,
+                Some(&mut mailbox),
+            )
+            .with_state_request(&mut state_request)
+            .with_register_requests(&mut registers);
+            scheduler.refresh_selection(&services);
+        }
+        assert_eq!(
+            scheduler.active(),
+            ScheduledProductionServiceKind::StateRequest
+        );
+
+        let mut substituted = StateRequestController::new();
+        substituted.start(state_request_config(10)).unwrap();
+        substituted.next_action(1).unwrap().unwrap();
+        {
+            let services =
+                ScheduledProductionServices::<0, 1, 0>::new(None, None, None, Some(&mut mailbox))
+                    .with_state_request(&mut substituted)
+                    .with_register_requests(&mut registers);
+            assert_eq!(
+                scheduler.ensure_request_matches(&controls, &services),
+                Err(ScheduledProductionServiceKind::StateRequest)
+            );
+        }
+        controls.release(request).unwrap();
+    }
+
+    #[test]
+    fn state_request_terminal_progress_and_fault_remain_visible_to_the_scheduler() {
+        let mut controller = StateRequestController::new();
+        controller.start(state_request_config(7)).unwrap();
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+        let mut controls = ControlRequestPool::<1>::new();
+        let mut frame = [0; MAX_ETHERNET_FRAME_LEN];
+
+        for (now_ns, response, expected) in [
+            (1, [0, 0, 0, 0, 0, 0], StateRequestProgress::ControlWritten),
+            (
+                3,
+                [EthercatState::Op as u8, 0, 0, 0, 0, 0],
+                StateRequestProgress::Complete(crate::StateRequestResult {
+                    observation: crate::StateRequestObservation {
+                        handle: controller.active_handle().unwrap(),
+                        position: 0,
+                        station_address: 0x1000,
+                        requested_state: EthercatState::Op,
+                        observed_status: AlStatus::new(EthercatState::Op as u16, 0),
+                        generation: 7,
+                        deadline_ns: 1_000,
+                        observed_at_ns: 4,
+                    },
+                    completed_at_ns: 4,
+                }),
+            ),
+        ] {
+            let handle = {
+                let mut services =
+                    ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+                        .with_state_request(&mut controller);
+                scheduler.refresh_selection(&services);
+                assert_eq!(
+                    scheduler.active(),
+                    ScheduledProductionServiceKind::StateRequest
+                );
+                scheduler
+                    .enqueue_due(now_ns, &mut controls, &mut services)
+                    .unwrap()
+                    .request
+                    .unwrap()
+            };
+            let action = controller.pending().unwrap();
+            controls
+                .get_mut(handle)
+                .unwrap()
+                .build_frame(&mut frame, [0xFF; 6], [1, 2, 3, 4, 5, 6])
+                .unwrap();
+            let response = if action.read_len == 0 {
+                action.payload()
+            } else {
+                &response[..action.read_len as usize]
+            };
+            controls
+                .complete(handle, action.generation, action.address, response, 1)
+                .unwrap();
+            let progress = {
+                let mut services =
+                    ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+                        .with_state_request(&mut controller);
+                scheduler.consume_terminal(&mut controls, &mut services, handle, now_ns + 1, now_ns)
+            };
+            assert_eq!(
+                progress,
+                Ok(ScheduledProductionServiceProgress::StateRequest(expected))
+            );
+        }
+        assert_eq!(controller.phase(), StateRequestPhase::Complete);
+        assert_eq!(controls.in_use(), 0);
+
+        let mut faulted = StateRequestController::new();
+        faulted.start(state_request_config(8)).unwrap();
+        let action = faulted.next_action(1).unwrap().unwrap();
+        assert_eq!(
+            faulted.accept(action, 8, &[], 0, 2),
+            Err(StateRequestError::Al(
+                crate::AlError::UnexpectedWorkingCounter
+            ))
+        );
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+        let services = ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+            .with_state_request(&mut faulted);
+        scheduler.refresh_selection(&services);
+        assert_eq!(
+            scheduler.active(),
+            ScheduledProductionServiceKind::StateRequest
+        );
+        assert_eq!(
+            scheduler.controller_fault(&services),
+            Some(ScheduledProductionServiceFault::StateRequest(
+                StateRequestError::Al(crate::AlError::UnexpectedWorkingCounter)
+            ))
+        );
+        assert!(!scheduler.controller_ready(&services));
     }
 
     #[test]
@@ -2942,7 +3312,7 @@ mod tests {
                 ScheduledProductionServices::<1, 0, 0, 0>::new(None, None, None, None)
                     .with_dc_clock_configuration(&mut dc_clock);
             assert_eq!(
-                scheduler.consume_terminal(&mut controls, &mut services, read_handle, 2),
+                scheduler.consume_terminal(&mut controls, &mut services, read_handle, 2, 1),
                 Ok(ScheduledProductionServiceProgress::DcClockConfiguration(
                     DcClockProgress::Advanced
                 ))
@@ -2980,7 +3350,7 @@ mod tests {
                 ScheduledProductionServices::<1, 0, 0, 0>::new(None, None, None, None)
                     .with_dc_clock_configuration(&mut dc_clock);
             assert_eq!(
-                scheduler.consume_terminal(&mut controls, &mut services, write_handle, 4),
+                scheduler.consume_terminal(&mut controls, &mut services, write_handle, 4, 2),
                 Ok(ScheduledProductionServiceProgress::DcClockConfiguration(
                     DcClockProgress::Complete
                 ))
@@ -3049,7 +3419,7 @@ mod tests {
                 let mut services =
                     ScheduledProductionServices::<1, 0, 0, 0>::new(None, None, None, None)
                         .with_watchdog_configuration(&mut watchdog);
-                scheduler.consume_terminal(&mut controls, &mut services, handle, now_ns + 1)
+                scheduler.consume_terminal(&mut controls, &mut services, handle, now_ns + 1, now_ns)
             };
             scheduler.request = None;
             now_ns += 2;
@@ -3131,7 +3501,7 @@ mod tests {
                 let mut services =
                     ScheduledProductionServices::<1, 0, 0, 0>::new(None, None, None, None)
                         .with_dc_sync_configuration(&mut dc_sync);
-                scheduler.consume_terminal(&mut controls, &mut services, handle, now_ns + 1)
+                scheduler.consume_terminal(&mut controls, &mut services, handle, now_ns + 1, now_ns)
             };
             scheduler.request = None;
             now_ns += 2;

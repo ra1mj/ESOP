@@ -3,32 +3,33 @@ use esop_ethercat_core::wire::{
     MAX_ETHERNET_FRAME_LEN, WORKING_COUNTER_LEN,
 };
 use esop_ethercat_core::{
-    AL_ID_LOADED_FLAG, AL_ID_REQUEST_FLAG, AlStatus, CoeHeader, CoeService, ControlError,
-    ControlRequestPool, CycleError, DatagramPlan, DcClockConfig, DcClockController,
-    DcClockProgress, DcCyclicConfig, DcCyclicError, DcCyclicSync, DcMonitor, DcSyncConfig,
-    DcSyncController, DcSyncProgress, DcSyncWindowConfig, DcTopology, Domain, DomainSegment,
-    ESC_AL_CONTROL, ESC_AL_STATUS, ESC_AL_STATUS_CODE, ESC_CONFIGURATION, ESC_DC_SYSTEM_DIFF,
-    ESC_DC_SYSTEM_TIME, ESC_FEATURE_DC_SUPPORTED, ESC_PROCESS_DATA_WATCHDOG_TIME,
-    ESC_WATCHDOG_DIVIDER, EscDcRange, EscRegisterRequestController, EscRegisterRequestProgress,
-    EscRegisterRequestState, EscWatchdogConfig, EthercatMaster, EthercatPort, EthercatState,
-    ExpectedSlave, FMMU_IMAGE_LEN, FmmuRegisterDiscoveryController, FmmuRegisterDiscoveryProgress,
-    FramePlan, FramePlanSet, LinkState, MAX_MAILBOX_BYTES, MailboxConfig, MailboxController,
-    MailboxError, MailboxHeader, MailboxPhase, MailboxProgress, MailboxProtocol,
-    MailboxRetryPolicy, MappingConfigController, MappingConfigPhase, MappingConfigProgress,
-    MappingTable, MasterConfig, PdoConfigAction, PdoConfigBatch, PdoConfigBatchPhase,
-    PdoConfigBatchPlan, PdoConfigController, PdoConfigError, PdoConfigJob, PdoConfigPhase,
-    PdoConfigPlan, PdoConfigProgress, PdoConfigStep, PdoSdoWrite, PortError, RegisterOperation,
-    RequestHandle, RequestState, RxPoll, RxSlotState, SYNC_MANAGER_IMAGE_LEN, ScanDcCapabilities,
-    ScanPortLink, ScanRecord, ScheduleDomain, ScheduleTable, ScheduledControlCycleError,
-    ScheduledDomainBank, ScheduledDomainEntry, ScheduledPdoConfiguration,
-    ScheduledPdoConfigurationProgress, ScheduledProcessInputEntry, ScheduledProcessInputs,
-    ScheduledProductionServiceCycleError, ScheduledProductionServiceFault,
+    AL_ID_LOADED_FLAG, AL_ID_REQUEST_FLAG, AlErrorAcknowledgePolicy, AlStatus,
+    AlTransitionTimeouts, CoeHeader, CoeService, ControlError, ControlRequestPool, CycleError,
+    DatagramPlan, DcClockConfig, DcClockController, DcClockProgress, DcCyclicConfig, DcCyclicError,
+    DcCyclicSync, DcMonitor, DcSyncConfig, DcSyncController, DcSyncProgress, DcSyncWindowConfig,
+    DcTopology, Domain, DomainSegment, ESC_AL_CONTROL, ESC_AL_STATUS, ESC_AL_STATUS_CODE,
+    ESC_CONFIGURATION, ESC_DC_SYSTEM_DIFF, ESC_DC_SYSTEM_TIME, ESC_FEATURE_DC_SUPPORTED,
+    ESC_PROCESS_DATA_WATCHDOG_TIME, ESC_WATCHDOG_DIVIDER, EscDcRange, EscRegisterRequestController,
+    EscRegisterRequestProgress, EscRegisterRequestState, EscWatchdogConfig, EthercatMaster,
+    EthercatPort, EthercatState, ExpectedSlave, FMMU_IMAGE_LEN, FmmuRegisterDiscoveryController,
+    FmmuRegisterDiscoveryProgress, FramePlan, FramePlanSet, LinkState, MAX_MAILBOX_BYTES,
+    MailboxConfig, MailboxController, MailboxError, MailboxHeader, MailboxPhase, MailboxProgress,
+    MailboxProtocol, MailboxRetryPolicy, MappingConfigController, MappingConfigPhase,
+    MappingConfigProgress, MappingTable, MasterConfig, PdoConfigAction, PdoConfigBatch,
+    PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigController, PdoConfigError, PdoConfigJob,
+    PdoConfigPhase, PdoConfigPlan, PdoConfigProgress, PdoConfigStep, PdoSdoWrite, PortError,
+    RegisterOperation, RequestHandle, RequestState, RxPoll, RxSlotState, SYNC_MANAGER_IMAGE_LEN,
+    ScanDcCapabilities, ScanPortLink, ScanRecord, ScheduleDomain, ScheduleTable,
+    ScheduledControlCycleError, ScheduledDomainBank, ScheduledDomainEntry,
+    ScheduledPdoConfiguration, ScheduledPdoConfigurationProgress, ScheduledProcessInputEntry,
+    ScheduledProcessInputs, ScheduledProductionServiceCycleError, ScheduledProductionServiceFault,
     ScheduledProductionServiceKind, ScheduledProductionServiceProgress,
     ScheduledProductionServiceRecovery, ScheduledProductionServiceScheduler,
     ScheduledProductionServices, ScheduledReceiveError, ScheduledServiceFrameError,
     ScheduledServiceTxError, ScheduledServiceTxFailure, SlaveIdentity, StartupAction,
     StartupConfig, StartupConfigurationServices, StartupController, StartupError, StartupPhase,
-    StartupProgress, StartupSlaveProfile, SyncManagerConfig,
+    StartupProgress, StartupSlaveProfile, StateRequestConfig, StateRequestController,
+    StateRequestPhase, StateRequestProgress, SyncManagerConfig,
     SyncManagerRegisterDiscoveryController, SyncManagerRegisterDiscoveryProgress,
     WatchdogController, WatchdogControllerConfig, WatchdogError, WatchdogField, WatchdogPhase,
     WatchdogPlan, WatchdogPlanEntry, WatchdogProgress, fixed_address,
@@ -702,6 +703,216 @@ fn async_register_request_uses_the_bounded_production_service_slot_across_cycles
     assert!(
         other_cycle_facts_from_production_service_cycle(&second, ready_other_cycle_facts())
             .coe_ready
+    );
+}
+
+#[test]
+fn runtime_state_request_preserves_cyclic_order_and_does_not_retransmit_in_flight_work() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<3, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let mut process_plan = FramePlan::<1>::new();
+    process_plan
+        .push(DatagramPlan {
+            command: Command::Lrw,
+            index: 12,
+            address: 0x1000,
+            payload_offset: 0,
+            payload_len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut process_plans = FramePlanSet::<1, 1>::new();
+    process_plans.push(process_plan.datagrams()[0]).unwrap();
+    let process_image = [0x40, 0x00];
+    let process_inputs = ScheduledProcessInputs::new(
+        &bank,
+        &schedule,
+        [ScheduledProcessInputEntry {
+            id: 9,
+            image: &process_image,
+            plans: &process_plans,
+        }],
+    )
+    .unwrap();
+    let mut state_request = StateRequestController::new();
+    let request = state_request
+        .start(StateRequestConfig {
+            position: 0,
+            station_address: 0x1000,
+            observed_status: AlStatus::new(EthercatState::SafeOp as u16, 0),
+            requested_state: EthercatState::Op,
+            generation: 7,
+            now_ns: 100_000,
+            deadline_ns: 600_000,
+            request_timeout_ns: 300_000,
+            transition_timeouts: AlTransitionTimeouts::uniform(400_000),
+            error_acknowledge_policy: AlErrorAcknowledgePolicy::Enabled,
+        })
+        .unwrap();
+    let mut scheduler = ScheduledProductionServiceScheduler::new();
+    let mut controls = ControlRequestPool::<1>::new();
+    let mut port = TwoFrameSimPort::new();
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut dc_image = [0; 8];
+
+    port.set_now_ns(100_000);
+    port.pause_after_next_rx_frames(2);
+    bank.submit_due_process_inputs(&process_inputs, &mut master, &mut port, 1, 150_000, 150_000)
+        .unwrap();
+    let first = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            100_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+                .with_state_request(&mut state_request),
+            1,
+            150_000,
+            150_000,
+        )
+        .unwrap();
+    assert_eq!(
+        first.selected(),
+        ScheduledProductionServiceKind::StateRequest
+    );
+    assert_eq!(
+        first.progress(),
+        ScheduledProductionServiceProgress::Waiting
+    );
+    assert_eq!(
+        first.recovery(),
+        ScheduledProductionServiceRecovery::AwaitingResponse
+    );
+    assert!(first.request().is_some());
+    assert_eq!(controls.in_use(), 1);
+    assert_eq!(state_request.phase(), StateRequestPhase::Transitioning);
+    assert_eq!(port.al_control_writes, 1);
+    assert_eq!(port.last_al_control, Some(EthercatState::Op as u16));
+    assert_eq!(
+        port.tx_commands[..3],
+        [Command::Lrw as u8, Command::Frmw as u8, Command::Fpwr as u8]
+    );
+    assert!(
+        !other_cycle_facts_from_production_service_cycle(&first, ready_other_cycle_facts())
+            .topology_valid
+    );
+
+    port.set_now_ns(200_000);
+    bank.submit_due_process_inputs(&process_inputs, &mut master, &mut port, 2, 250_000, 250_000)
+        .unwrap();
+    let second = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            200_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+                .with_state_request(&mut state_request),
+            2,
+            250_000,
+            250_000,
+        )
+        .unwrap();
+    assert_eq!(
+        second.progress(),
+        ScheduledProductionServiceProgress::StateRequest(StateRequestProgress::ControlWritten)
+    );
+    assert_eq!(second.request(), None);
+    assert_eq!(controls.in_use(), 0);
+    assert_eq!(port.al_control_writes, 1);
+    assert_eq!(port.tx_attempts, 5);
+    assert_eq!(
+        port.tx_commands[3..5],
+        [Command::Lrw as u8, Command::Frmw as u8]
+    );
+    assert!(
+        !other_cycle_facts_from_production_service_cycle(&second, ready_other_cycle_facts())
+            .topology_valid
+    );
+
+    let mut status = [0; 6];
+    status[..2].copy_from_slice(&(EthercatState::Op as u16).to_le_bytes());
+    port.set_next_control_response(fixed_address(0x1000, ESC_AL_STATUS), &status);
+    port.set_now_ns(300_000);
+    bank.submit_due_process_inputs(&process_inputs, &mut master, &mut port, 3, 350_000, 350_000)
+        .unwrap();
+    let third = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            300_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+                .with_state_request(&mut state_request),
+            3,
+            350_000,
+            350_000,
+        )
+        .unwrap();
+    let result = state_request.result(request).unwrap();
+    assert_eq!(
+        third.progress(),
+        ScheduledProductionServiceProgress::StateRequest(StateRequestProgress::Complete(result))
+    );
+    assert_eq!(result.observation.observed_status.state, EthercatState::Op);
+    assert_eq!(result.observation.observed_at_ns, 300_000);
+    assert_eq!(third.request(), None);
+    assert!(third.service_ready());
+    assert_eq!(state_request.phase(), StateRequestPhase::Complete);
+    assert_eq!(controls.in_use(), 0);
+    assert_eq!(port.tx_attempts, 8);
+    assert_eq!(
+        port.tx_commands[5..8],
+        [Command::Lrw as u8, Command::Frmw as u8, Command::Fprd as u8]
+    );
+    assert!(
+        other_cycle_facts_from_production_service_cycle(&third, ready_other_cycle_facts())
+            .topology_valid
     );
 }
 

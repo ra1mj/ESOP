@@ -21,6 +21,7 @@ runs in `no_std` protocol, lifecycle, and profile crates.
 | [Error Handling](./error-handling.md) | Error types, handling strategies | Filled |
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | Filled |
 | [EtherCAT Register Requests](./ethercat-register-requests.md) | Fixed-capacity asynchronous ESC register request contract | Filled |
+| [EtherCAT State Requests](./ethercat-state-requests.md) | Bounded explicit runtime ESM request contract | Filled |
 | [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | Filled |
 | [Product Configuration](./product-configuration.md) | cfggen, static artifacts and build-report contract | Filled |
 

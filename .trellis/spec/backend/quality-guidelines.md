@@ -46,6 +46,17 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   the caller still owns any product policy that elevates a diagnostic result.
   Follow the complete API, validation and test contract in
   [EtherCAT Asynchronous Register Requests](./ethercat-register-requests.md).
+- Route explicit runtime ESM changes through `StateRequestController` and bind
+  it to `ScheduledProductionServices::with_state_request`. Resolve station,
+  current status, timeout profile, request timeout and Device Emulation policy
+  from a Ready `StartupController`; never rescan, rebuild mappings or duplicate
+  AL sequencing inside the request controller. Keep its scheduler priority
+  after startup/configuration/DC and before mailbox/register diagnostics, retain
+  an in-flight request without retransmission, reconcile verified observations
+  with the real master cycle, and keep a fault selected until explicit recovery.
+  Reject runtime state changes for non-empty OpOnly output profiles until the
+  shared bounded OpOnly sequence exists. Follow
+  [EtherCAT Runtime State Requests](./ethercat-state-requests.md).
 - Decode ESC base registers at their protocol widths from one exact bounded
   block. Type/revision are bytes, build is little-endian `u16`, RAM and port
   descriptor are separate bytes, and Features Supported is its own `u16`.
