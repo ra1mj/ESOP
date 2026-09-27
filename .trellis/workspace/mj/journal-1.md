@@ -1768,3 +1768,36 @@ Integrated generated slave-copy plans into the stable production cycle with tran
 ### Next Steps
 
 - None - task complete
+
+
+## Session 53: Generated mailbox status-bit discovery
+
+**Date**: 2026-09-27
+**Task**: Generated mailbox status-bit discovery
+**Branch**: `main`
+
+### Summary
+
+Generated canonical direct MBoxIn SyncManager status-bit policy from ESI, revalidated it in no_std product and startup paths, added scheduler coverage, updated compliance docs, and passed local and remote quality gates.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4c163da5b4c9c2ec1d837edca6bed977eb41feda` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
