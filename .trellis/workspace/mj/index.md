@@ -7,9 +7,9 @@
 ## Current Status
 
 <!-- @@@auto:current-status -->
-- **Active File**: `journal-1.md`
-- **Total Sessions**: 58
-- **Last Active**: 2026-09-27
+- **Active File**: `journal-2.md`
+- **Total Sessions**: 59
+- **Last Active**: 2026-09-28
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,8 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~1969 | Active |
+| `journal-2.md` | ~40 | Active |
+| `journal-1.md` | ~1969 | Archived |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 59 | 2026-09-28 | EtherCAT asynchronous register requests | `dbb4422` | `main` |
 | 58 | 2026-09-27 | EtherCAT Requesting ID verification | `3b96e09` | `main` |
 | 57 | 2026-09-27 | Per-Domain cyclic WKC qualification | `377fc12`, `69be2a6` | `main` |
 | 56 | 2026-09-27 | Product-controlled SDO Information verification | `4cc0205` | `main` |
