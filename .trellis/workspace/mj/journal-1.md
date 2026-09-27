@@ -1934,3 +1934,36 @@ Added exact pure-WKC mismatch observation and fixed-index Domain attribution, sa
 ### Next Steps
 
 - None - task complete
+
+
+## Session 58: EtherCAT Requesting ID verification
+
+**Date**: 2026-09-27
+**Task**: EtherCAT Requesting ID verification
+**Branch**: `main`
+
+### Summary
+
+Implemented strict product-configured EtherCAT Requesting ID support across core Startup sequencing, cfggen artifacts and hashes, runtime anti-tamper validation, production scheduler lifecycle gating, build reports, tests, capability evidence, and documentation. Full make ci and HIL test gates pass.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3b96e09` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
