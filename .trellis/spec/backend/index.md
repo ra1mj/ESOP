@@ -20,6 +20,7 @@ runs in `no_std` protocol, lifecycle, and profile crates.
 | [Database Guidelines](./database-guidelines.md) | Persistence and database scope | Not applicable |
 | [Error Handling](./error-handling.md) | Error types, handling strategies | Filled |
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | Filled |
+| [EtherCAT Register Requests](./ethercat-register-requests.md) | Fixed-capacity asynchronous ESC register request contract | Filled |
 | [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | Filled |
 | [Product Configuration](./product-configuration.md) | cfggen, static artifacts and build-report contract | Filled |
 

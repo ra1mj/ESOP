@@ -324,6 +324,19 @@ AssignActivate，并在运行时重算后形成产品顺序固定容量计划。
 | REG-001 | P1 | 提供异步 ESC 寄存器请求 API，仅在控制面预算中执行。 | 寄存器读写不会推迟指定 PDO 周期。 |
 | EXT-001 | P2 | FoE、SoE、EoE、VoE 必须作为独立协议模块注册，不得改动数据报核心。 | 编译开关和插件 API 回归测试。 |
 
+REG-001 的软件路径现提供固定容量 `EscRegisterRequestController`。应用可排队固定站地址
+`FPRD`/`FPWR`，并通过携带 slot/generation 的稳定句柄查询 `Queued`、`Busy`、`Success`、
+`Error`、实际 WKC 和有界响应字节；终态结果必须显式释放，旧句柄不能读取复用槽位。提交前
+事务式校验站地址、非零长度、16-bit ESC 寄存器范围、绝对 deadline 和容量。生产调度把该
+服务放在 Startup/PDO/Watchdog/Mapping/DC/Mailbox 之后，每周期最多接纳一个寄存器数据报，
+沿用同一 Domain/DC/control RX finalizer；in-flight 请求跨周期保留且不重发，因更早的 DC/TX
+阶段未上总线的 Prepared 请求只释放共享池槽并可在自身 deadline 前重建。完成时再次核对
+operation/index/generation/address/length/deadline/WKC，失败只终结对应应用请求，不把诊断型寄存器
+访问提升为运动生命周期的 CoE 门。Linux 仿真已覆盖 `LRW -> FRMW -> FPRD` 发送顺序、延迟到
+下一周期的响应、无重发和完整结果消费。当前不支持 auto-increment、broadcast、logical register
+访问、in-flight cancel 或单周期并行寄存器数据报；软件证据也不证明物理响应来源、真实从站
+互操作、目标 WCET、HIL、ETG conformance 或功能安全资格。
+
 MBX-002 与 COE-004 的软件边界均已实现。Complete Access 和 SDO Information 使用独立的
 ESI capability 与逐从站产品授权，默认均禁用。SDO Information 只验证生成产品选入的有限
 PDO 条目，按对象请求 description，再逐 subindex 核对精确 CANopen 类型、位宽、读写权和

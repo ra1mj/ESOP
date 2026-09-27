@@ -9,19 +9,20 @@ use esop_ethercat_core::{
     DcSyncController, DcSyncProgress, DcSyncWindowConfig, DcTopology, Domain, DomainSegment,
     ESC_AL_CONTROL, ESC_AL_STATUS, ESC_AL_STATUS_CODE, ESC_CONFIGURATION, ESC_DC_SYSTEM_DIFF,
     ESC_DC_SYSTEM_TIME, ESC_FEATURE_DC_SUPPORTED, ESC_PROCESS_DATA_WATCHDOG_TIME,
-    ESC_WATCHDOG_DIVIDER, EscDcRange, EscWatchdogConfig, EthercatMaster, EthercatPort,
-    EthercatState, ExpectedSlave, FMMU_IMAGE_LEN, FmmuRegisterDiscoveryController,
-    FmmuRegisterDiscoveryProgress, FramePlan, FramePlanSet, LinkState, MAX_MAILBOX_BYTES,
-    MailboxConfig, MailboxController, MailboxError, MailboxHeader, MailboxPhase, MailboxProgress,
-    MailboxProtocol, MailboxRetryPolicy, MappingConfigController, MappingConfigPhase,
-    MappingConfigProgress, MappingTable, MasterConfig, PdoConfigAction, PdoConfigBatch,
-    PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigController, PdoConfigError, PdoConfigJob,
-    PdoConfigPhase, PdoConfigPlan, PdoConfigProgress, PdoConfigStep, PdoSdoWrite, PortError,
-    RegisterOperation, RequestHandle, RequestState, RxPoll, RxSlotState, SYNC_MANAGER_IMAGE_LEN,
-    ScanDcCapabilities, ScanPortLink, ScanRecord, ScheduleDomain, ScheduleTable,
-    ScheduledControlCycleError, ScheduledDomainBank, ScheduledDomainEntry,
-    ScheduledPdoConfiguration, ScheduledPdoConfigurationProgress, ScheduledProcessInputEntry,
-    ScheduledProcessInputs, ScheduledProductionServiceCycleError, ScheduledProductionServiceFault,
+    ESC_WATCHDOG_DIVIDER, EscDcRange, EscRegisterRequestController, EscRegisterRequestProgress,
+    EscRegisterRequestState, EscWatchdogConfig, EthercatMaster, EthercatPort, EthercatState,
+    ExpectedSlave, FMMU_IMAGE_LEN, FmmuRegisterDiscoveryController, FmmuRegisterDiscoveryProgress,
+    FramePlan, FramePlanSet, LinkState, MAX_MAILBOX_BYTES, MailboxConfig, MailboxController,
+    MailboxError, MailboxHeader, MailboxPhase, MailboxProgress, MailboxProtocol,
+    MailboxRetryPolicy, MappingConfigController, MappingConfigPhase, MappingConfigProgress,
+    MappingTable, MasterConfig, PdoConfigAction, PdoConfigBatch, PdoConfigBatchPhase,
+    PdoConfigBatchPlan, PdoConfigController, PdoConfigError, PdoConfigJob, PdoConfigPhase,
+    PdoConfigPlan, PdoConfigProgress, PdoConfigStep, PdoSdoWrite, PortError, RegisterOperation,
+    RequestHandle, RequestState, RxPoll, RxSlotState, SYNC_MANAGER_IMAGE_LEN, ScanDcCapabilities,
+    ScanPortLink, ScanRecord, ScheduleDomain, ScheduleTable, ScheduledControlCycleError,
+    ScheduledDomainBank, ScheduledDomainEntry, ScheduledPdoConfiguration,
+    ScheduledPdoConfigurationProgress, ScheduledProcessInputEntry, ScheduledProcessInputs,
+    ScheduledProductionServiceCycleError, ScheduledProductionServiceFault,
     ScheduledProductionServiceKind, ScheduledProductionServiceProgress,
     ScheduledProductionServiceRecovery, ScheduledProductionServiceScheduler,
     ScheduledProductionServices, ScheduledReceiveError, ScheduledServiceFrameError,
@@ -542,6 +543,166 @@ fn production_service_scheduler_prioritizes_mapping_and_accepts_its_own_generati
     );
     assert!(fifth.service_ready());
     assert_eq!(controls.in_use(), 0);
+}
+
+#[test]
+fn async_register_request_uses_the_bounded_production_service_slot_across_cycles() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<3, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let mut process_plan = FramePlan::<1>::new();
+    process_plan
+        .push(DatagramPlan {
+            command: Command::Lrw,
+            index: 12,
+            address: 0x1000,
+            payload_offset: 0,
+            payload_len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut process_plans = FramePlanSet::<1, 1>::new();
+    process_plans.push(process_plan.datagrams()[0]).unwrap();
+    let process_image = [0x40, 0x00];
+    let process_inputs = ScheduledProcessInputs::new(
+        &bank,
+        &schedule,
+        [ScheduledProcessInputEntry {
+            id: 9,
+            image: &process_image,
+            plans: &process_plans,
+        }],
+    )
+    .unwrap();
+    let mut registers = EscRegisterRequestController::<2>::new(42);
+    let request = registers
+        .submit_read(0x1000, ESC_AL_STATUS, 2, 100_000, 300_000)
+        .unwrap();
+    let mut scheduler = ScheduledProductionServiceScheduler::new();
+    let mut controls = ControlRequestPool::<1>::new();
+    let mut port = TwoFrameSimPort::new();
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut dc_image = [0; 8];
+    port.set_next_control_response(fixed_address(0x1000, ESC_AL_STATUS), &[0x08, 0x00]);
+
+    port.set_now_ns(100_000);
+    port.pause_after_next_rx_frames(2);
+    bank.submit_due_process_inputs(&process_inputs, &mut master, &mut port, 1, 150_000, 150_000)
+        .unwrap();
+    let first = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            100_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+                .with_register_requests(&mut registers),
+            1,
+            150_000,
+            150_000,
+        )
+        .unwrap();
+    assert_eq!(
+        first.selected(),
+        ScheduledProductionServiceKind::RegisterRequest
+    );
+    assert_eq!(
+        first.progress(),
+        ScheduledProductionServiceProgress::Waiting
+    );
+    assert_eq!(
+        first.recovery(),
+        ScheduledProductionServiceRecovery::AwaitingResponse
+    );
+    assert!(first.request().is_some());
+    assert_eq!(controls.in_use(), 1);
+    assert_eq!(
+        registers.status(request).unwrap().state,
+        EscRegisterRequestState::Busy
+    );
+    assert_eq!(port.tx_attempts, 3);
+    assert_eq!(
+        port.tx_commands[..3],
+        [Command::Lrw as u8, Command::Frmw as u8, Command::Fprd as u8]
+    );
+
+    port.set_now_ns(200_000);
+    bank.submit_due_process_inputs(&process_inputs, &mut master, &mut port, 2, 250_000, 250_000)
+        .unwrap();
+    let second = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            200_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+                .with_register_requests(&mut registers),
+            2,
+            250_000,
+            250_000,
+        )
+        .unwrap();
+    assert_eq!(
+        second.progress(),
+        ScheduledProductionServiceProgress::RegisterRequest(
+            EscRegisterRequestProgress::ReadComplete(request)
+        )
+    );
+    assert_eq!(second.request(), None);
+    assert_eq!(controls.in_use(), 0);
+    assert_eq!(registers.data(request).unwrap(), &[0x08, 0x00]);
+    assert_eq!(
+        registers.status(request).unwrap().state,
+        EscRegisterRequestState::Success
+    );
+    assert_eq!(port.tx_attempts, 5);
+    assert_eq!(
+        port.tx_commands[3..5],
+        [Command::Lrw as u8, Command::Frmw as u8]
+    );
+    assert!(
+        other_cycle_facts_from_production_service_cycle(&second, ready_other_cycle_facts())
+            .coe_ready
+    );
 }
 
 #[test]
@@ -4412,10 +4573,12 @@ struct TwoFrameSimPort {
     lengths: [usize; 4],
     count: usize,
     tx_attempts: usize,
+    tx_commands: [u8; 16],
     drop_on_attempt: Option<usize>,
     fail_on_attempt: Option<usize>,
     rx_polls: usize,
     reported_now_after_rx_polls: Option<(usize, u64)>,
+    empty_on_rx_poll: Option<usize>,
     mailbox_send_address: Option<u32>,
     mailbox_receive_address: Option<u32>,
     mailbox_status_address: Option<u32>,
@@ -4440,10 +4603,12 @@ impl TwoFrameSimPort {
             lengths: [0; 4],
             count: 0,
             tx_attempts: 0,
+            tx_commands: [0; 16],
             drop_on_attempt: None,
             fail_on_attempt: None,
             rx_polls: 0,
             reported_now_after_rx_polls: None,
+            empty_on_rx_poll: None,
             mailbox_send_address: None,
             mailbox_receive_address: None,
             mailbox_status_address: None,
@@ -4526,6 +4691,10 @@ impl TwoFrameSimPort {
         assert!(polls > 0);
         self.reported_now_after_rx_polls = Some((self.rx_polls + polls, now_ns));
     }
+
+    fn pause_after_next_rx_frames(&mut self, frames: usize) {
+        self.empty_on_rx_poll = Some(self.rx_polls + frames + 1);
+    }
 }
 
 impl EthercatPort for TwoFrameSimPort {
@@ -4546,6 +4715,14 @@ impl EthercatPort for TwoFrameSimPort {
             return Err(PortError::HardwareFault);
         }
         self.tx_attempts += 1;
+        let header = DatagramHeader::decode(
+            &frame[ETHERNET_HEADER_LEN + ETHERCAT_FRAME_HEADER_LEN
+                ..ETHERNET_HEADER_LEN + ETHERCAT_FRAME_HEADER_LEN + DATAGRAM_HEADER_LEN],
+        )
+        .expect("submitted EtherCAT frame must contain a datagram header");
+        if self.tx_attempts <= self.tx_commands.len() {
+            self.tx_commands[self.tx_attempts - 1] = header.command as u8;
+        }
         if self.fail_on_attempt == Some(self.tx_attempts) {
             self.fail_on_attempt = None;
             return Err(PortError::HardwareFault);
@@ -4629,6 +4806,10 @@ impl EthercatPort for TwoFrameSimPort {
         scratch: &mut [u8; MAX_ETHERNET_FRAME_LEN],
     ) -> Result<RxPoll, Self::Error> {
         self.rx_polls += 1;
+        if self.empty_on_rx_poll == Some(self.rx_polls) {
+            self.empty_on_rx_poll = None;
+            return Ok(RxPoll::Empty);
+        }
         if self.count == 0 {
             return Ok(RxPoll::Empty);
         }

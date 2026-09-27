@@ -25,6 +25,7 @@ mod pdo_config;
 mod plan;
 mod port;
 mod production_service;
+mod register_request;
 mod registers;
 mod ring;
 mod rx_index;
@@ -134,6 +135,11 @@ pub use production_service::{
     ScheduledProductionServiceFault, ScheduledProductionServiceKind,
     ScheduledProductionServiceProgress, ScheduledProductionServiceRecovery,
     ScheduledProductionServiceScheduler, ScheduledProductionServices,
+};
+pub use register_request::{
+    EscRegisterAction, EscRegisterRequestController, EscRegisterRequestError,
+    EscRegisterRequestHandle, EscRegisterRequestProgress, EscRegisterRequestState,
+    EscRegisterRequestStatus,
 };
 pub use registers::{
     AL_ID_LOADED_FLAG, AL_ID_REQUEST_FLAG, AL_STATUS_WITH_CODE_LEN, BASIC_ESC_INFO_LEN,

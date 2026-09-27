@@ -37,6 +37,15 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   allow WKC 0, and the same policy must be checked by `RxIndexTable`, the
   `ControlRequest`, and the consuming FSM. Never special-case a register
   address inside the generic RX engine.
+- Route application-owned asynchronous ESC register access through the fixed
+  `EscRegisterRequestController` and the production service scheduler. Keep it
+  below startup/configuration/DC/mailbox priority, admit at most one prepared
+  request per cycle, retain in-flight ownership without retransmission, and
+  require explicit release before reusing a terminal slot. A register request
+  failure is request-local and must not silently become a CoE/lifecycle gate;
+  the caller still owns any product policy that elevates a diagnostic result.
+  Follow the complete API, validation and test contract in
+  [EtherCAT Asynchronous Register Requests](./ethercat-register-requests.md).
 - Decode ESC base registers at their protocol widths from one exact bounded
   block. Type/revision are bytes, build is little-endian `u16`, RAM and port
   descriptor are separate bytes, and Features Supported is its own `u16`.

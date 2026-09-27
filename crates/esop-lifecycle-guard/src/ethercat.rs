@@ -955,6 +955,7 @@ pub fn other_cycle_facts_from_production_service_cycle<E, const DOMAINS: usize>(
         | ScheduledProductionServiceKind::Mailbox => {
             other.coe_ready &= cycle.service_ready();
         }
+        ScheduledProductionServiceKind::RegisterRequest => {}
     }
     other.deadline_met &= cycle.post_receive_deadline_met();
     other

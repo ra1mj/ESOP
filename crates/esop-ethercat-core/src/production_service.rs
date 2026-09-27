@@ -24,6 +24,9 @@ use crate::pdo_config::{
     PdoConfigBatchStatus, PdoConfigController, PdoConfigError, PdoConfigPhase, PdoConfigProgress,
 };
 use crate::port::EthercatPort;
+use crate::register_request::{
+    EscRegisterRequestController, EscRegisterRequestError, EscRegisterRequestProgress,
+};
 use crate::scheduled_domains::{
     ScheduledControlCycleError, ScheduledControlCycleReport, ScheduledDomainBank,
     ScheduledMailboxCycleError, ScheduledMailboxCycleReport, ScheduledReceiveReport,
@@ -43,6 +46,7 @@ pub enum ScheduledProductionServiceKind {
     DcSyncConfiguration,
     DcConfiguration,
     Mailbox,
+    RegisterRequest,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -63,6 +67,7 @@ pub enum ScheduledProductionServiceProgress {
     DcSyncConfiguration(DcSyncProgress),
     DcConfiguration(DcProgress),
     Mailbox(MailboxProgress),
+    RegisterRequest(EscRegisterRequestProgress),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,6 +81,7 @@ pub enum ScheduledProductionServiceFault {
     DcSyncConfiguration(DcSyncError),
     DcConfiguration(DcError),
     Mailbox(MailboxError),
+    RegisterRequest(EscRegisterRequestError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -205,6 +211,7 @@ pub struct ScheduledProductionServices<
     const FMMUS: usize,
     const PDO_OPS: usize = 0,
     const PDO_JOBS: usize = 1,
+    const REGISTER_REQUESTS: usize = 0,
 > {
     pub startup: Option<&'a mut StartupController<MAX_SLAVES>>,
     pdo_configuration: Option<ScheduledPdoConfiguration<'a, PDO_OPS, PDO_JOBS>>,
@@ -214,6 +221,7 @@ pub struct ScheduledProductionServices<
     pub dc_sync_configuration: Option<&'a mut DcSyncController<MAX_SLAVES>>,
     pub dc_configuration: Option<&'a mut DcController>,
     pub mailbox: Option<&'a mut MailboxController>,
+    register_requests: Option<&'a mut EscRegisterRequestController<REGISTER_REQUESTS>>,
     mapped_mailbox_status: Option<MailboxMappedStatusBit>,
 }
 
@@ -224,7 +232,7 @@ impl<
     const FMMUS: usize,
     const PDO_OPS: usize,
     const PDO_JOBS: usize,
-> ScheduledProductionServices<'a, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>
+> ScheduledProductionServices<'a, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS, 0>
 {
     pub const fn new(
         startup: Option<&'a mut StartupController<MAX_SLAVES>>,
@@ -241,10 +249,41 @@ impl<
             dc_sync_configuration: None,
             dc_configuration,
             mailbox,
+            register_requests: None,
             mapped_mailbox_status: None,
         }
     }
 
+    pub fn with_register_requests<const REGISTER_REQUESTS: usize>(
+        self,
+        register_requests: &'a mut EscRegisterRequestController<REGISTER_REQUESTS>,
+    ) -> ScheduledProductionServices<'a, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS, REGISTER_REQUESTS>
+    {
+        ScheduledProductionServices {
+            startup: self.startup,
+            pdo_configuration: self.pdo_configuration,
+            watchdog_configuration: self.watchdog_configuration,
+            mapping: self.mapping,
+            dc_clock_configuration: self.dc_clock_configuration,
+            dc_sync_configuration: self.dc_sync_configuration,
+            dc_configuration: self.dc_configuration,
+            mailbox: self.mailbox,
+            register_requests: Some(register_requests),
+            mapped_mailbox_status: self.mapped_mailbox_status,
+        }
+    }
+}
+
+impl<
+    'a,
+    const MAX_SLAVES: usize,
+    const SMS: usize,
+    const FMMUS: usize,
+    const PDO_OPS: usize,
+    const PDO_JOBS: usize,
+    const REGISTER_REQUESTS: usize,
+> ScheduledProductionServices<'a, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS, REGISTER_REQUESTS>
+{
     pub fn with_pdo_configuration(
         mut self,
         pdo_configuration: ScheduledPdoConfiguration<'a, PDO_OPS, PDO_JOBS>,
@@ -465,6 +504,7 @@ impl ScheduledProductionServiceScheduler {
         const FMMUS: usize,
         const PDO_OPS: usize,
         const PDO_JOBS: usize,
+        const REGISTER_REQUESTS: usize,
     >(
         &mut self,
         bank: &mut ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
@@ -475,7 +515,15 @@ impl ScheduledProductionServiceScheduler {
         dc_image: &mut [u8],
         application_time_ns: u64,
         controls: &mut ControlRequestPool<REQUESTS>,
-        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
+        services: &mut ScheduledProductionServices<
+            '_,
+            MAX_SLAVES,
+            SMS,
+            FMMUS,
+            PDO_OPS,
+            PDO_JOBS,
+            REGISTER_REQUESTS,
+        >,
         generation: u16,
         rx_deadline_ns: u64,
         cycle_deadline_ns: u64,
@@ -792,10 +840,19 @@ impl ScheduledProductionServiceScheduler {
         const FMMUS: usize,
         const PDO_OPS: usize,
         const PDO_JOBS: usize,
+        const REGISTER_REQUESTS: usize,
     >(
         &mut self,
         now_ns: u64,
-        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
+        services: &mut ScheduledProductionServices<
+            '_,
+            MAX_SLAVES,
+            SMS,
+            FMMUS,
+            PDO_OPS,
+            PDO_JOBS,
+            REGISTER_REQUESTS,
+        >,
     ) -> Result<(), StartupBarrierReleaseError> {
         let requirements = match services.startup.as_deref() {
             Some(startup) if startup.phase() == StartupPhase::AwaitingConfiguration => {
@@ -910,9 +967,18 @@ impl ScheduledProductionServiceScheduler {
         const FMMUS: usize,
         const PDO_OPS: usize,
         const PDO_JOBS: usize,
+        const REGISTER_REQUESTS: usize,
     >(
         &mut self,
-        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
+        services: &ScheduledProductionServices<
+            '_,
+            MAX_SLAVES,
+            SMS,
+            FMMUS,
+            PDO_OPS,
+            PDO_JOBS,
+            REGISTER_REQUESTS,
+        >,
     ) {
         if self.request.is_some()
             || self.pdo_action.is_some()
@@ -982,6 +1048,7 @@ impl ScheduledProductionServiceScheduler {
             ScheduledProductionServiceKind::DcSyncConfiguration,
             ScheduledProductionServiceKind::DcConfiguration,
             ScheduledProductionServiceKind::Mailbox,
+            ScheduledProductionServiceKind::RegisterRequest,
         ]
         .into_iter()
         .find(|kind| self.service_active(services, *kind))
@@ -994,9 +1061,18 @@ impl ScheduledProductionServiceScheduler {
         const FMMUS: usize,
         const PDO_OPS: usize,
         const PDO_JOBS: usize,
+        const REGISTER_REQUESTS: usize,
     >(
         &self,
-        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
+        services: &ScheduledProductionServices<
+            '_,
+            MAX_SLAVES,
+            SMS,
+            FMMUS,
+            PDO_OPS,
+            PDO_JOBS,
+            REGISTER_REQUESTS,
+        >,
         kind: ScheduledProductionServiceKind,
     ) -> bool {
         match kind {
@@ -1064,6 +1140,10 @@ impl ScheduledProductionServiceScheduler {
                     )
                 })
             }
+            ScheduledProductionServiceKind::RegisterRequest => services
+                .register_requests
+                .as_deref()
+                .is_some_and(EscRegisterRequestController::has_pending),
         }
     }
 
@@ -1074,10 +1154,19 @@ impl ScheduledProductionServiceScheduler {
         const FMMUS: usize,
         const PDO_OPS: usize,
         const PDO_JOBS: usize,
+        const REGISTER_REQUESTS: usize,
     >(
         &self,
         controls: &ControlRequestPool<REQUESTS>,
-        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
+        services: &ScheduledProductionServices<
+            '_,
+            MAX_SLAVES,
+            SMS,
+            FMMUS,
+            PDO_OPS,
+            PDO_JOBS,
+            REGISTER_REQUESTS,
+        >,
     ) -> Result<(), ScheduledProductionServiceKind> {
         if self.active == ScheduledProductionServiceKind::PdoConfiguration {
             let binding = services.pdo_configuration.as_ref().ok_or(self.active)?;
@@ -1222,6 +1311,21 @@ impl ScheduledProductionServiceScheduler {
                         action.deadline_ns,
                     )
                 }),
+            ScheduledProductionServiceKind::RegisterRequest => services
+                .register_requests
+                .as_deref()
+                .and_then(EscRegisterRequestController::pending)
+                .is_some_and(|action| {
+                    request.matches_action(
+                        action.datagram_index,
+                        action.generation,
+                        action.address,
+                        action.operation,
+                        action.payload(),
+                        action.datagram_len(),
+                        action.deadline_ns,
+                    )
+                }),
             ScheduledProductionServiceKind::Idle => false,
         };
         if matches { Ok(()) } else { Err(self.active) }
@@ -1234,11 +1338,20 @@ impl ScheduledProductionServiceScheduler {
         const FMMUS: usize,
         const PDO_OPS: usize,
         const PDO_JOBS: usize,
+        const REGISTER_REQUESTS: usize,
     >(
         &mut self,
         now_ns: u64,
         controls: &mut ControlRequestPool<REQUESTS>,
-        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
+        services: &mut ScheduledProductionServices<
+            '_,
+            MAX_SLAVES,
+            SMS,
+            FMMUS,
+            PDO_OPS,
+            PDO_JOBS,
+            REGISTER_REQUESTS,
+        >,
     ) -> Result<ScheduledProductionEnqueueOutcome, ControlError> {
         match self.active {
             ScheduledProductionServiceKind::Idle => Ok(ScheduledProductionEnqueueOutcome::EMPTY),
@@ -1601,6 +1714,42 @@ impl ScheduledProductionServiceScheduler {
                     fault: outcome.fault.map(ScheduledProductionServiceFault::Mailbox),
                 })
             }
+            ScheduledProductionServiceKind::RegisterRequest => {
+                let controller = services
+                    .register_requests
+                    .as_deref_mut()
+                    .ok_or(ControlError::InvalidState)?;
+                let action = match controller.next_action(now_ns) {
+                    Ok(action) => action,
+                    Err(error) => {
+                        return Ok(ScheduledProductionEnqueueOutcome {
+                            fault: Some(ScheduledProductionServiceFault::RegisterRequest(error)),
+                            ..ScheduledProductionEnqueueOutcome::EMPTY
+                        });
+                    }
+                };
+                let Some(action) = action else {
+                    return Ok(ScheduledProductionEnqueueOutcome::EMPTY);
+                };
+                if action.deadline_ns <= now_ns {
+                    return Ok(ScheduledProductionEnqueueOutcome {
+                        fault: Some(ScheduledProductionServiceFault::RegisterRequest(
+                            EscRegisterRequestError::Timeout(action.handle),
+                        )),
+                        ..ScheduledProductionEnqueueOutcome::EMPTY
+                    });
+                }
+                match controller.enqueue_pending(controls) {
+                    Ok(request) => Ok(ScheduledProductionEnqueueOutcome {
+                        request: Some(request),
+                        ..ScheduledProductionEnqueueOutcome::EMPTY
+                    }),
+                    Err(error) => Ok(ScheduledProductionEnqueueOutcome {
+                        fault: Some(ScheduledProductionServiceFault::RegisterRequest(error)),
+                        ..ScheduledProductionEnqueueOutcome::EMPTY
+                    }),
+                }
+            }
         }
     }
 
@@ -1629,11 +1778,20 @@ impl ScheduledProductionServiceScheduler {
         const FMMUS: usize,
         const PDO_OPS: usize,
         const PDO_JOBS: usize,
+        const REGISTER_REQUESTS: usize,
     >(
         &self,
         bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
         now_ns: u64,
-        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
+        services: &mut ScheduledProductionServices<
+            '_,
+            MAX_SLAVES,
+            SMS,
+            FMMUS,
+            PDO_OPS,
+            PDO_JOBS,
+            REGISTER_REQUESTS,
+        >,
     ) -> (
         Option<ScheduledProductionServiceProgress>,
         Option<ScheduledProductionServiceFault>,
@@ -1681,10 +1839,19 @@ impl ScheduledProductionServiceScheduler {
         const FMMUS: usize,
         const PDO_OPS: usize,
         const PDO_JOBS: usize,
+        const REGISTER_REQUESTS: usize,
     >(
         &mut self,
         controls: &mut ControlRequestPool<REQUESTS>,
-        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
+        services: &mut ScheduledProductionServices<
+            '_,
+            MAX_SLAVES,
+            SMS,
+            FMMUS,
+            PDO_OPS,
+            PDO_JOBS,
+            REGISTER_REQUESTS,
+        >,
         handle: RequestHandle,
         now_ns: u64,
     ) -> Result<ScheduledProductionServiceProgress, ScheduledProductionServiceFault> {
@@ -1743,6 +1910,15 @@ impl ScheduledProductionServiceScheduler {
                 .accept_completed(controls, handle, now_ns)
                 .map(ScheduledProductionServiceProgress::DcConfiguration)
                 .map_err(ScheduledProductionServiceFault::DcConfiguration),
+            ScheduledProductionServiceKind::RegisterRequest => services
+                .register_requests
+                .as_deref_mut()
+                .ok_or(ScheduledProductionServiceFault::Control(
+                    ControlError::InvalidState,
+                ))?
+                .accept_completed(controls, handle, now_ns)
+                .map(ScheduledProductionServiceProgress::RegisterRequest)
+                .map_err(ScheduledProductionServiceFault::RegisterRequest),
             ScheduledProductionServiceKind::Idle
             | ScheduledProductionServiceKind::PdoConfiguration
             | ScheduledProductionServiceKind::Mailbox => Err(
@@ -1757,9 +1933,18 @@ impl ScheduledProductionServiceScheduler {
         const FMMUS: usize,
         const PDO_OPS: usize,
         const PDO_JOBS: usize,
+        const REGISTER_REQUESTS: usize,
     >(
         &self,
-        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
+        services: &ScheduledProductionServices<
+            '_,
+            MAX_SLAVES,
+            SMS,
+            FMMUS,
+            PDO_OPS,
+            PDO_JOBS,
+            REGISTER_REQUESTS,
+        >,
     ) -> Option<ScheduledProductionServiceFault> {
         match self.active {
             ScheduledProductionServiceKind::Idle => None,
@@ -1803,6 +1988,7 @@ impl ScheduledProductionServiceScheduler {
                 .as_deref()
                 .and_then(MailboxController::last_error)
                 .map(ScheduledProductionServiceFault::Mailbox),
+            ScheduledProductionServiceKind::RegisterRequest => None,
         }
     }
 
@@ -1812,9 +1998,18 @@ impl ScheduledProductionServiceScheduler {
         const FMMUS: usize,
         const PDO_OPS: usize,
         const PDO_JOBS: usize,
+        const REGISTER_REQUESTS: usize,
     >(
         &self,
-        services: &ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
+        services: &ScheduledProductionServices<
+            '_,
+            MAX_SLAVES,
+            SMS,
+            FMMUS,
+            PDO_OPS,
+            PDO_JOBS,
+            REGISTER_REQUESTS,
+        >,
     ) -> bool {
         match self.active {
             ScheduledProductionServiceKind::Idle => true,
@@ -1850,6 +2045,7 @@ impl ScheduledProductionServiceScheduler {
                 .mailbox
                 .as_deref()
                 .is_some_and(|controller| controller.phase() != MailboxPhase::Faulted),
+            ScheduledProductionServiceKind::RegisterRequest => services.register_requests.is_some(),
         }
     }
 
@@ -2585,6 +2781,91 @@ mod tests {
             );
         }
         assert_eq!(startup.phase(), StartupPhase::AwaitingConfiguration);
+    }
+
+    #[test]
+    fn register_requests_run_after_mailbox_and_remain_available_without_it() {
+        let config = MailboxConfig::new(0x1000, 32, 0x1100, 32);
+        let mut mailbox = MailboxController::new();
+        mailbox
+            .start(config, 0x1000, 7, 0, MailboxProtocol::CoE, &[1])
+            .unwrap();
+        let mut registers = EscRegisterRequestController::<2>::new(90);
+        registers
+            .submit_read(0x1000, crate::ESC_AL_STATUS, 2, 0, 1_000)
+            .unwrap();
+
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+        {
+            let services =
+                ScheduledProductionServices::<0, 0, 0>::new(None, None, None, Some(&mut mailbox))
+                    .with_register_requests(&mut registers);
+            scheduler.refresh_selection(&services);
+            assert_eq!(scheduler.active(), ScheduledProductionServiceKind::Mailbox);
+        }
+
+        let mut register_scheduler = ScheduledProductionServiceScheduler::new();
+        let mut controls = ControlRequestPool::<1>::new();
+        {
+            let mut services = ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+                .with_register_requests(&mut registers);
+            register_scheduler.refresh_selection(&services);
+            assert_eq!(
+                register_scheduler.active(),
+                ScheduledProductionServiceKind::RegisterRequest
+            );
+            let outcome = register_scheduler
+                .enqueue_due(1, &mut controls, &mut services)
+                .unwrap();
+            assert!(outcome.request.is_some());
+            assert_eq!(outcome.fault, None);
+        }
+        assert_eq!(controls.in_use(), 1);
+    }
+
+    #[test]
+    fn register_control_pool_failure_is_reported_as_a_request_local_fault() {
+        let mut registers = EscRegisterRequestController::<1>::new(90);
+        let request = registers
+            .submit_read(0x1000, crate::ESC_AL_STATUS, 2, 0, 1_000)
+            .unwrap();
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+        let mut controls = ControlRequestPool::<1>::new();
+        let occupied = controls
+            .acquire(
+                90,
+                7,
+                crate::fixed_address(0x1001, crate::ESC_AL_STATUS),
+                RegisterOperation::Read,
+                &[0, 0],
+                1_000,
+            )
+            .unwrap();
+        let mut services = ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+            .with_register_requests(&mut registers);
+
+        scheduler.refresh_selection(&services);
+        let outcome = scheduler
+            .enqueue_due(1, &mut controls, &mut services)
+            .unwrap();
+
+        assert_eq!(outcome.request, None);
+        assert_eq!(
+            outcome.fault,
+            Some(ScheduledProductionServiceFault::RegisterRequest(
+                EscRegisterRequestError::Control {
+                    request,
+                    error: ControlError::SlotBusy,
+                }
+            ))
+        );
+        assert_eq!(controls.in_use(), 1);
+        assert_eq!(registers.queued_len(), 0);
+        assert_eq!(
+            registers.status(request).unwrap().state,
+            crate::EscRegisterRequestState::Error
+        );
+        controls.release(occupied).unwrap();
     }
 
     #[test]
