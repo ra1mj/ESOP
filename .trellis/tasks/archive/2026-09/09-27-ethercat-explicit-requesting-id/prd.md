@@ -89,3 +89,12 @@ or activation succeeds.
 - Dynamic Hot Connect group discovery or topology insertion/removal.
 - Physical-device response provenance, two-vendor interoperability, target
   WCET, long-duration HIL, ETG conformance, or functional safety.
+
+## Delivery
+
+- Verification passed on 2026-09-27 with the focused core, cfggen,
+  product-config, Linux production-scheduler, build-report, R2 qualification,
+  `make test-hil`, and full `make ci` gates.
+- The pushed implementation/archive/journal chain through
+  `77d0c8afee918128799eb914ae526618cbc22e93` passed GitHub Actions quality run
+  `36325647352`.
