@@ -101,7 +101,7 @@ long-duration operation, and hardware HIL remain unqualified.
 - [x] `cargo test -p esop-ethercat-core --no-fail-fast` passes.
 - [x] `cargo test -p esop-ethercat-linux-port --test scheduled_domains` passes.
 - [x] `make ci` passes.
-- [ ] The final commit is pushed to `ra1mj/ESOP` and the exact pushed SHA has a
+- [x] The final commit is pushed to `ra1mj/ESOP` and the exact pushed SHA has a
       successful GitHub Actions `quality` run.
 
 Local acceptance evidence was collected on 2026-09-27. The focused core and
@@ -109,6 +109,23 @@ Linux integration suites passed, followed by the repository-wide `make ci`
 gate covering formatting, diff checks, workspace all-feature tests, Clippy with
 warnings denied, release and `aarch64-unknown-none` builds, BPF C syntax, and
 the generated configuration/qualification validators.
+
+## Verification Evidence
+
+Verified on 2026-09-27:
+
+- `cargo test -p esop-ethercat-core --no-fail-fast`: 261 core unit tests and
+  all public core integration tests passed.
+- `cargo test -p esop-ethercat-linux-port --test scheduled_domains`: 20
+  production-scheduler simulation tests passed, including the public verified
+  FMMU-bank clear path.
+- `make ci` passed formatting/diff checks, workspace all-feature tests, Clippy
+  with warnings denied, release and `aarch64-unknown-none` builds, BPF C syntax,
+  deterministic configuration generation, and every qualification validator.
+- Implementation commit `3bba091d634fa38cca374f27d2596c232546af0a`
+  passed GitHub Actions run `36293040422`, including Rust quality/live Zenoh,
+  the CO-RE BPF build, and all privileged eBPF runtime qualification jobs:
+  `https://github.com/ra1mj/ESOP/actions/runs/36293040422`.
 
 ## Out of Scope
 
