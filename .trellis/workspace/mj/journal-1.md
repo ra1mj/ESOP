@@ -1599,3 +1599,37 @@ Implemented bounded standard SII FMMU usage parsing and schema-v2 startup eviden
 ### Next Steps
 
 - None - task complete
+
+
+## Session 48: FMMU register bank discovery and clearing
+
+**Date**: 2026-09-27
+**Task**: FMMU register bank discovery and clearing
+**Branch**: `main`
+
+### Summary
+
+Added bounded ESC FMMU register-bank discovery, atomic Startup evidence, full-bank clear/readback mapping qualification, production scheduler integration, documentation, and exact-SHA CI evidence.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `3bba091` | (see git log) |
+| `d866558` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
