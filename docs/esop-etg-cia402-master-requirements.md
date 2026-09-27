@@ -29,6 +29,8 @@
 
 **状态修正（2026-09-27）：** 标准 SII FMMU usage category 已实现固定容量解析、ESI/生成产物传播、schema-v2 结构签名、RxPDO→Outputs/TxPDO→Inputs index 兼容校验，以及 ESC 报告 FMMU/SyncManager count 的首个 AL 前门控。Startup 现按 FMMU bank、SyncManager bank、SII category stream 的顺序完成 live 证据，并只在 FMMU/SM/SII/可选 DC 全部成功后原子发布；增强 Mapping 路径先清零/回读完整 SM bank，再处理完整 FMMU bank 和期望映射。逻辑地址仍由主站确定性分配；物理响应认证、真实从站互操作、目标 WCET 和 HIL 仍未完成。
 
+**状态修正（2026-09-27）：** Complete Access 的软件边界现已实现：类型化且默认禁用的 SDO 访问策略、initiate 命令 `0x10` 编码、响应模式核对、直接 ESI capability 与逐从站产品授权、全生成产物/哈希传播、运行时防篡改和邮箱/主站精确字节测试均已具备。PDO 配置继续使用单 subindex。SDO Information、对象字典交叉验证、真实从站互操作、HIL、目标 WCET 和 ETG 一致性资格仍未完成，因此不能据此声明完整 Class B 能力。
+
 SII 增量现已包含从标准 `0x0040` 到 END 的固定容量 category stream acquisition，
 内部续读保持动作游标和绝对 deadline，并在完整读取后原子投影 signedness-aware
 FMMU usage/SM/RxPDO/TxPDO candidate，并由 Startup 在首个 AL 动作前与生成配置重建的
@@ -189,7 +191,7 @@ Mailbox 不属于硬实时 PDO，但属于 Class B P0：
 - 每个请求使用固定缓冲和异步 FSM，周期任务只给出 byte/datagram/time 预算；
 - CoE expedited/normal SDO upload/download；
 - segmented SDO 作为 ESOP P0，避免对象超过 mailbox 长度时失去互操作能力；
-- Complete Access、SDO Information 作为 P1，但 profile 可声明设备需要；
+- Complete Access 软件路径已按 P1 实现，并由 ESI capability 与产品逐从站授权共同控制；SDO Information 仍为 P1，profile 可声明设备需要；
 - 接收 CoE Emergency 并写入固定事件环；消费不及时不能阻塞 mailbox；
 - FoE/EoE/SoE 只有产品声明支持时，才启用对应 capability 和测试。
 
@@ -261,7 +263,7 @@ P0 诊断至少提供：
 | Mailbox polling | shall | PollTime 或 StatusBit | P0 |
 | SDO normal/expedited | shall | upload/download + abort | P0 |
 | Segmented SDO | should | 提升为 ESOP P0 | P0 |
-| Complete Access | should；ENI import 时 shall | 首版 P1，不声明 ENI import | P1 |
+| Complete Access | should；ENI import 时 shall | P1 软件路径已实现：类型化策略、产品授权和精确字节；不声明 ENI import，真实互操作/HIL 待补 | P1 |
 | SDO Information | should | 可关闭诊断能力 | P1 |
 | Emergency | shall | 固定事件记录并异步上报 | P0 |
 | EoE/FoE/SoE | 条件要求 | 首版不声明；插件化 | P2 |
@@ -520,7 +522,7 @@ absolute timer release
 | --- | --- | --- |
 | M0 | `esop_queue`、wire codec、arena、Linux simulation port、测试框架 | 部分实现：wire codec、调用方固定 arena、固定帧池、SPSC ring、Linux AF_PACKET port、固定容量确定性 `SimulatedPort`、通用 DMA descriptor ownership/cache 契约和测试基础已具备；STM32/HPMicro 具体 DMA 端口仍未实现 |
 | M1 | scan/SII/AL/SM/FMMU、单 Domain PDO、WKC、诊断 | 部分实现：scan/ESC、Device Emulation 能力读取、普通 ESC 的有界 AL Error Acknowledge、Device Emulation 禁止 ACK、首故障诊断保留、ESI 四类 ESM timeout 与版本化 ETG.1020 默认值、严格 ESI CoE 邮箱对生成、SII 标准邮箱固定头解析、SII/ESI `OpOnly` 输出校验及 OP 前后写入读回门控、SII 身份读取、固定容量 EEPROM 分块读取、ordered FMMU usage/SyncManager/RxPDO/TxPDO category 只读解析、schema-v2 事务式固定容量配置候选、ESC FMMU count 门、按 PDO 类别分段的多 SyncManager FMMU 逻辑地址分配、AL 单步转换、可选全从站 PREOP 屏障、产品顺序多从站 PDO 批次、真实整批 Complete 门控和保留拓扑的 SAFEOP/OP 继续、PDO 位域、SM/FMMU 校验与写入读回 FSM、生成式固定容量 CoE PDO assignment/mapping 计划与逐写回读 FSM、PDO 配置统一生产调度/邮箱接入、启动控制面闭环、单 Domain Frame Plan/WKC 提交、固定容量多 Domain/PDO/datagram 注册、SII segment datagram 绑定、MTU 拆帧与多速率激活编排、固定事件诊断和 Linux HIL 端口已具备；Startup 实时 SII 标准邮箱布局交叉验证已具备；FMMU 寄存器描述自动发现与批处理、完整周期 WKC、完整 SII/ESI 自动发现、真实从站 ESM/PDO 互操作和真实总线 HIL 未实现 |
-| M2 | Mailbox resilient/polling、CoE SDO/Emergency、DC | 部分实现：固定容量 Mailbox 发送/轮询 FSM、有限预算重试、协议/计数器/长度异常恢复、生成式直接 MBoxIn SyncManager Status Bit 发现与在线 SII 交叉验证、确定性 FMMU-mapped Domain 状态尾部及 invalid/stale 无回退轮询、PollTime 回退、CoE SDO expedited/segmented upload/download、abort、Emergency payload 解码及固定事件环接入、DC System Time/receive-time/Data Link Status 精确扫描、固定容量物理拓扑与参考钟相对传播延迟投影、拓扑范围驱动的全从站 `0x0920/12` offset/delay 初始化、DC SYNC0/SYNC1 配置 FSM、FRMW reference-clock 周期同步槽、offset/jitter 锁定监测和主站控制请求闭环已具备；外部应用授时源、全从站运行时漂移补偿、真实时序精度、真实从站互操作和 HIL 仍未实现 |
+| M2 | Mailbox resilient/polling、CoE SDO/Emergency、DC | 部分实现：固定容量 Mailbox 发送/轮询 FSM、有限预算重试、协议/计数器/长度异常恢复、生成式直接 MBoxIn SyncManager Status Bit 发现与在线 SII 交叉验证、确定性 FMMU-mapped Domain 状态尾部及 invalid/stale 无回退轮询、PollTime 回退、CoE SDO expedited/segmented upload/download、产品控制的 Complete Access 类型化策略/精确 `0x10`/运行时防篡改、abort、Emergency payload 解码及固定事件环接入、DC System Time/receive-time/Data Link Status 精确扫描、固定容量物理拓扑与参考钟相对传播延迟投影、拓扑范围驱动的全从站 `0x0920/12` offset/delay 初始化、DC SYNC0/SYNC1 配置 FSM、FRMW reference-clock 周期同步槽、offset/jitter 锁定监测和主站控制请求闭环已具备；SDO Information、外部应用授时源、全从站运行时漂移补偿、真实时序精度、真实从站互操作和 HIL 仍未实现 |
 | M3 | CiA 402 FSA、CSP/CSV/CST、两厂商驱动 HIL | 部分实现：独立 profile 已具备 Statusword FSA 解码、基础 Controlword 使能序列、生命周期拒绝、Fault reset 单脉冲、模式切换监督、实际模式确认、Operation Enabled 门槛、周期设定值首目标/限幅守卫、固定容量双轴独立控制、配置停止动作和新 permit epoch 恢复约束，以及基于核心 `PdoEntry` 的标准 `0x6040/0x6060/0x6041/0x6061/0x603F` 与 CSP/CSV/CST 目标/实际值 typed binding；厂商 quirk、单位/缩放、三模式真实对象互操作和两厂商驱动 HIL 仍未实现 |
 | M4 | STM32/HPM port、500 us 资格、完整 capability manifest | 部分实现：仓库已提供证据绑定的 `capability_manifest.json` 及 CI 校验；STM32/HPMicro 具体 DMA 端口、500 us 目标板资格和完整硬件能力证据仍未实现 |
 | M5 | ETG 官方一致性/互操作流程、Class A 差距评估 | 未开始 |

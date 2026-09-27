@@ -160,7 +160,7 @@
     {
       "id": "product_config_generator",
       "status": "implemented",
-      "scope": "Deterministic host-only esop.product.v1 and bounded ESI-subset compilation into static C/Rust, normalized Domain/PDO/Frame Plan, per-slave CoE mailbox and optional raw ESC watchdog intent, fixed-capacity ordered ESI FMMU usage plus structural SII SM evidence, ESM timeout, OpOnly, explicit DC System Time/reference-clock policy, selected ESI DC OpMode descriptors and resolved absolute DC SYNC timing, device inventory, exact ProcBuf v6 layout and fail-closed build input",
+      "scope": "Deterministic host-only esop.product.v1 and bounded ESI-subset compilation into static C/Rust, normalized Domain/PDO/Frame Plan, per-slave CoE mailbox plus independent Complete Access capability/authorization and optional raw ESC watchdog intent, fixed-capacity ordered ESI FMMU usage plus structural SII SM evidence, ESM timeout, OpOnly, explicit DC System Time/reference-clock policy, selected ESI DC OpMode descriptors and resolved absolute DC SYNC timing, device inventory, exact ProcBuf v6 layout and fail-closed build input",
       "evidence": [
         "crates/esop-cfggen/src/lib.rs",
         "crates/esop-cfggen/src/generator.rs",
@@ -193,9 +193,30 @@
       "limitation": "Deterministic software tests prove canonical direct and FMMU-mapped Status Bit generation, PollTime compatibility, Domain/LRD/WKC propagation, product tamper rejection, exact Mapping write/readback behavior for caller-delivered responses, and production-scheduler suppression without direct fallback for inactive, invalid or stale cyclic input. Runtime callers must switch to mapped mode only after Mapping Complete; physical response authenticity, target timing/WCET, device interoperability, ETG conformance and hardware HIL remain open"
     },
     {
+      "id": "ethercat_product_complete_access",
+      "status": "implemented",
+      "scope": "Allocation-free typed CoE SDO Complete Access admission and exact 0x10 initiate encoding, direct ESI capability plus per-product authorization, deterministic artifact/build-input/hash propagation, runtime tamper rejection, and mailbox/master wire-path tests",
+      "evidence": [
+        "crates/esop-ethercat-core/src/coe.rs",
+        "crates/esop-ethercat-core/tests/cycle.rs",
+        "crates/esop-cfggen/src/esi.rs",
+        "crates/esop-cfggen/src/generator.rs",
+        "crates/esop-cfggen/tests/generation.rs",
+        "crates/esop-product-config/src/lib.rs",
+        "crates/esop-product-config/tests/generated_product.rs",
+        "config/examples/sim-dual-axis/product.json",
+        "config/examples/sim-dual-axis/esi/esop-sim.xml",
+        "scripts/generate-robot-build-report.py",
+        "scripts/tests/test_robot_build_report.py",
+        "docs/esop-product-configuration.md",
+        ".trellis/spec/backend/product-configuration.md"
+      ],
+      "limitation": "Deterministic software tests cover exact command bytes, policy rejection, response-mode validation, generated policy/hash/build-report evidence and simulated mailbox/master routing. SDO Information, automatic PDO Complete Access grouping, block transfer, physical slave interoperability, response authenticity, target WCET, ETG conformance, HIL and functional safety remain open"
+    },
+    {
       "id": "product_runtime_attachment",
       "status": "implemented",
-      "scope": "Allocation-free no_std activation of generated Rust product configuration with exact hash, ProcBuf v6, observed topology, Domain/PDO/datagram/WKC, schedule/frame-plan, per-slave ESM timeout, OpOnly, mailbox, optional ESC watchdog, ordered FMMU usage, schema-v2 structural SII and selected DC mode startup profiles, ordered watchdog and resolved DC SYNC plans, CiA 402 map and axis-policy validation plus deterministic all-slave PDO batch construction",
+      "scope": "Allocation-free no_std activation of generated Rust product configuration with exact hash, ProcBuf v6, observed topology, Domain/PDO/datagram/WKC, schedule/frame-plan, per-slave ESM timeout, OpOnly, mailbox, validated typed Complete Access policy, optional ESC watchdog, ordered FMMU usage, schema-v2 structural SII and selected DC mode startup profiles, ordered watchdog and resolved DC SYNC plans, CiA 402 map and axis-policy validation plus deterministic all-slave PDO batch construction",
       "evidence": [
         "crates/esop-product-config/src/lib.rs",
         "crates/esop-product-config/tests/generated_product.rs",
@@ -204,7 +225,7 @@
         "Makefile",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Activation validates static expectations, enforces RxPDO-to-Outputs and TxPDO-to-Inputs FMMU index compatibility, attaches generated mailbox/FMMU/structural SII and selected DC mode expectations to Startup, requires measurable propagation evidence for required DC slaves, and builds bounded ordered PDO and DC SYNC plans; live FMMU and SyncManager banks are discovered and cleared by runtime rather than becoming product-owned desired mappings. Physical response authentication, external application-time discipline, artifact signing/deployment policy, interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
+      "limitation": "Activation validates static expectations including Complete Access enabled-implies-supported, enforces RxPDO-to-Outputs and TxPDO-to-Inputs FMMU index compatibility, attaches generated mailbox/FMMU/structural SII and selected DC mode expectations to Startup, requires measurable propagation evidence for required DC slaves, and builds bounded ordered PDO and DC SYNC plans; live FMMU and SyncManager banks are discovered and cleared by runtime rather than becoming product-owned desired mappings. SDO Information and real Complete Access device behavior remain outside this static claim; physical response authentication, external application-time discipline, artifact signing/deployment policy, interoperability, target WCET/resources, HIL, braking/mechanics and functional-safety qualification remain open"
     },
     {
       "id": "pdo_configuration_readback",

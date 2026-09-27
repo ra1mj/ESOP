@@ -34,6 +34,41 @@ def require(mapping: dict, key: str, path: str):
     return mapping[key]
 
 
+def validate_complete_access_devices(value: object, declared_slaves: int) -> None:
+    if not isinstance(value, list):
+        fail("devices.coe_complete_access must be a list")
+    if len(value) != declared_slaves:
+        fail("devices.coe_complete_access length must match declared_slaves")
+
+    names: set[str] = set()
+    positions: set[int] = set()
+    for index, entry in enumerate(value):
+        path = f"devices.coe_complete_access[{index}]"
+        if not isinstance(entry, dict):
+            fail(f"{path} must be an object")
+        expected = {"name", "position", "supported", "enabled"}
+        if set(entry) != expected:
+            fail(f"{path} must contain exactly name, position, supported, enabled")
+        name = entry["name"]
+        position = entry["position"]
+        if not isinstance(name, str) or not name.strip():
+            fail(f"{path}.name must be a non-empty string")
+        if type(position) is not int or not 0 <= position <= 0xFFFF:
+            fail(f"{path}.position must be a non-negative u16 integer")
+        if type(entry["supported"]) is not bool:
+            fail(f"{path}.supported must be a boolean")
+        if type(entry["enabled"]) is not bool:
+            fail(f"{path}.enabled must be a boolean")
+        if entry["enabled"] and not entry["supported"]:
+            fail(f"{path} cannot enable unsupported Complete Access")
+        if name in names:
+            fail(f"devices.coe_complete_access contains duplicate name: {name}")
+        if position in positions:
+            fail(f"devices.coe_complete_access contains duplicate position: {position}")
+        names.add(name)
+        positions.add(position)
+
+
 def validate_report(report: dict) -> None:
     if require(report, "schema_version", "report") != SCHEMA:
         fail(f"schema_version must be {SCHEMA}")
@@ -60,6 +95,10 @@ def validate_report(report: dict) -> None:
             fail(f"devices.{key} must be a non-negative integer")
     if not isinstance(require(devices, "source", "devices"), str):
         fail("devices.source must be a string")
+    if "coe_complete_access" in devices:
+        validate_complete_access_devices(
+            devices["coe_complete_access"], devices["declared_slaves"]
+        )
 
     process_data = require(report, "process_data", "report")
     for key in (

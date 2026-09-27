@@ -1,11 +1,31 @@
 {
-  "config_sha256": "3c8f147c09127a8553044f8a5fbf8c3fb7b2c606b1b65038f597306339b74903",
+  "config_sha256": "4fb4315ab4c089fa56d9c8bf979bb37e9568b2ca3c7be1ead4ae1f45dd922f52",
   "cycle_budget": {
     "deadline_ns": 800000,
     "period_ns": 1000000,
     "qualification": "generated_not_measured"
   },
   "devices": {
+    "coe_complete_access": [
+      {
+        "enabled": true,
+        "name": "drive_left",
+        "position": 0,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_right",
+        "position": 1,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "io_block",
+        "position": 2,
+        "supported": false
+      }
+    ],
     "declared_axes": 2,
     "declared_io_channels": 16,
     "declared_slaves": 3,

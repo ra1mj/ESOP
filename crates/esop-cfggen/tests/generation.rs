@@ -82,12 +82,46 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert_eq!(build_input["process_data"]["expected_wkc"], 8);
     assert_eq!(build_input["process_data"]["copy_bytes_per_cycle"], 4);
     assert_eq!(build_input["process_data"]["wire_bytes_per_cycle"], 181);
+    assert_eq!(
+        build_input["devices"]["coe_complete_access"][0],
+        serde_json::json!({
+            "name": "drive_left",
+            "position": 0,
+            "supported": true,
+            "enabled": true,
+        })
+    );
+    assert_eq!(
+        build_input["devices"]["coe_complete_access"][1]["supported"],
+        true
+    );
+    assert_eq!(
+        build_input["devices"]["coe_complete_access"][1]["enabled"],
+        false
+    );
 
     let inventory: Value =
         serde_json::from_slice(&fs::read(first.join("device_inventory.json")).unwrap()).unwrap();
     assert_eq!(inventory["devices"][0]["mailbox"]["send_address"], 0x1000);
     assert_eq!(inventory["devices"][0]["mailbox"]["send_capacity"], 64);
     assert_eq!(inventory["devices"][0]["watchdog"]["divider"], 2500);
+    assert_eq!(
+        inventory["devices"][0]["coe_complete_access_supported"],
+        true
+    );
+    assert_eq!(inventory["devices"][0]["coe_complete_access_enabled"], true);
+    assert_eq!(
+        inventory["devices"][1]["coe_complete_access_supported"],
+        true
+    );
+    assert_eq!(
+        inventory["devices"][1]["coe_complete_access_enabled"],
+        false
+    );
+    assert_eq!(
+        inventory["devices"][2]["coe_complete_access_supported"],
+        false
+    );
     assert_eq!(
         inventory["devices"][0]["watchdog"]["process_data_intervals"],
         100
@@ -123,6 +157,8 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     let product: Value =
         serde_json::from_slice(&fs::read(first.join("product_config.json")).unwrap()).unwrap();
     assert_eq!(product["slaves"][0]["mailbox"]["receive_capacity"], 64);
+    assert_eq!(product["slaves"][0]["coe_complete_access_enabled"], true);
+    assert_eq!(product["slaves"][1]["coe_complete_access_enabled"], false);
     assert_eq!(product["slaves"][2]["mailbox"]["send_capacity"], 32);
     assert_eq!(product["slaves"][0]["sii_sync_manager_count"], 4);
     assert_eq!(product["slaves"][0]["sii_enabled_sync_managers"], 15);
@@ -235,6 +271,8 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(header.contains("uint16_t watchdog_divider"));
     assert!(header.contains("uint8_t has_process_data_watchdog"));
     assert!(header.contains("uint16_t process_data_watchdog_intervals"));
+    assert!(header.contains("uint8_t coe_complete_access_supported"));
+    assert!(header.contains("uint8_t coe_complete_access_enabled"));
     assert!(header.contains("esop_slave_copy_config_t"));
     assert!(header.contains("#define ESOP_SLAVE_COPY_COUNT 1u"));
     assert!(header.contains("\"left_position_to_io\", 9u, 15u, 16u"));
@@ -269,6 +307,12 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(rust.contains("cycle_time1_ns: 0"));
     assert!(rust.contains("watchdog: Some(EscWatchdogConfig::new(Some(2500), Some(100)))"));
     assert!(rust.contains("watchdog: None"));
+    assert!(
+        rust.contains("coe_complete_access_supported: true, coe_complete_access_enabled: true")
+    );
+    assert!(
+        rust.contains("coe_complete_access_supported: true, coe_complete_access_enabled: false")
+    );
     assert!(rust.contains("ProductSlaveCopyConfig"));
     assert!(rust.contains("name: \"left_position_to_io\", source_pdo_index: 9"));
 
@@ -284,6 +328,66 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
 
     assert_eq!(first_summary.config_sha256, second_summary.config_sha256);
     assert_eq!(artifact_bytes(&first), artifact_bytes(&second));
+}
+
+#[test]
+fn complete_access_capability_policy_and_hashes_are_strict() {
+    let fixture = Fixture::new();
+    let enabled = generate(&fixture.product, &fixture.output("ca-enabled")).unwrap();
+    fixture.edit_product(|product| {
+        product["slaves"][0].as_object_mut().unwrap().remove("coe");
+    });
+    let disabled_output = fixture.output("ca-disabled");
+    let disabled = generate(&fixture.product, &disabled_output).unwrap();
+    assert_ne!(enabled.config_sha256, disabled.config_sha256);
+    let product: Value =
+        serde_json::from_slice(&fs::read(disabled_output.join("product_config.json")).unwrap())
+            .unwrap();
+    assert_eq!(product["slaves"][0]["coe_complete_access_supported"], true);
+    assert_eq!(product["slaves"][0]["coe_complete_access_enabled"], false);
+
+    let fixture = Fixture::new();
+    fixture.edit_esi(|xml| xml.replace(" CompleteAccess=\"true\"", ""));
+    let error = generate(&fixture.product, &fixture.output("ca-unsupported"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("enables CoE Complete Access but its ESI does not advertise support"),
+        "{error}"
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        product["slaves"][0]["coe"]["unexpected"] = Value::Bool(true);
+    });
+    assert!(
+        generate(&fixture.product, &fixture.output("ca-unknown-field"))
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field `unexpected`")
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        product["slaves"][0].as_object_mut().unwrap().remove("coe");
+    });
+    let supported_output = fixture.output("ca-supported-hash");
+    let supported = generate(&fixture.product, &supported_output).unwrap();
+    let supported_inventory: Value =
+        serde_json::from_slice(&fs::read(supported_output.join("device_inventory.json")).unwrap())
+            .unwrap();
+    fixture.edit_esi(|xml| xml.replace(" CompleteAccess=\"true\"", ""));
+    let unsupported_output = fixture.output("ca-unsupported-hash");
+    let unsupported = generate(&fixture.product, &unsupported_output).unwrap();
+    let unsupported_inventory: Value = serde_json::from_slice(
+        &fs::read(unsupported_output.join("device_inventory.json")).unwrap(),
+    )
+    .unwrap();
+    assert_ne!(supported.config_sha256, unsupported.config_sha256);
+    assert_ne!(
+        supported_inventory["devices"][0]["esi_semantic_sha256"],
+        unsupported_inventory["devices"][0]["esi_semantic_sha256"]
+    );
 }
 
 #[test]

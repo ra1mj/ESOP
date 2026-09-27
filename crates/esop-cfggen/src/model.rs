@@ -173,12 +173,21 @@ pub struct SlaveManifest {
     #[serde(default)]
     pub serial: Option<HexU32>,
     #[serde(default)]
+    pub coe: SlaveCoeManifest,
+    #[serde(default)]
     pub dc: SlaveDcManifest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watchdog: Option<SlaveWatchdogManifest>,
     pub domain_id: u8,
     pub rx_pdos: Vec<HexU16>,
     pub tx_pdos: Vec<HexU16>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SlaveCoeManifest {
+    #[serde(default)]
+    pub complete_access: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

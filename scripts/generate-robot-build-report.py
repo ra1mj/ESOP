@@ -47,6 +47,42 @@ def require_optional_nonnegative_int(value: object, path: str) -> int | None:
     return require_nonnegative_int(value, path)
 
 
+def validate_complete_access_devices(
+    value: object, declared_slaves: int, path: str
+) -> list[dict]:
+    if not isinstance(value, list):
+        raise ValueError(f"{path} must be a list")
+    if len(value) != declared_slaves:
+        raise ValueError(f"{path} length must match declared_slaves")
+
+    names: set[str] = set()
+    positions: set[int] = set()
+    checked: list[dict] = []
+    for index, entry in enumerate(value):
+        item_path = f"{path}[{index}]"
+        item = require_exact_object(
+            entry, {"name", "position", "supported", "enabled"}, item_path
+        )
+        name = require_nonempty_string(item["name"], f"{item_path}.name")
+        position = require_nonnegative_int(item["position"], f"{item_path}.position")
+        if position > 0xFFFF:
+            raise ValueError(f"{item_path}.position must fit in u16")
+        if type(item["supported"]) is not bool:
+            raise ValueError(f"{item_path}.supported must be a boolean")
+        if type(item["enabled"]) is not bool:
+            raise ValueError(f"{item_path}.enabled must be a boolean")
+        if item["enabled"] and not item["supported"]:
+            raise ValueError(f"{item_path} cannot enable unsupported Complete Access")
+        if name in names:
+            raise ValueError(f"{path} contains duplicate name: {name}")
+        if position in positions:
+            raise ValueError(f"{path} contains duplicate position: {position}")
+        names.add(name)
+        positions.add(position)
+        checked.append(item)
+    return checked
+
+
 def validate_product_input(value: object) -> dict:
     product = require_exact_object(
         value,
@@ -78,13 +114,24 @@ def validate_product_input(value: object) -> dict:
 
     devices = require_exact_object(
         product["devices"],
-        {"declared_slaves", "declared_axes", "declared_io_channels", "source"},
+        {
+            "declared_slaves",
+            "declared_axes",
+            "declared_io_channels",
+            "coe_complete_access",
+            "source",
+        },
         "product input devices",
     )
     for key in ("declared_slaves", "declared_axes", "declared_io_channels"):
         require_nonnegative_int(devices[key], f"product input devices.{key}")
     if devices["declared_slaves"] == 0:
         raise ValueError("product input devices.declared_slaves must be positive")
+    validate_complete_access_devices(
+        devices["coe_complete_access"],
+        devices["declared_slaves"],
+        "product input devices.coe_complete_access",
+    )
     require_nonempty_string(devices["source"], "product input devices.source")
 
     process_data = require_exact_object(
@@ -203,6 +250,7 @@ def build_report(product_input: object | None = None) -> dict:
             "declared_slaves": 0,
             "declared_axes": 0,
             "declared_io_channels": 0,
+            "coe_complete_access": [],
             "source": "no hardware topology supplied",
         },
         "process_data": {

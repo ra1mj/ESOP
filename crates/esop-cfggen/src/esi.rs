@@ -26,6 +26,7 @@ pub struct EsiDevice {
     pub sync_managers: Vec<EsiSyncManager>,
     pub mailbox: Option<EsiMailbox>,
     pub coe_supported: bool,
+    pub coe_complete_access_supported: bool,
     pub dc_modes: Vec<EsiDcMode>,
     pub rx_pdos: Vec<EsiPdo>,
     pub tx_pdos: Vec<EsiPdo>,
@@ -182,6 +183,7 @@ struct DeviceBuilder {
     fmmu_usages: Vec<EsiFmmuUsage>,
     sync_managers: Vec<EsiSyncManager>,
     coe_supported: bool,
+    coe_complete_access_supported: bool,
     dc_modes: Vec<EsiDcMode>,
     rx_pdos: Vec<EsiPdo>,
     tx_pdos: Vec<EsiPdo>,
@@ -216,6 +218,7 @@ impl DeviceBuilder {
             sync_managers: self.sync_managers,
             mailbox,
             coe_supported: self.coe_supported,
+            coe_complete_access_supported: self.coe_complete_access_supported,
             dc_modes: self.dc_modes,
             rx_pdos: self.rx_pdos,
             tx_pdos: self.tx_pdos,
@@ -588,7 +591,10 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                             && pdo.is_none()
                             && stack_ends_with(&stack, &["Mailbox", "CoE"]) =>
                     {
-                        device.as_mut().expect("device exists").coe_supported = true;
+                        let complete_access = parse_coe_complete_access(&start, path)?;
+                        let device = device.as_mut().expect("device exists");
+                        device.coe_supported = true;
+                        device.coe_complete_access_supported = complete_access;
                     }
                     "Entry" if pdo.is_some() => {
                         if entry.is_some() {
@@ -606,7 +612,9 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                     && stack_ends_with(&stack, &["Device", "Mailbox"])
                     && let Some(device) = device.as_mut()
                 {
+                    let complete_access = parse_coe_complete_access(&start, path)?;
                     device.coe_supported = true;
+                    device.coe_complete_access_supported = complete_access;
                 }
                 if matches!(
                     name.as_str(),
@@ -1057,6 +1065,17 @@ fn optional_u8_attribute(start: &BytesStart<'_>, name: &str, path: &Path) -> Res
         })
 }
 
+fn parse_coe_complete_access(start: &BytesStart<'_>, path: &Path) -> Result<bool> {
+    optional_attribute(start, "CompleteAccess", path)?
+        .map(|value| parse_bool(&value))
+        .transpose()
+        .map_err(|detail| GeneratorError::Xml {
+            path: path.to_owned(),
+            detail: format!("invalid CoE CompleteAccess: {detail}"),
+        })
+        .map(|value| value.unwrap_or(false))
+}
+
 fn parse_number(value: &str) -> std::result::Result<u64, String> {
     let value = value.trim();
     if let Some(digits) = value
@@ -1213,7 +1232,7 @@ mod tests {
 <Sm StartAddress="#x1000" DefaultSize="64" ControlByte="#x26" Enable="1">MBoxOut</Sm>
 <Sm StartAddress="#x1100" DefaultSize="32" ControlByte="#x22" Enable="1">MBoxIn</Sm>
 <Sm Enable="true" OpOnly="1">Outputs</Sm><Sm Enable="1">Inputs</Sm>
-<Mailbox><CoE/></Mailbox>
+<Mailbox><CoE CompleteAccess="true"/></Mailbox>
 <StateMachine><Timeout><PreopTimeout>11</PreopTimeout><SafeopOpTimeout>22</SafeopOpTimeout>
 <BackToInitTimeout>33</BackToInitTimeout><BackToSafeopTimeout>44</BackToSafeopTimeout>
 </Timeout></StateMachine>
@@ -1239,6 +1258,7 @@ mod tests {
         assert!(device.sync_managers[2].op_only);
         assert_eq!(device.sync_managers[2].activation, 0x09);
         assert!(device.coe_supported);
+        assert!(device.coe_complete_access_supported);
         assert_eq!(
             device.mailbox,
             Some(EsiMailbox {
@@ -1260,6 +1280,39 @@ mod tests {
             device.mailbox.unwrap().receive_sync_manager(),
             MailboxReceiveSyncManager::new(1, 0x1100, 32, 0x22)
         );
+    }
+
+    #[test]
+    fn coe_complete_access_is_parsed_for_empty_and_paired_elements() {
+        let base = r##"<EtherCATInfo><Vendor><Id>1</Id></Vendor><Descriptions><Devices><Device>
+<Type ProductCode="1" RevisionNo="1">Drive</Type><Name>Drive</Name>
+<Mailbox>{coe}</Mailbox>
+</Device></Devices></Descriptions></EtherCATInfo>"##;
+        for coe in [
+            r#"<CoE CompleteAccess="true"/>"#,
+            r#"<CoE CompleteAccess="1"></CoE>"#,
+        ] {
+            let catalog =
+                parse_text(Path::new("fixture.xml"), &base.replace("{coe}", coe)).unwrap();
+            assert!(catalog.devices[0].coe_supported);
+            assert!(catalog.devices[0].coe_complete_access_supported);
+        }
+
+        let catalog =
+            parse_text(Path::new("fixture.xml"), &base.replace("{coe}", "<CoE/>")).unwrap();
+        assert!(!catalog.devices[0].coe_complete_access_supported);
+    }
+
+    #[test]
+    fn malformed_coe_complete_access_is_rejected() {
+        let xml = r##"<EtherCATInfo><Vendor><Id>1</Id></Vendor><Descriptions><Devices><Device>
+<Type ProductCode="1" RevisionNo="1">Drive</Type><Name>Drive</Name>
+<Mailbox><CoE CompleteAccess="sometimes"/></Mailbox>
+</Device></Devices></Descriptions></EtherCATInfo>"##;
+        let error = parse_text(Path::new("fixture.xml"), xml)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid CoE CompleteAccess"), "{error}");
     }
 
     #[test]

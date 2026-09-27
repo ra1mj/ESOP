@@ -9,8 +9,8 @@ use esop_ethercat_core::{
     EthercatPort, EthercatState, EventCode, ExpectedSlave, FrameHandle, FramePlan, LinkState,
     MailboxConfig, MailboxController, MailboxProtocol, MasterConfig, NoopDmaCache, PortError,
     RegisterOperation, RxExpectation, RxPoll, RxSlotState, RxWorkingCounterPolicy,
-    ScanDcCapabilities, ScanPortLink, ScanRecord, SdoProgress, SdoTransfer, SlaveIdentity,
-    StartupConfig, StartupController, StartupProgress,
+    ScanDcCapabilities, ScanPortLink, ScanRecord, SdoAccess, SdoAccessPolicy, SdoProgress,
+    SdoTransfer, SlaveIdentity, StartupConfig, StartupController, StartupProgress,
 };
 
 const MTU: usize = MAX_ETHERNET_FRAME_LEN;
@@ -1250,12 +1250,13 @@ fn startup_dc_receive_times_round_trip_through_master_and_rx_consumer() {
 }
 
 #[test]
-fn coe_sdo_round_trips_through_mailbox_control_and_master() {
+fn complete_access_sdo_round_trips_through_mailbox_control_and_master() {
     let config = MasterConfig::new([0xFF; 6], [1, 2, 3, 4, 5, 6]);
     let mut master = EthercatMaster::<2, MTU>::new(config);
     let mut pool = ControlRequestPool::<2>::new();
-    let mut sdo = SdoTransfer::new();
-    sdo.start_download(0x6040, 0, &[0x06, 0x00], false).unwrap();
+    let mut sdo = SdoTransfer::with_policy(SdoAccessPolicy::new(true));
+    sdo.start_download(0x6040, 0, &[0x06, 0x00], SdoAccess::Complete)
+        .unwrap();
 
     let mut mailbox = MailboxController::new();
     mailbox
@@ -1275,6 +1276,12 @@ fn coe_sdo_round_trips_through_mailbox_control_and_master() {
     master
         .build_control_request(&mut pool, send_request, send_frame)
         .unwrap();
+    {
+        let slot = master.frame_slot_mut(send_frame).unwrap();
+        let sent = FrameView::parse(&slot.bytes[..slot.len]).unwrap();
+        let datagram = sent.datagrams().next().unwrap().unwrap();
+        assert_eq!(&datagram.payload[6..12], &[0, 0x20, 0x3B, 0x40, 0x60, 0]);
+    }
     let mut port = MockPort::with_response(1, &[0; 16]);
     master.submit_frame(&mut port, send_frame).unwrap();
     let mut scratch = [0; MTU];

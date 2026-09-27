@@ -308,13 +308,18 @@ AssignActivate，并在运行时重算后形成产品顺序固定容量计划。
 | MBX-001 | P0 | 邮箱收发、计数器、重复帧、超时、错误响应必须由非阻塞请求状态机处理。 | 请求跨多个 service 调用完成，周期路径无阻塞。 |
 | COE-001 | P0 | 支持 CoE SDO expedited 和 segmented upload/download，报告 abort code。 | 标准对象读写、分段传输、abort 和超时测试。 |
 | COE-002 | P0 | 可在 PREOP/SAFEOP 配置阶段执行 SDO 写入以设置 PDO assignment/mapping。 | 已知 CoE 从站启动后 PDO 映射与期望一致。 |
-| MBX-002 | P1 | 支持 Complete Access 的 SDO 传输，但必须允许设备配置禁用。 | CA 支持/拒绝两类设备的兼容测试。 |
+| MBX-002 | P1 | 支持 Complete Access 的 SDO 传输，但必须允许设备配置禁用。 | 软件测试覆盖类型化策略、initiate 命令精确 `0x10`、非法模式/响应拒绝、ESI 能力与产品授权、生成哈希、运行时防篡改和邮箱/主站线上字节；真实从站互操作与 HIL 仍待完成。 |
 | MBX-003 | P0 | 实现与上层邮箱协议无关的 Mailbox Resilient Layer，恢复丢失、重复或状态不一致的邮箱帧。 | 丢帧、重复帧、计数器回绕和重试故障注入。 |
 | MBX-004 | P0 | 按 ESI/SII/静态配置支持 PollTime、直接读取 MBoxIn SyncManager Status Bit，或通过 FMMU 把 Mailbox Status Bit 映射到周期 Domain；轮询严格受控制面预算限制。 | 软件测试覆盖 PollTime、生成式直接 SM Status Bit、在线 SII SM/FMMU usage 交叉验证、确定性 Domain 尾部/FMMU/WKC 生成、运行时防篡改，以及 invalid/stale 输入抑制且无直接回退；两种设备模型的物理响应真实性与 HIL 仍待验证。 |
 | COE-003 | P0 | 接收 CoE Emergency 消息并以固定事件记录交给应用；应用未及时消费不得阻塞邮箱 FSM。 | 多驱动并发 Emergency、事件环满和顺序测试。 |
 | COE-004 | P1 | 支持 SDO Information service，用于读取对象、类型、访问权和 PDO 可映射属性；可在产品构建中关闭。 | 与已知对象字典及 ESI 描述交叉验证。 |
 | REG-001 | P1 | 提供异步 ESC 寄存器请求 API，仅在控制面预算中执行。 | 寄存器读写不会推迟指定 PDO 周期。 |
 | EXT-001 | P2 | FoE、SoE、EoE、VoE 必须作为独立协议模块注册，不得改动数据报核心。 | 编译开关和插件 API 回归测试。 |
+
+MBX-002 的软件边界已实现：默认策略禁用 Complete Access，只有直接 ESI CoE capability
+和逐从站产品授权同时成立时，运行时才可构造允许 `SdoAccess::Complete` 的传输；非法
+subindex、模式不匹配和生成数据篡改均 fail-closed。PDO 配置仍显式使用单 subindex。
+该状态不关闭 COE-004；SDO Information、对象字典交叉验证和真实设备资格仍是独立缺口。
 
 ### 5.7 CiA 402 与运动控制 Feature Pack
 
@@ -412,8 +417,8 @@ typedef struct {
 | --- | --- | --- |
 | M0：Wire + Port | `wire`、固定帧槽、Linux raw 仿真端口、通用 DMA descriptor ownership/cache 契约、Frame Plan 到 DMA TX descriptor 的直接构建、DMA TX 提交端口边界、DMA RX descriptor 直接消费会话、STM32/HPM MAC bring-up | 所有数据报编码/解析单测；可接收/发送 EtherType `0x88A4`；通用描述符状态机、缓存维护、TX 零中间帧拷贝构建、RX descriptor 直接解析和提交失败回收测试通过，目标板 DMA 缓存测试仍需实板完成。 |
 | M1：最小 PDO 主站 | scan、固定地址、AL、SM/FMMU 写入读回、单 Domain、LRW、WKC、诊断 | 1/8/32 从站 HIL，达到 SAFEOP/OP，过程数据连续 1 小时无内存增长。 |
-| M2：可用驱动主站 | CoE SDO、PDO 配置、DC、多个 Domain、恢复 API | 已具备固定容量多 Domain 注册、SII segment datagram 绑定、MTU 拆帧和多速率激活编排；仍需具备 CoE/DC 驱动从站的 250/500 us 基线、故障注入和 jitter 报告。 |
-| M3：产品化扩展 | 配置生成器、Complete Access、寄存器请求、RTOS 示例、PCAP 回放 | 配置可复现、跨端口回归、资源报告和 API 兼容性检查。 |
+| M2：可用驱动主站 | CoE SDO、PDO 配置、DC、多个 Domain、恢复 API | 已具备固定容量多 Domain 注册、SII segment datagram 绑定、MTU 拆帧、多速率激活编排和产品控制的 Complete Access 软件路径；仍需 SDO Information、CoE/DC 驱动从站的 250/500 us 基线、故障注入、jitter 报告与真实设备互操作。 |
+| M3：产品化扩展 | 配置生成器、Complete Access、寄存器请求、RTOS 示例、PCAP 回放 | Complete Access 的确定性配置、构建报告与运行时防篡改已具备；完整 M3 仍需跨端口回归、资源报告资格、API 兼容性、RTOS 示例和 PCAP 回放。 |
 | M4：可选协议 | FoE、SoE、EoE、VoE、冗余 | 每个协议独立开关、独立测试和对周期性能影响报告。 |
 
 M1 是“完成必需 EtherCAT PDO 功能”的最小可用版本；M2 是“适合带 DC 伺服设备的实际控制”的目标版本。不得为了赶 M1 把同步等待或无边界扫描逻辑放入周期 API。

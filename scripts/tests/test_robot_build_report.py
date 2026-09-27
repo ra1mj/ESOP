@@ -36,6 +36,26 @@ def product_input() -> dict:
             "declared_slaves": 3,
             "declared_axes": 2,
             "declared_io_channels": 16,
+            "coe_complete_access": [
+                {
+                    "name": "drive_left",
+                    "position": 0,
+                    "supported": True,
+                    "enabled": True,
+                },
+                {
+                    "name": "drive_right",
+                    "position": 1,
+                    "supported": True,
+                    "enabled": False,
+                },
+                {
+                    "name": "io_block",
+                    "position": 2,
+                    "supported": False,
+                    "enabled": False,
+                },
+            ],
             "source": "esop-cfggen validated product manifest and ESI subset",
         },
         "process_data": {
@@ -78,6 +98,7 @@ class RobotBuildReportTests(unittest.TestCase):
         self.assertEqual(report["software"]["config_hash"], generator_module["config_hash"]())
         self.assertEqual(report["platform"]["board"], "host-development")
         self.assertEqual(report["devices"]["declared_slaves"], 0)
+        self.assertEqual(report["devices"]["coe_complete_access"], [])
         self.assertFalse(report["qualification"]["passed"])
 
     def test_product_input_projects_exact_generated_evidence(self):
@@ -128,6 +149,20 @@ class RobotBuildReportTests(unittest.TestCase):
         platform_extra["platform"]["dma_bytes"] = None
         cases.append((platform_extra, "unknown keys"))
 
+        unsupported_complete_access = product_input()
+        unsupported_complete_access["devices"]["coe_complete_access"][2]["enabled"] = True
+        cases.append((unsupported_complete_access, "cannot enable unsupported"))
+
+        duplicate_complete_access_position = product_input()
+        duplicate_complete_access_position["devices"]["coe_complete_access"][2][
+            "position"
+        ] = 1
+        cases.append((duplicate_complete_access_position, "duplicate position"))
+
+        missing_complete_access_entry = product_input()
+        missing_complete_access_entry["devices"]["coe_complete_access"].pop()
+        cases.append((missing_complete_access_entry, "length must match"))
+
         for value, reason in cases:
             with self.subTest(reason=reason):
                 self.assert_product_rejected(value, reason)
@@ -136,6 +171,13 @@ class RobotBuildReportTests(unittest.TestCase):
         invalid_wire_report["process_data"]["wire_bytes_per_cycle"] = True
         with self.assertRaisesRegex(ValueError, "wire_bytes_per_cycle"):
             validate_report(invalid_wire_report)
+
+        invalid_complete_access_report = build_report(product_input())
+        invalid_complete_access_report["devices"]["coe_complete_access"][0][
+            "supported"
+        ] = False
+        with self.assertRaisesRegex(ValueError, "cannot enable unsupported"):
+            validate_report(invalid_complete_access_report)
 
     def test_build_report_does_not_mutate_product_input(self):
         source = product_input()

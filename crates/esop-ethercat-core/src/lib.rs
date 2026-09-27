@@ -49,8 +49,8 @@ pub use al::{
 pub use arena::{Arena, ArenaError};
 pub use coe::{
     COE_EMERGENCY_LEN, COE_HEADER_LEN, CoeEmergency, CoeHeader, CoeService, MAX_SDO_DATA,
-    MAX_SDO_SEGMENT_BYTES, SDO_DATA_OFFSET, SdoDirection, SdoError, SdoPhase, SdoProgress,
-    SdoResponse, SdoTransfer,
+    MAX_SDO_SEGMENT_BYTES, SDO_DATA_OFFSET, SdoAccess, SdoAccessPolicy, SdoDirection, SdoError,
+    SdoPhase, SdoProgress, SdoResponse, SdoTransfer,
 };
 pub use control::{
     ControlError, ControlExpiry, ControlExpiryHandles, ControlRequest, ControlRequestPool,

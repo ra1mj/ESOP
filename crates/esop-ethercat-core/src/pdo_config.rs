@@ -6,7 +6,7 @@
 //! at a time, so it can share the existing asynchronous mailbox budget without
 //! touching the cyclic PDO path.
 
-use crate::coe::{SdoError, SdoTransfer};
+use crate::coe::{SdoAccess, SdoError, SdoTransfer};
 use crate::mailbox::{MAX_MAILBOX_BYTES, MailboxConfig, MailboxController, MailboxError};
 
 pub const MAX_PDO_SDO_DATA: usize = 4;
@@ -601,12 +601,12 @@ impl<const OPS: usize> PdoConfigController<OPS> {
                     write.index,
                     write.subindex,
                     &write.data[..write.data_len as usize],
-                    false,
+                    SdoAccess::Single,
                 )
                 .map_err(PdoConfigError::Sdo),
             PdoConfigStep::VerifyUpload => self
                 .transfer
-                .start_upload(write.index, write.subindex, false)
+                .start_upload(write.index, write.subindex, SdoAccess::Single)
                 .map_err(PdoConfigError::Sdo),
         }
     }

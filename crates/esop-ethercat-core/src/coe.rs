@@ -19,6 +19,7 @@ const SDO_ABORT: u8 = 0x80;
 const SDO_DOWNLOAD_RESPONSE: u8 = 0x60;
 const SDO_UPLOAD_SEGMENT_REQUEST: u8 = 0x60;
 const SDO_DOWNLOAD_SEGMENT_RESPONSE: u8 = 0x20;
+const SDO_COMPLETE_ACCESS: u8 = 0x10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -112,6 +113,34 @@ pub enum SdoDirection {
     Download,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SdoAccess {
+    #[default]
+    Single,
+    Complete,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SdoAccessPolicy {
+    complete_access_enabled: bool,
+}
+
+impl SdoAccessPolicy {
+    pub const fn new(complete_access_enabled: bool) -> Self {
+        Self {
+            complete_access_enabled,
+        }
+    }
+
+    pub const fn complete_access_enabled(self) -> bool {
+        self.complete_access_enabled
+    }
+
+    pub const fn permits(self, access: SdoAccess) -> bool {
+        matches!(access, SdoAccess::Single) || self.complete_access_enabled
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SdoPhase {
     Idle,
@@ -144,6 +173,9 @@ pub enum SdoError {
     ToggleMismatch,
     SizeMismatch,
     SegmentMalformed,
+    CompleteAccessDisabled,
+    InvalidCompleteAccessSubindex,
+    CompleteAccessMismatch,
     Abort(u32),
 }
 
@@ -157,6 +189,7 @@ pub struct SdoResponse<'a> {
     pub last: bool,
     pub abort_code: Option<u32>,
     pub command: u8,
+    pub complete_access: Option<bool>,
 }
 
 impl<'a> SdoResponse<'a> {
@@ -187,6 +220,7 @@ impl<'a> SdoResponse<'a> {
                     payload[6], payload[7], payload[8], payload[9],
                 ])),
                 command,
+                complete_access: None,
             });
         }
 
@@ -210,6 +244,7 @@ impl<'a> SdoResponse<'a> {
                     last: true,
                     abort_code: None,
                     command,
+                    complete_access: Some(command & SDO_COMPLETE_ACCESS != 0),
                 });
             }
 
@@ -230,6 +265,7 @@ impl<'a> SdoResponse<'a> {
                 last: false,
                 abort_code: None,
                 command,
+                complete_access: Some(command & SDO_COMPLETE_ACCESS != 0),
             });
         }
 
@@ -248,6 +284,7 @@ impl<'a> SdoResponse<'a> {
                 last: true,
                 abort_code: None,
                 command,
+                complete_access: None,
             });
         }
 
@@ -271,6 +308,7 @@ impl<'a> SdoResponse<'a> {
                 last: command & 0x01 != 0,
                 abort_code: None,
                 command,
+                complete_access: None,
             });
         }
 
@@ -284,6 +322,7 @@ impl<'a> SdoResponse<'a> {
                 last: true,
                 abort_code: None,
                 command,
+                complete_access: None,
             });
         }
 
@@ -296,7 +335,8 @@ pub struct SdoTransfer {
     direction: SdoDirection,
     index: u16,
     subindex: u8,
-    complete_access: bool,
+    access: SdoAccess,
+    access_policy: SdoAccessPolicy,
     data: [u8; MAX_SDO_DATA],
     data_len: usize,
     expected_size: Option<usize>,
@@ -310,12 +350,17 @@ pub struct SdoTransfer {
 
 impl SdoTransfer {
     pub const fn new() -> Self {
+        Self::with_policy(SdoAccessPolicy::new(false))
+    }
+
+    pub const fn with_policy(access_policy: SdoAccessPolicy) -> Self {
         Self {
             phase: SdoPhase::Idle,
             direction: SdoDirection::Upload,
             index: 0,
             subindex: 0,
-            complete_access: false,
+            access: SdoAccess::Single,
+            access_policy,
             data: [0; MAX_SDO_DATA],
             data_len: 0,
             expected_size: None,
@@ -342,6 +387,14 @@ impl SdoTransfer {
 
     pub const fn subindex(&self) -> u8 {
         self.subindex
+    }
+
+    pub const fn access(&self) -> SdoAccess {
+        self.access
+    }
+
+    pub const fn access_policy(&self) -> SdoAccessPolicy {
+        self.access_policy
     }
 
     pub const fn data_len(&self) -> usize {
@@ -376,9 +429,9 @@ impl SdoTransfer {
         &mut self,
         index: u16,
         subindex: u8,
-        complete_access: bool,
+        access: SdoAccess,
     ) -> Result<(), SdoError> {
-        self.begin(SdoDirection::Upload, index, subindex, complete_access, &[])?;
+        self.begin(SdoDirection::Upload, index, subindex, access, &[])?;
         self.build_upload_initiate();
         Ok(())
     }
@@ -388,15 +441,9 @@ impl SdoTransfer {
         index: u16,
         subindex: u8,
         data: &[u8],
-        complete_access: bool,
+        access: SdoAccess,
     ) -> Result<(), SdoError> {
-        self.begin(
-            SdoDirection::Download,
-            index,
-            subindex,
-            complete_access,
-            data,
-        )?;
+        self.begin(SdoDirection::Download, index, subindex, access, data)?;
         if data.len() <= 4 {
             self.build_download_expedited();
         } else {
@@ -425,6 +472,9 @@ impl SdoTransfer {
             (SdoDirection::Upload, SdoPhase::AwaitInitiate) => {
                 if let Err(error) = self.check_object(response.index, response.subindex) {
                     return self.fail(error);
+                }
+                if response.complete_access != Some(matches!(self.access, SdoAccess::Complete)) {
+                    return self.fail(SdoError::CompleteAccessMismatch);
                 }
                 if response.command & 0x02 != 0 {
                     if let Err(error) = self.store_upload_data(response.data) {
@@ -522,7 +572,7 @@ impl SdoTransfer {
         direction: SdoDirection,
         index: u16,
         subindex: u8,
-        complete_access: bool,
+        access: SdoAccess,
         data: &[u8],
     ) -> Result<(), SdoError> {
         if !matches!(
@@ -534,11 +584,17 @@ impl SdoTransfer {
         if data.len() > MAX_SDO_DATA {
             return Err(SdoError::PayloadTooLarge);
         }
+        if !self.access_policy.permits(access) {
+            return Err(SdoError::CompleteAccessDisabled);
+        }
+        if matches!(access, SdoAccess::Complete) && subindex > 1 {
+            return Err(SdoError::InvalidCompleteAccessSubindex);
+        }
         self.phase = SdoPhase::AwaitInitiate;
         self.direction = direction;
         self.index = index;
         self.subindex = subindex;
-        self.complete_access = complete_access;
+        self.access = access;
         self.data.fill(0);
         self.data[..data.len()].copy_from_slice(data);
         self.data_len = data.len();
@@ -570,7 +626,12 @@ impl SdoTransfer {
     }
 
     fn build_upload_initiate(&mut self) {
-        let command = SDO_UPLOAD_REQUEST | if self.complete_access { 0x80 } else { 0 };
+        let command = SDO_UPLOAD_REQUEST
+            | if matches!(self.access, SdoAccess::Complete) {
+                SDO_COMPLETE_ACCESS
+            } else {
+                0
+            };
         self.write_common_header(CoeService::SdoRequest, command);
         self.pending_len = SDO_DATA_OFFSET;
     }
@@ -579,7 +640,11 @@ impl SdoTransfer {
         let unused = 4 - self.data_len;
         let command = SDO_DOWNLOAD_EXPEDITED
             | ((unused as u8) << 2)
-            | if self.complete_access { 0x80 } else { 0 };
+            | if matches!(self.access, SdoAccess::Complete) {
+                SDO_COMPLETE_ACCESS
+            } else {
+                0
+            };
         self.write_common_header(CoeService::SdoRequest, command);
         self.pending[SDO_DATA_OFFSET..SDO_DATA_OFFSET + 4].fill(0);
         self.pending[SDO_DATA_OFFSET..SDO_DATA_OFFSET + self.data_len]
@@ -588,7 +653,12 @@ impl SdoTransfer {
     }
 
     fn build_download_initiate(&mut self) {
-        let command = SDO_DOWNLOAD_NORMAL | if self.complete_access { 0x80 } else { 0 };
+        let command = SDO_DOWNLOAD_NORMAL
+            | if matches!(self.access, SdoAccess::Complete) {
+                SDO_COMPLETE_ACCESS
+            } else {
+                0
+            };
         self.write_common_header(CoeService::SdoRequest, command);
         self.pending[SDO_DATA_OFFSET..SDO_DATA_OFFSET + 4]
             .copy_from_slice(&(self.data_len as u32).to_le_bytes());
@@ -676,7 +746,7 @@ mod tests {
     fn expedited_download_encodes_command_and_fixed_data_area() {
         let mut transfer = SdoTransfer::new();
         transfer
-            .start_download(0x6040, 0, &[0x06, 0x00], false)
+            .start_download(0x6040, 0, &[0x06, 0x00], SdoAccess::Single)
             .unwrap();
         let request = transfer.request().unwrap();
         assert_eq!(request.len(), 10);
@@ -687,9 +757,99 @@ mod tests {
     }
 
     #[test]
+    fn complete_access_requests_use_bit_four_only_on_initiate() {
+        let policy = SdoAccessPolicy::new(true);
+
+        let mut upload = SdoTransfer::with_policy(policy);
+        upload.start_upload(0x2000, 1, SdoAccess::Complete).unwrap();
+        assert_eq!(upload.request().unwrap()[2], 0x50);
+
+        let mut expedited = SdoTransfer::with_policy(policy);
+        expedited
+            .start_download(0x2000, 1, &[1, 2], SdoAccess::Complete)
+            .unwrap();
+        assert_eq!(expedited.request().unwrap()[2], 0x3B);
+
+        let data = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let mut segmented = SdoTransfer::with_policy(policy);
+        segmented
+            .start_download(0x2000, 1, &data, SdoAccess::Complete)
+            .unwrap();
+        assert_eq!(segmented.request().unwrap()[2], 0x31);
+
+        let mut initiate_response = [0; 6];
+        response_header(&mut initiate_response);
+        initiate_response[2] = SDO_DOWNLOAD_RESPONSE;
+        initiate_response[3..5].copy_from_slice(&0x2000u16.to_le_bytes());
+        initiate_response[5] = 1;
+        assert_eq!(
+            segmented.accept_response(&initiate_response),
+            Ok(SdoProgress::Advanced)
+        );
+        assert_eq!(segmented.request().unwrap()[2], 0);
+
+        let mut ack = [0; 3];
+        response_header(&mut ack);
+        ack[2] = SDO_DOWNLOAD_SEGMENT_RESPONSE;
+        assert_eq!(segmented.accept_response(&ack), Ok(SdoProgress::Advanced));
+        assert_eq!(segmented.request().unwrap()[2], 0x1B);
+    }
+
+    #[test]
+    fn complete_access_admission_is_fail_closed_before_state_mutation() {
+        let mut disabled = SdoTransfer::new();
+        assert_eq!(
+            disabled.start_upload(0x2000, 0, SdoAccess::Complete),
+            Err(SdoError::CompleteAccessDisabled)
+        );
+        assert_eq!(disabled.phase(), SdoPhase::Idle);
+        assert_eq!(disabled.index(), 0);
+        assert_eq!(disabled.request(), None);
+
+        let mut invalid_subindex = SdoTransfer::with_policy(SdoAccessPolicy::new(true));
+        assert_eq!(
+            invalid_subindex.start_download(0x2000, 2, &[1], SdoAccess::Complete),
+            Err(SdoError::InvalidCompleteAccessSubindex)
+        );
+        assert_eq!(invalid_subindex.phase(), SdoPhase::Idle);
+        assert_eq!(invalid_subindex.request(), None);
+    }
+
+    #[test]
+    fn complete_access_upload_requires_matching_response_mode() {
+        let mut transfer = SdoTransfer::with_policy(SdoAccessPolicy::new(true));
+        transfer
+            .start_upload(0x2000, 1, SdoAccess::Complete)
+            .unwrap();
+
+        let mut response = [0; 10];
+        response_header(&mut response);
+        response[2] = 0x4B;
+        response[3..5].copy_from_slice(&0x2000u16.to_le_bytes());
+        response[5] = 1;
+        response[6..8].copy_from_slice(&[0x34, 0x12]);
+        assert_eq!(
+            transfer.accept_response(&response),
+            Err(SdoError::CompleteAccessMismatch)
+        );
+        assert_eq!(transfer.phase(), SdoPhase::Faulted);
+
+        let mut matching = SdoTransfer::with_policy(SdoAccessPolicy::new(true));
+        matching
+            .start_upload(0x2000, 1, SdoAccess::Complete)
+            .unwrap();
+        response[2] = 0x5B;
+        assert_eq!(
+            matching.accept_response(&response),
+            Ok(SdoProgress::Complete)
+        );
+        assert_eq!(matching.data(), &[0x34, 0x12]);
+    }
+
+    #[test]
     fn expedited_upload_completes_and_validates_object() {
         let mut transfer = SdoTransfer::new();
-        transfer.start_upload(0x6064, 0, false).unwrap();
+        transfer.start_upload(0x6064, 0, SdoAccess::Single).unwrap();
         assert_eq!(transfer.request().unwrap()[2], SDO_UPLOAD_REQUEST);
 
         let mut response = [0; 10];
@@ -710,7 +870,9 @@ mod tests {
     fn segmented_download_tracks_toggle_and_last_segment() {
         let data = [1, 2, 3, 4, 5, 6, 7, 8, 9];
         let mut transfer = SdoTransfer::new();
-        transfer.start_download(0x2000, 1, &data, false).unwrap();
+        transfer
+            .start_download(0x2000, 1, &data, SdoAccess::Single)
+            .unwrap();
 
         let mut initiate_response = [0; 6];
         response_header(&mut initiate_response);
@@ -737,7 +899,7 @@ mod tests {
     #[test]
     fn segmented_upload_rejects_wrong_toggle_without_publishing_partial_data() {
         let mut transfer = SdoTransfer::new();
-        transfer.start_upload(0x2000, 1, false).unwrap();
+        transfer.start_upload(0x2000, 1, SdoAccess::Single).unwrap();
 
         let mut initiate_response = [0; 10];
         response_header(&mut initiate_response);
@@ -762,7 +924,7 @@ mod tests {
     #[test]
     fn normal_upload_without_size_indication_completes_on_last_segment() {
         let mut transfer = SdoTransfer::new();
-        transfer.start_upload(0x2000, 1, false).unwrap();
+        transfer.start_upload(0x2000, 1, SdoAccess::Single).unwrap();
 
         let mut initiate_response = [0; 6];
         response_header(&mut initiate_response);
@@ -789,7 +951,7 @@ mod tests {
     #[test]
     fn abort_response_is_preserved_as_a_terminal_protocol_result() {
         let mut transfer = SdoTransfer::new();
-        transfer.start_upload(0x6041, 0, false).unwrap();
+        transfer.start_upload(0x6041, 0, SdoAccess::Single).unwrap();
 
         let mut abort = [0; 10];
         response_header(&mut abort);

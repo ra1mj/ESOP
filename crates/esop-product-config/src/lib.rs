@@ -18,11 +18,11 @@ pub use esop_ethercat_core::{
     PdoConfigBatch, PdoConfigBatchError, PdoConfigBatchPhase, PdoConfigBatchPlan,
     PdoConfigBatchPlanError, PdoConfigBatchStatus, PdoConfigJob, PdoConfigPlan, PdoConfigPlanError,
     PdoDirection, PdoEntry, PdoEntrySpec, PdoRegistrationRequest, PdoSdoWrite, ScheduleTable,
-    SiiConfigurationSignature, SiiConfigurationSignatureBuilder, SiiConfigurationSignatureError,
-    SiiDcMode, SiiDcModeExpectation, SiiFmmuUsage, SlaveCopyError, SlaveCopyPlan, SlaveCopyPlanSet,
-    SlaveCopyPlanSetError, SlaveIdentity, SlaveRecord, StartupConfig, StartupController,
-    StartupDcRequirement, StartupError, StartupSlaveProfile, WatchdogPlan, WatchdogPlanEntry,
-    WatchdogPlanError,
+    SdoAccessPolicy, SiiConfigurationSignature, SiiConfigurationSignatureBuilder,
+    SiiConfigurationSignatureError, SiiDcMode, SiiDcModeExpectation, SiiFmmuUsage, SlaveCopyError,
+    SlaveCopyPlan, SlaveCopyPlanSet, SlaveCopyPlanSetError, SlaveIdentity, SlaveRecord,
+    StartupConfig, StartupController, StartupDcRequirement, StartupError, StartupSlaveProfile,
+    WatchdogPlan, WatchdogPlanEntry, WatchdogPlanError,
 };
 pub use esop_lifecycle_guard::procbuf::{Cia402AxisCommandPolicy, Cia402AxisCommandPolicyError};
 pub use esop_procbuf::{
@@ -70,6 +70,8 @@ pub struct ProductSlaveConfig {
     pub dc_sync_timing: Option<DcSyncTiming>,
     pub watchdog: Option<EscWatchdogConfig>,
     pub transition_timeouts: AlTransitionTimeouts,
+    pub coe_complete_access_supported: bool,
+    pub coe_complete_access_enabled: bool,
     pub mailbox_config: MailboxConfig,
     pub mailbox_send_sync_manager: u8,
     pub mailbox_send_control_byte: u8,
@@ -80,6 +82,25 @@ pub struct ProductSlaveConfig {
     pub sii_enabled_sync_managers: u16,
     pub sii_fmmu_count: u8,
     pub sii_fmmu_usages: [SiiFmmuUsage; MAX_SII_FMMU_USAGES],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductSdoAccessPolicyError {
+    UnknownSlave { position: u16 },
+    CompleteAccessEnabledWithoutSupport { position: u16 },
+}
+
+fn validated_sdo_access_policy(
+    slave: ProductSlaveConfig,
+) -> Result<SdoAccessPolicy, ProductSdoAccessPolicyError> {
+    if slave.coe_complete_access_enabled && !slave.coe_complete_access_supported {
+        return Err(
+            ProductSdoAccessPolicyError::CompleteAccessEnabledWithoutSupport {
+                position: slave.position,
+            },
+        );
+    }
+    Ok(SdoAccessPolicy::new(slave.coe_complete_access_enabled))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -506,6 +527,7 @@ pub enum ProductActivationError {
         domain_id: u8,
     },
     MailboxStatusCapacityExceeded,
+    SdoAccessPolicy(ProductSdoAccessPolicyError),
     SlaveCopyPdoIndexOutOfRange {
         copy_index: usize,
         pdo_index: usize,
@@ -673,6 +695,21 @@ fn sync_manager_status_fmmu_index(
 impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
     StaticProductConfig<'a, SLAVES, DOMAINS, AXES>
 {
+    pub fn sdo_access_policy(
+        &self,
+        slave_position: u16,
+    ) -> Result<SdoAccessPolicy, ProductSdoAccessPolicyError> {
+        let slave = self
+            .slaves
+            .iter()
+            .copied()
+            .find(|slave| slave.position == slave_position)
+            .ok_or(ProductSdoAccessPolicyError::UnknownSlave {
+                position: slave_position,
+            })?;
+        validated_sdo_access_policy(slave)
+    }
+
     pub fn watchdog_plan(&self) -> Result<WatchdogPlan<SLAVES>, ProductStartupError> {
         let mut plan = WatchdogPlan::new();
         for slave in self.slaves.iter().copied() {
@@ -1542,6 +1579,7 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
         ProductActivationError,
     > {
         self.validate_identity(expected_config_sha256)?;
+        self.validate_sdo_access_policies()?;
         self.validate_procbuf::<IO, EVENTS>(procbuf, boot_id)?;
         self.validate_topology(observed_slaves)?;
         let (mapped_mailbox_status, mapped_mailbox_status_count) =
@@ -1667,6 +1705,13 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
             || self.metadata.deadline_ns > self.metadata.base_period_ns
         {
             return Err(ProductActivationError::InvalidCycleTiming);
+        }
+        Ok(())
+    }
+
+    fn validate_sdo_access_policies(&self) -> Result<(), ProductActivationError> {
+        for slave in self.slaves.iter().copied() {
+            validated_sdo_access_policy(slave).map_err(ProductActivationError::SdoAccessPolicy)?;
         }
         Ok(())
     }
@@ -1980,6 +2025,8 @@ mod tests {
                 dc_sync_timing: None,
                 watchdog: None,
                 transition_timeouts: ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
+                coe_complete_access_supported: false,
+                coe_complete_access_enabled: false,
                 mailbox_config: MailboxConfig::new(0x1000, 32, 0x1100, 32),
                 mailbox_send_sync_manager: 0,
                 mailbox_send_control_byte: 0x26,
@@ -2060,6 +2107,36 @@ mod tests {
                 .validate_for(OperatingMode::Csp)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn product_sdo_policy_is_typed_and_activation_rejects_tampering() {
+        let mut product = config();
+        assert_eq!(
+            product.sdo_access_policy(0),
+            Ok(SdoAccessPolicy::new(false))
+        );
+        assert_eq!(
+            product.sdo_access_policy(9),
+            Err(ProductSdoAccessPolicyError::UnknownSlave { position: 9 })
+        );
+
+        product.slaves[0].coe_complete_access_supported = true;
+        product.slaves[0].coe_complete_access_enabled = true;
+        assert_eq!(product.sdo_access_policy(0), Ok(SdoAccessPolicy::new(true)));
+
+        product.slaves[0].coe_complete_access_supported = false;
+        assert_eq!(
+            product.sdo_access_policy(0),
+            Err(ProductSdoAccessPolicyError::CompleteAccessEnabledWithoutSupport { position: 0 })
+        );
+        let procbuf = ProcBuf::<1, 0, 1, 8>::new(7, 11);
+        assert!(matches!(
+            activate(&product, &[observed()], &procbuf),
+            Err(ProductActivationError::SdoAccessPolicy(
+                ProductSdoAccessPolicyError::CompleteAccessEnabledWithoutSupport { position: 0 }
+            ))
+        ));
     }
 
     #[test]

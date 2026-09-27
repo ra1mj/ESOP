@@ -11,8 +11,8 @@ use esop_product_config::{
     PdoConfigBatchPlanError, PdoConfigPlanError, PdoSdoWrite, ProcBuf, ProcBufHeaderError,
     ProductActivationError, ProductMailboxBinding, ProductMailboxPolicyError,
     ProductMailboxStatusMappingError, ProductPdoBatchError, ProductPdoPlanError, ProductSlaveKind,
-    ProductStartupError, SiiConfigurationSignatureError, SiiFmmuUsage, SlaveCopyPlanSetError,
-    SlaveRecord, StartupDcRequirement,
+    ProductStartupError, SdoAccessPolicy, SiiConfigurationSignatureError, SiiFmmuUsage,
+    SlaveCopyPlanSetError, SlaveRecord, StartupDcRequirement,
 };
 
 mod generated {
@@ -60,10 +60,22 @@ fn checked_in_product_activates_exact_generated_evidence() {
     assert_eq!(
         active.metadata().config_sha256,
         [
-            0x3c, 0x8f, 0x14, 0x7c, 0x09, 0x12, 0x7a, 0x85, 0x53, 0x04, 0x4f, 0x8a, 0x5f, 0xbf,
-            0x8c, 0x3f, 0xb7, 0xb2, 0xc6, 0x06, 0xb1, 0xb6, 0x50, 0x38, 0xf5, 0x97, 0x30, 0x63,
-            0x39, 0xb7, 0x49, 0x03,
+            0x4f, 0xb4, 0x31, 0x5a, 0xb4, 0xc0, 0x89, 0xfa, 0x56, 0xd9, 0xc8, 0xbf, 0x97, 0x9b,
+            0xb3, 0x7e, 0x95, 0x68, 0xb2, 0xca, 0x3c, 0x7b, 0xe1, 0xea, 0xd4, 0xae, 0x1f, 0x45,
+            0xdd, 0x92, 0x2f, 0x52,
         ]
+    );
+    assert_eq!(
+        generated::PRODUCT_CONFIG.sdo_access_policy(0),
+        Ok(SdoAccessPolicy::new(true))
+    );
+    assert_eq!(
+        generated::PRODUCT_CONFIG.sdo_access_policy(1),
+        Ok(SdoAccessPolicy::new(false))
+    );
+    assert_eq!(
+        generated::PRODUCT_CONFIG.sdo_access_policy(2),
+        Ok(SdoAccessPolicy::new(false))
     );
 
     let startup_profiles = generated::PRODUCT_CONFIG.startup_profiles().unwrap();

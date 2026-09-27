@@ -68,6 +68,9 @@
       "product_code": "0x00004020",
       "revision": "0x00000001",
       "serial": "0x00000001",
+      "coe": {
+        "complete_access": true
+      },
       "dc": {
         "required": true,
         "reference_clock": true,

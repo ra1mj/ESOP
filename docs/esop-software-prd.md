@@ -185,6 +185,15 @@ FR-006 当前增量由宿主机 `esop-cfggen` 与 `no_std` 的 `esop-product-con
 | FR-018 | P0 | 系统应识别 DC 能力、选择参考时钟、配置应用时间、SYNC0 周期/相位并监测时钟质量。 | DC 与非 DC 拓扑启动均通过；记录 offset、jitter、last sync、失锁次数和同步窗口状态。 |
 | FR-019 | P0 | 当 DC 未锁定、WKC 无效、命令过期或驱动状态异常时，系统不得发布新的有效运动目标。 | DC 失锁、WKC 异常、命令超时、驱动 fault 联合故障矩阵通过。 |
 
+FR-017 的 Complete Access 软件增量现已完成：核心使用类型化 `SdoAccess` 和默认禁用的
+`SdoAccessPolicy`，仅在 initiate upload/download 中编码规范位 `0x10`，并在状态变更前拒绝
+未授权模式、非法 subindex 和 upload 响应模式不一致。cfggen 只读取直接
+`Device/Mailbox/CoE@CompleteAccess` 能力，并要求产品逐从站显式授权；支持与授权分别进入
+规范化 JSON、inventory、C/Rust、build input、ESI semantic hash 和配置 hash。产品运行时在
+激活前重建策略并拒绝 `enabled && !supported` 篡改，邮箱/主站集成测试检查精确线上字节。
+PDO assignment/mapping 仍固定使用单 subindex。FR-017 仍为部分完成：SDO Information、对象字典
+交叉验证、真实从站互操作、HIL、目标 WCET 和 ETG 一致性证据尚未完成。
+
 FR-018 的发现与传播延迟边界现已完成：在线扫描精确解码 12-byte ESC 基础块及 Features
 Supported，对 DC-capable 从站按 32/64-bit 读取 `0x0910` System Time，并区分 WKC 1
 的可参考时钟证据与 WKC 0 的 delay-only 阴性证据；所有 base-DC 从站继续精确读取
@@ -577,6 +586,15 @@ C/Rust、周期指标、语义 hash 与配置 hash 均反映该变化。`esop-pr
 invalid 或 stale 均不读输入邮箱，也不会回退直接寄存器。PDO 配置邮箱继续使用直接状态
 字节，无 `MBoxState` 产品继续 PollTime。该软件闭环不证明物理响应来源、真实从站互操作、
 目标 WCET、长时运行、ETG 一致性、实物 HIL 或功能安全资格。
+
+R2 Complete Access SDO 增量：核心以 `SdoAccess::Single/Complete` 和逐传输
+`SdoAccessPolicy` 取代原始布尔参数，默认构造保持 fail-closed。Complete Access 仅允许
+subindex 0/1，initiate 命令精确设置 `0x10`，segment 命令保持原格式；upload 响应必须回显
+匹配模式，download 继续接受标准 `0x60`。ESI capability 与产品 authorization 独立生成并
+共同进入静态产物、build report 输入和哈希；运行时按 position 暴露经校验策略并在激活前
+拒绝不支持却启用的静态数据。仿真产品覆盖支持且启用、支持但禁用、完全不支持三种状态，
+邮箱/主站路径验证精确请求字节。该增量不实现 SDO Information、自动 PDO Complete Access
+分组或 block transfer，也不证明真实设备响应、互操作、WCET、HIL、ETG 或功能安全资格。
 
 R2 SII category stream 增量：`SiiCategoryStreamReader<WORDS>` 复用现有 EEPROM
 寄存器动作与控制请求池，从标准 word `0x0040` 读取两字 category header 和精确

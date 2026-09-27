@@ -30,6 +30,8 @@ pub fn Cia402AxisCommandPolicy::validate_for_product(
 ) -> Result<(), Cia402AxisCommandPolicyError>;
 pub fn StaticProductConfig::activate(...) ->
     Result<ActivatedProduct<...>, ProductActivationError>;
+pub fn StaticProductConfig::sdo_access_policy(position: u16) ->
+    Result<SdoAccessPolicy, ProductSdoAccessPolicyError>;
 pub fn ActivatedProduct::slave_copy_plans(...) ->
     &SlaveCopyPlanSet<MAX_PRODUCT_SLAVE_COPIES>;
 pub fn ScheduledDomainBank::publish_slave_copies(
@@ -148,6 +150,9 @@ Input schema `esop.product.v1` is strict (`deny_unknown_fields`) and owns:
   `process_data_intervals` raw `u16` values are independently optional, where
   the object contains at least one field and every present value is nonzero;
   absence preserves the corresponding ESC default and emits no action.
+- an optional strict per-slave `coe` object whose `complete_access` boolean
+  defaults false. It may be true only when the selected direct
+  `Device/Mailbox/CoE` declares a valid `CompleteAccess=true` capability.
 
 ESI paths are confined relative paths and their canonical targets must remain
 under the product directory. Names/labels rendered into C are nonempty,
@@ -216,6 +221,17 @@ milliseconds converted to checked nanoseconds; missing values use the named
 `ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1`. Mailbox data, timeout profiles, and
 activation templates and the ordered FMMU usage profile participate in ESI
 semantic and configuration hashes.
+The direct CoE element may also declare the strict boolean `CompleteAccess`
+capability. Missing means unsupported and malformed values fail parsing. ESI
+support and product enablement remain separate generated booleans in normalized
+JSON, inventory, C/Rust and build input. ESI support participates in semantic
+and configuration hashes; product enablement participates in configuration
+identity. Generation rejects enablement without support. Runtime activation
+rechecks the same implication before ProcBuf/topology mutation, and
+`sdo_access_policy(position)` is the only product helper that converts those
+fields into a core `SdoAccessPolicy`. Policy-aware transfers use
+`SdoTransfer::with_policy`; default transfers and all generated PDO
+assignment/mapping operations remain explicitly `SdoAccess::Single`.
 The generator also retains both mailbox SyncManager indexes. An ordered
 SyncManager-status / `MBoxState` FMMU usage requires the canonical direct
 MBoxIn status policy `0x0800 + index * 8 + 5`, mask `0x08`, active-high;
@@ -428,8 +444,11 @@ The configuration SHA-256 covers normalized product semantics and a sorted
 label-to-semantic-ESI-hash map. It excludes timestamps, host paths, compiler,
 output directory, JSON key order, and XML formatting.
 
-`robot_build_input.json` uses `esop.product-build-input.v1`. Optional build
-report projection copies the config hash, platform, devices,
+`robot_build_input.json` uses `esop.product-build-input.v1`. Its devices object
+contains one exact Complete Access record per declared slave with name,
+position, ESI support and product enablement. The report boundary rejects
+length mismatch, duplicate name/position, non-boolean fields and enablement
+without support. Optional build report projection copies the config hash, platform, devices,
 PDO/frame/wire/WKC/copy metrics, cycle budget, and resources while preserving
 `qualification.passed=false`. Default build-report generation without a
 product input retains its host-placeholder shape.
@@ -455,6 +474,7 @@ datagrams, FCS, and inter-packet gap respectively.
 | Nested/misplaced ESI DC OpMode or wrapped DC field | Reject before mode or device metadata publication. |
 | Zero/malformed/overflowing ESM timeout or non-output OpOnly SM | Reject before staging or hash publication. |
 | Missing CoE, partial/duplicate/disabled ESI mailbox SM, or invalid mailbox range | Reject before staging or hash publication. |
+| Malformed ESI Complete Access capability, product enablement without support, or duplicate/malformed build-input policy evidence | Reject before staging, runtime mutation, or build-report publication. |
 | Duplicate Domain/slave/axis identity or overlapping range | Reject before registry mutation/publication. |
 | Capacity, schedule, raw policy, or ProcBuf layout overflow | Reject with the owning contract error. |
 | Generation failure with an existing output | Preserve the previous six-file directory byte-for-byte. |
@@ -489,7 +509,7 @@ datagrams, FCS, and inter-packet gap respectively.
 | PDO upload readback length or byte mismatch | Latch controller fault and keep the current operation index. |
 | PDO mailbox terminal failure | Latch the exact typed transport fault and keep the current operation index. |
 | Substituted PDO mailbox/controller binding | Reject before TX without consuming or advancing the PDO action. |
-| Product build input with unknown fields, invalid hash/budget, or `passed=true` | Reject before report write. |
+| Product build input with unknown fields, invalid hash/budget, invalid Complete Access evidence, or `passed=true` | Reject before report write. |
 | Missing target/HIL/WCET/resource evidence | Keep report unqualified. |
 
 ## 5. Good / Base / Bad Cases
@@ -502,7 +522,9 @@ datagrams, FCS, and inter-packet gap respectively.
   measurable propagation-delay evidence for both required drives, and a
   two-entry 1 ms DC SYNC plan with exact `AssignActivate=0x0300`; both drives
   also carry divider 2500 and process-data interval 100 while the IO slave
-  preserves ESC watchdog defaults.
+  preserves ESC watchdog defaults. Both drives advertise Complete Access, but
+  only the left drive is product-authorized; the IO slave is unsupported and
+  disabled.
 - Base: no `PRODUCT_INPUT` produces the existing unqualified host build
   report; an omitted slave `dc` object produces no Startup DC requirement, and
   optional unmeasurable DC evidence remains explicitly `None`; an omitted

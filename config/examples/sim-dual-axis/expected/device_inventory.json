@@ -1,7 +1,9 @@
 {
-  "config_sha256": "3c8f147c09127a8553044f8a5fbf8c3fb7b2c606b1b65038f597306339b74903",
+  "config_sha256": "4fb4315ab4c089fa56d9c8bf979bb37e9568b2ca3c7be1ead4ae1f45dd922f52",
   "devices": [
     {
+      "coe_complete_access_enabled": true,
+      "coe_complete_access_supported": true,
       "dc": {
         "op_mode": "DcSync",
         "reference_clock": true,
@@ -16,7 +18,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP simulated CiA 402 drive",
       "esi_label": "esop-sim-drive-v1",
-      "esi_semantic_sha256": "0d8ab30c5af41e9b7a56cc547df921bbd85786b614d07c3df1b17eee8909eb9c",
+      "esi_semantic_sha256": "04c8179c2c44e0bedaf6d15406a063ff4af405fd3aba43ad746ea4bc967b6899",
       "esi_type_name": "ESOP-SIM-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -109,6 +111,8 @@
       }
     },
     {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": true,
       "dc": {
         "op_mode": "DcSync",
         "reference_clock": false,
@@ -123,7 +127,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP simulated CiA 402 drive",
       "esi_label": "esop-sim-drive-v1",
-      "esi_semantic_sha256": "0d8ab30c5af41e9b7a56cc547df921bbd85786b614d07c3df1b17eee8909eb9c",
+      "esi_semantic_sha256": "04c8179c2c44e0bedaf6d15406a063ff4af405fd3aba43ad746ea4bc967b6899",
       "esi_type_name": "ESOP-SIM-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -216,6 +220,8 @@
       }
     },
     {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": false,
       "dc": {
         "op_mode": null,
         "reference_clock": false,
@@ -225,7 +231,7 @@
       "domain_id": 1,
       "esi_device_name": "ESOP simulated digital IO",
       "esi_label": "esop-sim-io-v1",
-      "esi_semantic_sha256": "adae8c7f5cfe2befef05adc20329d09b860275440564f63b163551072d976cb3",
+      "esi_semantic_sha256": "0791161f7db266ffb70d4712b43f16ac8af0821fc6def69b25ab4fab0f1a6bfb",
       "esi_type_name": "ESOP-SIM-IO",
       "kind": "ethercat_io",
       "mailbox": {
