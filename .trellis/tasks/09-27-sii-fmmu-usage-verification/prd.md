@@ -77,19 +77,19 @@ open.
 
 ## Acceptance Criteria
 
-- [ ] Unit tests parse every supported usage, preserve order, and reject empty,
+- [x] Unit tests parse every supported usage, preserve order, and reject empty,
       duplicate, unknown, and over-capacity categories atomically.
-- [ ] Signature tests prove FMMU count, order, usage, missing-category, and
+- [x] Signature tests prove FMMU count, order, usage, missing-category, and
       schema changes affect equality/digest as designed.
-- [ ] ESI/generator tests prove `<Fmmu>` values reach semantic JSON, generated
+- [x] ESI/generator tests prove `<Fmmu>` values reach semantic JSON, generated
       Rust, and generated C artifacts; invalid values and excess entries fail.
-- [ ] Product tests reject Rx/Tx PDO groups mapped onto incompatible FMMU usage
+- [x] Product tests reject Rx/Tx PDO groups mapped onto incompatible FMMU usage
       indexes and accept the committed dual-axis example.
-- [ ] Startup simulation proves a valid descriptor reaches the existing AL
+- [x] Startup simulation proves a valid descriptor reaches the existing AL
       sequence and count/signature failures emit no AL action and no evidence.
-- [ ] Existing SM/PDO/DC, mapping, product generation, Linux simulation, and
+- [x] Existing SM/PDO/DC, mapping, product generation, Linux simulation, and
       workspace tests remain green.
-- [ ] `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+- [x] `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
       `cargo test --workspace`, repository policy checks, and exact pushed-SHA
       GitHub Actions complete successfully.
 
@@ -100,3 +100,27 @@ open.
 - Mailbox Status Bit scheduling changes.
 - Physical provenance, ETG conformance, real-slave interoperability, and HIL.
 - Increasing the existing process-data mapping model's segment capacity.
+
+## Verification Evidence
+
+Verified on 2026-09-27:
+
+- `cargo test -p esop-ethercat-core sii --no-fail-fast`: 51 filtered core
+  tests plus 4 public domain-registry tests passed.
+- `cargo test -p esop-ethercat-core startup --no-fail-fast`: 45 filtered core
+  tests plus 2 public cycle tests passed.
+- `cargo test -p esop-cfggen --no-fail-fast`: 8 unit and 15 generation tests
+  passed, including invalid/excess FMMU declarations.
+- `cargo test -p esop-product-config --no-fail-fast`: 15 unit and 10 generated
+  product tests passed, including tampered usage profiles.
+- `cargo test -p esop-ethercat-linux-port --test scheduled_domains`: 19 tests
+  passed; `make cfggen-runtime-example` regenerated the exact committed Rust
+  module and validated the generated C header.
+- `make ci` passed all-feature workspace checks/tests/Clippy, release and
+  `aarch64-unknown-none` builds, capability/protobuf/config/build/performance/
+  qualification validators, BPF C syntax, and Zenoh feature compilation.
+- `make test-zenoh` passed both live router integration tests locally.
+- Implementation commit `0bd1d18c89df3fa50aef1fd658c6c15c9bcca3ef`
+  passed GitHub Actions run `36290495008`, including Rust quality/live Zenoh,
+  full CO-RE BPF build, and every privileged eBPF runtime qualification job:
+  `https://github.com/ra1mj/ESOP/actions/runs/36290495008`.

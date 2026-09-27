@@ -17,6 +17,10 @@
    acceptance evidence, archive the task, update the journal, then push the
    final documentation commit and verify its exact SHA.
 
+All eight steps completed on 2026-09-27. The implementation SHA and GitHub run
+are recorded in `prd.md`; task archival and journal commits are produced by the
+standard Trellis finish workflow after this acceptance record is committed.
+
 ## Validation Commands
 
 ```bash
