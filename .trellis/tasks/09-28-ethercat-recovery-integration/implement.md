@@ -74,8 +74,8 @@ git diff --check
 - [x] Run focused formatting, Clippy, unit, Linux simulation, and `no_std`
       checks.
 - [x] Run `make test-hil` and `make ci`.
-- [ ] Run Trellis check/spec-update/finish flow.
-- [ ] Commit, push to `ra1mj/ESOP`, and wait for exact GitHub Actions success.
+- [x] Run Trellis check/spec-update/finish flow.
+- [x] Commit, push to `ra1mj/ESOP`, and wait for exact GitHub Actions success.
 
 Final validation:
 

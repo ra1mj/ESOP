@@ -76,7 +76,7 @@ implicit return to OP.
 - [x] `REC-001`, the capability manifest, software PRD, release boundary, and
       Trellis specs describe the completed software layer and the remaining
       WCET/HIL/conformance gaps consistently.
-- [ ] Focused tests, core `no_std` checks, `make test-hil`, `make ci`, and exact
+- [x] Focused tests, core `no_std` checks, `make test-hil`, `make ci`, and exact
       GitHub Actions for the pushed commit pass.
 
 ## Out of Scope
