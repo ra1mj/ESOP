@@ -1735,3 +1735,36 @@ Added strict generated slave-to-slave copy declarations, fixed-capacity runtime 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 52: Automatic slave-copy cycle-owner integration
+
+**Date**: 2026-09-27
+**Task**: Automatic slave-copy cycle-owner integration
+**Branch**: `main`
+
+### Summary
+
+Integrated generated slave-copy plans into the stable production cycle with transactional double-page publication, typed shared-image proof, fail-closed owner behavior, and cross-layer simulation evidence.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `c696975` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
