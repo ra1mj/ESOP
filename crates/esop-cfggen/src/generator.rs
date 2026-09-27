@@ -4,20 +4,23 @@ use crate::esi::{
     EsiTransitionTimeouts,
 };
 use crate::model::{
-    AxisMode, AxisPolicyManifest, DomainManifest, HexU16, HexU32, ProductManifest, SlaveDcManifest,
-    SlaveKind, SlaveManifest, SlaveWatchdogManifest,
+    AxisMode, AxisPolicyManifest, DomainManifest, HexU16, HexU32, PdoReferenceManifest,
+    ProductManifest, SlaveCopyManifest, SlaveDcManifest, SlaveKind, SlaveManifest,
+    SlaveWatchdogManifest,
 };
 use esop_ethercat_core::wire::{
     Command, ETHERCAT_FRAME_HEADER_LEN, ETHERNET_HEADER_LEN, MIN_ETHERNET_FRAME_LEN,
 };
 use esop_ethercat_core::{
     DcSyncTiming, DomainConfig, DomainDatagramSpec, DomainRegistry, EscWatchdogConfig,
-    FramePlanSet, MAX_SII_FMMU_USAGES, PdoDirection, PdoRegistrationRequest, SiiDcMode,
+    FramePlanSet, MAX_SII_FMMU_USAGES, PdoDirection, PdoEntryHandle, PdoRegistrationRequest,
+    SiiDcMode, SlaveCopyPlan, SlaveCopyPlanSet,
 };
 use esop_lifecycle_guard::procbuf::Cia402AxisCommandPolicy;
 use esop_procbuf::{ABI_VERSION, ProcBufDimensions, ProcBufLayoutDescriptor, describe_layout};
 use esop_product_config::{
-    MAX_PRODUCT_AXIS_PDOS, MAX_PRODUCT_PDO_ENTRIES_PER_DOMAIN, PRODUCT_RUNTIME_SCHEMA,
+    MAX_PRODUCT_AXIS_PDOS, MAX_PRODUCT_PDO_ENTRIES_PER_DOMAIN, MAX_PRODUCT_SLAVE_COPIES,
+    PRODUCT_RUNTIME_SCHEMA,
 };
 use esop_profile_cia402::{Cia402PdoMap, OperatingMode};
 use serde::Serialize;
@@ -183,6 +186,20 @@ struct GeneratedAxis {
     policy: AxisPolicyManifest,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct GeneratedSlaveCopy {
+    name: String,
+    source: PdoReferenceManifest,
+    target: PdoReferenceManifest,
+    target_quality: PdoReferenceManifest,
+    source_pdo_index: usize,
+    target_pdo_index: usize,
+    target_quality_pdo_index: usize,
+    target_domain_id: u8,
+    payload_bytes: usize,
+    invalid_fill: u8,
+}
+
 #[derive(Clone, Copy, Debug, Serialize)]
 struct CycleMetrics {
     pdo_bytes_per_cycle: usize,
@@ -245,6 +262,7 @@ fn build_artifacts(input: &Path) -> Result<GeneratedArtifacts> {
         mut domains,
         pdos,
         datagrams,
+        pdo_handles,
     } = build_domain_plan(&manifest, &resolved)?;
     let axes = validate_axes(&manifest, &resolved, &pdos)?;
     let procbuf = describe_layout(ProcBufDimensions {
@@ -264,6 +282,7 @@ fn build_artifacts(input: &Path) -> Result<GeneratedArtifacts> {
             MAX_DATAGRAMS_PER_FRAME,
         >(manifest.cycle.base_period_ns, &mut frame_plans)
         .map_err(|error| GeneratorError::Registry(format!("{error:?}")))?;
+    let slave_copies = resolve_slave_copies(&manifest, &pdos, &pdo_handles, &registry)?;
     if schedule.hyperperiod_ticks() as usize > manifest.capacities.max_schedule_slots {
         return Err(GeneratorError::Invalid(format!(
             "schedule hyperperiod {} exceeds declared max_schedule_slots {}",
@@ -302,7 +321,7 @@ fn build_artifacts(input: &Path) -> Result<GeneratedArtifacts> {
             })
             .collect();
     }
-    let metrics = calculate_cycle_metrics(&domains, &schedule)?;
+    let metrics = calculate_cycle_metrics(&domains, &slave_copies, &schedule)?;
     let generated_slaves = resolved
         .iter()
         .map(|slave| {
@@ -386,6 +405,7 @@ fn build_artifacts(input: &Path) -> Result<GeneratedArtifacts> {
         &domains,
         &pdos,
         &datagrams,
+        &slave_copies,
         &axes,
     )?;
     let config_sha256 = sha256_json(&semantic)?;
@@ -400,6 +420,7 @@ fn build_artifacts(input: &Path) -> Result<GeneratedArtifacts> {
         "domains": domains,
         "pdo_entries": pdos,
         "datagrams": datagrams,
+        "slave_copies": slave_copies,
         "axes": axes,
         "schedule": {
             "base_tick_ns": schedule.base_tick_ns(),
@@ -424,6 +445,7 @@ fn build_artifacts(input: &Path) -> Result<GeneratedArtifacts> {
         &domains,
         &pdos,
         &datagrams,
+        &slave_copies,
         &axes,
         procbuf,
     );
@@ -434,6 +456,7 @@ fn build_artifacts(input: &Path) -> Result<GeneratedArtifacts> {
         &domains,
         &pdos,
         &datagrams,
+        &slave_copies,
         &axes,
         procbuf,
     )?;
@@ -636,6 +659,33 @@ fn normalize_and_validate_manifest(manifest: &mut ProductManifest) -> Result<()>
                 "axis {} references unknown slave {}",
                 axis.name, axis.slave
             )));
+        }
+    }
+    if manifest.slave_copies.len() > MAX_PRODUCT_SLAVE_COPIES {
+        return Err(GeneratorError::Invalid(format!(
+            "slave_copies exceeds runtime capacity {MAX_PRODUCT_SLAVE_COPIES}"
+        )));
+    }
+    let mut copy_names = BTreeSet::new();
+    for copy in &manifest.slave_copies {
+        validate_text("slave_copy.name", &copy.name)?;
+        if !copy_names.insert(copy.name.clone()) {
+            return Err(GeneratorError::Invalid(format!(
+                "duplicate slave copy name {}",
+                copy.name
+            )));
+        }
+        for (role, reference) in [
+            ("source", &copy.source),
+            ("target", &copy.target),
+            ("target_quality", &copy.target_quality),
+        ] {
+            if !names.contains(&reference.slave) {
+                return Err(GeneratorError::Invalid(format!(
+                    "slave copy {} {role} references unknown slave {}",
+                    copy.name, reference.slave
+                )));
+            }
         }
     }
     Ok(())
@@ -852,6 +902,7 @@ struct BuiltDomainPlan {
     domains: Vec<GeneratedDomain>,
     pdos: Vec<GeneratedPdo>,
     datagrams: Vec<GeneratedDatagram>,
+    pdo_handles: Vec<PdoEntryHandle>,
 }
 
 fn build_domain_plan(
@@ -929,6 +980,7 @@ fn build_domain_plan(
     let mut generated_domains = Vec::with_capacity(work.len());
     let mut generated_pdos = Vec::new();
     let mut generated_datagrams = Vec::new();
+    let mut pdo_handles = Vec::new();
     let mut datagram_index = 0u16;
     for domain in work {
         let image_bytes = domain.output_bytes + domain.input_bytes;
@@ -943,7 +995,7 @@ fn build_domain_plan(
             ))
             .map_err(|error| GeneratorError::Registry(format!("{error:?}")))?;
         for pdo in &domain.pdos {
-            registry
+            let handle = registry
                 .register_pdo_at(
                     domain.manifest.id,
                     pdo.bit_offset,
@@ -957,6 +1009,7 @@ fn build_domain_plan(
                     ),
                 )
                 .map_err(|error| GeneratorError::Registry(format!("{error:?}")))?;
+            pdo_handles.push(handle);
         }
         if domain.output_bytes != 0 {
             let index = next_datagram_index(&mut datagram_index)?;
@@ -1012,7 +1065,136 @@ fn build_domain_plan(
         domains: generated_domains,
         pdos: generated_pdos,
         datagrams: generated_datagrams,
+        pdo_handles,
     })
+}
+
+fn resolve_slave_copies(
+    manifest: &ProductManifest,
+    pdos: &[GeneratedPdo],
+    pdo_handles: &[PdoEntryHandle],
+    registry: &Registry,
+) -> Result<Vec<GeneratedSlaveCopy>> {
+    if pdos.len() != pdo_handles.len() {
+        return Err(GeneratorError::Invalid(
+            "internal PDO handle count mismatch".to_owned(),
+        ));
+    }
+    let mut plans = SlaveCopyPlanSet::<MAX_PRODUCT_SLAVE_COPIES>::new();
+    let mut generated = Vec::with_capacity(manifest.slave_copies.len());
+    for copy in &manifest.slave_copies {
+        let source_pdo_index = resolve_copy_pdo(
+            manifest,
+            pdos,
+            copy,
+            "source",
+            &copy.source,
+            GeneratedDirection::Tx,
+        )?;
+        let target_pdo_index = resolve_copy_pdo(
+            manifest,
+            pdos,
+            copy,
+            "target",
+            &copy.target,
+            GeneratedDirection::Rx,
+        )?;
+        let target_quality_pdo_index = resolve_copy_pdo(
+            manifest,
+            pdos,
+            copy,
+            "target_quality",
+            &copy.target_quality,
+            GeneratedDirection::Rx,
+        )?;
+        let plan = SlaveCopyPlan::build(
+            registry,
+            pdo_handles[source_pdo_index],
+            pdo_handles[target_pdo_index],
+            pdo_handles[target_quality_pdo_index],
+            copy.invalid_fill,
+        )
+        .map_err(|error| {
+            GeneratorError::Invalid(format!("slave copy {} is invalid: {error:?}", copy.name))
+        })?;
+        plans.push(plan).map_err(|error| {
+            GeneratorError::Invalid(format!(
+                "slave copy {} conflicts with the ordered plan set: {error:?}",
+                copy.name
+            ))
+        })?;
+        generated.push(GeneratedSlaveCopy {
+            name: copy.name.clone(),
+            source: copy.source.clone(),
+            target: copy.target.clone(),
+            target_quality: copy.target_quality.clone(),
+            source_pdo_index,
+            target_pdo_index,
+            target_quality_pdo_index,
+            target_domain_id: plan.target_domain_id(),
+            payload_bytes: plan.payload_len(),
+            invalid_fill: copy.invalid_fill,
+        });
+    }
+    Ok(generated)
+}
+
+fn resolve_copy_pdo(
+    manifest: &ProductManifest,
+    pdos: &[GeneratedPdo],
+    copy: &SlaveCopyManifest,
+    role: &str,
+    reference: &PdoReferenceManifest,
+    direction: GeneratedDirection,
+) -> Result<usize> {
+    let position = manifest
+        .slaves
+        .iter()
+        .find(|slave| slave.name == reference.slave)
+        .map(|slave| slave.position)
+        .ok_or_else(|| {
+            GeneratorError::Invalid(format!(
+                "slave copy {} {role} references unknown slave {}",
+                copy.name, reference.slave
+            ))
+        })?;
+    let object_matches = pdos
+        .iter()
+        .enumerate()
+        .filter(|(_, pdo)| {
+            pdo.slave_position == position
+                && pdo.object_index == reference.index
+                && pdo.subindex == reference.subindex
+        })
+        .collect::<Vec<_>>();
+    let direction_matches = object_matches
+        .iter()
+        .filter(|(_, pdo)| pdo.direction == direction)
+        .map(|(index, _)| *index)
+        .collect::<Vec<_>>();
+    if direction_matches.len() == 1 {
+        return Ok(direction_matches[0]);
+    }
+    if direction_matches.is_empty() && object_matches.len() == 1 {
+        return Err(GeneratorError::Invalid(format!(
+            "slave copy {} {role} {} 0x{:04x}:{} has direction {:?}, expected {:?}",
+            copy.name,
+            reference.slave,
+            reference.index.0,
+            reference.subindex,
+            object_matches[0].1.direction,
+            direction,
+        )));
+    }
+    Err(GeneratorError::Invalid(format!(
+        "slave copy {} {role} {} 0x{:04x}:{} matched {} selected {:?} PDO entries",
+        copy.name,
+        reference.slave,
+        reference.index.0,
+        reference.subindex,
+        direction_matches.len(),
+        direction,
+    )))
 }
 
 fn append_slave_pdos(
@@ -1233,6 +1415,7 @@ const fn runtime_policy(policy: AxisPolicyManifest) -> Cia402AxisCommandPolicy {
 
 fn calculate_cycle_metrics(
     domains: &[GeneratedDomain],
+    slave_copies: &[GeneratedSlaveCopy],
     schedule: &esop_ethercat_core::ScheduleTable<MAX_DOMAINS, MAX_SCHEDULE_SLOTS>,
 ) -> Result<CycleMetrics> {
     let mut maximum = CycleMetrics {
@@ -1267,10 +1450,6 @@ fn calculate_cycle_metrics(
                 .expected_wkc
                 .checked_add(domain.expected_wkc)
                 .ok_or_else(|| GeneratorError::Invalid("cycle WKC overflows".to_owned()))?;
-            current.copy_bytes_per_cycle = current
-                .copy_bytes_per_cycle
-                .checked_add(domain.input_bytes)
-                .ok_or_else(|| GeneratorError::Invalid("cycle copy bytes overflow".to_owned()))?;
             current.wire_bytes_per_cycle = current
                 .wire_bytes_per_cycle
                 .checked_add(
@@ -1281,6 +1460,15 @@ fn calculate_cycle_metrics(
                         .sum::<usize>(),
                 )
                 .ok_or_else(|| GeneratorError::Invalid("cycle wire bytes overflow".to_owned()))?;
+        }
+        for copy in slave_copies {
+            if due & (1u64 << copy.target_domain_id) == 0 {
+                continue;
+            }
+            current.copy_bytes_per_cycle = current
+                .copy_bytes_per_cycle
+                .checked_add(copy.payload_bytes)
+                .ok_or_else(|| GeneratorError::Invalid("cycle copy bytes overflow".to_owned()))?;
         }
         maximum.pdo_bytes_per_cycle = maximum.pdo_bytes_per_cycle.max(current.pdo_bytes_per_cycle);
         maximum.frame_count = maximum.frame_count.max(current.frame_count);
@@ -1311,6 +1499,7 @@ fn semantic_identity(
     domains: &[GeneratedDomain],
     pdos: &[GeneratedPdo],
     datagrams: &[GeneratedDatagram],
+    slave_copies: &[GeneratedSlaveCopy],
     axes: &[GeneratedAxis],
 ) -> Result<Value> {
     let mut normalized_manifest = serde_json::to_value(manifest).map_err(|error| {
@@ -1336,6 +1525,7 @@ fn semantic_identity(
         "domains": domains,
         "pdo_entries": pdos,
         "datagrams": datagrams,
+        "slave_copies": slave_copies,
         "axes": axes,
     }))
 }
@@ -1414,6 +1604,7 @@ fn render_header(
     domains: &[GeneratedDomain],
     pdos: &[GeneratedPdo],
     datagrams: &[GeneratedDatagram],
+    slave_copies: &[GeneratedSlaveCopy],
     axes: &[GeneratedAxis],
     procbuf: ProcBufLayoutDescriptor,
 ) -> String {
@@ -1425,6 +1616,7 @@ fn render_header(
     header.push_str("typedef struct { const char *name; uint8_t id; uint32_t logical_address; uint32_t image_offset; uint32_t image_bytes; uint32_t output_bytes; uint32_t input_bytes; uint32_t period_ticks; uint32_t phase_ticks; uint16_t expected_wkc; } esop_domain_config_t;\n");
     header.push_str("typedef struct { uint8_t domain_id; uint16_t slave_position; uint16_t assignment_index; uint8_t sync_manager; uint16_t object_index; uint8_t subindex; uint8_t direction; uint32_t bit_offset; uint8_t bit_length; uint8_t is_signed; } esop_pdo_config_t;\n");
     header.push_str("typedef struct { uint8_t domain_id; uint8_t command; uint8_t index; uint32_t logical_address; uint32_t image_offset; uint16_t payload_len; uint16_t expected_wkc; uint8_t input; } esop_datagram_config_t;\n");
+    header.push_str("typedef struct { const char *name; uint32_t source_pdo_index; uint32_t target_pdo_index; uint32_t target_quality_pdo_index; uint8_t invalid_fill; } esop_slave_copy_config_t;\n");
     header.push_str("typedef struct { const char *name; uint8_t index; uint16_t slave_position; int8_t mode; double position_scale; double velocity_scale; double torque_scale; int32_t position_offset; double min_position; double max_position; double max_velocity; double max_torque; double max_position_step; } esop_axis_config_t;\n\n");
     header.push_str(&format!(
         "#define ESOP_PRODUCT_NAME {}\n#define ESOP_CONFIG_SHA256 {}\n#define ESOP_ROBOT_ID UINT64_C(0x{:016x})\n#define ESOP_POLICY_VERSION UINT32_C({})\n",
@@ -1434,14 +1626,15 @@ fn render_header(
         manifest.product.policy_version,
     ));
     header.push_str(&format!(
-        "#define ESOP_SLAVE_COUNT {}u\n#define ESOP_DOMAIN_COUNT {}u\n#define ESOP_PDO_COUNT {}u\n#define ESOP_DATAGRAM_COUNT {}u\n#define ESOP_AXIS_COUNT {}u\n",
+        "#define ESOP_SLAVE_COUNT {}u\n#define ESOP_DOMAIN_COUNT {}u\n#define ESOP_PDO_COUNT {}u\n#define ESOP_DATAGRAM_COUNT {}u\n#define ESOP_SLAVE_COPY_COUNT {}u\n#define ESOP_AXIS_COUNT {}u\n",
         slaves.len(),
         domains.len(),
         pdos.len(),
         datagrams.len(),
+        slave_copies.len(),
         axes.len(),
     ));
-    header.push_str("#define ESOP_SLAVE_STORAGE_COUNT (ESOP_SLAVE_COUNT ? ESOP_SLAVE_COUNT : 1u)\n#define ESOP_DOMAIN_STORAGE_COUNT (ESOP_DOMAIN_COUNT ? ESOP_DOMAIN_COUNT : 1u)\n#define ESOP_PDO_STORAGE_COUNT (ESOP_PDO_COUNT ? ESOP_PDO_COUNT : 1u)\n#define ESOP_DATAGRAM_STORAGE_COUNT (ESOP_DATAGRAM_COUNT ? ESOP_DATAGRAM_COUNT : 1u)\n#define ESOP_AXIS_STORAGE_COUNT (ESOP_AXIS_COUNT ? ESOP_AXIS_COUNT : 1u)\n\n");
+    header.push_str("#define ESOP_SLAVE_STORAGE_COUNT (ESOP_SLAVE_COUNT ? ESOP_SLAVE_COUNT : 1u)\n#define ESOP_DOMAIN_STORAGE_COUNT (ESOP_DOMAIN_COUNT ? ESOP_DOMAIN_COUNT : 1u)\n#define ESOP_PDO_STORAGE_COUNT (ESOP_PDO_COUNT ? ESOP_PDO_COUNT : 1u)\n#define ESOP_DATAGRAM_STORAGE_COUNT (ESOP_DATAGRAM_COUNT ? ESOP_DATAGRAM_COUNT : 1u)\n#define ESOP_SLAVE_COPY_STORAGE_COUNT (ESOP_SLAVE_COPY_COUNT ? ESOP_SLAVE_COPY_COUNT : 1u)\n#define ESOP_AXIS_STORAGE_COUNT (ESOP_AXIS_COUNT ? ESOP_AXIS_COUNT : 1u)\n\n");
     header.push_str(&format!(
         "static const uint16_t esop_procbuf_abi_version = {}u;\nstatic const uint32_t esop_procbuf_region_bytes = {}u;\nstatic const uint64_t esop_procbuf_layout_hash = UINT64_C(0x{:016x});\n\n",
         ABI_VERSION, procbuf.region_bytes, procbuf.layout_hash
@@ -1554,6 +1747,21 @@ fn render_header(
             u8::from(datagram.input),
         ));
     }
+    header.push_str("};\n\nstatic const esop_slave_copy_config_t esop_slave_copies[ESOP_SLAVE_COPY_STORAGE_COUNT] = {\n");
+    if slave_copies.is_empty() {
+        header.push_str("  {0},\n");
+    } else {
+        for copy in slave_copies {
+            header.push_str(&format!(
+                "  {{{}, {}u, {}u, {}u, UINT8_C(0x{:02x})}},\n",
+                c_string(&copy.name),
+                copy.source_pdo_index,
+                copy.target_pdo_index,
+                copy.target_quality_pdo_index,
+                copy.invalid_fill,
+            ));
+        }
+    }
     header
         .push_str("};\n\nstatic const esop_axis_config_t esop_axes[ESOP_AXIS_STORAGE_COUNT] = {\n");
     if axes.is_empty() {
@@ -1588,6 +1796,7 @@ fn render_rust_module(
     domains: &[GeneratedDomain],
     pdos: &[GeneratedPdo],
     datagrams: &[GeneratedDatagram],
+    slave_copies: &[GeneratedSlaveCopy],
     axes: &[GeneratedAxis],
     procbuf: ProcBufLayoutDescriptor,
 ) -> Result<String> {
@@ -1599,7 +1808,7 @@ use esop_product_config::{\n\
     DomainDatagramSpec, MailboxConfig, OpOnlySyncManagerProfile, OperatingMode, PdoDirection,\n\
     PdoRegistrationRequest,\n\
     ProcBufDimensions, ProcBufLayoutDescriptor, ProductAxisConfig, ProductDatagramConfig,\n\
-    ProductDomainConfig, ProductMetadata, ProductPdoConfig, ProductSlaveConfig,\n\
+    ProductDomainConfig, ProductMetadata, ProductPdoConfig, ProductSlaveConfig, ProductSlaveCopyConfig,\n\
     ProductSlaveKind, EscWatchdogConfig, SiiDcMode, SiiDcModeExpectation, SlaveIdentity, StaticProductConfig,\n\
 };\n\n",
     );
@@ -1621,6 +1830,22 @@ use esop_product_config::{\n\
             rust_direction(&pdo.direction),
             pdo.bit_length,
             pdo.signed,
+        ));
+    }
+    output.push_str("];\n\n");
+
+    output.push_str(&format!(
+        "static PRODUCT_SLAVE_COPIES: [ProductSlaveCopyConfig; {}] = [\n",
+        slave_copies.len()
+    ));
+    for copy in slave_copies {
+        output.push_str(&format!(
+            "    ProductSlaveCopyConfig {{ name: {}, source_pdo_index: {}, target_pdo_index: {}, target_quality_pdo_index: {}, invalid_fill: 0x{:02x} }},\n",
+            rust_string(&copy.name),
+            copy.source_pdo_index,
+            copy.target_pdo_index,
+            copy.target_quality_pdo_index,
+            copy.invalid_fill,
         ));
     }
     output.push_str("];\n\n");
@@ -1798,7 +2023,7 @@ use esop_product_config::{\n\
             domain.input_expected_wkc,
         ));
     }
-    output.push_str("    ],\n    pdos: &PRODUCT_PDOS,\n    datagrams: &PRODUCT_DATAGRAMS,\n");
+    output.push_str("    ],\n    pdos: &PRODUCT_PDOS,\n    datagrams: &PRODUCT_DATAGRAMS,\n    slave_copies: &PRODUCT_SLAVE_COPIES,\n");
 
     output.push_str("    axes: [\n");
     for axis in axes {

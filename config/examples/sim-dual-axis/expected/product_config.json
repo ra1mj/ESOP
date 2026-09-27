@@ -46,16 +46,16 @@
     "max_process_image_bytes": 128,
     "max_schedule_slots": 16
   },
-  "config_sha256": "b95690490cc4f8e5a6ac769bd5f65e677f3d509abcfa70e8019a2c046e834514",
+  "config_sha256": "e241ac19602f9adc68d206e726ed048fa3f915e34b04e6bd35a45af9774b6241",
   "cycle": {
     "base_period_ns": 1000000,
     "deadline_ns": 800000
   },
   "cycle_metrics": {
-    "copy_bytes_per_cycle": 20,
+    "copy_bytes_per_cycle": 4,
     "expected_wkc": 6,
     "frame_count": 2,
-    "pdo_bytes_per_cycle": 36,
+    "pdo_bytes_per_cycle": 41,
     "wire_bytes_per_cycle": 180
   },
   "datagrams": [
@@ -92,20 +92,20 @@
       "index": 2,
       "input": false,
       "logical_address": "0x00001100",
-      "payload_len": 2,
+      "payload_len": 7,
       "process_image_offset": 64
     },
     {
       "command": "lrd",
       "command_code": 10,
       "domain_id": 1,
-      "domain_offset": 2,
+      "domain_offset": 7,
       "expected_wkc": 1,
       "index": 3,
       "input": true,
-      "logical_address": "0x00001102",
+      "logical_address": "0x00001107",
       "payload_len": 2,
-      "process_image_offset": 66
+      "process_image_offset": 71
     }
   ],
   "domains": [
@@ -152,11 +152,11 @@
       "input_expected_wkc": 1,
       "logical_address": "0x00001100",
       "name": "io",
-      "output_bytes": 2,
-      "pdo_count": 2,
+      "output_bytes": 7,
+      "pdo_count": 4,
       "period_ticks": 4,
       "phase_ticks": 0,
-      "process_image_bytes": 4,
+      "process_image_bytes": 9,
       "process_image_offset": 64
     }
   ],
@@ -357,9 +357,35 @@
       "sync_manager": 2
     },
     {
+      "assignment_index": "0x1601",
+      "bit_length": 32,
+      "bit_offset": 16,
+      "direction": "rx",
+      "domain_id": 1,
+      "name": "Drive position mirror",
+      "object_index": "0x7010",
+      "signed": true,
+      "slave_position": 2,
+      "subindex": 1,
+      "sync_manager": 2
+    },
+    {
+      "assignment_index": "0x1601",
+      "bit_length": 8,
+      "bit_offset": 48,
+      "direction": "rx",
+      "domain_id": 1,
+      "name": "Drive position mirror quality",
+      "object_index": "0x7011",
+      "signed": false,
+      "slave_position": 2,
+      "subindex": 1,
+      "sync_manager": 2
+    },
+    {
       "assignment_index": "0x1a01",
       "bit_length": 16,
-      "bit_offset": 16,
+      "bit_offset": 56,
       "direction": "tx",
       "domain_id": 1,
       "name": "Inputs",
@@ -386,6 +412,32 @@
     "hyperperiod_ticks": 4
   },
   "schema_version": "esop.product-config.v1",
+  "slave_copies": [
+    {
+      "invalid_fill": 0,
+      "name": "left_position_to_io",
+      "payload_bytes": 4,
+      "source": {
+        "index": "0x6064",
+        "slave": "drive_left",
+        "subindex": 0
+      },
+      "source_pdo_index": 9,
+      "target": {
+        "index": "0x7010",
+        "slave": "io_block",
+        "subindex": 1
+      },
+      "target_domain_id": 1,
+      "target_pdo_index": 15,
+      "target_quality": {
+        "index": "0x7011",
+        "slave": "io_block",
+        "subindex": 1
+      },
+      "target_quality_pdo_index": 16
+    }
+  ],
   "slaves": [
     {
       "dc": {
@@ -571,7 +623,7 @@
       "domain_id": 1,
       "esi_device_name": "ESOP simulated digital IO",
       "esi_label": "esop-sim-io-v1",
-      "esi_semantic_sha256": "21cccfa968e3997b5bf29cfa65c229300a767033ab0719c3626eddd5e4125c40",
+      "esi_semantic_sha256": "f2a181dbebb5cacae40862bfc89f156b1132e879c073a3f7474208cec814d08b",
       "esi_type_name": "ESOP-SIM-IO",
       "kind": "ethercat_io",
       "mailbox": {

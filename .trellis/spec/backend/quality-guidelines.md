@@ -405,6 +405,14 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   source sample at most one cycle old; otherwise write the product-specified
   fallback and invalid quality byte. Runtime binding errors leave output
   untouched and require suppressing that target frame.
+- Product-owned slave copies use strict semantic manifest references; cfggen
+  resolves them only within selected ESI PDOs, validates through the core plan
+  builder, hashes the resolved identity, and emits PDO indices. Runtime
+  activation must retain or recover the matching registration handles and
+  rebuild one fixed-capacity `SlaveCopyPlanSet`; reject excess capacity and any
+  target/quality overlap before publishing the activated product. Products
+  with no copies retain an empty set. `copy_bytes_per_cycle` counts due copy
+  payloads, not all received Domain bytes.
 - Treat `motion_permit_current` as permit freshness, not motion authorization:
   a blocked gate revokes the permit when the guard enters `Stopping`. Only the
   guard's cycle action may authorize CiA 402 enable.

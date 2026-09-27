@@ -89,6 +89,14 @@
             <Index>#x7000</Index><SubIndex>1</SubIndex><BitLen>16</BitLen>
             <Name>Outputs</Name><DataType>UINT</DataType>
           </Entry>
+          <Entry>
+            <Index>#x7010</Index><SubIndex>1</SubIndex><BitLen>32</BitLen>
+            <Name>Drive position mirror</Name><DataType>DINT</DataType>
+          </Entry>
+          <Entry>
+            <Index>#x7011</Index><SubIndex>1</SubIndex><BitLen>8</BitLen>
+            <Name>Drive position mirror quality</Name><DataType>USINT</DataType>
+          </Entry>
         </RxPdo>
         <TxPdo Sm="3">
           <Index>#x1A01</Index>

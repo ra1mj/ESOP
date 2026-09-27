@@ -62,7 +62,27 @@ pub struct ProductManifest {
     pub platform: PlatformManifest,
     pub domains: Vec<DomainManifest>,
     pub slaves: Vec<SlaveManifest>,
+    #[serde(default)]
+    pub slave_copies: Vec<SlaveCopyManifest>,
     pub axes: Vec<AxisManifest>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SlaveCopyManifest {
+    pub name: String,
+    pub source: PdoReferenceManifest,
+    pub target: PdoReferenceManifest,
+    pub target_quality: PdoReferenceManifest,
+    pub invalid_fill: u8,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PdoReferenceManifest {
+    pub slave: String,
+    pub index: HexU16,
+    pub subindex: u8,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

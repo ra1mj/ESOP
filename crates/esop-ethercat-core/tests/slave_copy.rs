@@ -2,7 +2,7 @@ use esop_ethercat_core::wire::{Command, DatagramHeader, FrameView, MAX_ETHERNET_
 use esop_ethercat_core::{
     Domain, DomainConfig, DomainDatagramSpec, DomainRegistry, DomainSegment, FramePlan,
     PdoDirection, PdoEntryHandle, PdoRegistrationRequest, SlaveCopyError, SlaveCopyPlan,
-    SlaveCopyStatus,
+    SlaveCopyPlanSet, SlaveCopyPlanSetError, SlaveCopyStatus,
 };
 
 type Registry = DomainRegistry<2, 4, 2>;
@@ -360,4 +360,30 @@ fn static_plan_rejects_mismapped_fields_and_unroutable_outputs() {
         SlaveCopyPlan::build(&unreadable, source, target, quality, 0),
         Err(SlaveCopyError::MissingDatagram)
     );
+}
+
+#[test]
+fn fixed_plan_set_rejects_capacity_and_overlapping_target_bytes_transactionally() {
+    let (mut registry, source, target, quality) = mapping();
+    registry.activate::<4>(250_000).unwrap();
+    let plan = SlaveCopyPlan::build(&registry, source, target, quality, 0xCC).unwrap();
+    assert_eq!(plan.payload_len(), 2);
+    assert!(plan.target_due(1));
+    assert!(!plan.target_due(0));
+
+    let mut empty = SlaveCopyPlanSet::<0>::new();
+    assert_eq!(
+        empty.push(plan),
+        Err(SlaveCopyPlanSetError::CapacityExceeded)
+    );
+    assert!(empty.is_empty());
+
+    let mut plans = SlaveCopyPlanSet::<2>::new();
+    plans.push(plan).unwrap();
+    assert_eq!(
+        plans.push(plan),
+        Err(SlaveCopyPlanSetError::TargetOverlap { existing_index: 0 })
+    );
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans.plans(), &[plan]);
 }

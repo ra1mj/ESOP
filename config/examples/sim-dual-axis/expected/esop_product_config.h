@@ -9,21 +9,24 @@ typedef struct { const char *name; uint16_t position; uint16_t station_address; 
 typedef struct { const char *name; uint8_t id; uint32_t logical_address; uint32_t image_offset; uint32_t image_bytes; uint32_t output_bytes; uint32_t input_bytes; uint32_t period_ticks; uint32_t phase_ticks; uint16_t expected_wkc; } esop_domain_config_t;
 typedef struct { uint8_t domain_id; uint16_t slave_position; uint16_t assignment_index; uint8_t sync_manager; uint16_t object_index; uint8_t subindex; uint8_t direction; uint32_t bit_offset; uint8_t bit_length; uint8_t is_signed; } esop_pdo_config_t;
 typedef struct { uint8_t domain_id; uint8_t command; uint8_t index; uint32_t logical_address; uint32_t image_offset; uint16_t payload_len; uint16_t expected_wkc; uint8_t input; } esop_datagram_config_t;
+typedef struct { const char *name; uint32_t source_pdo_index; uint32_t target_pdo_index; uint32_t target_quality_pdo_index; uint8_t invalid_fill; } esop_slave_copy_config_t;
 typedef struct { const char *name; uint8_t index; uint16_t slave_position; int8_t mode; double position_scale; double velocity_scale; double torque_scale; int32_t position_offset; double min_position; double max_position; double max_velocity; double max_torque; double max_position_step; } esop_axis_config_t;
 
 #define ESOP_PRODUCT_NAME "ESOP dual-axis simulator"
-#define ESOP_CONFIG_SHA256 "b95690490cc4f8e5a6ac769bd5f65e677f3d509abcfa70e8019a2c046e834514"
+#define ESOP_CONFIG_SHA256 "e241ac19602f9adc68d206e726ed048fa3f915e34b04e6bd35a45af9774b6241"
 #define ESOP_ROBOT_ID UINT64_C(0x000000000000e502)
 #define ESOP_POLICY_VERSION UINT32_C(1)
 #define ESOP_SLAVE_COUNT 3u
 #define ESOP_DOMAIN_COUNT 2u
-#define ESOP_PDO_COUNT 16u
+#define ESOP_PDO_COUNT 18u
 #define ESOP_DATAGRAM_COUNT 4u
+#define ESOP_SLAVE_COPY_COUNT 1u
 #define ESOP_AXIS_COUNT 2u
 #define ESOP_SLAVE_STORAGE_COUNT (ESOP_SLAVE_COUNT ? ESOP_SLAVE_COUNT : 1u)
 #define ESOP_DOMAIN_STORAGE_COUNT (ESOP_DOMAIN_COUNT ? ESOP_DOMAIN_COUNT : 1u)
 #define ESOP_PDO_STORAGE_COUNT (ESOP_PDO_COUNT ? ESOP_PDO_COUNT : 1u)
 #define ESOP_DATAGRAM_STORAGE_COUNT (ESOP_DATAGRAM_COUNT ? ESOP_DATAGRAM_COUNT : 1u)
+#define ESOP_SLAVE_COPY_STORAGE_COUNT (ESOP_SLAVE_COPY_COUNT ? ESOP_SLAVE_COPY_COUNT : 1u)
 #define ESOP_AXIS_STORAGE_COUNT (ESOP_AXIS_COUNT ? ESOP_AXIS_COUNT : 1u)
 
 static const uint16_t esop_procbuf_abi_version = 6u;
@@ -38,7 +41,7 @@ static const esop_slave_config_t esop_slaves[ESOP_SLAVE_STORAGE_COUNT] = {
 
 static const esop_domain_config_t esop_domains[ESOP_DOMAIN_STORAGE_COUNT] = {
   {"motion", 0u, UINT32_C(0x00001000), 0u, 32u, 14u, 18u, 1u, 0u, 4u},
-  {"io", 1u, UINT32_C(0x00001100), 64u, 4u, 2u, 2u, 4u, 0u, 2u},
+  {"io", 1u, UINT32_C(0x00001100), 64u, 9u, 7u, 2u, 4u, 0u, 2u},
 };
 
 static const esop_pdo_config_t esop_pdos[ESOP_PDO_STORAGE_COUNT] = {
@@ -57,14 +60,20 @@ static const esop_pdo_config_t esop_pdos[ESOP_PDO_STORAGE_COUNT] = {
   {0u, 1u, UINT16_C(0x1a00), 3u, UINT16_C(0x603f), 0u, 1u, 208u, 16u, 0u},
   {0u, 1u, UINT16_C(0x1a00), 3u, UINT16_C(0x6064), 0u, 1u, 224u, 32u, 1u},
   {1u, 2u, UINT16_C(0x1601), 2u, UINT16_C(0x7000), 1u, 0u, 0u, 16u, 0u},
-  {1u, 2u, UINT16_C(0x1a01), 3u, UINT16_C(0x6000), 1u, 1u, 16u, 16u, 0u},
+  {1u, 2u, UINT16_C(0x1601), 2u, UINT16_C(0x7010), 1u, 0u, 16u, 32u, 1u},
+  {1u, 2u, UINT16_C(0x1601), 2u, UINT16_C(0x7011), 1u, 0u, 48u, 8u, 0u},
+  {1u, 2u, UINT16_C(0x1a01), 3u, UINT16_C(0x6000), 1u, 1u, 56u, 16u, 0u},
 };
 
 static const esop_datagram_config_t esop_datagrams[ESOP_DATAGRAM_STORAGE_COUNT] = {
   {0u, UINT8_C(0x0b), 0u, UINT32_C(0x00001000), 0u, 14u, 2u, 0u},
   {0u, UINT8_C(0x0a), 1u, UINT32_C(0x0000100e), 14u, 18u, 2u, 1u},
-  {1u, UINT8_C(0x0b), 2u, UINT32_C(0x00001100), 64u, 2u, 1u, 0u},
-  {1u, UINT8_C(0x0a), 3u, UINT32_C(0x00001102), 66u, 2u, 1u, 1u},
+  {1u, UINT8_C(0x0b), 2u, UINT32_C(0x00001100), 64u, 7u, 1u, 0u},
+  {1u, UINT8_C(0x0a), 3u, UINT32_C(0x00001107), 71u, 2u, 1u, 1u},
+};
+
+static const esop_slave_copy_config_t esop_slave_copies[ESOP_SLAVE_COPY_STORAGE_COUNT] = {
+  {"left_position_to_io", 9u, 15u, 16u, UINT8_C(0x00)},
 };
 
 static const esop_axis_config_t esop_axes[ESOP_AXIS_STORAGE_COUNT] = {

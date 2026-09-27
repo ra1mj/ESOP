@@ -23,6 +23,12 @@ pub enum SlaveCopyError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SlaveCopyPlanSetError {
+    CapacityExceeded,
+    TargetOverlap { existing_index: usize },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SlaveCopyStatus {
     Valid,
     InvalidSource,
@@ -63,6 +69,25 @@ pub struct SlaveCopyPlan {
 }
 
 impl SlaveCopyPlan {
+    const EMPTY: Self = Self {
+        source_domain_id: 0,
+        target_domain_id: 0,
+        source_address: 0,
+        target_address: 0,
+        source_offset: 0,
+        target_offset: 0,
+        quality_offset: 0,
+        len: 0,
+        source_len: 0,
+        target_len: 0,
+        source_expected_wkc: 0,
+        source_period_ticks: 1,
+        source_phase_ticks: 0,
+        target_period_ticks: 1,
+        target_phase_ticks: 0,
+        invalid_fill: 0,
+    };
+
     /// Bind a plan only after all PDOs and datagrams are frozen by activation.
     /// Source and target fields must be whole bytes of identical width, and
     /// each must be covered by a matching process-data datagram.
@@ -157,6 +182,16 @@ impl SlaveCopyPlan {
         self.target_domain_id
     }
 
+    pub const fn payload_len(&self) -> usize {
+        self.len
+    }
+
+    pub const fn target_due(&self, target_cycle: u64) -> bool {
+        target_cycle != 0
+            && (target_cycle - 1) % self.target_period_ticks as u64
+                == self.target_phase_ticks as u64
+    }
+
     /// Call after finishing the source receive and immediately before building
     /// the target frame for `target_cycle`. Errors leave outputs unchanged;
     /// the caller must not transmit the target frame on error.
@@ -208,10 +243,7 @@ impl SlaveCopyPlan {
         if source_image.len() < self.source_len || target_image.len() < self.target_len {
             return Err(SlaveCopyError::ImageBounds);
         }
-        if target_cycle == 0
-            || (target_cycle - 1) % u64::from(self.target_period_ticks)
-                != u64::from(self.target_phase_ticks)
-        {
+        if !self.target_due(target_cycle) {
             return Err(SlaveCopyError::TargetNotDue);
         }
 
@@ -249,6 +281,74 @@ impl SlaveCopyPlan {
             target_cycle,
         })
     }
+
+    fn target_overlaps(&self, other: &Self) -> bool {
+        self.target_domain_id == other.target_domain_id
+            && (ranges_overlap(
+                self.target_offset,
+                self.target_offset + self.len,
+                other.target_offset,
+                other.target_offset + other.len,
+            ) || ranges_overlap(
+                self.target_offset,
+                self.target_offset + self.len,
+                other.quality_offset,
+                other.quality_offset + 1,
+            ) || ranges_overlap(
+                self.quality_offset,
+                self.quality_offset + 1,
+                other.target_offset,
+                other.target_offset + other.len,
+            ) || self.quality_offset == other.quality_offset)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SlaveCopyPlanSet<const PLANS: usize> {
+    plans: [SlaveCopyPlan; PLANS],
+    count: usize,
+}
+
+impl<const PLANS: usize> SlaveCopyPlanSet<PLANS> {
+    pub const fn new() -> Self {
+        Self {
+            plans: [SlaveCopyPlan::EMPTY; PLANS],
+            count: 0,
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn plans(&self) -> &[SlaveCopyPlan] {
+        &self.plans[..self.count]
+    }
+
+    pub fn push(&mut self, plan: SlaveCopyPlan) -> Result<(), SlaveCopyPlanSetError> {
+        if self.count == PLANS {
+            return Err(SlaveCopyPlanSetError::CapacityExceeded);
+        }
+        if let Some(existing_index) = self.plans[..self.count]
+            .iter()
+            .position(|existing| existing.target_overlaps(&plan))
+        {
+            return Err(SlaveCopyPlanSetError::TargetOverlap { existing_index });
+        }
+        self.plans[self.count] = plan;
+        self.count += 1;
+        Ok(())
+    }
+}
+
+impl<const PLANS: usize> Default for SlaveCopyPlanSet<PLANS> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 fn covered_by_datagram<const DOMAINS: usize, const PDOS: usize, const DATAGRAMS: usize>(
@@ -277,4 +377,13 @@ fn covered_by_datagram<const DOMAINS: usize, const PDOS: usize, const DATAGRAMS:
                 && datagram.plan.payload_offset <= start
                 && end <= datagram.plan.payload_offset + datagram.plan.payload_len
         }))
+}
+
+const fn ranges_overlap(
+    left_start: usize,
+    left_end: usize,
+    right_start: usize,
+    right_end: usize,
+) -> bool {
+    left_start < right_end && right_start < left_end
 }

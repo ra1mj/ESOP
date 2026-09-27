@@ -4,11 +4,11 @@ AlTransitionTimeouts, Cia402AxisCommandPolicy, Command, DcSyncTiming, DomainConf
 DomainDatagramSpec, MailboxConfig, OpOnlySyncManagerProfile, OperatingMode, PdoDirection,
 PdoRegistrationRequest,
 ProcBufDimensions, ProcBufLayoutDescriptor, ProductAxisConfig, ProductDatagramConfig,
-ProductDomainConfig, ProductMetadata, ProductPdoConfig, ProductSlaveConfig,
+ProductDomainConfig, ProductMetadata, ProductPdoConfig, ProductSlaveConfig, ProductSlaveCopyConfig,
 ProductSlaveKind, EscWatchdogConfig, SiiDcMode, SiiDcModeExpectation, SlaveIdentity, StaticProductConfig,
 };
 
-static PRODUCT_PDOS: [ProductPdoConfig; 16] = [
+static PRODUCT_PDOS: [ProductPdoConfig; 18] = [
     ProductPdoConfig { domain_id: 0, assignment_index: 0x1600, sync_manager: 2, bit_offset: 0, request: PdoRegistrationRequest::new(0, 0x6040, 0, PdoDirection::Rx, 16, false) },
     ProductPdoConfig { domain_id: 0, assignment_index: 0x1600, sync_manager: 2, bit_offset: 16, request: PdoRegistrationRequest::new(0, 0x6060, 0, PdoDirection::Rx, 8, true) },
     ProductPdoConfig { domain_id: 0, assignment_index: 0x1600, sync_manager: 2, bit_offset: 24, request: PdoRegistrationRequest::new(0, 0x607a, 0, PdoDirection::Rx, 32, true) },
@@ -24,14 +24,20 @@ static PRODUCT_PDOS: [ProductPdoConfig; 16] = [
     ProductPdoConfig { domain_id: 0, assignment_index: 0x1a00, sync_manager: 3, bit_offset: 208, request: PdoRegistrationRequest::new(1, 0x603f, 0, PdoDirection::Tx, 16, false) },
     ProductPdoConfig { domain_id: 0, assignment_index: 0x1a00, sync_manager: 3, bit_offset: 224, request: PdoRegistrationRequest::new(1, 0x6064, 0, PdoDirection::Tx, 32, true) },
     ProductPdoConfig { domain_id: 1, assignment_index: 0x1601, sync_manager: 2, bit_offset: 0, request: PdoRegistrationRequest::new(2, 0x7000, 1, PdoDirection::Rx, 16, false) },
-    ProductPdoConfig { domain_id: 1, assignment_index: 0x1a01, sync_manager: 3, bit_offset: 16, request: PdoRegistrationRequest::new(2, 0x6000, 1, PdoDirection::Tx, 16, false) },
+    ProductPdoConfig { domain_id: 1, assignment_index: 0x1601, sync_manager: 2, bit_offset: 16, request: PdoRegistrationRequest::new(2, 0x7010, 1, PdoDirection::Rx, 32, true) },
+    ProductPdoConfig { domain_id: 1, assignment_index: 0x1601, sync_manager: 2, bit_offset: 48, request: PdoRegistrationRequest::new(2, 0x7011, 1, PdoDirection::Rx, 8, false) },
+    ProductPdoConfig { domain_id: 1, assignment_index: 0x1a01, sync_manager: 3, bit_offset: 56, request: PdoRegistrationRequest::new(2, 0x6000, 1, PdoDirection::Tx, 16, false) },
+];
+
+static PRODUCT_SLAVE_COPIES: [ProductSlaveCopyConfig; 1] = [
+    ProductSlaveCopyConfig { name: "left_position_to_io", source_pdo_index: 9, target_pdo_index: 15, target_quality_pdo_index: 16, invalid_fill: 0x00 },
 ];
 
 static PRODUCT_DATAGRAMS: [ProductDatagramConfig; 4] = [
     ProductDatagramConfig { domain_id: 0, spec: DomainDatagramSpec::new(Command::Lwr, 0, 0x00001000, 0, 14, 2, false) },
     ProductDatagramConfig { domain_id: 0, spec: DomainDatagramSpec::new(Command::Lrd, 1, 0x0000100e, 14, 18, 2, true) },
-    ProductDatagramConfig { domain_id: 1, spec: DomainDatagramSpec::new(Command::Lwr, 2, 0x00001100, 0, 2, 1, false) },
-    ProductDatagramConfig { domain_id: 1, spec: DomainDatagramSpec::new(Command::Lrd, 3, 0x00001102, 2, 2, 1, true) },
+    ProductDatagramConfig { domain_id: 1, spec: DomainDatagramSpec::new(Command::Lwr, 2, 0x00001100, 0, 7, 1, false) },
+    ProductDatagramConfig { domain_id: 1, spec: DomainDatagramSpec::new(Command::Lrd, 3, 0x00001107, 7, 2, 1, true) },
 ];
 
 #[allow(clippy::approx_constant)]
@@ -39,7 +45,7 @@ pub static PRODUCT_CONFIG: StaticProductConfig<'static, 3, 2, 2> = StaticProduct
     metadata: ProductMetadata {
         schema_version: "esop.product-runtime.v1",
         product_name: "ESOP dual-axis simulator",
-        config_sha256: [0xb9, 0x56, 0x90, 0x49, 0x0c, 0xc4, 0xf8, 0xe5, 0xa6, 0xac, 0x76, 0x9b, 0xd5, 0xf6, 0x5e, 0x67, 0x7f, 0x3d, 0x50, 0x9a, 0xbc, 0xfa, 0x70, 0xe8, 0x01, 0x9a, 0x2c, 0x04, 0x6e, 0x83, 0x45, 0x14],
+        config_sha256: [0xe2, 0x41, 0xac, 0x19, 0x60, 0x2f, 0x9a, 0xdc, 0x68, 0xd2, 0x06, 0xe7, 0x26, 0xed, 0x04, 0x8f, 0xa3, 0xf9, 0x15, 0xe3, 0x4b, 0x04, 0xe6, 0xbd, 0x35, 0xa4, 0x5a, 0xf9, 0x77, 0x4b, 0x62, 0x41],
         robot_id: 0x000000000000e502,
         policy_version: 1,
         base_period_ns: 1000000,
@@ -53,10 +59,11 @@ pub static PRODUCT_CONFIG: StaticProductConfig<'static, 3, 2, 2> = StaticProduct
     ],
     domains: [
         ProductDomainConfig { name: "motion", config: DomainConfig::new(0, 0x00001000, 0, 32, 1, 0), expected_pdo_count: 14, expected_datagram_count: 2, expected_wkc: 4, input_expected_wkc: 2 },
-        ProductDomainConfig { name: "io", config: DomainConfig::new(1, 0x00001100, 64, 4, 4, 0), expected_pdo_count: 2, expected_datagram_count: 2, expected_wkc: 2, input_expected_wkc: 1 },
+        ProductDomainConfig { name: "io", config: DomainConfig::new(1, 0x00001100, 64, 9, 4, 0), expected_pdo_count: 4, expected_datagram_count: 2, expected_wkc: 2, input_expected_wkc: 1 },
     ],
     pdos: &PRODUCT_PDOS,
     datagrams: &PRODUCT_DATAGRAMS,
+    slave_copies: &PRODUCT_SLAVE_COPIES,
     axes: [
         ProductAxisConfig { name: "left_joint", index: 0, slave_position: 0, mode: OperatingMode::Csp, policy: Cia402AxisCommandPolicy { position_units_per_radian: 100000.0, velocity_units_per_radian_per_second: 1000.0, torque_units_per_newton_metre: 100.0, position_offset: 0, min_position_radians: -3.141592653589793, max_position_radians: 3.141592653589793, max_velocity_radians_per_second: 10.0, max_torque_newton_metres: 100.0, max_position_step_radians: 0.02 } },
         ProductAxisConfig { name: "right_joint", index: 1, slave_position: 1, mode: OperatingMode::Csp, policy: Cia402AxisCommandPolicy { position_units_per_radian: -100000.0, velocity_units_per_radian_per_second: -1000.0, torque_units_per_newton_metre: -100.0, position_offset: 0, min_position_radians: -3.141592653589793, max_position_radians: 3.141592653589793, max_velocity_radians_per_second: 10.0, max_torque_newton_metres: 100.0, max_position_step_radians: 0.02 } },

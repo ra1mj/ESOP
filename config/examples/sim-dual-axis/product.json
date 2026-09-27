@@ -129,6 +129,27 @@
       "tx_pdos": ["0x1a01"]
     }
   ],
+  "slave_copies": [
+    {
+      "name": "left_position_to_io",
+      "source": {
+        "slave": "drive_left",
+        "index": "0x6064",
+        "subindex": 0
+      },
+      "target": {
+        "slave": "io_block",
+        "index": "0x7010",
+        "subindex": 1
+      },
+      "target_quality": {
+        "slave": "io_block",
+        "index": "0x7011",
+        "subindex": 1
+      },
+      "invalid_fill": 0
+    }
+  ],
   "axes": [
     {
       "index": 0,

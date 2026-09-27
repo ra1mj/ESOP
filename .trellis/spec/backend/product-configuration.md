@@ -30,6 +30,8 @@ pub fn Cia402AxisCommandPolicy::validate_for_product(
 ) -> Result<(), Cia402AxisCommandPolicyError>;
 pub fn StaticProductConfig::activate(...) ->
     Result<ActivatedProduct<...>, ProductActivationError>;
+pub fn ActivatedProduct::slave_copy_plans(...) ->
+    &SlaveCopyPlanSet<MAX_PRODUCT_SLAVE_COPIES>;
 pub fn StaticProductConfig::build_pdo_startup_plan<const OPS: usize>(...) ->
     Result<ProductPdoStartupPlan<OPS>, ProductPdoPlanError>;
 pub fn StaticProductConfig::build_pdo_configuration_batch<
@@ -124,6 +126,9 @@ Input schema `esop.product.v1` is strict (`deny_unknown_fields`) and owns:
 - ProcBuf dimensions and generator capacities;
 - period/deadline and platform metadata;
 - ordered Domain, slave, selected ESI PDO, and axis policy declarations;
+- an optional ordered `slave_copies` list. Each strict entry names one source
+  TxPDO, target RxPDO, and unsigned one-byte target quality RxPDO by slave name,
+  object index, and subindex, plus the product-reviewed fallback byte;
 - an optional strict per-slave `dc` object whose `required` and
   `reference_clock` booleans default false, where reference implies required,
   at most one slave may select reference, every required slave selects one
@@ -158,7 +163,18 @@ the caller-expected 32-byte hash, exact ProcBuf v6 descriptor/header, exact
 observed online/configured topology, rebuilt Domain/PDO/datagram/WKC evidence,
 schedule/frame plans, drive ownership, product policies, and selected-mode
 CiA 402 PDO maps.
-It returns the owning frozen result only after all checks pass.
+For slave copies, cfggen first resolves semantic references within the selected
+ESI PDOs and validates them with `SlaveCopyPlan::build` against the active
+generator registry. Generated Rust stores the resolved PDO array indices;
+runtime activation retains only the referenced registration handles, rebuilds
+the fixed-capacity plan set from its own active registry, and rejects unknown
+indices, direction/width/alignment/datagram-coverage errors, capacity excess,
+or overlapping target/quality bytes. It returns the owning frozen result only
+after all checks pass.
+
+`copy_bytes_per_cycle` is the maximum sum of configured slave-copy payload
+widths whose target Domains are due on one hyperperiod tick. It is not the
+Domain input-byte count and excludes the separate target quality-byte write.
 
 Each generated slave carries four ESM transition timeout classes, one validated
 CoE mailbox pair, one bounded `OpOnlySyncManagerProfile`, and an ordered FMMU

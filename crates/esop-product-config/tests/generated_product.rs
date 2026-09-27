@@ -1,10 +1,13 @@
+use esop_ethercat_core::wire::{Command, DatagramHeader, FrameView, MAX_ETHERNET_FRAME_LEN};
+use esop_ethercat_core::{Domain, DomainSegment, SlaveCopyStatus};
 use esop_product_config::{
     ActivatedProduct, AlTransitionTimeouts, Cia402AxisCommandPolicyError, DomainRegistryError,
-    ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, EscWatchdogConfig, FramePlanSetError, MailboxConfig,
-    MailboxConfigError, MailboxDirection, OperatingMode, PdoConfigBatchPlanError,
-    PdoConfigPlanError, PdoSdoWrite, ProcBuf, ProcBufHeaderError, ProductActivationError,
-    ProductMailboxBinding, ProductPdoBatchError, ProductPdoPlanError, ProductSlaveKind,
-    ProductStartupError, SiiFmmuUsage, SlaveRecord, StartupDcRequirement,
+    ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, EscWatchdogConfig, FramePlanSetError,
+    MAX_PRODUCT_SLAVE_COPIES, MailboxConfig, MailboxConfigError, MailboxDirection, OperatingMode,
+    PdoConfigBatchPlanError, PdoConfigPlanError, PdoSdoWrite, ProcBuf, ProcBufHeaderError,
+    ProductActivationError, ProductMailboxBinding, ProductPdoBatchError, ProductPdoPlanError,
+    ProductSlaveKind, ProductStartupError, SiiFmmuUsage, SlaveCopyPlanSetError, SlaveRecord,
+    StartupDcRequirement,
 };
 
 mod generated {
@@ -52,9 +55,9 @@ fn checked_in_product_activates_exact_generated_evidence() {
     assert_eq!(
         active.metadata().config_sha256,
         [
-            0xb9, 0x56, 0x90, 0x49, 0x0c, 0xc4, 0xf8, 0xe5, 0xa6, 0xac, 0x76, 0x9b, 0xd5, 0xf6,
-            0x5e, 0x67, 0x7f, 0x3d, 0x50, 0x9a, 0xbc, 0xfa, 0x70, 0xe8, 0x01, 0x9a, 0x2c, 0x04,
-            0x6e, 0x83, 0x45, 0x14,
+            0xe2, 0x41, 0xac, 0x19, 0x60, 0x2f, 0x9a, 0xdc, 0x68, 0xd2, 0x06, 0xe7, 0x26, 0xed,
+            0x04, 0x8f, 0xa3, 0xf9, 0x15, 0xe3, 0x4b, 0x04, 0xe6, 0xbd, 0x35, 0xa4, 0x5a, 0xf9,
+            0x77, 0x4b, 0x62, 0x41,
         ]
     );
 
@@ -119,7 +122,7 @@ fn checked_in_product_activates_exact_generated_evidence() {
     assert_eq!(active.registry().domain_count(), 2);
     assert_eq!(active.registry().domain(0).unwrap().pdo_count, 14);
     assert_eq!(active.registry().domain(0).unwrap().expected_wkc, 4);
-    assert_eq!(active.registry().domain(1).unwrap().pdo_count, 2);
+    assert_eq!(active.registry().domain(1).unwrap().pdo_count, 4);
     assert_eq!(active.registry().domain(1).unwrap().expected_wkc, 2);
     assert_eq!(active.schedule().hyperperiod_ticks(), 4);
     assert_eq!(active.schedule().due_mask(0), 0b11);
@@ -127,10 +130,122 @@ fn checked_in_product_activates_exact_generated_evidence() {
     assert_eq!(active.frame_plans().len(), 2);
     assert_eq!(active.frame_plans()[0].datagram_count(), 2);
     assert_eq!(active.frame_plans()[1].datagram_count(), 2);
+    assert_eq!(active.slave_copy_plans().len(), 1);
+    assert_eq!(active.slave_copy_plans().plans()[0].payload_len(), 4);
     assert_eq!(active.axis_modes(), &[OperatingMode::Csp; 2]);
     for map in active.axis_pdo_maps() {
         map.validate_for(OperatingMode::Csp).unwrap();
     }
+}
+
+fn receive_motion_position(
+    domain: &mut Domain<32, 1>,
+    generation: u16,
+    cycle: u64,
+    wkc: u16,
+    position: i32,
+) -> bool {
+    let mut payload = [0u8; 18];
+    payload[5..9].copy_from_slice(&position.to_le_bytes());
+    domain.begin_receive(generation).unwrap();
+    domain
+        .stage_datagram(
+            generation,
+            DatagramHeader {
+                command: Command::Lrd,
+                index: 1,
+                address: 0x100E,
+                length: payload.len() as u16,
+                last: true,
+            },
+            &payload,
+            wkc,
+        )
+        .unwrap();
+    domain.finish_receive(generation, cycle).unwrap()
+}
+
+#[test]
+fn generated_slave_copy_runs_from_verified_receive_into_the_due_target_frame() {
+    let procbuf =
+        ProcBuf::<2, 16, 2, 64>::new(generated::PRODUCT_CONFIG.metadata.robot_id, BOOT_ID);
+    let active = activate(&generated::PRODUCT_CONFIG, &observed_slaves(), &procbuf).unwrap();
+    let plan = active.slave_copy_plans().plans()[0];
+
+    let mut source = Domain::<32, 1>::new(0x1000);
+    source
+        .add_segment(DomainSegment {
+            datagram_index: 1,
+            input_offset: 14,
+            len: 18,
+            expected_wkc: 2,
+        })
+        .unwrap();
+    let mut target = Domain::<9, 1>::new(0x1100);
+
+    assert!(receive_motion_position(&mut source, 1, 1, 2, 0x1234_5678));
+    let copied = plan.apply_to_domains(&source, &mut target, 1).unwrap();
+    assert_eq!(copied.status, SlaveCopyStatus::Valid);
+    assert_eq!(target.output(), &[0, 0, 0x78, 0x56, 0x34, 0x12, 1, 0, 0]);
+
+    let mut process_image = [0u8; 73];
+    process_image[64..73].copy_from_slice(target.output());
+    let mut frame = [0u8; MAX_ETHERNET_FRAME_LEN];
+    let frame_plan = &active.frame_plans()[1].plans()[0];
+    let frame_len = frame_plan
+        .build(&mut frame, [0xFF; 6], [1, 2, 3, 4, 5, 6], &process_image)
+        .unwrap();
+    let parsed = FrameView::parse(&frame[..frame_len]).unwrap();
+    let first = parsed.datagrams().next().unwrap().unwrap();
+    assert_eq!(first.payload, &[0, 0, 0x78, 0x56, 0x34, 0x12, 1]);
+
+    let stale = plan.apply_to_domains(&source, &mut target, 5).unwrap();
+    assert_eq!(stale.status, SlaveCopyStatus::StaleSource);
+    assert_eq!(target.output(), &[0; 9]);
+
+    assert!(receive_motion_position(&mut source, 2, 5, 2, -123));
+    assert_eq!(
+        plan.apply_to_domains(&source, &mut target, 5)
+            .unwrap()
+            .status,
+        SlaveCopyStatus::Valid
+    );
+    assert!(!receive_motion_position(&mut source, 3, 9, 0, 999));
+    assert_eq!(
+        plan.apply_to_domains(&source, &mut target, 9)
+            .unwrap()
+            .status,
+        SlaveCopyStatus::InvalidSource
+    );
+    assert_eq!(target.output(), &[0; 9]);
+}
+
+#[test]
+fn runtime_revalidates_generated_slave_copy_indices_and_capacity() {
+    let procbuf =
+        ProcBuf::<2, 16, 2, 64>::new(generated::PRODUCT_CONFIG.metadata.robot_id, BOOT_ID);
+    let mut bad_index = generated::PRODUCT_CONFIG;
+    let mut bad_copy = [bad_index.slave_copies[0]];
+    bad_copy[0].source_pdo_index = usize::MAX;
+    bad_index.slave_copies = &bad_copy;
+    assert!(matches!(
+        activate(&bad_index, &observed_slaves(), &procbuf),
+        Err(ProductActivationError::SlaveCopyPdoIndexOutOfRange {
+            copy_index: 0,
+            pdo_index: usize::MAX,
+        })
+    ));
+
+    let mut too_many = generated::PRODUCT_CONFIG;
+    let copies = [too_many.slave_copies[0]; MAX_PRODUCT_SLAVE_COPIES + 1];
+    too_many.slave_copies = &copies;
+    assert!(matches!(
+        activate(&too_many, &observed_slaves(), &procbuf),
+        Err(ProductActivationError::SlaveCopySet {
+            copy_index: MAX_PRODUCT_SLAVE_COPIES,
+            error: SlaveCopyPlanSetError::CapacityExceeded,
+        })
+    ));
 }
 
 #[test]
@@ -185,7 +300,7 @@ fn checked_in_product_builds_exact_per_slave_pdo_startup_plans() {
         .build_pdo_startup_plan::<17>(1)
         .unwrap();
     let io = generated::PRODUCT_CONFIG
-        .build_pdo_startup_plan::<12>(2)
+        .build_pdo_startup_plan::<14>(2)
         .unwrap();
 
     assert_eq!(left.station_address(), 0x1001);
@@ -193,7 +308,7 @@ fn checked_in_product_builds_exact_per_slave_pdo_startup_plans() {
     assert_eq!(io.station_address(), 0x1003);
     assert_eq!(left.plan().writes(), right.plan().writes());
     assert_eq!(left.plan().len(), 17);
-    assert_eq!(io.plan().len(), 12);
+    assert_eq!(io.plan().len(), 14);
 
     let left_writes = left.plan().writes();
     assert_eq!(left_writes[0], PdoSdoWrite::new(0x1C12, 0, &[0]).unwrap());
@@ -220,13 +335,17 @@ fn checked_in_product_builds_exact_per_slave_pdo_startup_plans() {
         io_writes[2],
         PdoSdoWrite::new(0x1601, 1, &0x1001_7000u32.to_le_bytes()).unwrap()
     );
-    assert_eq!(io_writes[6], PdoSdoWrite::new(0x1C13, 0, &[0]).unwrap());
-    assert_eq!(io_writes[7], PdoSdoWrite::new(0x1A01, 0, &[0]).unwrap());
     assert_eq!(
-        io_writes[8],
+        io_writes[4],
+        PdoSdoWrite::new(0x1601, 3, &0x0801_7011u32.to_le_bytes()).unwrap()
+    );
+    assert_eq!(io_writes[8], PdoSdoWrite::new(0x1C13, 0, &[0]).unwrap());
+    assert_eq!(io_writes[9], PdoSdoWrite::new(0x1A01, 0, &[0]).unwrap());
+    assert_eq!(
+        io_writes[10],
         PdoSdoWrite::new(0x1A01, 1, &0x1001_6000u32.to_le_bytes()).unwrap()
     );
-    assert_eq!(io_writes[11], PdoSdoWrite::new(0x1C13, 0, &[1]).unwrap());
+    assert_eq!(io_writes[13], PdoSdoWrite::new(0x1C13, 0, &[1]).unwrap());
 }
 
 #[test]

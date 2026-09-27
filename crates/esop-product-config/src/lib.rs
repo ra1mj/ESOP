@@ -17,9 +17,10 @@ pub use esop_ethercat_core::{
     PdoConfigBatchPlan, PdoConfigBatchPlanError, PdoConfigBatchStatus, PdoConfigJob, PdoConfigPlan,
     PdoConfigPlanError, PdoDirection, PdoEntry, PdoEntrySpec, PdoRegistrationRequest, PdoSdoWrite,
     ScheduleTable, SiiConfigurationSignature, SiiConfigurationSignatureBuilder,
-    SiiConfigurationSignatureError, SiiDcMode, SiiDcModeExpectation, SiiFmmuUsage, SlaveIdentity,
-    SlaveRecord, StartupConfig, StartupController, StartupDcRequirement, StartupError,
-    StartupSlaveProfile, WatchdogPlan, WatchdogPlanEntry, WatchdogPlanError,
+    SiiConfigurationSignatureError, SiiDcMode, SiiDcModeExpectation, SiiFmmuUsage, SlaveCopyError,
+    SlaveCopyPlan, SlaveCopyPlanSet, SlaveCopyPlanSetError, SlaveIdentity, SlaveRecord,
+    StartupConfig, StartupController, StartupDcRequirement, StartupError, StartupSlaveProfile,
+    WatchdogPlan, WatchdogPlanEntry, WatchdogPlanError,
 };
 pub use esop_lifecycle_guard::procbuf::{Cia402AxisCommandPolicy, Cia402AxisCommandPolicyError};
 pub use esop_procbuf::{
@@ -32,6 +33,7 @@ pub const PRODUCT_RUNTIME_SCHEMA: &str = "esop.product-runtime.v1";
 pub const CONFIG_SHA256_BYTES: usize = 32;
 pub const MAX_PRODUCT_AXIS_PDOS: usize = 32;
 pub const MAX_PRODUCT_PDO_ENTRIES_PER_DOMAIN: usize = 256;
+pub const MAX_PRODUCT_SLAVE_COPIES: usize = 32;
 const MAX_PRODUCT_SYNC_MANAGERS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -173,6 +175,15 @@ pub struct ProductPdoConfig {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProductSlaveCopyConfig {
+    pub name: &'static str,
+    pub source_pdo_index: usize,
+    pub target_pdo_index: usize,
+    pub target_quality_pdo_index: usize,
+    pub invalid_fill: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProductMailboxBinding {
     slave_position: u16,
     mailbox_config: MailboxConfig,
@@ -302,6 +313,7 @@ pub struct StaticProductConfig<'a, const SLAVES: usize, const DOMAINS: usize, co
     pub domains: [ProductDomainConfig; DOMAINS],
     pub pdos: &'a [ProductPdoConfig],
     pub datagrams: &'a [ProductDatagramConfig],
+    pub slave_copies: &'a [ProductSlaveCopyConfig],
     pub axes: [ProductAxisConfig; AXES],
 }
 
@@ -352,6 +364,18 @@ pub enum ProductActivationError {
     DomainEvidenceMismatch {
         domain_id: u8,
     },
+    SlaveCopyPdoIndexOutOfRange {
+        copy_index: usize,
+        pdo_index: usize,
+    },
+    SlaveCopy {
+        copy_index: usize,
+        error: SlaveCopyError,
+    },
+    SlaveCopySet {
+        copy_index: usize,
+        error: SlaveCopyPlanSetError,
+    },
     AxisIndexOutOfRange {
         axis: usize,
         index: usize,
@@ -395,6 +419,7 @@ pub struct ActivatedProduct<
     registry: DomainRegistry<DOMAINS, PDOS, DATAGRAMS>,
     schedule: ScheduleTable<DOMAINS, SLOTS>,
     frame_plans: [FramePlanSet<FRAMES, PLAN>; DOMAINS],
+    slave_copy_plans: SlaveCopyPlanSet<MAX_PRODUCT_SLAVE_COPIES>,
     axis_modes: [OperatingMode; AXES],
     axis_policies: [Cia402AxisCommandPolicy; AXES],
     axis_pdo_maps: [Cia402PdoMap; AXES],
@@ -424,6 +449,10 @@ impl<
 
     pub const fn frame_plans(&self) -> &[FramePlanSet<FRAMES, PLAN>; DOMAINS] {
         &self.frame_plans
+    }
+
+    pub const fn slave_copy_plans(&self) -> &SlaveCopyPlanSet<MAX_PRODUCT_SLAVE_COPIES> {
+        &self.slave_copy_plans
     }
 
     pub const fn axis_modes(&self) -> &[OperatingMode; AXES] {
@@ -1039,6 +1068,7 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
         self.validate_topology(observed_slaves)?;
 
         let mut registry = DomainRegistry::<DOMAINS, PDOS, DATAGRAMS>::new();
+        let mut slave_copy_handles = [[None; 3]; MAX_PRODUCT_SLAVE_COPIES];
         for domain in self.domains {
             registry
                 .register_domain(domain.config)
@@ -1046,9 +1076,25 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
         }
         for (pdo_index, pdo) in self.pdos.iter().copied().enumerate() {
             self.validate_pdo_owner(pdo_index, pdo)?;
-            registry
+            let handle = registry
                 .register_pdo_at(pdo.domain_id, pdo.bit_offset, pdo.request)
                 .map_err(ProductActivationError::Registry)?;
+            for (copy_index, copy) in self
+                .slave_copies
+                .iter()
+                .take(MAX_PRODUCT_SLAVE_COPIES)
+                .enumerate()
+            {
+                if copy.source_pdo_index == pdo_index {
+                    slave_copy_handles[copy_index][0] = Some(handle);
+                }
+                if copy.target_pdo_index == pdo_index {
+                    slave_copy_handles[copy_index][1] = Some(handle);
+                }
+                if copy.target_quality_pdo_index == pdo_index {
+                    slave_copy_handles[copy_index][2] = Some(handle);
+                }
+            }
         }
         for datagram in self.datagrams.iter().copied() {
             registry
@@ -1064,6 +1110,7 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                 &mut frame_plans,
             )
             .map_err(ProductActivationError::Registry)?;
+        let slave_copy_plans = self.build_slave_copy_plans(&registry, &slave_copy_handles)?;
         let (axis_modes, axis_policies, axis_pdo_maps) = self.validate_axes(&registry)?;
 
         Ok(ActivatedProduct {
@@ -1071,10 +1118,47 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
             registry,
             schedule,
             frame_plans,
+            slave_copy_plans,
             axis_modes,
             axis_policies,
             axis_pdo_maps,
         })
+    }
+
+    fn build_slave_copy_plans<const PDOS: usize, const DATAGRAMS: usize>(
+        &self,
+        registry: &DomainRegistry<DOMAINS, PDOS, DATAGRAMS>,
+        handles: &[[Option<esop_ethercat_core::PdoEntryHandle>; 3]; MAX_PRODUCT_SLAVE_COPIES],
+    ) -> Result<SlaveCopyPlanSet<MAX_PRODUCT_SLAVE_COPIES>, ProductActivationError> {
+        if self.slave_copies.len() > MAX_PRODUCT_SLAVE_COPIES {
+            return Err(ProductActivationError::SlaveCopySet {
+                copy_index: MAX_PRODUCT_SLAVE_COPIES,
+                error: SlaveCopyPlanSetError::CapacityExceeded,
+            });
+        }
+        let mut plans = SlaveCopyPlanSet::new();
+        for (copy_index, copy) in self.slave_copies.iter().copied().enumerate() {
+            let handle = |slot: usize, pdo_index: usize| {
+                handles[copy_index][slot].ok_or(
+                    ProductActivationError::SlaveCopyPdoIndexOutOfRange {
+                        copy_index,
+                        pdo_index,
+                    },
+                )
+            };
+            let plan = SlaveCopyPlan::build(
+                registry,
+                handle(0, copy.source_pdo_index)?,
+                handle(1, copy.target_pdo_index)?,
+                handle(2, copy.target_quality_pdo_index)?,
+                copy.invalid_fill,
+            )
+            .map_err(|error| ProductActivationError::SlaveCopy { copy_index, error })?;
+            plans
+                .push(plan)
+                .map_err(|error| ProductActivationError::SlaveCopySet { copy_index, error })?;
+        }
+        Ok(plans)
     }
 
     fn validate_identity(
@@ -1436,6 +1520,7 @@ mod tests {
             }],
             pdos: &PDOS,
             datagrams: &DATAGRAMS,
+            slave_copies: &[],
             axes: [ProductAxisConfig {
                 name: "axis",
                 index: 0,
@@ -1667,6 +1752,7 @@ mod tests {
             domains: base.domains,
             pdos: base.pdos,
             datagrams: base.datagrams,
+            slave_copies: base.slave_copies,
             axes: base.axes,
         };
         assert_eq!(

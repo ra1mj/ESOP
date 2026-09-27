@@ -189,7 +189,10 @@ pub use sii_stream::{
 pub use slave::{
     AlStatus, EthercatState, SlaveIdentity, SlaveRecord, SlaveTable, SlaveTableError, next_state,
 };
-pub use slave_copy::{SlaveCopyError, SlaveCopyOutcome, SlaveCopyPlan, SlaveCopyStatus};
+pub use slave_copy::{
+    SlaveCopyError, SlaveCopyOutcome, SlaveCopyPlan, SlaveCopyPlanSet, SlaveCopyPlanSetError,
+    SlaveCopyStatus,
+};
 pub use startup::{
     ExpectedSlave, STARTUP_SII_IMAGE_BYTE_CAPACITY, STARTUP_SII_IMAGE_WORD_CAPACITY,
     STARTUP_SII_PDO_ENTRY_CAPACITY, StartupAction, StartupAlFault, StartupConfig,

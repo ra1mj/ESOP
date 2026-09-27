@@ -77,10 +77,10 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
 
     let build_input: Value =
         serde_json::from_slice(&fs::read(first.join("robot_build_input.json")).unwrap()).unwrap();
-    assert_eq!(build_input["process_data"]["pdo_bytes_per_cycle"], 36);
+    assert_eq!(build_input["process_data"]["pdo_bytes_per_cycle"], 41);
     assert_eq!(build_input["process_data"]["frame_count"], 2);
     assert_eq!(build_input["process_data"]["expected_wkc"], 6);
-    assert_eq!(build_input["process_data"]["copy_bytes_per_cycle"], 20);
+    assert_eq!(build_input["process_data"]["copy_bytes_per_cycle"], 4);
     assert_eq!(build_input["process_data"]["wire_bytes_per_cycle"], 180);
 
     let inventory: Value =
@@ -145,6 +145,11 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert_eq!(product["slaves"][1]["dc"]["required"], true);
     assert_eq!(product["slaves"][1]["dc"]["reference_clock"], false);
     assert_eq!(product["slaves"][2]["dc"]["required"], false);
+    assert_eq!(product["slave_copies"][0]["name"], "left_position_to_io");
+    assert_eq!(product["slave_copies"][0]["source_pdo_index"], 9);
+    assert_eq!(product["slave_copies"][0]["target_pdo_index"], 15);
+    assert_eq!(product["slave_copies"][0]["target_quality_pdo_index"], 16);
+    assert_eq!(product["slave_copies"][0]["payload_bytes"], 4);
 
     let header = fs::read_to_string(first.join("esop_product_config.h")).unwrap();
     assert!(header.contains("uint16_t mailbox_send_address"));
@@ -164,6 +169,9 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(header.contains("uint16_t watchdog_divider"));
     assert!(header.contains("uint8_t has_process_data_watchdog"));
     assert!(header.contains("uint16_t process_data_watchdog_intervals"));
+    assert!(header.contains("esop_slave_copy_config_t"));
+    assert!(header.contains("#define ESOP_SLAVE_COPY_COUNT 1u"));
+    assert!(header.contains("\"left_position_to_io\", 9u, 15u, 16u"));
     assert!(header.contains("UINT16_C(0x1000), UINT16_C(64), UINT16_C(0x1100), UINT16_C(64)"));
     assert!(header.contains("4u, UINT16_C(0x000f)"));
     assert!(header.contains("2u, {1u, 2u, 0u, 0u"));
@@ -184,6 +192,8 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(rust.contains("cycle_time1_ns: 0"));
     assert!(rust.contains("watchdog: Some(EscWatchdogConfig::new(Some(2500), Some(100)))"));
     assert!(rust.contains("watchdog: None"));
+    assert!(rust.contains("ProductSlaveCopyConfig"));
+    assert!(rust.contains("name: \"left_position_to_io\", source_pdo_index: 9"));
 
     fixture.edit_product(|_| {});
     let xml = fs::read_to_string(&fixture.esi).unwrap();
@@ -197,6 +207,89 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
 
     assert_eq!(first_summary.config_sha256, second_summary.config_sha256);
     assert_eq!(artifact_bytes(&first), artifact_bytes(&second));
+}
+
+#[test]
+fn slave_copy_references_and_target_ownership_fail_closed() {
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        product["slave_copies"][0]["source"]["index"] = Value::String("0x6fff".to_owned());
+    });
+    assert!(
+        generate(&fixture.product, &fixture.output("copy-unknown-source"))
+            .unwrap_err()
+            .to_string()
+            .contains("matched 0 selected Tx PDO entries")
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        product["slave_copies"][0]["source"] = product["slave_copies"][0]["target"].clone();
+    });
+    assert!(
+        generate(&fixture.product, &fixture.output("copy-wrong-direction"))
+            .unwrap_err()
+            .to_string()
+            .contains("has direction Rx, expected Tx")
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        product["slave_copies"][0]["source"] = serde_json::json!({
+            "slave": "io_block",
+            "index": "0x6000",
+            "subindex": 1
+        });
+        product["slave_copies"][0]["target"] = serde_json::json!({
+            "slave": "io_block",
+            "index": "0x7000",
+            "subindex": 1
+        });
+    });
+    assert!(
+        generate(&fixture.product, &fixture.output("copy-same-slave"))
+            .unwrap_err()
+            .to_string()
+            .contains("SameSlave")
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        product["slave_copies"][0]["target"]["index"] = Value::String("0x7000".to_owned());
+    });
+    assert!(
+        generate(&fixture.product, &fixture.output("copy-width"))
+            .unwrap_err()
+            .to_string()
+            .contains("InvalidWidth")
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        let mut duplicate = product["slave_copies"][0].clone();
+        duplicate["name"] = Value::String("duplicate_target".to_owned());
+        product["slave_copies"]
+            .as_array_mut()
+            .unwrap()
+            .push(duplicate);
+    });
+    assert!(
+        generate(&fixture.product, &fixture.output("copy-overlap"))
+            .unwrap_err()
+            .to_string()
+            .contains("TargetOverlap")
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        product["slave_copies"][0]["source"]["unexpected"] = Value::Bool(true);
+    });
+    assert!(
+        generate(&fixture.product, &fixture.output("copy-unknown-field"))
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field `unexpected`")
+    );
 }
 
 #[test]
