@@ -14,7 +14,13 @@ use crate::control::{
     RequestState,
 };
 use crate::dc::{DcTopology, DcTopologyError};
+use crate::fmmu_discovery::{
+    FmmuRegisterBank, FmmuRegisterDiscoveryAction, FmmuRegisterDiscoveryController,
+    FmmuRegisterDiscoveryError, FmmuRegisterDiscoveryPhase, FmmuRegisterDiscoveryProgress,
+};
 use crate::mailbox::{MailboxConfig, MailboxConfigError};
+use crate::mapping::MappingTable;
+use crate::mapping_config::{MappingConfigController, MappingConfigError};
 use crate::rx_index::RxWorkingCounterPolicy;
 use crate::scan::{
     ScanAction, ScanController, ScanDcCapabilities, ScanError, ScanPhase, ScanProgress,
@@ -254,6 +260,7 @@ pub enum StartupPhase {
     Scanning,
     ReadingIdentity,
     ReadingMailbox,
+    ReadingFmmuRegisters,
     ReadingConfiguration,
     TransitioningAl,
     AwaitingConfiguration,
@@ -266,6 +273,7 @@ pub enum StartupAction {
     Scan(ScanAction),
     Sii(SiiAction),
     SiiMailbox(SiiAction),
+    FmmuRegisters(FmmuRegisterDiscoveryAction),
     SiiConfiguration(SiiAction),
     Al(AlAction),
     OpOnly(OpOnlySyncManagerAction),
@@ -277,6 +285,7 @@ impl StartupAction {
             Self::Scan(action) => action.token,
             Self::Sii(action) => action.token,
             Self::SiiMailbox(action) => action.token,
+            Self::FmmuRegisters(action) => action.token,
             Self::SiiConfiguration(action) => action.token,
             Self::Al(action) => action.token,
             Self::OpOnly(action) => action.token,
@@ -288,6 +297,7 @@ impl StartupAction {
             Self::Scan(action) => action.datagram_index,
             Self::Sii(action) => action.datagram_index,
             Self::SiiMailbox(action) => action.datagram_index,
+            Self::FmmuRegisters(action) => action.datagram_index,
             Self::SiiConfiguration(action) => action.datagram_index,
             Self::Al(action) => action.datagram_index,
             Self::OpOnly(action) => action.datagram_index,
@@ -299,6 +309,7 @@ impl StartupAction {
             Self::Scan(action) => action.generation,
             Self::Sii(action) => action.generation,
             Self::SiiMailbox(action) => action.generation,
+            Self::FmmuRegisters(action) => action.generation,
             Self::SiiConfiguration(action) => action.generation,
             Self::Al(action) => action.generation,
             Self::OpOnly(action) => action.generation,
@@ -310,6 +321,7 @@ impl StartupAction {
             Self::Scan(action) => action.address,
             Self::Sii(action) => action.address,
             Self::SiiMailbox(action) => action.address,
+            Self::FmmuRegisters(action) => action.address,
             Self::SiiConfiguration(action) => action.address,
             Self::Al(action) => action.address,
             Self::OpOnly(action) => action.address,
@@ -321,6 +333,7 @@ impl StartupAction {
             Self::Scan(action) => action.operation,
             Self::Sii(action) => action.operation,
             Self::SiiMailbox(action) => action.operation,
+            Self::FmmuRegisters(action) => action.operation,
             Self::SiiConfiguration(action) => action.operation,
             Self::Al(action) => action.operation,
             Self::OpOnly(action) => action.operation,
@@ -332,6 +345,7 @@ impl StartupAction {
             Self::Scan(action) => action.payload(),
             Self::Sii(action) => action.payload(),
             Self::SiiMailbox(action) => action.payload(),
+            Self::FmmuRegisters(action) => action.payload(),
             Self::SiiConfiguration(action) => action.payload(),
             Self::Al(action) => action.payload(),
             Self::OpOnly(action) => action.payload(),
@@ -343,6 +357,7 @@ impl StartupAction {
             Self::Scan(action) => action.deadline_ns,
             Self::Sii(action) => action.deadline_ns,
             Self::SiiMailbox(action) => action.deadline_ns,
+            Self::FmmuRegisters(action) => action.deadline_ns,
             Self::SiiConfiguration(action) => action.deadline_ns,
             Self::Al(action) => action.deadline_ns,
             Self::OpOnly(action) => action.deadline_ns,
@@ -354,6 +369,7 @@ impl StartupAction {
             Self::Scan(action) => action.expected_wkc,
             Self::Sii(action) => action.expected_wkc,
             Self::SiiMailbox(action) => action.expected_wkc,
+            Self::FmmuRegisters(action) => action.expected_wkc,
             Self::SiiConfiguration(action) => action.expected_wkc,
             Self::Al(action) => action.expected_wkc,
             Self::OpOnly(action) => action.expected_wkc,
@@ -365,6 +381,7 @@ impl StartupAction {
             Self::Scan(action) => action.working_counter_policy,
             Self::Sii(_)
             | Self::SiiMailbox(_)
+            | Self::FmmuRegisters(_)
             | Self::SiiConfiguration(_)
             | Self::Al(_)
             | Self::OpOnly(_) => RxWorkingCounterPolicy::Exact,
@@ -376,6 +393,7 @@ impl StartupAction {
             Self::Scan(action) => action.datagram_len(),
             Self::Sii(action) => action.datagram_len(),
             Self::SiiMailbox(action) => action.datagram_len(),
+            Self::FmmuRegisters(action) => action.datagram_len(),
             Self::SiiConfiguration(action) => action.datagram_len(),
             Self::Al(action) => action.datagram_len(),
             Self::OpOnly(action) => action.datagram_len(),
@@ -387,6 +405,7 @@ impl StartupAction {
             Self::Scan(action) => action.read_len as usize,
             Self::Sii(action) => action.read_len as usize,
             Self::SiiMailbox(action) => action.read_len as usize,
+            Self::FmmuRegisters(action) => action.response_len(),
             Self::SiiConfiguration(action) => action.read_len as usize,
             Self::Al(action) => action.read_len as usize,
             Self::OpOnly(action) => action.response_len(),
@@ -400,6 +419,7 @@ pub enum StartupProgress {
     SlaveDiscovered(usize),
     IdentityVerified(usize),
     MailboxVerified(usize),
+    FmmuRegistersRead(usize),
     SiiConfigurationVerified(usize),
     SlaveReady(usize),
     AwaitingConfiguration,
@@ -454,6 +474,17 @@ pub enum StartupError {
     Scan(ScanError),
     Sii(SiiError),
     SiiMailbox(SiiMailboxError),
+    FmmuRegisters(FmmuRegisterDiscoveryError),
+    MissingVerifiedFmmuRegisters(u16),
+    FmmuRegisterPositionMismatch {
+        expected: u16,
+        observed: u16,
+    },
+    FmmuRegisterStationMismatch {
+        expected: u16,
+        observed: u16,
+    },
+    MappingConfiguration(MappingConfigError),
     SiiConfiguration(SiiDiscoveryError),
     SiiConfigurationSignature(SiiConfigurationSignatureError),
     SiiConfigurationMismatch {
@@ -522,6 +553,8 @@ pub struct StartupController<const MAX_SLAVES: usize> {
     scan: ScanController<MAX_SLAVES>,
     sii: SiiIdentityReader,
     sii_mailbox: SiiBlockReader<SII_STANDARD_MAILBOX_WORD_COUNT>,
+    fmmu_registers: FmmuRegisterDiscoveryController,
+    staged_fmmu_registers: Option<FmmuRegisterBank>,
     sii_configuration: StartupSiiDiscovery,
     sii_configuration_scratch: [u8; STARTUP_SII_IMAGE_BYTE_CAPACITY],
     al: AlTransitionController,
@@ -530,6 +563,7 @@ pub struct StartupController<const MAX_SLAVES: usize> {
     device_emulation: [bool; MAX_SLAVES],
     esc_fmmu_counts: [u8; MAX_SLAVES],
     verified_mailboxes: [Option<MailboxConfig>; MAX_SLAVES],
+    verified_fmmu_registers: [Option<FmmuRegisterBank>; MAX_SLAVES],
     verified_sii: [Option<SiiConfigurationSignature>; MAX_SLAVES],
     verified_dc_modes: [Option<SiiDcMode>; MAX_SLAVES],
     selected_reference_clock: Option<StartupReferenceClock>,
@@ -557,6 +591,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             scan: ScanController::new(station_address_base),
             sii: SiiIdentityReader::new(),
             sii_mailbox: SiiBlockReader::new(),
+            fmmu_registers: FmmuRegisterDiscoveryController::new(),
+            staged_fmmu_registers: None,
             sii_configuration: SiiStreamDiscoveryController::new(),
             sii_configuration_scratch: [0; STARTUP_SII_IMAGE_BYTE_CAPACITY],
             al: AlTransitionController::new(),
@@ -565,6 +601,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             device_emulation: [false; MAX_SLAVES],
             esc_fmmu_counts: [0; MAX_SLAVES],
             verified_mailboxes: [None; MAX_SLAVES],
+            verified_fmmu_registers: [None; MAX_SLAVES],
             verified_sii: [None; MAX_SLAVES],
             verified_dc_modes: [None; MAX_SLAVES],
             selected_reference_clock: None,
@@ -620,6 +657,59 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             .and_then(|index| self.verified_sii[index])
     }
 
+    pub fn verified_fmmu_registers(&self, position: u16) -> Option<FmmuRegisterBank> {
+        self.table
+            .records()
+            .iter()
+            .position(|record| record.position == position)
+            .and_then(|index| self.verified_fmmu_registers[index])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_mapping_for_position<const SMS: usize, const FMMUS: usize>(
+        &self,
+        position: u16,
+        controller: &mut MappingConfigController<SMS, FMMUS>,
+        generation: u16,
+        now_ns: u64,
+        timeout_ns: u64,
+        request_timeout_ns: u64,
+        table: &MappingTable<SMS, FMMUS>,
+    ) -> Result<(), StartupError> {
+        let index = self
+            .table
+            .records()
+            .iter()
+            .position(|record| record.position == position)
+            .ok_or(StartupError::MissingScanPosition(position))?;
+        let record = self.table.records()[index];
+        let bank = self.verified_fmmu_registers[index]
+            .ok_or(StartupError::MissingVerifiedFmmuRegisters(position))?;
+        if bank.position() != position {
+            return Err(StartupError::FmmuRegisterPositionMismatch {
+                expected: position,
+                observed: bank.position(),
+            });
+        }
+        if bank.station_address() != record.station_address {
+            return Err(StartupError::FmmuRegisterStationMismatch {
+                expected: record.station_address,
+                observed: bank.station_address(),
+            });
+        }
+        controller
+            .start_with_verified_fmmus(
+                record.station_address,
+                generation,
+                now_ns,
+                timeout_ns,
+                request_timeout_ns,
+                bank,
+                table,
+            )
+            .map_err(StartupError::MappingConfiguration)
+    }
+
     pub fn verified_dc_mode(&self, position: u16) -> Option<SiiDcMode> {
         self.table
             .records()
@@ -667,6 +757,10 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             StartupPhase::ReadingMailbox => {
                 self.sii_mailbox.pending().map(StartupAction::SiiMailbox)
             }
+            StartupPhase::ReadingFmmuRegisters => self
+                .fmmu_registers
+                .pending()
+                .map(StartupAction::FmmuRegisters),
             StartupPhase::ReadingConfiguration => self
                 .sii_configuration
                 .pending()
@@ -817,6 +911,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.scan = ScanController::new(self.station_address_base);
         self.sii = SiiIdentityReader::new();
         self.sii_mailbox = SiiBlockReader::new();
+        self.fmmu_registers = FmmuRegisterDiscoveryController::new();
+        self.staged_fmmu_registers = None;
         self.sii_configuration = SiiStreamDiscoveryController::new();
         self.sii_configuration_scratch = [0; STARTUP_SII_IMAGE_BYTE_CAPACITY];
         self.al = AlTransitionController::new();
@@ -825,6 +921,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.device_emulation = [false; MAX_SLAVES];
         self.esc_fmmu_counts = [0; MAX_SLAVES];
         self.verified_mailboxes = [None; MAX_SLAVES];
+        self.verified_fmmu_registers = [None; MAX_SLAVES];
         self.verified_sii = [None; MAX_SLAVES];
         self.verified_dc_modes = [None; MAX_SLAVES];
         self.selected_reference_clock = None;
@@ -879,6 +976,24 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                         Err(error) => {
                             return self
                                 .fail(StartupError::SiiMailbox(SiiMailboxError::Block(error)));
+                        }
+                    }
+                }
+                StartupPhase::ReadingFmmuRegisters => {
+                    self.start_fmmu_register_reader(now_ns)?;
+                    match self.fmmu_registers.next_action(now_ns) {
+                        Ok(Some(action)) => {
+                            return Ok(Some(StartupAction::FmmuRegisters(action)));
+                        }
+                        Ok(None)
+                            if self.fmmu_registers.phase()
+                                == FmmuRegisterDiscoveryPhase::Complete =>
+                        {
+                            self.finish_fmmu_registers()?;
+                        }
+                        Ok(None) => return Ok(None),
+                        Err(error) => {
+                            return self.fail(StartupError::FmmuRegisters(error));
                         }
                     }
                 }
@@ -1018,6 +1133,25 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                 };
                 if progress == SiiProgress::Complete {
                     return self.finish_mailbox(now_ns);
+                }
+                Ok(StartupProgress::Advanced)
+            }
+            StartupAction::FmmuRegisters(action) => {
+                if self.phase != StartupPhase::ReadingFmmuRegisters {
+                    return self.fail(StartupError::NoPendingAction);
+                }
+                let progress = match self.fmmu_registers.accept(
+                    action,
+                    generation,
+                    payload,
+                    working_counter,
+                    now_ns,
+                ) {
+                    Ok(progress) => progress,
+                    Err(error) => return self.fail(StartupError::FmmuRegisters(error)),
+                };
+                if progress == FmmuRegisterDiscoveryProgress::Complete {
+                    return self.finish_fmmu_registers();
                 }
                 Ok(StartupProgress::Advanced)
             }
@@ -1220,6 +1354,12 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                     }
                 }
             }
+            StartupAction::FmmuRegisters(action) => {
+                match self.fmmu_registers.timeout(action, now_ns) {
+                    Ok(_) => Ok(StartupProgress::Advanced),
+                    Err(error) => self.fail(StartupError::FmmuRegisters(error)),
+                }
+            }
             StartupAction::SiiConfiguration(action) => {
                 match self.sii_configuration.timeout(action.token, now_ns) {
                     Ok(()) => Ok(StartupProgress::Advanced),
@@ -1299,6 +1439,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.scan = ScanController::new(self.station_address_base);
         self.sii = SiiIdentityReader::new();
         self.sii_mailbox = SiiBlockReader::new();
+        self.fmmu_registers = FmmuRegisterDiscoveryController::new();
+        self.staged_fmmu_registers = None;
         self.sii_configuration = SiiStreamDiscoveryController::new();
         self.sii_configuration_scratch = [0; STARTUP_SII_IMAGE_BYTE_CAPACITY];
         self.al = AlTransitionController::new();
@@ -1307,6 +1449,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.device_emulation = [false; MAX_SLAVES];
         self.esc_fmmu_counts = [0; MAX_SLAVES];
         self.verified_mailboxes = [None; MAX_SLAVES];
+        self.verified_fmmu_registers = [None; MAX_SLAVES];
         self.verified_sii = [None; MAX_SLAVES];
         self.verified_dc_modes = [None; MAX_SLAVES];
         self.selected_reference_clock = None;
@@ -1470,6 +1613,36 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         }
     }
 
+    fn start_fmmu_register_reader(&mut self, now_ns: u64) -> Result<(), StartupError> {
+        if !matches!(
+            self.fmmu_registers.phase(),
+            FmmuRegisterDiscoveryPhase::Idle
+                | FmmuRegisterDiscoveryPhase::Complete
+                | FmmuRegisterDiscoveryPhase::Faulted
+        ) {
+            return Ok(());
+        }
+        let record = self
+            .table
+            .records()
+            .get(self.current_index)
+            .copied()
+            .ok_or(StartupError::ExpectedCountMismatch)?;
+        let reported_count = self.esc_fmmu_counts[self.current_index];
+        match self.fmmu_registers.start(
+            record.position,
+            record.station_address,
+            reported_count,
+            self.generation,
+            now_ns,
+            self.config.sii_configuration_timeout_ns,
+            self.config.request_timeout_ns,
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) => self.fail(StartupError::FmmuRegisters(error)),
+        }
+    }
+
     fn start_sii_configuration_reader(&mut self, now_ns: u64) -> Result<(), StartupError> {
         if !matches!(
             self.sii_configuration.phase(),
@@ -1545,7 +1718,11 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             self.phase = StartupPhase::ReadingMailbox;
             return Ok(StartupProgress::IdentityVerified(self.current_index));
         }
-        if profile.expected_sii.is_some() || profile.expected_dc_mode.is_some() {
+        if profile.expected_sii.is_some() {
+            self.phase = StartupPhase::ReadingFmmuRegisters;
+            return Ok(StartupProgress::IdentityVerified(self.current_index));
+        }
+        if profile.expected_dc_mode.is_some() {
             self.phase = StartupPhase::ReadingConfiguration;
             return Ok(StartupProgress::IdentityVerified(self.current_index));
         }
@@ -1581,7 +1758,11 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         }
         self.verified_mailboxes[self.current_index] = Some(observed);
         let profile = self.profile_for_position(record.position)?;
-        if profile.expected_sii.is_some() || profile.expected_dc_mode.is_some() {
+        if profile.expected_sii.is_some() {
+            self.phase = StartupPhase::ReadingFmmuRegisters;
+            return Ok(StartupProgress::MailboxVerified(self.current_index));
+        }
+        if profile.expected_dc_mode.is_some() {
             self.phase = StartupPhase::ReadingConfiguration;
             return Ok(StartupProgress::MailboxVerified(self.current_index));
         }
@@ -1590,6 +1771,28 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             StartupProgress::IdentityVerified(index) => Ok(StartupProgress::MailboxVerified(index)),
             progress => Ok(progress),
         }
+    }
+
+    fn finish_fmmu_registers(&mut self) -> Result<StartupProgress, StartupError> {
+        let record = self
+            .table
+            .records()
+            .get(self.current_index)
+            .copied()
+            .ok_or(StartupError::ExpectedCountMismatch)?;
+        let bank = self
+            .fmmu_registers
+            .bank()
+            .filter(|bank| {
+                bank.position() == record.position
+                    && bank.station_address() == record.station_address
+                    && bank.descriptor_count()
+                        == usize::from(self.esc_fmmu_counts[self.current_index])
+            })
+            .ok_or(StartupError::MissingVerifiedFmmuRegisters(record.position))?;
+        self.staged_fmmu_registers = Some(bank);
+        self.phase = StartupPhase::ReadingConfiguration;
+        Ok(StartupProgress::FmmuRegistersRead(self.current_index))
     }
 
     fn finish_sii_configuration(&mut self, now_ns: u64) -> Result<StartupProgress, StartupError> {
@@ -1610,6 +1813,18 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             .sii_configuration
             .candidate()
             .ok_or(StartupError::NoPendingAction)?;
+        let observed_fmmu_registers = if profile.expected_sii.is_some() {
+            Some(
+                self.staged_fmmu_registers
+                    .filter(|bank| {
+                        bank.position() == record.position
+                            && bank.station_address() == record.station_address
+                    })
+                    .ok_or(StartupError::MissingVerifiedFmmuRegisters(record.position))?,
+            )
+        } else {
+            None
+        };
         let described_fmmus = candidate.fmmu_usages().len() as u8;
         let reported_fmmus = self.esc_fmmu_counts[self.current_index];
         if described_fmmus > reported_fmmus {
@@ -1658,6 +1873,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         };
         self.verified_sii[self.current_index] = observed_sii;
         self.verified_dc_modes[self.current_index] = observed_dc_mode;
+        self.verified_fmmu_registers[self.current_index] = observed_fmmu_registers;
+        self.staged_fmmu_registers = None;
         self.phase = StartupPhase::TransitioningAl;
         match self.start_al_for_current(now_ns)? {
             StartupProgress::IdentityVerified(index) => {
@@ -1867,6 +2084,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.last_error = Some(error);
         self.selected_reference_clock = None;
         self.dc_topology = None;
+        self.staged_fmmu_registers = None;
         self.phase = StartupPhase::Faulted;
         Err(error)
     }
@@ -1902,6 +2120,8 @@ impl<const MAX_SLAVES: usize> Default for StartupController<MAX_SLAVES> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fmmu_discovery::FmmuRegisterDescriptor;
+    use crate::mapping::FmmuConfig;
     use crate::op_only::{SYNC_MANAGER_ENABLE_FLAG, SYNC_MANAGER_OP_ONLY_FLAG};
     use crate::registers::{
         ESC_AL_STATUS, ESC_CONFIGURATION, ESC_EEPROM_CONTROL, ESC_EEPROM_DATA, ESC_TYPE,
@@ -2366,6 +2586,19 @@ mod tests {
         startup_sii_signature_with_fmmu(rx_object, [SiiFmmuUsage::Outputs, SiiFmmuUsage::Inputs])
     }
 
+    fn staged_fmmu_bank(
+        position: u16,
+        station_address: u16,
+        descriptor_count: u8,
+    ) -> FmmuRegisterBank {
+        FmmuRegisterBank::from_parts(
+            position,
+            station_address,
+            descriptor_count,
+            [FmmuRegisterDescriptor::RESET; crate::MAX_ESC_FMMUS],
+        )
+    }
+
     fn prepared_sii_verification(expected_sii: SiiConfigurationSignature) -> StartupController<1> {
         let identity = SlaveIdentity {
             vendor_id: 1,
@@ -2388,6 +2621,7 @@ mod tests {
         startup.profiles[0] = StartupSlaveProfile::new(0).with_expected_sii(expected_sii);
         startup.expected_count = 1;
         startup.esc_fmmu_counts[0] = 2;
+        startup.staged_fmmu_registers = Some(staged_fmmu_bank(0, 0x1000, 2));
         startup
             .table
             .add(0, 0x1000, identity)
@@ -2411,6 +2645,46 @@ mod tests {
         let mut startup = prepared_sii_verification(expected_sii);
         startup.profiles[0] = startup.profiles[0].with_expected_dc_mode(expected_dc_mode);
         startup
+    }
+
+    fn prepared_fmmu_register_discovery(
+        expected_sii: SiiConfigurationSignature,
+    ) -> StartupController<1> {
+        let mut startup = prepared_sii_verification(expected_sii);
+        startup.phase = StartupPhase::ReadingFmmuRegisters;
+        startup.fmmu_registers = FmmuRegisterDiscoveryController::new();
+        startup.staged_fmmu_registers = None;
+        startup
+    }
+
+    fn drive_fmmu_register_discovery(
+        startup: &mut StartupController<1>,
+        descriptors: [[u8; crate::FMMU_IMAGE_LEN]; 2],
+        now_ns: &mut u64,
+    ) {
+        for (index, descriptor) in descriptors.iter().enumerate() {
+            let action = startup.next_action(*now_ns).unwrap().unwrap();
+            let StartupAction::FmmuRegisters(inner) = action else {
+                panic!("expected FMMU register discovery action");
+            };
+            assert_eq!(inner.descriptor_index as usize, index);
+            assert_eq!(
+                inner.address,
+                fixed_address(
+                    0x1000,
+                    crate::ESC_FMMU_BASE + index as u16 * crate::ESC_FMMU_STRIDE
+                )
+            );
+            let progress = startup
+                .accept(action, action.generation(), descriptor, 1, *now_ns + 1)
+                .unwrap();
+            if index == descriptors.len() - 1 {
+                assert_eq!(progress, StartupProgress::FmmuRegistersRead(0));
+            } else {
+                assert_eq!(progress, StartupProgress::Advanced);
+            }
+            *now_ns += 2;
+        }
     }
 
     fn prepared_multi_sii_verification(
@@ -2452,6 +2726,7 @@ mod tests {
                 })
                 .unwrap();
         }
+        startup.staged_fmmu_registers = Some(staged_fmmu_bank(0, 0x1000, 2));
         startup
     }
 
@@ -2508,6 +2783,90 @@ mod tests {
     }
 
     #[test]
+    fn startup_discovers_fmmu_bank_then_publishes_and_bridges_atomically() {
+        let expected = startup_sii_signature(0x6040);
+        let mut startup = prepared_fmmu_register_discovery(expected);
+        let mut first = [0; crate::FMMU_IMAGE_LEN];
+        first[0..4].copy_from_slice(&0x1122_3344u32.to_le_bytes());
+        first[4..6].copy_from_slice(&8u16.to_le_bytes());
+        first[8..10].copy_from_slice(&0x1000u16.to_le_bytes());
+        first[11] = 2;
+        first[12] = 1;
+        let mut now_ns = 1;
+
+        assert_eq!(startup.verified_fmmu_registers(0), None);
+        assert_eq!(startup.verified_sii(0), None);
+        drive_fmmu_register_discovery(
+            &mut startup,
+            [first, [0; crate::FMMU_IMAGE_LEN]],
+            &mut now_ns,
+        );
+        assert_eq!(startup.phase(), StartupPhase::ReadingConfiguration);
+        assert_eq!(startup.verified_fmmu_registers(0), None);
+        assert_eq!(startup.verified_sii(0), None);
+        assert!(matches!(
+            startup.next_action(now_ns),
+            Ok(Some(StartupAction::SiiConfiguration(_)))
+        ));
+
+        assert_eq!(
+            drive_sii_configuration(&mut startup, &startup_sii_image(0x6040), &mut now_ns),
+            Ok(StartupProgress::SiiConfigurationVerified(0))
+        );
+        let bank = startup.verified_fmmu_registers(0).unwrap();
+        assert_eq!(bank.position(), 0);
+        assert_eq!(bank.station_address(), 0x1000);
+        assert_eq!(bank.descriptor_count(), 2);
+        assert_eq!(bank.descriptor(0).unwrap().logical_start(), 0x1122_3344);
+        assert_eq!(startup.verified_sii(0), Some(expected));
+
+        let mut table = MappingTable::<0, 1>::new();
+        table
+            .add_fmmu(FmmuConfig {
+                index: 0,
+                logical_start: 0x2000,
+                length: 8,
+                logical_start_bit: 0,
+                logical_end_bit: 7,
+                physical_start: 0x1000,
+                physical_start_bit: 0,
+                fmmu_type: 2,
+                enable: true,
+            })
+            .unwrap();
+        let mut mapping = MappingConfigController::<0, 1>::new();
+        startup
+            .start_mapping_for_position(0, &mut mapping, 8, now_ns, 1_000, 100, &table)
+            .unwrap();
+        let action = mapping.next_action(now_ns + 1).unwrap().unwrap();
+        assert_eq!(action.item, crate::MappingConfigItem::FmmuReset(0));
+        assert_eq!(action.operation, RegisterOperation::Write);
+    }
+
+    #[test]
+    fn startup_discards_staged_fmmu_bank_when_sii_verification_fails() {
+        let expected = startup_sii_signature(0x6040);
+        let observed = startup_sii_signature(0x607A);
+        let mut startup = prepared_fmmu_register_discovery(expected);
+        let mut now_ns = 1;
+        drive_fmmu_register_discovery(&mut startup, [[0; crate::FMMU_IMAGE_LEN]; 2], &mut now_ns);
+        assert!(startup.staged_fmmu_registers.is_some());
+        assert_eq!(
+            drive_sii_configuration(&mut startup, &startup_sii_image(0x607A), &mut now_ns),
+            Err(StartupError::SiiConfigurationMismatch {
+                position: 0,
+                expected,
+                observed,
+            })
+        );
+        assert_eq!(startup.phase(), StartupPhase::Faulted);
+        assert_eq!(startup.staged_fmmu_registers, None);
+        assert_eq!(startup.verified_fmmu_registers(0), None);
+        assert_eq!(startup.verified_sii(0), None);
+        assert_eq!(startup.verified_dc_mode(0), None);
+    }
+
+    #[test]
     fn startup_fails_closed_on_sii_configuration_mismatch() {
         let expected = startup_sii_signature(0x6040);
         let observed = startup_sii_signature(0x607A);
@@ -2522,6 +2881,7 @@ mod tests {
             })
         );
         assert_eq!(startup.phase(), StartupPhase::Faulted);
+        assert_eq!(startup.verified_fmmu_registers(0), None);
         assert_eq!(startup.verified_sii(0), None);
         assert_eq!(startup.next_action(now_ns), Ok(None));
     }
@@ -2542,6 +2902,7 @@ mod tests {
             })
         );
         assert_eq!(startup.phase(), StartupPhase::Faulted);
+        assert_eq!(startup.verified_fmmu_registers(0), None);
         assert_eq!(startup.verified_sii(0), None);
         assert_eq!(startup.verified_dc_mode(0), None);
         assert_eq!(startup.next_action(now_ns), Ok(None));
@@ -2571,6 +2932,7 @@ mod tests {
             })
         );
         assert_eq!(startup.phase(), StartupPhase::Faulted);
+        assert_eq!(startup.verified_fmmu_registers(0), None);
         assert_eq!(startup.verified_sii(0), None);
         assert_eq!(startup.next_action(now_ns), Ok(None));
     }
@@ -2602,6 +2964,7 @@ mod tests {
         );
         assert_eq!(startup.verified_sii(0), Some(expected_sii));
         assert_eq!(startup.verified_dc_mode(0), Some(expected_dc));
+        assert!(startup.verified_fmmu_registers(0).is_some());
 
         assert_eq!(
             accept_al_state(&mut startup, EthercatState::Op, now_ns),
@@ -2654,6 +3017,7 @@ mod tests {
         );
         assert_eq!(startup.verified_sii(0), None);
         assert_eq!(startup.verified_dc_mode(0), None);
+        assert_eq!(startup.verified_fmmu_registers(0), None);
 
         let mut missing = prepared_sii_dc_verification(expected_sii, expectation);
         let mut now_ns = 1;
@@ -2666,6 +3030,7 @@ mod tests {
         );
         assert_eq!(missing.verified_sii(0), None);
         assert_eq!(missing.verified_dc_mode(0), None);
+        assert_eq!(missing.verified_fmmu_registers(0), None);
     }
 
     #[test]
@@ -2730,6 +3095,7 @@ mod tests {
         now_ns += 4;
         assert_eq!(startup.phase(), StartupPhase::ReadingIdentity);
         assert_eq!(startup.current_index(), 1);
+        startup.staged_fmmu_registers = Some(staged_fmmu_bank(1, 0x1001, 2));
         startup.phase = StartupPhase::ReadingConfiguration;
         assert_eq!(
             drive_sii_configuration(&mut startup, &startup_sii_image(0x607A), &mut now_ns),
@@ -4027,7 +4393,8 @@ mod tests {
     fn end_probe_deadline(action: StartupAction) -> u64 {
         match action {
             StartupAction::Scan(action) => action.deadline_ns,
-            StartupAction::Sii(_)
+            StartupAction::FmmuRegisters(_)
+            | StartupAction::Sii(_)
             | StartupAction::SiiMailbox(_)
             | StartupAction::SiiConfiguration(_)
             | StartupAction::Al(_)

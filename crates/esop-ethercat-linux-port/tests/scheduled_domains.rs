@@ -8,7 +8,8 @@ use esop_ethercat_core::{
     DcMonitor, DcSyncConfig, DcSyncController, DcSyncProgress, DcSyncWindowConfig, DcTopology,
     Domain, DomainSegment, ESC_AL_STATUS, ESC_CONFIGURATION, ESC_DC_SYSTEM_DIFF,
     ESC_DC_SYSTEM_TIME, ESC_FEATURE_DC_SUPPORTED, EscDcRange, EthercatMaster, EthercatPort,
-    EthercatState, ExpectedSlave, FramePlan, FramePlanSet, LinkState, MAX_MAILBOX_BYTES,
+    EthercatState, ExpectedSlave, FMMU_IMAGE_LEN, FmmuRegisterDiscoveryController,
+    FmmuRegisterDiscoveryProgress, FramePlan, FramePlanSet, LinkState, MAX_MAILBOX_BYTES,
     MailboxConfig, MailboxController, MailboxError, MailboxHeader, MailboxPhase, MailboxProgress,
     MailboxProtocol, MailboxRetryPolicy, MappingConfigController, MappingConfigPhase,
     MappingConfigProgress, MappingTable, MasterConfig, PdoConfigAction, PdoConfigBatch,
@@ -536,6 +537,123 @@ fn production_service_scheduler_prioritizes_mapping_and_accepts_its_own_generati
     );
     assert!(fifth.service_ready());
     assert_eq!(controls.in_use(), 0);
+}
+
+#[test]
+fn production_scheduler_drives_public_verified_fmmu_bank_clear_path() {
+    let mut discovery = FmmuRegisterDiscoveryController::new();
+    discovery.start(0, 1, 2, 31, 0, 1_000_000, 100_000).unwrap();
+    for index in 0..2u8 {
+        let action = discovery
+            .next_action(u64::from(index) * 2 + 1)
+            .unwrap()
+            .unwrap();
+        let mut descriptor = [0; FMMU_IMAGE_LEN];
+        descriptor[0] = index + 1;
+        descriptor[12] = 1;
+        let progress = discovery
+            .accept(
+                action,
+                action.generation,
+                &descriptor,
+                1,
+                u64::from(index) * 2 + 2,
+            )
+            .unwrap();
+        if index == 1 {
+            assert_eq!(progress, FmmuRegisterDiscoveryProgress::Complete);
+        }
+    }
+    let verified_bank = discovery.bank().unwrap();
+
+    let table = MappingTable::<0, 0>::new();
+    let mut mapping = MappingConfigController::<0, 0>::new();
+    mapping
+        .start_with_verified_fmmus(1, 41, 100_000, 1_000_000, 50_000, verified_bank, &table)
+        .unwrap();
+
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<1, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 1,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<1, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let mut scheduler = ScheduledProductionServiceScheduler::new();
+    let mut controls = ControlRequestPool::<1>::new();
+    let mut port = TwoFrameSimPort::new();
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut dc_image = [0; 8];
+
+    for cycle in 0..4u64 {
+        let now_ns = 100_000 + cycle * 100_000;
+        port.set_now_ns(now_ns);
+        let report = scheduler
+            .run_cycle(
+                &mut bank,
+                &mut master,
+                &mut port,
+                &mut scratch,
+                &mut dc,
+                &mut dc_image,
+                now_ns,
+                &mut controls,
+                &mut ScheduledProductionServices::<0, 0, 0>::new(
+                    None,
+                    Some(&mut mapping),
+                    None,
+                    None,
+                ),
+                (cycle + 1) as u16,
+                now_ns + 50_000,
+                now_ns + 50_000,
+            )
+            .unwrap();
+        assert_eq!(report.selected(), ScheduledProductionServiceKind::Mapping);
+        assert_eq!(report.fault(), None);
+        if cycle == 3 {
+            assert_eq!(
+                report.progress(),
+                ScheduledProductionServiceProgress::Mapping(MappingConfigProgress::Complete)
+            );
+            assert!(report.service_ready());
+        } else {
+            assert_eq!(
+                report.progress(),
+                ScheduledProductionServiceProgress::Mapping(MappingConfigProgress::Advanced)
+            );
+            assert!(!report.service_ready());
+        }
+        assert_eq!(controls.in_use(), 0);
+    }
+    assert_eq!(mapping.phase(), MappingConfigPhase::Complete);
 }
 
 #[test]

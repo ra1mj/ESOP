@@ -13,6 +13,7 @@ mod dma;
 mod domain;
 mod domain_registry;
 mod engine;
+mod fmmu_discovery;
 mod frame_pool;
 mod mailbox;
 mod mapping;
@@ -81,6 +82,11 @@ pub use engine::{
     CycleError, CycleReport, DmaReceiveCycle, EthercatMaster, MasterConfig, RxConsumerMux,
     RxDatagramConsumer,
 };
+pub use fmmu_discovery::{
+    FmmuRegisterBank, FmmuRegisterDescriptor, FmmuRegisterDiscoveryAction,
+    FmmuRegisterDiscoveryController, FmmuRegisterDiscoveryError, FmmuRegisterDiscoveryPhase,
+    FmmuRegisterDiscoveryProgress,
+};
 pub use frame_pool::{FrameHandle, FramePool, FramePoolError, FrameSlot};
 pub use mailbox::{
     MAILBOX_HEADER_LEN, MAX_MAILBOX_BYTES, MailboxAction, MailboxConfig, MailboxConfigError,
@@ -89,7 +95,7 @@ pub use mailbox::{
 };
 pub use mapping::{
     ESC_FMMU_BASE, ESC_FMMU_STRIDE, ESC_SYNC_MANAGER_BASE, ESC_SYNC_MANAGER_STRIDE, FMMU_IMAGE_LEN,
-    FmmuConfig, MappingError, MappingSummary, MappingTable, SYNC_MANAGER_IMAGE_LEN,
+    FmmuConfig, MAX_ESC_FMMUS, MappingError, MappingSummary, MappingTable, SYNC_MANAGER_IMAGE_LEN,
     SyncManagerConfig,
 };
 pub use mapping_config::{

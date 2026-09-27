@@ -8,6 +8,7 @@ use crate::op_only::{OpOnlyProfileError, OpOnlySyncManagerProfile};
 
 pub const ESC_FMMU_BASE: u16 = 0x0600;
 pub const ESC_FMMU_STRIDE: u16 = 16;
+pub const MAX_ESC_FMMUS: usize = 16;
 pub const ESC_SYNC_MANAGER_BASE: u16 = 0x0800;
 pub const ESC_SYNC_MANAGER_STRIDE: u16 = 8;
 

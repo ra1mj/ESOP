@@ -50,6 +50,19 @@ pub fn StartupController::dc_capabilities(position: u16) ->
     Option<ScanDcCapabilities>;
 pub fn StartupController::dc_topology(...) ->
     Option<&DcTopology<MAX_SLAVES>>;
+pub fn StartupController::verified_fmmu_registers(position: u16) ->
+    Option<FmmuRegisterBank>;
+pub fn StartupController::start_mapping_for_position<const SMS: usize, const FMMUS: usize>(
+    ...,
+    table: &MappingTable<SMS, FMMUS>,
+) -> Result<(), StartupError>;
+pub fn FmmuRegisterDiscoveryController::start(...) ->
+    Result<(), FmmuRegisterDiscoveryError>;
+pub fn MappingConfigController::<SMS, FMMUS>::start_with_verified_fmmus(
+    ...,
+    bank: FmmuRegisterBank,
+    table: &MappingTable<SMS, FMMUS>,
+) -> Result<(), MappingConfigError>;
 pub fn DcTopology::<MAX_SLAVES>::build(
     records: &[ScanRecord],
     reference_position: Option<u16>,
@@ -190,15 +203,18 @@ return before Startup mutation. It also propagates the selected
 descriptor are present in normalized JSON, device inventory, generated C/Rust
 and the product configuration SHA-256.
 `start_startup` supplies those profiles to Startup. After identity and optional
-mailbox verification, profiles with this expectation enter a distinct bounded
-configuration stream phase. Startup retains the position-keyed ESC FMMU count
-from each completed scan record and rejects an online usage category that
-exceeds it. It stages both structural-signature and
-selected-DC observations from that one pass, then publishes both position-
-keyed evidence records only after every comparison succeeds. It emits the
-first AL action only after exact comparison; stream, projection, capacity,
-timeout, ownership, signature, missing category, malformed descriptor, unknown
-mode, or field mismatch faults publish neither record. A nonzero legacy
+mailbox verification, profiles with an expected SII signature first read every
+ESC-reported standard 16-byte FMMU page in index order, then enter the bounded
+configuration stream phase. Register discovery uses one absolute deadline,
+exact WKC 1/length/generation/action ownership and a fixed maximum of 16 pages.
+Startup stages the position/station-bound bank together with structural-
+signature and selected-DC observations, then publishes all applicable evidence
+records only after every comparison succeeds. It rejects an online usage
+category that exceeds the scanned FMMU count. It emits the first AL action only
+after exact comparison; register, stream, projection, capacity, timeout,
+ownership, signature, missing category, malformed descriptor, unknown mode, or
+field mismatch faults publish no FMMU/SII/DC evidence. Profiles without an
+expected SII signature retain their legacy traffic shape. A nonzero legacy
 `StartupConfig.transition_timeout_ns` is an explicit uniform override;
 otherwise each AL step selects its generated/default timeout. OpOnly and AL
 work for one step share one absolute deadline. Non-OP and leaving-OP paths
@@ -290,9 +306,12 @@ Configuration, topology-wide DC SYNC Configuration, and/or legacy DC
 Configuration. The scheduler orders these services as PDO, Mapping, DC Clock,
 DC SYNC, legacy DC, then Startup. It releases Startup only after the whole PDO
 batch and other required controllers reach real Complete phases, then resumes
-the retained topology through SAFEOP/OP. Logical addresses remain master-owned;
-full FMMU register discovery, physical response authenticity and hardware
-qualification remain caller work.
+the retained topology through SAFEOP/OP. Logical addresses remain master-owned.
+The verified-bank mapping path rejects station/count/index drift before actions,
+zeroes and reads back every discovered FMMU slot including unused slots, then
+runs the existing desired SM/FMMU write/readback sequence. Physical response
+authenticity, interoperability, target WCET and hardware qualification remain
+outside this software claim.
 
 The configuration SHA-256 covers normalized product semantics and a sorted
 label-to-semantic-ESI-hash map. It excludes timestamps, host paths, compiler,
@@ -334,6 +353,8 @@ datagrams, FCS, and inter-packet gap respectively.
 | SII category image exceeds capacity, lacks END, overflows EEPROM addressing, or fails a response check | Latch the first stream fault and publish neither image nor configuration candidate. |
 | Invalid generated FMMU count/usage-to-PDO direction, SII SM mask/PDO grouping, empty per-slave PDO mapping, or live schema-v2 structural signature mismatch | Reject before Startup mutation or latch Startup before AL; publish no SII verification evidence. |
 | Live SII FMMU usage count exceeds the ESC scan record count | Latch the typed Startup count fault before evidence or AL; publish neither SII nor DC evidence. |
+| FMMU register count exceeds capacity, or a page has stale ownership, wrong WKC/length/generation, or timeout | Latch the typed discovery/Startup fault and publish no FMMU/SII/DC evidence. |
+| Verified FMMU bank station/count/index differs from desired mapping, or a cleared/configured page reads back differently | Reject before the first mapping action or latch Mapping fault; never report the configuration Complete. |
 | DC reference without required, or multiple generated references | Reject before Startup mutation or generated output publication. |
 | Required System Time absent, delay-only WKC 0, or explicit reference not capable | Latch Startup before identity/SII/AL and publish no selected reference. |
 | System Time WKC greater than one, malformed payload, stale generation, ownership mismatch, or timeout | Latch the first typed scan fault; publish no partial slave record. |
@@ -424,6 +445,12 @@ datagrams, FCS, and inter-packet gap respectively.
   ESC count gating, exact match/mismatch,
   configuration-action ownership, timeout, multi-slave reuse, restart clearing,
   and legacy opt-out before AL.
+- Cover ordered FMMU register-page discovery, zero/over-capacity banks, exact
+  address/WKC/length/generation/action ownership, control-pool completion,
+  timeout/restart, atomic FMMU/SII/DC publication, and failure without partial
+  evidence. Cover the Startup mapping bridge and complete discovered-bank
+  zero-write/readback, including unused slots and station/count/index/readback
+  failures, through the production scheduler/control-pool path.
 - Route a generated-style PDO action through `ScheduledPdoConfiguration`, the
   existing mailbox/DC/shared-RX path, exact upload readback, request rebuild,
   cross-generation waiting, timeout, lifecycle gating, fault blocking and

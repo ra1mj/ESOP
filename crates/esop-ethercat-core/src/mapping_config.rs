@@ -8,9 +8,10 @@ use crate::control::{
     ControlError, ControlRequestPool, MAX_CONTROL_PAYLOAD, RegisterOperation, RequestHandle,
     RequestState,
 };
+use crate::fmmu_discovery::FmmuRegisterBank;
 use crate::mapping::{
-    FMMU_IMAGE_LEN, FmmuConfig, MappingError, MappingTable, SYNC_MANAGER_IMAGE_LEN,
-    SyncManagerConfig,
+    ESC_FMMU_BASE, ESC_FMMU_STRIDE, FMMU_IMAGE_LEN, FmmuConfig, MAX_ESC_FMMUS, MappingError,
+    MappingTable, SYNC_MANAGER_IMAGE_LEN, SyncManagerConfig,
 };
 use crate::op_only::OpOnlySyncManagerProfile;
 use crate::registers::fixed_address;
@@ -18,6 +19,8 @@ use crate::registers::fixed_address;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MappingConfigPhase {
     Idle,
+    ClearingFmmu,
+    VerifyingFmmuClear,
     WritingSyncManager,
     VerifyingSyncManager,
     WritingFmmu,
@@ -28,6 +31,7 @@ pub enum MappingConfigPhase {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MappingConfigItem {
+    FmmuReset(u8),
     SyncManager(u8),
     Fmmu(u8),
 }
@@ -86,6 +90,19 @@ pub enum MappingConfigError {
     UnexpectedWorkingCounter,
     Timeout,
     ReadbackMismatch,
+    FmmuBankCapacityExceeded,
+    FmmuBankStationMismatch {
+        expected: u16,
+        observed: u16,
+    },
+    ConfiguredFmmuCountExceedsDiscovered {
+        configured: usize,
+        discovered: usize,
+    },
+    FmmuIndexOutsideDiscoveredBank {
+        index: u8,
+        discovered: usize,
+    },
     Mapping(MappingError),
     Control(ControlError),
 }
@@ -100,6 +117,7 @@ pub struct MappingConfigController<const SMS: usize, const FMMUS: usize> {
     sync_manager_count: usize,
     fmmus: [FmmuConfig; FMMUS],
     fmmu_count: usize,
+    discovered_fmmu_count: usize,
     op_only_outputs: OpOnlySyncManagerProfile,
     item_index: usize,
     pending: Option<MappingConfigAction>,
@@ -137,6 +155,7 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
                 enable: false,
             }; FMMUS],
             fmmu_count: 0,
+            discovered_fmmu_count: 0,
             op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
             item_index: 0,
             pending: None,
@@ -175,14 +194,92 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
         request_timeout_ns: u64,
         table: &MappingTable<SMS, FMMUS>,
     ) -> Result<(), MappingConfigError> {
+        self.start_inner(
+            station_address,
+            generation,
+            now_ns,
+            timeout_ns,
+            request_timeout_ns,
+            None,
+            table,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_with_verified_fmmus(
+        &mut self,
+        station_address: u16,
+        generation: u16,
+        now_ns: u64,
+        timeout_ns: u64,
+        request_timeout_ns: u64,
+        bank: FmmuRegisterBank,
+        table: &MappingTable<SMS, FMMUS>,
+    ) -> Result<(), MappingConfigError> {
+        self.start_inner(
+            station_address,
+            generation,
+            now_ns,
+            timeout_ns,
+            request_timeout_ns,
+            Some(bank),
+            table,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_inner(
+        &mut self,
+        station_address: u16,
+        generation: u16,
+        now_ns: u64,
+        timeout_ns: u64,
+        request_timeout_ns: u64,
+        bank: Option<FmmuRegisterBank>,
+        table: &MappingTable<SMS, FMMUS>,
+    ) -> Result<(), MappingConfigError> {
         if !matches!(
             self.phase,
             MappingConfigPhase::Idle | MappingConfigPhase::Complete | MappingConfigPhase::Faulted
         ) {
             return Err(MappingConfigError::Busy);
         }
-        self.sync_manager_count = table.sync_manager_count();
-        self.fmmu_count = table.fmmu_count();
+
+        let sync_manager_count = table.sync_manager_count();
+        let fmmu_count = table.fmmu_count();
+        let discovered_fmmu_count = if let Some(bank) = bank {
+            let discovered = bank.descriptor_count();
+            if discovered > MAX_ESC_FMMUS {
+                return Err(MappingConfigError::FmmuBankCapacityExceeded);
+            }
+            if bank.station_address() != station_address {
+                return Err(MappingConfigError::FmmuBankStationMismatch {
+                    expected: station_address,
+                    observed: bank.station_address(),
+                });
+            }
+            if fmmu_count > discovered {
+                return Err(MappingConfigError::ConfiguredFmmuCountExceedsDiscovered {
+                    configured: fmmu_count,
+                    discovered,
+                });
+            }
+            for config in table.fmmus() {
+                if usize::from(config.index) >= discovered {
+                    return Err(MappingConfigError::FmmuIndexOutsideDiscoveredBank {
+                        index: config.index,
+                        discovered,
+                    });
+                }
+            }
+            discovered
+        } else {
+            0
+        };
+
+        self.sync_manager_count = sync_manager_count;
+        self.fmmu_count = fmmu_count;
+        self.discovered_fmmu_count = discovered_fmmu_count;
         self.sync_managers[..self.sync_manager_count].copy_from_slice(table.sync_managers());
         self.fmmus[..self.fmmu_count].copy_from_slice(table.fmmus());
         self.op_only_outputs = table.op_only_outputs();
@@ -195,12 +292,10 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
         self.next_token = 1;
         self.next_datagram_index = 1;
         self.last_error = None;
-        self.phase = if self.sync_manager_count != 0 {
-            MappingConfigPhase::WritingSyncManager
-        } else if self.fmmu_count != 0 {
-            MappingConfigPhase::WritingFmmu
+        self.phase = if self.discovered_fmmu_count != 0 {
+            MappingConfigPhase::ClearingFmmu
         } else {
-            MappingConfigPhase::Complete
+            self.initial_mapping_phase()
         };
         Ok(())
     }
@@ -226,6 +321,39 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
         }
 
         let (item, operation, address, read_len, payload, write_len) = match self.phase {
+            MappingConfigPhase::ClearingFmmu => {
+                if self.item_index >= self.discovered_fmmu_count {
+                    self.item_index = 0;
+                    self.phase = self.initial_mapping_phase();
+                    return self.next_action(now_ns);
+                }
+                let index = self.item_index as u8;
+                (
+                    MappingConfigItem::FmmuReset(index),
+                    RegisterOperation::Write,
+                    fixed_address(
+                        self.station_address,
+                        ESC_FMMU_BASE + u16::from(index) * ESC_FMMU_STRIDE,
+                    ),
+                    0,
+                    [0; FMMU_IMAGE_LEN],
+                    FMMU_IMAGE_LEN,
+                )
+            }
+            MappingConfigPhase::VerifyingFmmuClear => {
+                let index = self.item_index as u8;
+                (
+                    MappingConfigItem::FmmuReset(index),
+                    RegisterOperation::Read,
+                    fixed_address(
+                        self.station_address,
+                        ESC_FMMU_BASE + u16::from(index) * ESC_FMMU_STRIDE,
+                    ),
+                    FMMU_IMAGE_LEN,
+                    [0; FMMU_IMAGE_LEN],
+                    0,
+                )
+            }
             MappingConfigPhase::WritingSyncManager => {
                 if self.item_index >= self.sync_manager_count {
                     self.phase = if self.fmmu_count != 0 {
@@ -357,6 +485,28 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
         }
 
         let progress = match self.phase {
+            MappingConfigPhase::ClearingFmmu => {
+                self.phase = MappingConfigPhase::VerifyingFmmuClear;
+                MappingConfigProgress::Advanced
+            }
+            MappingConfigPhase::VerifyingFmmuClear => {
+                if payload != [0; FMMU_IMAGE_LEN] {
+                    return self.fail(MappingConfigError::ReadbackMismatch);
+                }
+                self.item_index += 1;
+                if self.item_index < self.discovered_fmmu_count {
+                    self.phase = MappingConfigPhase::ClearingFmmu;
+                    MappingConfigProgress::Advanced
+                } else {
+                    self.item_index = 0;
+                    self.phase = self.initial_mapping_phase();
+                    if self.phase == MappingConfigPhase::Complete {
+                        MappingConfigProgress::Complete
+                    } else {
+                        MappingConfigProgress::Advanced
+                    }
+                }
+            }
             MappingConfigPhase::WritingSyncManager => {
                 self.phase = MappingConfigPhase::VerifyingSyncManager;
                 MappingConfigProgress::Advanced
@@ -511,6 +661,16 @@ impl<const SMS: usize, const FMMUS: usize> MappingConfigController<SMS, FMMUS> {
         Ok(())
     }
 
+    const fn initial_mapping_phase(&self) -> MappingConfigPhase {
+        if self.sync_manager_count != 0 {
+            MappingConfigPhase::WritingSyncManager
+        } else if self.fmmu_count != 0 {
+            MappingConfigPhase::WritingFmmu
+        } else {
+            MappingConfigPhase::Complete
+        }
+    }
+
     fn fail<T>(&mut self, error: MappingConfigError) -> Result<T, MappingConfigError> {
         self.last_error = Some(error);
         self.pending = None;
@@ -528,7 +688,21 @@ impl<const SMS: usize, const FMMUS: usize> Default for MappingConfigController<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fmmu_discovery::FmmuRegisterDescriptor;
     use crate::mapping::{ESC_FMMU_BASE, ESC_SYNC_MANAGER_BASE};
+
+    fn verified_bank(
+        position: u16,
+        station_address: u16,
+        descriptor_count: u8,
+    ) -> FmmuRegisterBank {
+        FmmuRegisterBank::from_parts(
+            position,
+            station_address,
+            descriptor_count,
+            [FmmuRegisterDescriptor::RESET; MAX_ESC_FMMUS],
+        )
+    }
 
     fn mapping_table() -> MappingTable<1, 1> {
         let mut table = MappingTable::new();
@@ -668,5 +842,188 @@ mod tests {
             fixed_address(0x1000, ESC_SYNC_MANAGER_BASE + 16)
         );
         assert_eq!(ESC_FMMU_BASE, 0x0600);
+    }
+
+    #[test]
+    fn verified_bank_clears_every_discovered_slot_before_mapping() {
+        let table = mapping_table();
+        let mut controller = MappingConfigController::<1, 1>::new();
+        controller
+            .start_with_verified_fmmus(
+                0x1000,
+                5,
+                0,
+                1_000,
+                100,
+                verified_bank(0, 0x1000, 2),
+                &table,
+            )
+            .unwrap();
+
+        for index in 0..2u8 {
+            let write = controller
+                .next_action(1 + u64::from(index) * 4)
+                .unwrap()
+                .unwrap();
+            assert_eq!(write.item, MappingConfigItem::FmmuReset(index));
+            assert_eq!(write.operation, RegisterOperation::Write);
+            assert_eq!(write.payload(), &[0; FMMU_IMAGE_LEN]);
+            assert_eq!(
+                write.address,
+                fixed_address(0x1000, ESC_FMMU_BASE + u16::from(index) * ESC_FMMU_STRIDE)
+            );
+            controller
+                .accept(write, 5, &[], 1, 2 + u64::from(index) * 4)
+                .unwrap();
+
+            let read = controller
+                .next_action(3 + u64::from(index) * 4)
+                .unwrap()
+                .unwrap();
+            assert_eq!(read.item, MappingConfigItem::FmmuReset(index));
+            assert_eq!(read.operation, RegisterOperation::Read);
+            assert_eq!(read.response_len(), FMMU_IMAGE_LEN);
+            controller
+                .accept(read, 5, &[0; FMMU_IMAGE_LEN], 1, 4 + u64::from(index) * 4)
+                .unwrap();
+        }
+
+        let write_sm = controller.next_action(9).unwrap().unwrap();
+        assert_eq!(write_sm.item, MappingConfigItem::SyncManager(2));
+        controller.accept(write_sm, 5, &[], 1, 10).unwrap();
+        let read_sm = controller.next_action(11).unwrap().unwrap();
+        let mut sm_image = [0; SYNC_MANAGER_IMAGE_LEN];
+        table
+            .sync_manager(2)
+            .unwrap()
+            .encode(&mut sm_image)
+            .unwrap();
+        controller.accept(read_sm, 5, &sm_image, 1, 12).unwrap();
+
+        let write_fmmu = controller.next_action(13).unwrap().unwrap();
+        assert_eq!(write_fmmu.item, MappingConfigItem::Fmmu(0));
+        controller.accept(write_fmmu, 5, &[], 1, 14).unwrap();
+        let read_fmmu = controller.next_action(15).unwrap().unwrap();
+        let mut image = [0; FMMU_IMAGE_LEN];
+        table.fmmu(0).unwrap().encode(&mut image).unwrap();
+        assert_eq!(
+            controller.accept(read_fmmu, 5, &image, 1, 16),
+            Ok(MappingConfigProgress::Complete)
+        );
+    }
+
+    #[test]
+    fn verified_bank_preflight_rejects_mismatch_without_mutation() {
+        let table = mapping_table();
+        let mut controller = MappingConfigController::<1, 1>::new();
+        assert_eq!(
+            controller.start_with_verified_fmmus(
+                0x1000,
+                5,
+                0,
+                1_000,
+                100,
+                verified_bank(0, 0x1001, 2),
+                &table,
+            ),
+            Err(MappingConfigError::FmmuBankStationMismatch {
+                expected: 0x1000,
+                observed: 0x1001,
+            })
+        );
+        assert_eq!(controller.phase(), MappingConfigPhase::Idle);
+        assert_eq!(
+            controller.next_action(1),
+            Err(MappingConfigError::NotStarted)
+        );
+
+        assert_eq!(
+            controller.start_with_verified_fmmus(
+                0x1000,
+                5,
+                0,
+                1_000,
+                100,
+                verified_bank(0, 0x1000, 0),
+                &table,
+            ),
+            Err(MappingConfigError::ConfiguredFmmuCountExceedsDiscovered {
+                configured: 1,
+                discovered: 0,
+            })
+        );
+
+        let mut sparse = MappingTable::<0, 1>::new();
+        sparse
+            .add_fmmu(FmmuConfig {
+                index: 1,
+                logical_start: 0x2000,
+                length: 8,
+                logical_start_bit: 0,
+                logical_end_bit: 7,
+                physical_start: 0x1000,
+                physical_start_bit: 0,
+                fmmu_type: 2,
+                enable: true,
+            })
+            .unwrap();
+        let mut sparse_controller = MappingConfigController::<0, 1>::new();
+        assert_eq!(
+            sparse_controller.start_with_verified_fmmus(
+                0x1000,
+                5,
+                0,
+                1_000,
+                100,
+                verified_bank(0, 0x1000, 1),
+                &sparse,
+            ),
+            Err(MappingConfigError::FmmuIndexOutsideDiscoveredBank {
+                index: 1,
+                discovered: 1,
+            })
+        );
+
+        assert_eq!(
+            controller.start_with_verified_fmmus(
+                0x1000,
+                5,
+                0,
+                1_000,
+                100,
+                verified_bank(0, 0x1000, (MAX_ESC_FMMUS + 1) as u8),
+                &table,
+            ),
+            Err(MappingConfigError::FmmuBankCapacityExceeded)
+        );
+        assert_eq!(controller.phase(), MappingConfigPhase::Idle);
+    }
+
+    #[test]
+    fn verified_bank_clear_readback_mismatch_latches_fault() {
+        let table = mapping_table();
+        let mut controller = MappingConfigController::<1, 1>::new();
+        controller
+            .start_with_verified_fmmus(
+                0x1000,
+                5,
+                0,
+                1_000,
+                100,
+                verified_bank(0, 0x1000, 2),
+                &table,
+            )
+            .unwrap();
+        let write = controller.next_action(1).unwrap().unwrap();
+        controller.accept(write, 5, &[], 1, 2).unwrap();
+        let read = controller.next_action(3).unwrap().unwrap();
+        let mut stale = [0; FMMU_IMAGE_LEN];
+        stale[12] = 1;
+        assert_eq!(
+            controller.accept(read, 5, &stale, 1, 4),
+            Err(MappingConfigError::ReadbackMismatch)
+        );
+        assert_eq!(controller.phase(), MappingConfigPhase::Faulted);
+        assert_eq!(controller.next_action(5), Ok(None));
     }
 }
