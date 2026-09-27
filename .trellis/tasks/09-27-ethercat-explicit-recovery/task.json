@@ -19,7 +19,8 @@
   "pr_url": null,
   "subtasks": [],
   "children": [
-    "09-27-ethercat-runtime-state-requests"
+    "09-27-ethercat-runtime-state-requests",
+    "09-27-ethercat-explicit-rescan"
   ],
   "parent": null,
   "relatedFiles": [],

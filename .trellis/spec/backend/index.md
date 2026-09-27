@@ -22,6 +22,7 @@ runs in `no_std` protocol, lifecycle, and profile crates.
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | Filled |
 | [EtherCAT Register Requests](./ethercat-register-requests.md) | Fixed-capacity asynchronous ESC register request contract | Filled |
 | [EtherCAT State Requests](./ethercat-state-requests.md) | Bounded explicit runtime ESM request contract | Filled |
+| [EtherCAT Explicit Rescan](./ethercat-rescan.md) | Bounded retained-plan PREOP topology verification contract | Filled |
 | [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | Filled |
 | [Product Configuration](./product-configuration.md) | cfggen, static artifacts and build-report contract | Filled |
 

@@ -946,7 +946,7 @@ pub fn other_cycle_facts_from_production_service_cycle<E, const DOMAINS: usize>(
                 other.topology_valid &= cycle.service_ready();
             }
         }
-        ScheduledProductionServiceKind::StateRequest => {
+        ScheduledProductionServiceKind::Rescan | ScheduledProductionServiceKind::StateRequest => {
             other.topology_valid &= cycle.service_ready();
         }
         ScheduledProductionServiceKind::PdoConfiguration

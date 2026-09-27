@@ -27,6 +27,9 @@ use crate::mailbox::{
 };
 use crate::mapping::{MappingTable, SyncManagerConfig};
 use crate::mapping_config::{MappingConfigController, MappingConfigError};
+use crate::rescan::{
+    RescanError, RescanHandle, RescanPhase, RescanProgress, RescanResult, RescanState, RescanStatus,
+};
 use crate::rx_index::RxWorkingCounterPolicy;
 use crate::scan::{
     ScanAction, ScanController, ScanDcCapabilities, ScanError, ScanPhase, ScanProgress,
@@ -544,6 +547,7 @@ pub enum StartupError {
     UnknownState,
     InvalidConfigurationBarrier,
     ConfigurationNotPending,
+    OperationDeadlineExceeded,
     AlErrorCode(u16),
     Control(ControlError),
     Scan(ScanError),
@@ -682,6 +686,8 @@ pub struct StartupController<const MAX_SLAVES: usize> {
     configuration_released: bool,
     transition_stage: StartupTransitionStage,
     step_deadline_ns: u64,
+    operation_deadline_ns: Option<u64>,
+    rescan: RescanState,
     last_error: Option<StartupError>,
     last_al_fault: Option<StartupAlFault>,
 }
@@ -727,6 +733,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             configuration_released: false,
             transition_stage: StartupTransitionStage::Idle,
             step_deadline_ns: 0,
+            operation_deadline_ns: None,
+            rescan: RescanState::new(),
             last_error: None,
             last_al_fault: None,
         }
@@ -746,6 +754,52 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
 
     pub const fn last_al_fault(&self) -> Option<StartupAlFault> {
         self.last_al_fault
+    }
+
+    pub const fn rescan_phase(&self) -> RescanPhase {
+        self.rescan.phase()
+    }
+
+    pub const fn active_rescan_handle(&self) -> Option<RescanHandle> {
+        match self.rescan.phase() {
+            RescanPhase::Active => self.rescan.handle(),
+            RescanPhase::Idle | RescanPhase::Complete | RescanPhase::Faulted => None,
+        }
+    }
+
+    pub const fn last_rescan_error(&self) -> Option<RescanError> {
+        self.rescan.last_error()
+    }
+
+    pub const fn is_rescan_active_or_faulted(&self) -> bool {
+        self.rescan.is_active_or_faulted()
+    }
+
+    pub fn rescan_status(&self, handle: RescanHandle) -> Result<RescanStatus, RescanError> {
+        self.rescan
+            .status(handle, self.phase, self.scan.records().len())
+    }
+
+    pub fn rescan_result(&self, handle: RescanHandle) -> Result<RescanResult, RescanError> {
+        self.rescan.result(handle)
+    }
+
+    pub fn project_rescan_progress(&self, progress: StartupProgress) -> Option<RescanProgress> {
+        if self.rescan.phase() == RescanPhase::Complete || progress == StartupProgress::Ready {
+            return self
+                .rescan
+                .handle()
+                .and_then(|handle| self.rescan.result(handle).ok())
+                .map(RescanProgress::Complete);
+        }
+        RescanProgress::from_startup(progress)
+    }
+
+    pub(crate) fn terminal_rescan_progress(&self) -> Option<RescanProgress> {
+        self.rescan
+            .handle()
+            .and_then(|handle| self.rescan.result(handle).ok())
+            .map(RescanProgress::Complete)
     }
 
     pub fn device_emulation(&self, position: u16) -> Option<bool> {
@@ -1082,7 +1136,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         config: StartupConfig,
         expected: &[ExpectedSlave],
     ) -> Result<(), StartupError> {
-        self.start_inner(generation, now_ns, config, expected, None)
+        self.start_inner(generation, now_ns, config, expected, None, None)
     }
 
     pub fn start_with_profiles(
@@ -1093,13 +1147,70 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         expected: &[ExpectedSlave],
         profiles: &[StartupSlaveProfile],
     ) -> Result<(), StartupError> {
-        self.start_inner(generation, now_ns, config, expected, Some(profiles))
+        self.start_inner(generation, now_ns, config, expected, Some(profiles), None)
+    }
+
+    pub fn start_rescan(
+        &mut self,
+        generation: u16,
+        now_ns: u64,
+        deadline_ns: u64,
+    ) -> Result<RescanHandle, RescanError> {
+        if self.rescan.phase() == RescanPhase::Active {
+            return Err(RescanError::Busy);
+        }
+        if !matches!(self.phase, StartupPhase::Ready | StartupPhase::Faulted) {
+            return Err(RescanError::InvalidState(self.phase));
+        }
+        if deadline_ns <= now_ns {
+            return Err(RescanError::InvalidDeadline);
+        }
+
+        let expected = self.expected;
+        let profiles = self.profiles;
+        let expected_count = self.expected_count;
+        let mut config = self.config;
+        config.target_state = EthercatState::PreOp;
+        config.configuration_services = StartupConfigurationServices::NONE;
+        self.validate_start_request(
+            config,
+            &expected[..expected_count],
+            Some(&profiles[..expected_count]),
+        )
+        .map_err(RescanError::Startup)?;
+
+        let handle = self.rescan.begin(generation, deadline_ns, expected_count);
+        self.start_inner(
+            generation,
+            now_ns,
+            config,
+            &expected[..expected_count],
+            Some(&profiles[..expected_count]),
+            Some(deadline_ns),
+        )
+        .map_err(RescanError::Startup)?;
+        Ok(handle)
     }
 
     fn start_inner(
         &mut self,
         generation: u16,
         now_ns: u64,
+        config: StartupConfig,
+        expected: &[ExpectedSlave],
+        profiles: Option<&[StartupSlaveProfile]>,
+        operation_deadline_ns: Option<u64>,
+    ) -> Result<(), StartupError> {
+        self.validate_start_request(config, expected, profiles)?;
+        if operation_deadline_ns.is_none() {
+            self.rescan.clear();
+        }
+        self.operation_deadline_ns = operation_deadline_ns;
+        self.reset_startup(generation, now_ns, config, expected, profiles)
+    }
+
+    fn validate_start_request(
+        &self,
         config: StartupConfig,
         expected: &[ExpectedSlave],
         profiles: Option<&[StartupSlaveProfile]>,
@@ -1202,6 +1313,17 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             }
         }
 
+        Ok(())
+    }
+
+    fn reset_startup(
+        &mut self,
+        generation: u16,
+        now_ns: u64,
+        config: StartupConfig,
+        expected: &[ExpectedSlave],
+        profiles: Option<&[StartupSlaveProfile]>,
+    ) -> Result<(), StartupError> {
         self.phase = StartupPhase::Scanning;
         self.config = config;
         self.generation = generation;
@@ -1254,18 +1376,19 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.step_deadline_ns = 0;
         self.last_error = None;
         self.last_al_fault = None;
-        match self.scan.start(
-            generation,
-            now_ns,
-            config.scan_timeout_ns,
-            config.request_timeout_ns,
-        ) {
+        let scan_timeout_ns = self.bounded_timeout(now_ns, config.scan_timeout_ns);
+        let request_timeout_ns = self.bounded_timeout(now_ns, config.request_timeout_ns);
+        match self
+            .scan
+            .start(generation, now_ns, scan_timeout_ns, request_timeout_ns)
+        {
             Ok(()) => Ok(()),
             Err(error) => self.fail(StartupError::Scan(error)),
         }
     }
 
     pub fn next_action(&mut self, now_ns: u64) -> Result<Option<StartupAction>, StartupError> {
+        self.ensure_operation_deadline(now_ns)?;
         loop {
             match self.phase {
                 StartupPhase::Scanning => match self.scan.next_action(now_ns) {
@@ -1412,6 +1535,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         working_counter: u16,
         now_ns: u64,
     ) -> Result<StartupProgress, StartupError> {
+        self.ensure_operation_deadline(now_ns)?;
         if self.pending_action() != Some(action) {
             return self.fail(StartupError::ActionMismatch);
         }
@@ -1692,6 +1816,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         action: StartupAction,
         now_ns: u64,
     ) -> Result<StartupProgress, StartupError> {
+        self.ensure_operation_deadline(now_ns)?;
         if self.pending_action() != Some(action) {
             return self.fail(StartupError::ActionMismatch);
         }
@@ -1954,6 +2079,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.dc_topology = Some(topology);
         if self.expected_count == 0 {
             self.phase = StartupPhase::Ready;
+            self.complete_rescan_if_active();
             return Ok(());
         }
         self.current_index = 0;
@@ -1978,8 +2104,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             record.station_address,
             self.generation,
             now_ns,
-            self.config.identity_timeout_ns,
-            self.config.request_timeout_ns,
+            self.bounded_timeout(now_ns, self.config.identity_timeout_ns),
+            self.bounded_timeout(now_ns, self.config.request_timeout_ns),
         ) {
             Ok(()) => Ok(()),
             Err(error) => self.fail(StartupError::Sii(error)),
@@ -2005,8 +2131,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             word_count: SII_STANDARD_MAILBOX_WORD_COUNT,
             generation: self.generation,
             now_ns,
-            timeout_ns: self.config.identity_timeout_ns,
-            request_timeout_ns: self.config.request_timeout_ns,
+            timeout_ns: self.bounded_timeout(now_ns, self.config.identity_timeout_ns),
+            request_timeout_ns: self.bounded_timeout(now_ns, self.config.request_timeout_ns),
         };
         match self.sii_mailbox.start(request) {
             Ok(()) => Ok(()),
@@ -2032,8 +2158,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             current_state: record.al_status.state,
             generation: self.generation,
             now_ns,
-            timeout_ns: self.config.identity_timeout_ns,
-            request_timeout_ns: self.config.request_timeout_ns,
+            timeout_ns: self.bounded_timeout(now_ns, self.config.identity_timeout_ns),
+            request_timeout_ns: self.bounded_timeout(now_ns, self.config.request_timeout_ns),
         }) {
             Ok(()) => Ok(()),
             Err(error) => self.fail(StartupError::RequestingId(error)),
@@ -2062,8 +2188,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             reported_count,
             self.generation,
             now_ns,
-            self.config.sii_configuration_timeout_ns,
-            self.config.request_timeout_ns,
+            self.bounded_timeout(now_ns, self.config.sii_configuration_timeout_ns),
+            self.bounded_timeout(now_ns, self.config.request_timeout_ns),
         ) {
             Ok(()) => Ok(()),
             Err(error) => self.fail(StartupError::FmmuRegisters(error)),
@@ -2092,8 +2218,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             reported_count,
             self.generation,
             now_ns,
-            self.config.sii_configuration_timeout_ns,
-            self.config.request_timeout_ns,
+            self.bounded_timeout(now_ns, self.config.sii_configuration_timeout_ns),
+            self.bounded_timeout(now_ns, self.config.request_timeout_ns),
         ) {
             Ok(()) => Ok(()),
             Err(error) => self.fail(StartupError::SyncManagerRegisters(error)),
@@ -2118,8 +2244,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                 record.station_address,
                 self.generation,
                 now_ns,
-                self.config.sii_configuration_timeout_ns,
-                self.config.request_timeout_ns,
+                self.bounded_timeout(now_ns, self.config.sii_configuration_timeout_ns),
+                self.bounded_timeout(now_ns, self.config.request_timeout_ns),
             ),
             signed: false,
         };
@@ -2484,7 +2610,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                     record.position,
                 ))?
         };
-        self.step_deadline_ns = now_ns.saturating_add(timeout_ns);
+        self.step_deadline_ns = now_ns.saturating_add(self.bounded_timeout(now_ns, timeout_ns));
 
         let needs_disabled =
             record.al_status.state != EthercatState::Op || self.stage_target != EthercatState::Op;
@@ -2525,7 +2651,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                 generation: self.generation,
                 now_ns,
                 timeout_ns: self.step_deadline_ns.saturating_sub(now_ns),
-                request_timeout_ns: self.config.request_timeout_ns,
+                request_timeout_ns: self.bounded_timeout(now_ns, self.config.request_timeout_ns),
             },
             record.al_status,
             policy,
@@ -2555,7 +2681,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             station_address,
             self.generation,
             self.step_deadline_ns,
-            self.config.request_timeout_ns,
+            self.bounded_timeout(now_ns, self.config.request_timeout_ns),
             profile,
             enabled,
         ) {
@@ -2636,6 +2762,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                 Ok(StartupProgress::AwaitingConfiguration)
             } else {
                 self.phase = StartupPhase::Ready;
+                self.complete_rescan_if_active();
                 Ok(StartupProgress::Ready)
             }
         } else if self.configuration_released {
@@ -2666,7 +2793,33 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.staged_fmmu_registers = None;
         self.staged_sync_manager_registers = None;
         self.phase = StartupPhase::Faulted;
-        Err(self.last_error.unwrap_or(error))
+        let retained = self.last_error.unwrap_or(error);
+        self.rescan
+            .fail(retained, self.phase, self.scan.records().len());
+        Err(retained)
+    }
+
+    fn bounded_timeout(&self, now_ns: u64, configured_timeout_ns: u64) -> u64 {
+        self.operation_deadline_ns
+            .map(|deadline_ns| configured_timeout_ns.min(deadline_ns.saturating_sub(now_ns)))
+            .unwrap_or(configured_timeout_ns)
+    }
+
+    fn ensure_operation_deadline(&mut self, now_ns: u64) -> Result<(), StartupError> {
+        if self
+            .operation_deadline_ns
+            .is_some_and(|deadline_ns| now_ns >= deadline_ns)
+        {
+            return self.fail(StartupError::OperationDeadlineExceeded);
+        }
+        Ok(())
+    }
+
+    fn complete_rescan_if_active(&mut self) {
+        if self.rescan.phase() == RescanPhase::Active {
+            let _ = self.rescan.complete(self.phase, self.scan.records().len());
+            self.operation_deadline_ns = None;
+        }
     }
 
     fn capture_al_fault(&mut self) {
@@ -5790,5 +5943,179 @@ mod tests {
         );
         assert_eq!(pool.in_use(), 0);
         assert_eq!(startup.phase(), StartupPhase::Faulted);
+    }
+
+    fn ready_empty_startup() -> StartupController<1> {
+        let mut startup = StartupController::<1>::new(0x1000);
+        startup
+            .start(1, 0, StartupConfig::new(EthercatState::Op), &[])
+            .unwrap();
+        let probe = startup.next_action(1).unwrap().unwrap();
+        assert!(matches!(probe, StartupAction::Scan(_)));
+        assert_eq!(
+            startup.accept(probe, probe.generation(), &[], 0, 2),
+            Ok(StartupProgress::Advanced)
+        );
+        assert_eq!(startup.phase(), StartupPhase::Ready);
+        startup
+    }
+
+    #[test]
+    fn rescan_submission_is_transactional_and_clears_retained_evidence() {
+        let profile = StartupSlaveProfile::new(0).with_expected_requesting_id(7);
+        let mut startup = prepared_runtime_state_request(EthercatState::Op, profile, false);
+        startup.verified_requesting_ids[0] = Some(7);
+        startup.selected_reference_clock = Some(StartupReferenceClock {
+            position: 0,
+            station_address: 0x1000,
+        });
+
+        assert_eq!(
+            startup.start_rescan(9, 100, 100),
+            Err(RescanError::InvalidDeadline)
+        );
+        assert_eq!(startup.phase(), StartupPhase::Ready);
+        assert_eq!(startup.records().len(), 1);
+        assert_eq!(startup.verified_requesting_id(0), Some(7));
+        assert_eq!(startup.rescan_phase(), RescanPhase::Idle);
+
+        let handle = startup.start_rescan(9, 100, 150).unwrap();
+        assert_eq!(startup.phase(), StartupPhase::Scanning);
+        assert_eq!(startup.rescan_phase(), RescanPhase::Active);
+        assert_eq!(startup.active_rescan_handle(), Some(handle));
+        assert!(startup.records().is_empty());
+        assert!(startup.scan_records().is_empty());
+        assert_eq!(startup.selected_reference_clock(), None);
+        assert_eq!(startup.verified_requesting_id(0), None);
+        assert!(startup.configuration_services().is_empty());
+        assert_eq!(startup.config.target_state, EthercatState::PreOp);
+
+        let status = startup.rescan_status(handle).unwrap();
+        assert_eq!(status.phase, RescanPhase::Active);
+        assert_eq!(status.startup_phase, StartupPhase::Scanning);
+        assert_eq!(status.generation, 9);
+        assert_eq!(status.deadline_ns, 150);
+        assert_eq!(status.expected_count, 1);
+        assert_eq!(status.discovered_count, 0);
+        assert_eq!(status.error, None);
+
+        let action = startup.next_action(101).unwrap().unwrap();
+        assert_eq!(action.generation(), 9);
+        assert!(action.deadline_ns() <= 150);
+    }
+
+    #[test]
+    fn rescan_completes_at_preop_and_replaces_stale_handles_only_after_validation() {
+        let mut startup = ready_empty_startup();
+        let first = startup.start_rescan(2, 10, 100).unwrap();
+        let probe = startup.next_action(11).unwrap().unwrap();
+        assert_eq!(
+            startup.accept(probe, probe.generation(), &[], 0, 12),
+            Ok(StartupProgress::Advanced)
+        );
+        assert_eq!(startup.phase(), StartupPhase::Ready);
+        assert_eq!(startup.rescan_phase(), RescanPhase::Complete);
+        let result = startup.rescan_result(first).unwrap();
+        assert_eq!(result.final_startup_phase, StartupPhase::Ready);
+        assert_eq!(result.expected_count, 0);
+        assert_eq!(result.discovered_count, 0);
+        assert_eq!(result.error, None);
+        assert!(startup.configuration_services().is_empty());
+        assert_eq!(startup.config.target_state, EthercatState::PreOp);
+        assert_eq!(startup.next_action(1_000), Ok(None));
+
+        assert_eq!(
+            startup.start_rescan(3, 200, 200),
+            Err(RescanError::InvalidDeadline)
+        );
+        assert_eq!(startup.rescan_result(first), Ok(result));
+
+        let second = startup.start_rescan(3, 200, 300).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            startup.rescan_status(first),
+            Err(RescanError::InvalidHandle)
+        );
+        assert_eq!(
+            startup.rescan_result(first),
+            Err(RescanError::InvalidHandle)
+        );
+    }
+
+    #[test]
+    fn rescan_deadline_latches_first_fault_and_explicit_retry_can_succeed() {
+        let mut startup = ready_empty_startup();
+        let first = startup.start_rescan(2, 100, 110).unwrap();
+        let action = startup.next_action(101).unwrap().unwrap();
+        assert_eq!(action.deadline_ns(), 110);
+
+        assert_eq!(
+            startup.next_action(110),
+            Err(StartupError::OperationDeadlineExceeded)
+        );
+        assert_eq!(startup.phase(), StartupPhase::Faulted);
+        assert_eq!(startup.rescan_phase(), RescanPhase::Faulted);
+        assert_eq!(
+            startup.last_rescan_error(),
+            Some(RescanError::Startup(
+                StartupError::OperationDeadlineExceeded
+            ))
+        );
+        assert_eq!(
+            startup.rescan_result(first).unwrap().error,
+            startup.last_rescan_error()
+        );
+        assert_eq!(
+            startup.next_action(111),
+            Err(StartupError::OperationDeadlineExceeded)
+        );
+
+        let second = startup.start_rescan(3, 120, 140).unwrap();
+        assert_ne!(first, second);
+        let probe = startup.next_action(121).unwrap().unwrap();
+        assert_eq!(probe.deadline_ns(), 140);
+        startup
+            .accept(probe, probe.generation(), &[], 0, 122)
+            .unwrap();
+        assert_eq!(startup.phase(), StartupPhase::Ready);
+        assert_eq!(startup.rescan_phase(), RescanPhase::Complete);
+        assert_eq!(startup.rescan_result(second).unwrap().error, None);
+    }
+
+    #[test]
+    fn rescan_deadline_caps_scan_and_nested_identity_requests() {
+        let mut startup =
+            prepared_runtime_state_request(EthercatState::Op, StartupSlaveProfile::new(0), false);
+        startup.start_rescan(9, 0, 1_000).unwrap();
+        let first_probe = startup.next_action(1).unwrap().unwrap();
+        assert_eq!(first_probe.deadline_ns(), 1_000);
+
+        let mut now_ns = 1;
+        accept_scanned_slave(&mut startup, 0, None, &mut now_ns);
+        finish_scan(&mut startup, now_ns).unwrap();
+        assert_eq!(startup.phase(), StartupPhase::ReadingIdentity);
+
+        let identity_action = startup.next_action(now_ns + 2).unwrap().unwrap();
+        assert!(matches!(identity_action, StartupAction::Sii(_)));
+        assert_eq!(identity_action.deadline_ns(), 1_000);
+    }
+
+    #[test]
+    fn rescan_rejects_non_terminal_startup_without_publishing_a_handle() {
+        let mut startup = StartupController::<1>::new(0x1000);
+        assert_eq!(
+            startup.start_rescan(1, 0, 100),
+            Err(RescanError::InvalidState(StartupPhase::Idle))
+        );
+        assert_eq!(startup.rescan_phase(), RescanPhase::Idle);
+
+        startup
+            .start(1, 0, StartupConfig::new(EthercatState::PreOp), &[])
+            .unwrap();
+        assert_eq!(
+            startup.start_rescan(2, 1, 100),
+            Err(RescanError::InvalidState(StartupPhase::Scanning))
+        );
+        assert_eq!(startup.rescan_phase(), RescanPhase::Idle);
     }
 }

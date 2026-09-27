@@ -57,6 +57,17 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   Reject runtime state changes for non-empty OpOnly output profiles until the
   shared bounded OpOnly sequence exists. Follow
   [EtherCAT Runtime State Requests](./ethercat-state-requests.md).
+- Route explicit topology verification through
+  `StartupController::start_rescan`. Validate the retained plan and future
+  absolute deadline before clearing readiness, then reuse the existing Startup
+  scan/SII/register/DC/AL authorities with PREOP as the fixed target and no
+  external configuration barrier. Cap every nested timeout and wire deadline
+  by the remaining operation budget. Classify the reused action as the named
+  `Rescan` production service at Startup priority, preserve any already
+  in-flight service, and keep active/faulted work fail-closed at the topology
+  lifecycle gate. Never auto-trigger a rescan, resize the process image,
+  reconfigure PDO/DC, return OP, or infer motion permission from completion.
+  Follow [EtherCAT Explicit Rescan](./ethercat-rescan.md).
 - Decode ESC base registers at their protocol widths from one exact bounded
   block. Type/revision are bytes, build is little-endian `u16`, RAM and port
   descriptor are separate bytes, and Features Supported is its own `u16`.

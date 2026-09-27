@@ -27,6 +27,7 @@ use crate::port::EthercatPort;
 use crate::register_request::{
     EscRegisterRequestController, EscRegisterRequestError, EscRegisterRequestProgress,
 };
+use crate::rescan::{RescanError, RescanPhase, RescanProgress};
 use crate::scheduled_domains::{
     ScheduledControlCycleError, ScheduledControlCycleReport, ScheduledDomainBank,
     ScheduledMailboxCycleError, ScheduledMailboxCycleReport, ScheduledReceiveReport,
@@ -42,6 +43,7 @@ use crate::wire::MAX_ETHERNET_FRAME_LEN;
 pub enum ScheduledProductionServiceKind {
     Idle,
     Startup,
+    Rescan,
     PdoConfiguration,
     WatchdogConfiguration,
     Mapping,
@@ -64,6 +66,7 @@ pub enum ScheduledProductionServiceProgress {
     Idle,
     Waiting,
     Startup(StartupProgress),
+    Rescan(RescanProgress),
     PdoConfiguration(ScheduledPdoConfigurationProgress),
     WatchdogConfiguration(WatchdogProgress),
     Mapping(MappingConfigProgress),
@@ -79,6 +82,7 @@ pub enum ScheduledProductionServiceProgress {
 pub enum ScheduledProductionServiceFault {
     Control(ControlError),
     Startup(StartupError),
+    Rescan(RescanError),
     PdoConfiguration(PdoConfigError),
     WatchdogConfiguration(WatchdogError),
     Mapping(MappingConfigError),
@@ -1061,6 +1065,7 @@ impl ScheduledProductionServiceScheduler {
         }
         self.active = [
             ScheduledProductionServiceKind::Startup,
+            ScheduledProductionServiceKind::Rescan,
             ScheduledProductionServiceKind::PdoConfiguration,
             ScheduledProductionServiceKind::WatchdogConfiguration,
             ScheduledProductionServiceKind::Mapping,
@@ -1100,14 +1105,19 @@ impl ScheduledProductionServiceScheduler {
             ScheduledProductionServiceKind::Idle => false,
             ScheduledProductionServiceKind::Startup => {
                 services.startup.as_deref().is_some_and(|controller| {
-                    !matches!(
-                        controller.phase(),
-                        StartupPhase::Idle
-                            | StartupPhase::AwaitingConfiguration
-                            | StartupPhase::Ready
-                    )
+                    !controller.is_rescan_active_or_faulted()
+                        && !matches!(
+                            controller.phase(),
+                            StartupPhase::Idle
+                                | StartupPhase::AwaitingConfiguration
+                                | StartupPhase::Ready
+                        )
                 })
             }
+            ScheduledProductionServiceKind::Rescan => services
+                .startup
+                .as_deref()
+                .is_some_and(StartupController::is_rescan_active_or_faulted),
             ScheduledProductionServiceKind::PdoConfiguration => services
                 .pdo_configuration
                 .as_ref()
@@ -1220,21 +1230,23 @@ impl ScheduledProductionServiceScheduler {
         };
         let request = controls.get(handle).ok_or(self.active)?;
         let matches = match self.active {
-            ScheduledProductionServiceKind::Startup => services
-                .startup
-                .as_deref()
-                .and_then(StartupController::pending_action)
-                .is_some_and(|action| {
-                    request.matches_action(
-                        action.datagram_index(),
-                        action.generation(),
-                        action.address(),
-                        action.operation(),
-                        action.payload(),
-                        action.datagram_len(),
-                        action.deadline_ns(),
-                    )
-                }),
+            ScheduledProductionServiceKind::Startup | ScheduledProductionServiceKind::Rescan => {
+                services
+                    .startup
+                    .as_deref()
+                    .and_then(StartupController::pending_action)
+                    .is_some_and(|action| {
+                        request.matches_action(
+                            action.datagram_index(),
+                            action.generation(),
+                            action.address(),
+                            action.operation(),
+                            action.payload(),
+                            action.datagram_len(),
+                            action.deadline_ns(),
+                        )
+                    })
+            }
             ScheduledProductionServiceKind::PdoConfiguration => services
                 .pdo_configuration
                 .as_ref()
@@ -1399,7 +1411,8 @@ impl ScheduledProductionServiceScheduler {
     ) -> Result<ScheduledProductionEnqueueOutcome, ControlError> {
         match self.active {
             ScheduledProductionServiceKind::Idle => Ok(ScheduledProductionEnqueueOutcome::EMPTY),
-            ScheduledProductionServiceKind::Startup => {
+            ScheduledProductionServiceKind::Startup | ScheduledProductionServiceKind::Rescan => {
+                let kind = self.active;
                 let controller = services
                     .startup
                     .as_deref_mut()
@@ -1408,7 +1421,16 @@ impl ScheduledProductionServiceScheduler {
                     Ok(action) => action,
                     Err(error) => {
                         return Ok(ScheduledProductionEnqueueOutcome {
-                            fault: Some(ScheduledProductionServiceFault::Startup(error)),
+                            fault: Some(match kind {
+                                ScheduledProductionServiceKind::Rescan => {
+                                    ScheduledProductionServiceFault::Rescan(
+                                        controller
+                                            .last_rescan_error()
+                                            .unwrap_or(RescanError::Startup(error)),
+                                    )
+                                }
+                                _ => ScheduledProductionServiceFault::Startup(error),
+                            }),
                             ..ScheduledProductionEnqueueOutcome::EMPTY
                         });
                     }
@@ -1422,16 +1444,39 @@ impl ScheduledProductionServiceScheduler {
                             ..ScheduledProductionEnqueueOutcome::EMPTY
                         });
                     }
+                    if kind == ScheduledProductionServiceKind::Rescan
+                        && let Some(progress) = controller.terminal_rescan_progress()
+                    {
+                        return Ok(ScheduledProductionEnqueueOutcome {
+                            progress: Some(ScheduledProductionServiceProgress::Rescan(progress)),
+                            ..ScheduledProductionEnqueueOutcome::EMPTY
+                        });
+                    }
                     return Ok(ScheduledProductionEnqueueOutcome::EMPTY);
                 };
                 if action.deadline_ns() <= now_ns {
                     return Ok(match controller.timeout(action, now_ns) {
                         Ok(progress) => ScheduledProductionEnqueueOutcome {
-                            progress: Some(ScheduledProductionServiceProgress::Startup(progress)),
+                            progress: Some(if kind == ScheduledProductionServiceKind::Rescan {
+                                controller
+                                    .project_rescan_progress(progress)
+                                    .map(ScheduledProductionServiceProgress::Rescan)
+                                    .unwrap_or(ScheduledProductionServiceProgress::Waiting)
+                            } else {
+                                ScheduledProductionServiceProgress::Startup(progress)
+                            }),
                             ..ScheduledProductionEnqueueOutcome::EMPTY
                         },
                         Err(error) => ScheduledProductionEnqueueOutcome {
-                            fault: Some(ScheduledProductionServiceFault::Startup(error)),
+                            fault: Some(if kind == ScheduledProductionServiceKind::Rescan {
+                                ScheduledProductionServiceFault::Rescan(
+                                    controller
+                                        .last_rescan_error()
+                                        .unwrap_or(RescanError::Startup(error)),
+                                )
+                            } else {
+                                ScheduledProductionServiceFault::Startup(error)
+                            }),
                             ..ScheduledProductionEnqueueOutcome::EMPTY
                         },
                     });
@@ -1974,15 +2019,29 @@ impl ScheduledProductionServiceScheduler {
         cycle: u64,
     ) -> Result<ScheduledProductionServiceProgress, ScheduledProductionServiceFault> {
         match self.active {
-            ScheduledProductionServiceKind::Startup => services
-                .startup
-                .as_deref_mut()
-                .ok_or(ScheduledProductionServiceFault::Control(
-                    ControlError::InvalidState,
-                ))?
-                .accept_completed(controls, handle, now_ns)
-                .map(ScheduledProductionServiceProgress::Startup)
-                .map_err(ScheduledProductionServiceFault::Startup),
+            ScheduledProductionServiceKind::Startup | ScheduledProductionServiceKind::Rescan => {
+                let kind = self.active;
+                let controller = services.startup.as_deref_mut().ok_or(
+                    ScheduledProductionServiceFault::Control(ControlError::InvalidState),
+                )?;
+                match controller.accept_completed(controls, handle, now_ns) {
+                    Ok(progress) if kind == ScheduledProductionServiceKind::Rescan => {
+                        Ok(controller
+                            .project_rescan_progress(progress)
+                            .map(ScheduledProductionServiceProgress::Rescan)
+                            .unwrap_or(ScheduledProductionServiceProgress::Waiting))
+                    }
+                    Ok(progress) => Ok(ScheduledProductionServiceProgress::Startup(progress)),
+                    Err(error) if kind == ScheduledProductionServiceKind::Rescan => {
+                        Err(ScheduledProductionServiceFault::Rescan(
+                            controller
+                                .last_rescan_error()
+                                .unwrap_or(RescanError::Startup(error)),
+                        ))
+                    }
+                    Err(error) => Err(ScheduledProductionServiceFault::Startup(error)),
+                }
+            }
             ScheduledProductionServiceKind::WatchdogConfiguration => services
                 .watchdog_configuration
                 .as_deref_mut()
@@ -2101,6 +2160,11 @@ impl ScheduledProductionServiceScheduler {
                 .as_deref()
                 .and_then(StartupController::last_error)
                 .map(ScheduledProductionServiceFault::Startup),
+            ScheduledProductionServiceKind::Rescan => services
+                .startup
+                .as_deref()
+                .and_then(StartupController::last_rescan_error)
+                .map(ScheduledProductionServiceFault::Rescan),
             ScheduledProductionServiceKind::PdoConfiguration => services
                 .pdo_configuration
                 .as_ref()
@@ -2170,6 +2234,10 @@ impl ScheduledProductionServiceScheduler {
                 .startup
                 .as_deref()
                 .is_some_and(|controller| controller.phase() == StartupPhase::Ready),
+            ScheduledProductionServiceKind::Rescan => services
+                .startup
+                .as_deref()
+                .is_some_and(|controller| controller.rescan_phase() == RescanPhase::Complete),
             ScheduledProductionServiceKind::PdoConfiguration => services
                 .pdo_configuration
                 .as_ref()
@@ -2581,6 +2649,161 @@ mod tests {
             ))
         );
         assert!(!scheduler.controller_ready(&services));
+    }
+
+    fn ready_empty_startup() -> StartupController<1> {
+        let mut startup = StartupController::new(0x1000);
+        startup
+            .start(1, 0, StartupConfig::new(EthercatState::Op), &[])
+            .unwrap();
+        let probe = startup.next_action(1).unwrap().unwrap();
+        startup
+            .accept(probe, probe.generation(), &[], 0, 2)
+            .unwrap();
+        assert_eq!(startup.phase(), StartupPhase::Ready);
+        startup
+    }
+
+    #[test]
+    fn rescan_has_startup_priority_and_in_flight_ownership_prevents_preemption() {
+        let mut startup = ready_empty_startup();
+        let handle = startup.start_rescan(7, 10, 100).unwrap();
+        let mut state_request = StateRequestController::new();
+        state_request.start(state_request_config(8)).unwrap();
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+        let mut controls = ControlRequestPool::<1>::new();
+
+        {
+            let services =
+                ScheduledProductionServices::<1, 0, 0>::new(Some(&mut startup), None, None, None)
+                    .with_state_request(&mut state_request);
+            scheduler.refresh_selection(&services);
+        }
+        assert_eq!(scheduler.active(), ScheduledProductionServiceKind::Rescan);
+
+        let request = {
+            let mut services =
+                ScheduledProductionServices::<1, 0, 0>::new(Some(&mut startup), None, None, None)
+                    .with_state_request(&mut state_request);
+            scheduler
+                .enqueue_due(11, &mut controls, &mut services)
+                .unwrap()
+                .request
+                .unwrap()
+        };
+        scheduler.request = Some(request);
+        {
+            let services =
+                ScheduledProductionServices::<1, 0, 0>::new(Some(&mut startup), None, None, None)
+                    .with_state_request(&mut state_request);
+            scheduler.refresh_selection(&services);
+            assert_eq!(scheduler.active(), ScheduledProductionServiceKind::Rescan);
+            assert_eq!(
+                scheduler.ensure_request_matches(&controls, &services),
+                Ok(())
+            );
+        }
+        assert_eq!(startup.active_rescan_handle(), Some(handle));
+
+        controls.release(request).unwrap();
+        let mut owner_scheduler = ScheduledProductionServiceScheduler::new();
+        let state_request_handle = {
+            let mut services = ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+                .with_state_request(&mut state_request);
+            owner_scheduler.refresh_selection(&services);
+            owner_scheduler
+                .enqueue_due(12, &mut controls, &mut services)
+                .unwrap()
+                .request
+                .unwrap()
+        };
+        owner_scheduler.request = Some(state_request_handle);
+        {
+            let services =
+                ScheduledProductionServices::<1, 0, 0>::new(Some(&mut startup), None, None, None)
+                    .with_state_request(&mut state_request);
+            owner_scheduler.refresh_selection(&services);
+        }
+        assert_eq!(
+            owner_scheduler.active(),
+            ScheduledProductionServiceKind::StateRequest
+        );
+        controls.release(state_request_handle).unwrap();
+    }
+
+    #[test]
+    fn rescan_terminal_progress_fault_and_no_auto_trigger_remain_visible() {
+        let mut startup = ready_empty_startup();
+        let handle = startup.start_rescan(7, 10, 100).unwrap();
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+        let mut controls = ControlRequestPool::<1>::new();
+        let request = {
+            let mut services =
+                ScheduledProductionServices::<1, 0, 0>::new(Some(&mut startup), None, None, None);
+            scheduler.refresh_selection(&services);
+            assert_eq!(scheduler.active(), ScheduledProductionServiceKind::Rescan);
+            scheduler
+                .enqueue_due(11, &mut controls, &mut services)
+                .unwrap()
+                .request
+                .unwrap()
+        };
+        let action = startup.pending_action().unwrap();
+        let mut frame = [0; MAX_ETHERNET_FRAME_LEN];
+        controls
+            .get_mut(request)
+            .unwrap()
+            .build_frame(&mut frame, [0xFF; 6], [1, 2, 3, 4, 5, 6])
+            .unwrap();
+        controls
+            .complete(request, action.generation(), action.address(), &[0, 0], 0)
+            .unwrap();
+        let progress = {
+            let mut services =
+                ScheduledProductionServices::<1, 0, 0>::new(Some(&mut startup), None, None, None);
+            scheduler
+                .consume_terminal(&mut controls, &mut services, request, 12, 1)
+                .unwrap()
+        };
+        assert_eq!(
+            progress,
+            ScheduledProductionServiceProgress::Rescan(RescanProgress::Complete(
+                startup.rescan_result(handle).unwrap()
+            ))
+        );
+        assert_eq!(startup.rescan_phase(), RescanPhase::Complete);
+        scheduler.request = None;
+        {
+            let services =
+                ScheduledProductionServices::<1, 0, 0>::new(Some(&mut startup), None, None, None);
+            assert!(scheduler.controller_ready(&services));
+            scheduler.refresh_selection(&services);
+        }
+        assert_eq!(scheduler.active(), ScheduledProductionServiceKind::Idle);
+
+        startup.start_rescan(8, 100, 110).unwrap();
+        let fault = {
+            let mut services =
+                ScheduledProductionServices::<1, 0, 0>::new(Some(&mut startup), None, None, None);
+            scheduler.refresh_selection(&services);
+            assert_eq!(scheduler.active(), ScheduledProductionServiceKind::Rescan);
+            scheduler
+                .enqueue_due(110, &mut controls, &mut services)
+                .unwrap()
+                .fault
+        };
+        assert_eq!(
+            fault,
+            Some(ScheduledProductionServiceFault::Rescan(
+                RescanError::Startup(StartupError::OperationDeadlineExceeded)
+            ))
+        );
+        {
+            let services =
+                ScheduledProductionServices::<1, 0, 0>::new(Some(&mut startup), None, None, None);
+            assert_eq!(scheduler.controller_fault(&services), fault);
+            assert!(!scheduler.controller_ready(&services));
+        }
     }
 
     #[test]

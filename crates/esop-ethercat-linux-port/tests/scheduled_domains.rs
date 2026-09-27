@@ -34,6 +34,7 @@ use esop_ethercat_core::{
     WatchdogController, WatchdogControllerConfig, WatchdogError, WatchdogField, WatchdogPhase,
     WatchdogPlan, WatchdogPlanEntry, WatchdogProgress, fixed_address,
 };
+use esop_ethercat_core::{RescanPhase, RescanProgress};
 use esop_ethercat_linux_port::SimulatedPort;
 use esop_lifecycle_guard::ethercat::{
     OtherCycleFacts, ScheduledControlGate, ScheduledDomainQuality, cyclic_quality_from_schedule,
@@ -912,6 +913,169 @@ fn runtime_state_request_preserves_cyclic_order_and_does_not_retransmit_in_fligh
     );
     assert!(
         other_cycle_facts_from_production_service_cycle(&third, ready_other_cycle_facts())
+            .topology_valid
+    );
+}
+
+#[test]
+fn explicit_rescan_preserves_cyclic_order_and_does_not_retransmit_in_flight_work() {
+    let schedule = ScheduleTable::<1, 1>::build(
+        100_000,
+        &[ScheduleDomain {
+            id: 9,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1000);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 12,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut bank = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 9,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<3, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+        [0xFF; 6],
+        [1, 2, 3, 4, 5, 6],
+    ));
+    let mut dc = DcCyclicSync::new(
+        DcCyclicConfig::new(0x3000, 13, 0),
+        DcMonitor::new(50, 10, 1, 2),
+    );
+    let mut process_plan = FramePlan::<1>::new();
+    process_plan
+        .push(DatagramPlan {
+            command: Command::Lrw,
+            index: 12,
+            address: 0x1000,
+            payload_offset: 0,
+            payload_len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut process_plans = FramePlanSet::<1, 1>::new();
+    process_plans.push(process_plan.datagrams()[0]).unwrap();
+    let process_image = [0x40, 0x00];
+    let process_inputs = ScheduledProcessInputs::new(
+        &bank,
+        &schedule,
+        [ScheduledProcessInputEntry {
+            id: 9,
+            image: &process_image,
+            plans: &process_plans,
+        }],
+    )
+    .unwrap();
+
+    let mut startup = StartupController::<1>::new(0x1000);
+    startup
+        .start(1, 0, StartupConfig::new(EthercatState::Op), &[])
+        .unwrap();
+    let initial_probe = startup.next_action(1).unwrap().unwrap();
+    startup
+        .accept(initial_probe, initial_probe.generation(), &[], 0, 2)
+        .unwrap();
+    let operation = startup.start_rescan(7, 100_000, 600_000).unwrap();
+
+    let mut scheduler = ScheduledProductionServiceScheduler::new();
+    let mut controls = ControlRequestPool::<1>::new();
+    let mut port = TwoFrameSimPort::new();
+    port.set_aprd_wkc_zero(true);
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut dc_image = [0; 8];
+
+    port.set_now_ns(100_000);
+    port.pause_after_next_rx_frames(2);
+    bank.submit_due_process_inputs(&process_inputs, &mut master, &mut port, 1, 150_000, 150_000)
+        .unwrap();
+    let first = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            100_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<1, 0, 0>::new(Some(&mut startup), None, None, None),
+            1,
+            150_000,
+            150_000,
+        )
+        .unwrap();
+    assert_eq!(first.selected(), ScheduledProductionServiceKind::Rescan);
+    assert_eq!(
+        first.progress(),
+        ScheduledProductionServiceProgress::Waiting
+    );
+    assert_eq!(
+        first.recovery(),
+        ScheduledProductionServiceRecovery::AwaitingResponse
+    );
+    assert!(first.request().is_some());
+    assert_eq!(controls.in_use(), 1);
+    assert_eq!(startup.rescan_phase(), RescanPhase::Active);
+    assert_eq!(port.tx_attempts, 3);
+    assert_eq!(
+        port.tx_commands[..3],
+        [Command::Lrw as u8, Command::Frmw as u8, Command::Aprd as u8]
+    );
+    assert!(
+        !other_cycle_facts_from_production_service_cycle(&first, ready_other_cycle_facts())
+            .topology_valid
+    );
+
+    port.set_now_ns(200_000);
+    bank.submit_due_process_inputs(&process_inputs, &mut master, &mut port, 2, 250_000, 250_000)
+        .unwrap();
+    let second = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            200_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<1, 0, 0>::new(Some(&mut startup), None, None, None),
+            2,
+            250_000,
+            250_000,
+        )
+        .unwrap();
+    let result = startup.rescan_result(operation).unwrap();
+    assert_eq!(
+        second.progress(),
+        ScheduledProductionServiceProgress::Rescan(RescanProgress::Complete(result))
+    );
+    assert_eq!(second.request(), None);
+    assert!(second.service_ready());
+    assert_eq!(startup.rescan_phase(), RescanPhase::Complete);
+    assert_eq!(startup.phase(), StartupPhase::Ready);
+    assert_eq!(controls.in_use(), 0);
+    assert_eq!(port.tx_attempts, 5);
+    assert_eq!(
+        port.tx_commands[3..5],
+        [Command::Lrw as u8, Command::Frmw as u8]
+    );
+    assert_eq!(port.al_control_writes, 0);
+    assert_eq!(result.expected_count, 0);
+    assert_eq!(result.discovered_count, 0);
+    assert!(
+        other_cycle_facts_from_production_service_cycle(&second, ready_other_cycle_facts())
             .topology_valid
     );
 }
@@ -4804,6 +4968,7 @@ struct TwoFrameSimPort {
     sync_window_difference: Option<u32>,
     al_control_writes: usize,
     last_al_control: Option<u16>,
+    aprd_wkc_zero: bool,
 }
 
 impl TwoFrameSimPort {
@@ -4834,6 +4999,7 @@ impl TwoFrameSimPort {
             sync_window_difference: None,
             al_control_writes: 0,
             last_al_control: None,
+            aprd_wkc_zero: false,
         }
     }
 
@@ -4905,6 +5071,10 @@ impl TwoFrameSimPort {
 
     fn pause_after_next_rx_frames(&mut self, frames: usize) {
         self.empty_on_rx_poll = Some(self.rx_polls + frames + 1);
+    }
+
+    fn set_aprd_wkc_zero(&mut self, enabled: bool) {
+        self.aprd_wkc_zero = enabled;
     }
 }
 
@@ -5000,6 +5170,10 @@ impl EthercatPort for TwoFrameSimPort {
                 {
                     self.frames[self.count][header_end..payload_end]
                         .copy_from_slice(&difference_ns.to_le_bytes());
+                }
+                if self.aprd_wkc_zero && header.command == Command::Aprd {
+                    self.frames[self.count][payload_end..payload_end + WORKING_COUNTER_LEN]
+                        .copy_from_slice(&0u16.to_le_bytes());
                 }
                 offset = payload_end + WORKING_COUNTER_LEN;
                 if header.last {

@@ -31,9 +31,10 @@
     {
       "id": "ethercat_explicit_recovery",
       "status": "partial",
-      "scope": "REC-001 control-plane recovery with an implemented allocation-free single-slave request_state operation: stable handles, legal multi-step ESM traversal over the existing AL authority, verified Startup context and retained-state reconciliation, fixed-priority production scheduling after cyclic Domain/DC work, no in-flight retransmission, typed latched faults, and fail-closed topology lifecycle gating",
+      "scope": "REC-001 control-plane recovery with implemented allocation-free request_state and explicit rescan operations: stable handles, legal multi-step ESM traversal over the existing AL authority, transactional retained-plan PREOP rescanning through the existing Startup scan/SII/register/DC/AL authorities, operation-wide absolute deadlines, synchronous stale-evidence invalidation, fixed-priority production scheduling after cyclic Domain/DC work, no in-flight retransmission, typed latched faults, and fail-closed topology lifecycle gating",
       "evidence": [
         "crates/esop-ethercat-core/src/state_request.rs",
+        "crates/esop-ethercat-core/src/rescan.rs",
         "crates/esop-ethercat-core/src/startup.rs",
         "crates/esop-ethercat-core/src/production_service.rs",
         "crates/esop-ethercat-linux-port/tests/scheduled_domains.rs",
@@ -41,9 +42,10 @@
         "docs/ethercat-master-requirements.md",
         "docs/esop-etg-cia402-master-requirements.md",
         "docs/esop-software-prd.md",
-        ".trellis/spec/backend/ethercat-state-requests.md"
+        ".trellis/spec/backend/ethercat-state-requests.md",
+        ".trellis/spec/backend/ethercat-rescan.md"
       ],
-      "limitation": "Only explicit request_state is implemented. Explicit rescan and single-slave reconfigure_slave, a unified recovery API and mixed-load qualification remain planned, and runtime state changes for profiles with non-empty OpOnly output rules are rejected until the shared bounded OpOnly sequence is extracted. Deterministic software tests do not prove physical response provenance, real-slave interoperability, target WCET/jitter, long-duration behavior, HIL, ETG conformance, safe outputs, STO, or functional-safety qualification; automatic retry and automatic OP return remain disabled"
+      "limitation": "Explicit request_state and retained-plan PREOP rescan are implemented. Single-slave reconfigure_slave, a unified recovery API and mixed recovery-load qualification remain planned, and runtime state changes for profiles with non-empty OpOnly output rules are rejected until the shared bounded OpOnly sequence is extracted. Rescan does not resize the process image, reconfigure PDO/DC, refresh commands, or return SAFEOP/OP. Deterministic software tests do not prove physical response provenance, real-slave interoperability, target WCET/jitter, long-duration behavior, HIL, ETG conformance, safe outputs, STO, or functional-safety qualification; automatic retry, automatic rescan and automatic OP return remain disabled"
     },
     {
       "id": "ethercat_domain_wkc_qualification",

@@ -27,6 +27,7 @@ mod port;
 mod production_service;
 mod register_request;
 mod registers;
+mod rescan;
 mod ring;
 mod rx_index;
 mod scan;
@@ -153,6 +154,9 @@ pub use registers::{
     ESC_FEATURES_SUPPORTED, ESC_FMMU_COUNT, ESC_PORT_COUNT, ESC_PORT_DESCRIPTOR, ESC_RAM_SIZE,
     ESC_REVISION, ESC_STATION_ADDRESS, ESC_SYNC_MANAGER_COUNT, ESC_TYPE, auto_increment_address,
     fixed_address, register_from_address, station_from_address,
+};
+pub use rescan::{
+    RescanError, RescanHandle, RescanPhase, RescanProgress, RescanResult, RescanStatus,
 };
 pub use ring::{RingError, SpscConsumer, SpscProducer, SpscRing};
 pub use rx_index::{

@@ -19,10 +19,10 @@ make ci
 
 ## 2. Explicit Rescan
 
-- [ ] Create and complete child task `ethercat-explicit-rescan`.
-- [ ] Add named rescan submission/progress/result APIs.
-- [ ] Invalidate stale readiness before reusing scan/SII/topology startup work.
-- [ ] Prove cyclic coexistence and no implicit trigger on ordinary faults.
+- [x] Create and complete child task `ethercat-explicit-rescan`.
+- [x] Add named rescan submission/progress/result APIs.
+- [x] Invalidate stale readiness before reusing scan/SII/topology startup work.
+- [x] Prove cyclic coexistence and no implicit trigger on ordinary faults.
 
 ## 3. Single-Slave Reconfiguration
 

@@ -511,7 +511,7 @@ ProcBuf 是实时数据 ABI，而不是通用消息总线。它必须是固定�
 | R4：机器人软件集成 | `ros2_control`、ROS bridge、URDF/配置生成、双轴轨迹演示。 | `read/update/write` 不绕过 ProcBuf；仿真与实机 HIL 演示及兼容矩阵完成。 |
 | R5：扩展与专项 | FoE、其他协议、冗余、FSoE 项目对接、官方流程。 | 每个扩展有独立开关、资源/周期影响报告与专项证据。 |
 
-R2 当前进展：固定容量 `ScheduledDomainBank` 已拥有多 Domain 共享 RX，`ScheduledAuxiliaryOutputs` 按**下一次 RX 周期**的冻结 due mask 提前提交辅助输出，生命周期入口会在 State/事件发布后完成最终 deadline 观测和补救。`ScheduledProcessInputs` 可在启动、恢复或其他明确需要预 RX 发送的阶段完成首次 priming；`ScheduledProductionCycleOwner` 随后以 `PrimingRequired → ReceiveArmed → OutputPending → ReceiveArmed` 固定状态交接上一轮生命周期输出，核对周期、generation、RX deadline 和实际完成报告，拒绝重复 priming，并把完整过程 handoff、最终 deadline、State 与事件发布合并为任务释放证据。`ScheduledProductionServiceScheduler` 现统一选择 Startup、PDO/Watchdog/Mapping、DC Clock/DC SYNC/DC 配置、显式状态请求、Mailbox 与普通异步 ESC 寄存器请求，固定优先级保持上述顺序；调度器持有唯一请求句柄，`Prepared` 最多发送一次，未上线时释放并从原 FSM 动作重建，`InFlight` 跨周期保留且不重发，`Complete`/`Failed` 由匹配 FSM 消费并释放，故障服务保持优先级直到外部显式重启。服务报告直接携带选择、进度、精确故障、恢复状态和就绪值，并由 Bank 核对真实 RX 后映射到 Topology 或 Configuration 门，不再由调用方手工声明 gate/readiness。可选受控停车入口已通过 `ControlledStopCycleState` 接入 stop-only、共享 RX、控制服务和统一生产服务周期；限幅由调用方冻结，受控验证/构帧/TX 首次失败会将当前 MLG 转换序列锁定到默认 Disable/QuickStop，cycle outcome 与 production release 均保留成功使用/回退证据。原始单位限幅、驱动行为、制动器和机械条件仍需逐产品冻结并通过 HIL。目标硬件 WCET 与实物 HIL 验收仍未完成，上表 R2 出口条件仍未满足。
+R2 当前进展：固定容量 `ScheduledDomainBank` 已拥有多 Domain 共享 RX，`ScheduledAuxiliaryOutputs` 按**下一次 RX 周期**的冻结 due mask 提前提交辅助输出，生命周期入口会在 State/事件发布后完成最终 deadline 观测和补救。`ScheduledProcessInputs` 可在启动、恢复或其他明确需要预 RX 发送的阶段完成首次 priming；`ScheduledProductionCycleOwner` 随后以 `PrimingRequired → ReceiveArmed → OutputPending → ReceiveArmed` 固定状态交接上一轮生命周期输出，核对周期、generation、RX deadline 和实际完成报告，拒绝重复 priming，并把完整过程 handoff、最终 deadline、State 与事件发布合并为任务释放证据。`ScheduledProductionServiceScheduler` 现统一选择 Startup/显式 Rescan、PDO/Watchdog/Mapping、DC Clock/DC SYNC/DC 配置、显式状态请求、Mailbox 与普通异步 ESC 寄存器请求，固定优先级保持上述顺序；调度器持有唯一请求句柄，`Prepared` 最多发送一次，未上线时释放并从原 FSM 动作重建，`InFlight` 跨周期保留且不重发，`Complete`/`Failed` 由匹配 FSM 消费并释放，故障服务保持优先级直到外部显式重启。服务报告直接携带选择、进度、精确故障、恢复状态和就绪值，并由 Bank 核对真实 RX 后映射到 Topology 或 Configuration 门，不再由调用方手工声明 gate/readiness。可选受控停车入口已通过 `ControlledStopCycleState` 接入 stop-only、共享 RX、控制服务和统一生产服务周期；限幅由调用方冻结，受控验证/构帧/TX 首次失败会将当前 MLG 转换序列锁定到默认 Disable/QuickStop，cycle outcome 与 production release 均保留成功使用/回退证据。原始单位限幅、驱动行为、制动器和机械条件仍需逐产品冻结并通过 HIL。目标硬件 WCET 与实物 HIL 验收仍未完成，上表 R2 出口条件仍未满足。
 
 R2 显式状态请求增量：`StateRequestController` 以固定容量单槽和稳定 handle 执行
 `request_state(position, target, deadline)`，为 INIT/PREOP/SAFEOP/OP 多步路径逐段复用
@@ -520,8 +520,17 @@ R2 显式状态请求增量：`StateRequestController` 以固定容量单槽和�
 request timeout、Device Emulation 策略和 profile timeout；每个成功 observation 按真实 master
 cycle 回写 retained table。调度器在 cyclic `LRW` 和 DC `FRMW` 后发送 `FPWR/FPRD`，延迟回包
 跨周期保持唯一请求且不重发，活动或锁存故障会清除 Topology gate。完成不恢复其他 lifecycle
-门、不自动重试或回 OP；非空 `OpOnly` 输出 profile、`rescan`、`reconfigure_slave`、统一恢复
-接口、目标 WCET 和实物 HIL 仍未完成。
+门、不自动重试或回 OP；非空 `OpOnly` 输出 profile、`reconfigure_slave`、统一恢复接口、目标
+WCET 和实物 HIL 仍未完成。
+
+R2 显式重扫增量：`StartupController::start_rescan(generation, now, deadline)` 从 Ready 或 Faulted
+retained plan 创建稳定 handle；无效状态或已过 deadline 在修改证据前拒绝。成功提交会在首个 APRD
+前同步替换从站表、扫描、SII/Requesting ID/邮箱/FMMU/SyncManager/DC、参考钟、AL、OpOnly 和配置
+屏障状态，然后以 PREOP 和空配置服务复用同一 Startup FSM。所有嵌套 timeout 与线缆请求 deadline
+都受总体绝对 deadline 限制。生产服务把复用动作命名投影为 Rescan 并保持 Startup 优先级；Linux
+模拟已验证 `LRW -> FRMW -> APRD`、跨周期延迟 APRD 不重发、单控制池槽、活动期 Topology gate
+关闭和终态恢复。结果不重建过程映像、不重配 PDO/DC、不刷新命令、不自动 SAFEOP/OP，也不证明
+物理响应来源、目标 WCET、实物 HIL、ETG 一致性或功能安全。
 
 R2 ProcBuf 活动命令与反馈闭环增量：`Cia402AxisCommandPolicy` 由产品配置在激活前冻结每轴有符号位置/速度/转矩比例、位置偏置、SI 机械边界、速度/转矩上限和每周期位置步长。`prepare_cia402_command` 对 ABI-v7 Command page 重做结构、到期时间、轴掩码、模式和完整 permit 身份检查，在局部固定数组内完成最近整数目标量化与向下取整限幅；任何非有限值、错误策略、越界或 raw 溢出均在触碰 guard、Domain、帧池和端口前返回轴定位错误。`StopCycleContext` 的直接、调度和统一生产服务 ProcBuf 入口在执行边界重新比对当前周期 permit，握手阶段不写目标，Switched On 使能边沿写已验证实际反馈，Operation Enabled 后才写期望目标，并复用现有活动帧的可写覆盖、别名、限幅、构帧、TX 和同周期停机回退事务。完成 RX 后，`cia402_feedback_to_procbuf` 用同一轴策略事务化反向换算实际值，发布 Statusword、模式、PDS 状态、错误码和字段质量；无效输入保留旧值但清质量，Controlword 只跟随端口接受帧。Linux 模拟端口已覆盖 ProcBuf 发布/读取、permit rearm、双向 SI 换算、实际值保持、期望 PDO、WKC 失效保留、活动/回退/失败 TX Controlword 和拒绝不变性；该证据不提供产品策略生成、真实驱动响应、制动/机械适用性、目标 WCET 或安全资格。
 
