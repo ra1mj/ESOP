@@ -137,3 +137,36 @@ Implemented bounded target-isolated EtherCAT reconfiguration through direct PREO
 ### Next Steps
 
 - None - task complete
+
+
+## Session 63: EtherCAT explicit recovery integration and closeout
+
+**Date**: 2026-09-28
+**Task**: EtherCAT explicit recovery integration and closeout
+**Branch**: `main`
+
+### Summary
+
+Added unified allocation-free recovery status/result/fault projections and fixed-capacity diagnostics, qualified mixed recovery scheduling under cyclic load, synchronized REC-001 documentation and capability boundaries, passed local and exact GitHub quality gates, and archived the integration child plus parent recovery plan.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `bcb9c9e` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
