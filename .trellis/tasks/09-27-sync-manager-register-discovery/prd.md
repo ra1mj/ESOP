@@ -96,27 +96,50 @@ long-duration operation, and hardware HIL remain unqualified.
 
 ## Acceptance Criteria
 
-- [ ] A discovery unit test proves exact addresses, count/order, field decoding,
+- [x] A discovery unit test proves exact addresses, count/order, field decoding,
       control-pool ownership, zero-count completion, and complete-only
       publication.
-- [ ] Negative tests cover over-capacity count, wrong WKC, short payload, stale
+- [x] Negative tests cover over-capacity count, wrong WKC, short payload, stale
       generation/action, timeout, and restart/reset behavior without partial
       evidence.
-- [ ] Startup tests prove expected-SII profiles emit FMMU reads, then
+- [x] Startup tests prove expected-SII profiles emit FMMU reads, then
       SyncManager reads, then SII category-stream work before AL; all applicable
       evidence is published atomically and cleared on restart or terminal fault.
-- [ ] Mapping tests prove the enhanced path clears and reads back all discovered
+- [x] Mapping tests prove the enhanced path clears and reads back all discovered
       SyncManager slots, including unused slots, before FMMU reset and desired
       mapping; bank/count/index mismatch and clear readback mismatch fail closed.
-- [ ] Existing legacy `start` and FMMU-only mapping paths retain their traffic
+- [x] Existing legacy `start` and FMMU-only mapping paths retain their traffic
       order and behavior.
-- [ ] A public Linux integration path proves the full verified-bank mapping
+- [x] A public Linux integration path proves the full verified-bank mapping
       controller remains compatible with the production scheduler/control pool.
-- [ ] `cargo test -p esop-ethercat-core --no-fail-fast` passes.
-- [ ] `cargo test -p esop-ethercat-linux-port --test scheduled_domains` passes.
-- [ ] `make ci` passes.
-- [ ] The final commit is pushed to `ra1mj/ESOP` and the exact pushed SHA has a
+- [x] `cargo test -p esop-ethercat-core --no-fail-fast` passes.
+- [x] `cargo test -p esop-ethercat-linux-port --test scheduled_domains` passes.
+- [x] `make ci` passes.
+- [x] The final commit is pushed to `ra1mj/ESOP` and the exact pushed SHA has a
       successful GitHub Actions `quality` run.
+
+Local acceptance evidence was collected on 2026-09-27. The focused core and
+Linux integration suites passed, followed by the repository-wide `make ci`
+gate covering formatting, diff checks, workspace all-feature tests, Clippy with
+warnings denied, release and `aarch64-unknown-none` builds, BPF C syntax, and
+the generated configuration/qualification validators.
+
+## Verification Evidence
+
+Verified on 2026-09-27:
+
+- `cargo test -p esop-ethercat-core --no-fail-fast`: 269 core unit tests and
+  all public core integration tests passed.
+- `cargo test -p esop-ethercat-linux-port --test scheduled_domains`: 20
+  production-scheduler simulation tests passed, including the public full
+  verified FMMU/SyncManager bank clear path.
+- `make ci` passed formatting/diff checks, workspace all-feature tests, Clippy
+  with warnings denied, release and `aarch64-unknown-none` builds, BPF C syntax,
+  deterministic configuration generation, and every qualification validator.
+- Implementation commit `bacaa05fe4535fd3e8ff692365ef7e2ef596e3a7`
+  passed GitHub Actions run `36295552710`, including Rust quality/live Zenoh,
+  the CO-RE BPF build, and all privileged eBPF runtime qualification jobs:
+  `https://github.com/ra1mj/ESOP/actions/runs/36295552710`.
 
 ## Out of Scope
 

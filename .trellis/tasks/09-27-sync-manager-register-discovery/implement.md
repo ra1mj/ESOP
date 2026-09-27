@@ -19,6 +19,11 @@
 8. Complete acceptance evidence, update executable specs, commit, push `main`,
    and verify the exact pushed SHA's GitHub Actions `quality` run.
 
+All eight steps completed on 2026-09-27. The implementation SHA and successful
+GitHub Actions run are recorded in `prd.md`; task archival and the developer
+journal are produced by the standard Trellis finish workflow after this
+acceptance record is committed.
+
 ## Risk and Rollback Points
 
 - `startup.rs` has a broad test surface; preserve legacy profile sequencing and
