@@ -80,7 +80,7 @@ operations.
 - [x] The release report carries the exact number of due copies applied.
 - [x] Existing stable-cycle, static auxiliary-output, generated-product, and
   empty-copy tests continue to pass.
-- [ ] Focused tests, `no_std` target checks, Clippy with warnings denied,
+- [x] Focused tests, `no_std` target checks, Clippy with warnings denied,
   `make ci`, and the exact pushed GitHub Actions run all pass.
 
 ## Out of Scope
