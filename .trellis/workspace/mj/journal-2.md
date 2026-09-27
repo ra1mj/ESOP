@@ -71,3 +71,36 @@ Implemented bounded explicit request_state over the AL FSM, Startup retained evi
 ### Next Steps
 
 - None - task complete
+
+
+## Session 61: EtherCAT explicit rescan
+
+**Date**: 2026-09-28
+**Task**: EtherCAT explicit rescan
+**Branch**: `main`
+
+### Summary
+
+Implemented bounded PREOP-only EtherCAT rescan with synchronous evidence invalidation, Startup reuse, production scheduling, lifecycle gating, delayed-response simulation, executable specs, and complete local CI.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `bd8fd8f` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
