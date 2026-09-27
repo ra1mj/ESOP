@@ -45,3 +45,29 @@ cargo test -p esop-cfggen --no-fail-fast
 cargo test -p esop-ethercat-linux-port --test scheduled_domains
 make ci
 ```
+
+## Implementation Result
+
+Accepted on 2026-09-27 in implementation commit
+`e7c8e8e7f1189ce273748afcc843f720926df713`.
+
+- Added strict product-owned ESC watchdog divider and process-data interval
+  configuration with deterministic normalized, inventory, C, Rust, and hash
+  artifacts.
+- Added a fixed-capacity write/readback controller for `0x0400/2` and
+  `0x0420/2` with exact request ownership, WKC, length, deadline, readback,
+  first-failure, and complete-only evidence contracts.
+- Integrated the controller between PDO configuration and mapping, including
+  cross-cycle request retention and the opt-in PREOP startup barrier.
+- Added generated-product, scheduler, Linux simulation, lifecycle, rejection,
+  compatibility, and fault-path tests; the simulator exercises both registers
+  on two drives while preserving the IO slave default.
+- Passed every focused crate suite, `make cfggen-runtime-example`, capability
+  validation, and the complete local `make ci` gate.
+- GitHub Actions `quality` run `36298255226` passed for the exact implementation
+  SHA, including Rust, Zenoh, BPF build, and privileged eBPF runtime jobs.
+
+Acceptance is limited to deterministic software-provided responses. Physical
+watchdog expiration, response authenticity, target timing/WCET, HIL,
+interoperability, ETG conformance, and functional-safety qualification remain
+out of scope.

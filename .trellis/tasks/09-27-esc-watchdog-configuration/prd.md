@@ -96,31 +96,31 @@ conformance, or functional-safety qualification may be inferred.
 
 ## Acceptance Criteria
 
-- [ ] Core tests prove empty plans, optional individual fields, exact
+- [x] Core tests prove empty plans, optional individual fields, exact
       `0x0400/2` then `0x0420/2` write/read order, little-endian values,
       product-order traversal, complete-only evidence, and control-pool
       ownership.
-- [ ] Negative core tests cover zero values, empty config, duplicate
+- [x] Negative core tests cover zero values, empty config, duplicate
       position/station, capacity, action/generation substitution, short
       readback, WKC mismatch, value mismatch, timeout, deadline overflow, and
       explicit restart after fault.
-- [ ] Cfggen rejects unknown/empty/zero watchdog declarations and emits stable
+- [x] Cfggen rejects unknown/empty/zero watchdog declarations and emits stable
       normalized JSON, inventory, C, Rust, and hash evidence for valid optional
       declarations.
-- [ ] Product runtime tests prove generated-order plan construction, exact
+- [x] Product runtime tests prove generated-order plan construction, exact
       position/station/value propagation, invalid static data rejection, and an
       empty-plan path for unconfigured products.
-- [ ] Scheduler and Linux simulation tests prove watchdog priority between PDO
+- [x] Scheduler and Linux simulation tests prove watchdog priority between PDO
       and Mapping, cross-cycle request retention/rebuild, exact readback
       routing, typed faulting, and PREOP release only after Complete.
-- [ ] Legacy products and Startup service masks without watchdog requirements
+- [x] Legacy products and Startup service masks without watchdog requirements
       retain their existing traffic and completion behavior.
-- [ ] `cargo test -p esop-ethercat-core --no-fail-fast` passes.
-- [ ] `cargo test -p esop-cfggen --no-fail-fast` passes.
-- [ ] `cargo test -p esop-product-config --no-fail-fast` passes.
-- [ ] `cargo test -p esop-ethercat-linux-port --test scheduled_domains` passes.
-- [ ] `make ci` passes.
-- [ ] The final commit is pushed to `ra1mj/ESOP`, and the exact pushed SHA has
+- [x] `cargo test -p esop-ethercat-core --no-fail-fast` passes.
+- [x] `cargo test -p esop-cfggen --no-fail-fast` passes.
+- [x] `cargo test -p esop-product-config --no-fail-fast` passes.
+- [x] `cargo test -p esop-ethercat-linux-port --test scheduled_domains` passes.
+- [x] `make ci` passes.
+- [x] The final commit is pushed to `ra1mj/ESOP`, and the exact pushed SHA has
       a successful GitHub Actions `quality` run.
 
 ## Out of Scope
