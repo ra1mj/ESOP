@@ -123,7 +123,10 @@ CiA 402 PDO maps.
 It returns the owning frozen result only after all checks pass.
 
 Each generated slave carries four ESM transition timeout classes, one validated
-CoE mailbox pair, and one bounded `OpOnlySyncManagerProfile`. ESI `MBoxOut`
+CoE mailbox pair, one bounded `OpOnlySyncManagerProfile`, and an ordered FMMU
+usage profile with an explicit count plus a fixed 16-entry array. Only direct
+`Device/Fmmu` declarations are accepted; unknown, misplaced, empty, or excess
+declarations fail before staging. ESI `MBoxOut`
 maps to master-send/slave-receive and `MBoxIn` maps to
 master-receive/slave-send. Both SyncManagers must be enabled and provide
 `StartAddress`, `DefaultSize`, and `ControlByte`, while the Device must declare
@@ -131,7 +134,8 @@ master-receive/slave-send. Both SyncManagers must be enabled and provide
 oversized mailbox ranges fail before publication. Timeout values are decimal
 milliseconds converted to checked nanoseconds; missing values use the named
 `ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1`. Mailbox data, timeout profiles, and
-activation templates participate in ESI semantic and configuration hashes.
+activation templates and the ordered FMMU usage profile participate in ESI
+semantic and configuration hashes.
 All ordered ESI DC mode metadata participates in the ESI semantic hash. The
 product-selected mode, its exact SII-representable descriptor, and the resolved
 absolute SYNC0/SYNC1 cycle, signed SYNC0 shift, and exact 16-bit
@@ -160,19 +164,25 @@ cursors. The image, category count, and byte projection stay unavailable until
 END is accepted. Capacity, missing-END, address, WKC, generation, payload and
 timeout failures are typed and latch the first terminal error. The companion
 `SiiStreamDiscoveryController` publishes `SiiConfigurationCandidate` only
-after caller-owned scratch conversion and complete transactional SM/RxPDO/
-TxPDO projection; explicit PDO signedness is preserved. A versioned SHA-256
-structural signature covers exact SM count/enabled/OpOnly masks and ordered
-Rx-then-Tx PDO index/SM/object/subindex/bit-length records; signedness is
-intentionally excluded from live comparison. The same completed caller-owned
+after caller-owned scratch conversion and complete transactional FMMU usage/
+SM/RxPDO/TxPDO projection; explicit PDO signedness is preserved. The standard
+FMMU category must be non-empty, unique, at most 16 bytes, and contain only
+unused, outputs, inputs, SyncManager-status, or unspecified values. The
+schema-v2 SHA-256 structural signature covers the exact ordered FMMU sequence,
+SM count/enabled/OpOnly masks and ordered Rx-then-Tx PDO
+index/SM/object/subindex/bit-length records; signedness is intentionally
+excluded from live comparison. The same completed caller-owned
 image exposes borrowed Strings and fixed 24-byte DC category parsers. Mode
 names use exact one-based string indices, reserved bytes must be zero, and all
 signed shifts/factors retain their protocol widths without allocation.
 
 `startup_profiles` validates timeout values, exact slave positions, generated
-mailbox ranges, generated SM count/enabled mask, OpOnly flags, exclusive
-selected RxPDO ownership, and contiguous PDO groups before rebuilding the
-expected SII signature from the static fields used by runtime configuration.
+mailbox ranges, generated FMMU count, generated SM count/enabled mask, OpOnly
+flags, exclusive selected RxPDO ownership, and contiguous PDO groups before
+rebuilding the expected SII signature from the static fields used by runtime
+configuration. In deterministic all-Rx-then-all-Tx group order, every process
+data FMMU index must declare Outputs for Rx or Inputs for Tx; missing or other
+usage values fail before Startup mutation.
 It first validates the product-wide DC invariant and maps each static policy to
 `StartupDcRequirement::{None,SystemTime,ReferenceClock}`; invalid policy must
 return before Startup mutation. It also propagates the selected
@@ -181,7 +191,9 @@ descriptor are present in normalized JSON, device inventory, generated C/Rust
 and the product configuration SHA-256.
 `start_startup` supplies those profiles to Startup. After identity and optional
 mailbox verification, profiles with this expectation enter a distinct bounded
-configuration stream phase. Startup stages both structural-signature and
+configuration stream phase. Startup retains the position-keyed ESC FMMU count
+from each completed scan record and rejects an online usage category that
+exceeds it. It stages both structural-signature and
 selected-DC observations from that one pass, then publishes both position-
 keyed evidence records only after every comparison succeeds. It emits the
 first AL action only after exact comparison; stream, projection, capacity,
@@ -278,8 +290,9 @@ Configuration, topology-wide DC SYNC Configuration, and/or legacy DC
 Configuration. The scheduler orders these services as PDO, Mapping, DC Clock,
 DC SYNC, legacy DC, then Startup. It releases Startup only after the whole PDO
 batch and other required controllers reach real Complete phases, then resumes
-the retained topology through SAFEOP/OP. Full mapping/FMMU discovery, physical
-response authenticity and hardware qualification remain caller work.
+the retained topology through SAFEOP/OP. Logical addresses remain master-owned;
+full FMMU register discovery, physical response authenticity and hardware
+qualification remain caller work.
 
 The configuration SHA-256 covers normalized product semantics and a sorted
 label-to-semantic-ESI-hash map. It excludes timestamps, host paths, compiler,
@@ -307,6 +320,7 @@ datagrams, FCS, and inter-packet gap respectively.
 | Unknown/missing JSON field or unsupported schema | Reject before staging. |
 | Absolute, parent-traversing, or symlink-escaping ESI path | Reject as invalid product input. |
 | Ambiguous ESI identity/PDO, duplicate object, wrong direction/width | Reject with identity/PDO/CiA 402 context. |
+| Unknown, misplaced, empty, or over-capacity ESI FMMU declaration | Reject before staging or hash publication. |
 | Nested/misplaced ESI DC OpMode or wrapped DC field | Reject before mode or device metadata publication. |
 | Zero/malformed/overflowing ESM timeout or non-output OpOnly SM | Reject before staging or hash publication. |
 | Missing CoE, partial/duplicate/disabled ESI mailbox SM, or invalid mailbox range | Reject before staging or hash publication. |
@@ -318,7 +332,8 @@ datagrams, FCS, and inter-packet gap respectively.
 | Invalid/misaligned startup profile or OpOnly without exclusive RxPDO | Reject before Startup mutation or control emission. |
 | Invalid expected mailbox, live SII parse/CoE/layout mismatch, or SII request fault | Latch typed Startup fault before AL and publish no mailbox evidence. |
 | SII category image exceeds capacity, lacks END, overflows EEPROM addressing, or fails a response check | Latch the first stream fault and publish neither image nor configuration candidate. |
-| Invalid generated SII SM mask/PDO grouping, empty per-slave PDO mapping, or live structural signature mismatch | Reject before Startup mutation or latch Startup before AL; publish no SII verification evidence. |
+| Invalid generated FMMU count/usage-to-PDO direction, SII SM mask/PDO grouping, empty per-slave PDO mapping, or live schema-v2 structural signature mismatch | Reject before Startup mutation or latch Startup before AL; publish no SII verification evidence. |
+| Live SII FMMU usage count exceeds the ESC scan record count | Latch the typed Startup count fault before evidence or AL; publish neither SII nor DC evidence. |
 | DC reference without required, or multiple generated references | Reject before Startup mutation or generated output publication. |
 | Required System Time absent, delay-only WKC 0, or explicit reference not capable | Latch Startup before identity/SII/AL and publish no selected reference. |
 | System Time WKC greater than one, malformed payload, stale generation, ownership mismatch, or timeout | Latch the first typed scan fault; publish no partial slave record. |
@@ -403,8 +418,10 @@ datagrams, FCS, and inter-packet gap respectively.
 - Cover bounded SII category-stream acquisition through END, unknown and
   zero-length categories, capacity/missing-END/address failures, non-reset
   action cursors, one absolute deadline, request-pool ownership, stale
-  responses, signed projection and candidate atomicity. Cover every structural
-  signature field, generated profile construction, exact match/mismatch,
+  responses, signed projection and candidate atomicity. Cover supported FMMU
+  values, order, duplicate/empty/unknown/capacity rejection, every schema-v2
+  signature field, generated profile construction, PDO direction compatibility,
+  ESC count gating, exact match/mismatch,
   configuration-action ownership, timeout, multi-slave reuse, restart clearing,
   and legacy opt-out before AL.
 - Route a generated-style PDO action through `ScheduledPdoConfiguration`, the

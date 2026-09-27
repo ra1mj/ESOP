@@ -36,6 +36,7 @@ pub const SII_CATEGORY_TX_PDO: u16 = 0x0032;
 pub const SII_CATEGORY_RX_PDO: u16 = 0x0033;
 pub const SII_CATEGORY_DC: u16 = 0x003C;
 pub const SII_CATEGORY_END: u16 = 0xFFFF;
+pub const MAX_SII_FMMU_USAGES: usize = 16;
 
 const ACTION_PAYLOAD_LEN: usize = 4;
 const IDENTITY_WORDS: [u16; 8] = [
@@ -84,6 +85,10 @@ pub enum SiiCategoryError {
     StringIndexOutOfBounds(u8),
     DuplicateStringsCategory,
     MissingStringsCategory,
+    EmptyFmmuCategory,
+    FmmuCountOutOfBounds,
+    InvalidFmmuUsage(u8),
+    DuplicateFmmuCategory,
     InvalidSyncManagerLength,
     SyncManagerCountOutOfBounds,
     InvalidPdoHeader,
@@ -96,6 +101,82 @@ pub enum SiiCategoryError {
     DcModeNotFound,
     DuplicateDcMode,
     EntryOutOfBounds,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum SiiFmmuUsage {
+    Unused = 0,
+    Outputs = 1,
+    Inputs = 2,
+    SyncManagerStatus = 3,
+    Unspecified = 0xff,
+}
+
+impl SiiFmmuUsage {
+    pub const fn from_raw(raw: u8) -> Result<Self, SiiCategoryError> {
+        match raw {
+            0 => Ok(Self::Unused),
+            1 => Ok(Self::Outputs),
+            2 => Ok(Self::Inputs),
+            3 => Ok(Self::SyncManagerStatus),
+            0xff => Ok(Self::Unspecified),
+            _ => Err(SiiCategoryError::InvalidFmmuUsage(raw)),
+        }
+    }
+
+    pub const fn raw(self) -> u8 {
+        self as u8
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SiiFmmuUsageProfile {
+    usages: [SiiFmmuUsage; MAX_SII_FMMU_USAGES],
+    count: u8,
+}
+
+impl SiiFmmuUsageProfile {
+    pub const EMPTY: Self = Self {
+        usages: [SiiFmmuUsage::Unused; MAX_SII_FMMU_USAGES],
+        count: 0,
+    };
+
+    pub const fn new() -> Self {
+        Self::EMPTY
+    }
+
+    pub const fn len(self) -> usize {
+        self.count as usize
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.count == 0
+    }
+
+    pub fn usages(&self) -> &[SiiFmmuUsage] {
+        &self.usages[..self.len()]
+    }
+
+    pub fn get(&self, index: usize) -> Option<SiiFmmuUsage> {
+        self.usages().get(index).copied()
+    }
+
+    pub fn push(&mut self, usage: SiiFmmuUsage) -> Result<(), SiiCategoryError> {
+        let index = self.len();
+        if index >= MAX_SII_FMMU_USAGES {
+            return Err(SiiCategoryError::FmmuCountOutOfBounds);
+        }
+        self.usages[index] = usage;
+        self.count += 1;
+        Ok(())
+    }
+}
+
+impl Default for SiiFmmuUsageProfile {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -208,6 +289,23 @@ impl<'a> SiiCategory<'a> {
             return Err(SiiCategoryError::InvalidSyncManagerLength);
         }
         Ok(SiiSyncManagerCategory { data: self.data })
+    }
+
+    pub fn fmmu_usages(&self) -> Result<SiiFmmuUsageProfile, SiiCategoryError> {
+        if self.kind != SII_CATEGORY_FMMU {
+            return Err(SiiCategoryError::UnexpectedCategory);
+        }
+        if self.data.is_empty() {
+            return Err(SiiCategoryError::EmptyFmmuCategory);
+        }
+        if self.data.len() > MAX_SII_FMMU_USAGES {
+            return Err(SiiCategoryError::FmmuCountOutOfBounds);
+        }
+        let mut profile = SiiFmmuUsageProfile::new();
+        for raw in self.data.iter().copied() {
+            profile.push(SiiFmmuUsage::from_raw(raw)?)?;
+        }
+        Ok(profile)
     }
 
     pub fn pdo(&self) -> Result<SiiPdoCategory<'a>, SiiCategoryError> {
@@ -1670,6 +1768,60 @@ mod tests {
             }
         );
         assert_eq!(reader.next_category().unwrap(), None);
+    }
+
+    #[test]
+    fn fmmu_category_preserves_standard_usage_order_and_rejects_invalid_payloads() {
+        let category = SiiCategory {
+            kind: SII_CATEGORY_FMMU,
+            offset_words: 0,
+            data: &[0, 1, 2, 3, 0xff, 0],
+        };
+        let profile = category.fmmu_usages().unwrap();
+        assert_eq!(
+            profile.usages(),
+            &[
+                SiiFmmuUsage::Unused,
+                SiiFmmuUsage::Outputs,
+                SiiFmmuUsage::Inputs,
+                SiiFmmuUsage::SyncManagerStatus,
+                SiiFmmuUsage::Unspecified,
+                SiiFmmuUsage::Unused,
+            ]
+        );
+        assert_eq!(profile.get(2), Some(SiiFmmuUsage::Inputs));
+        assert_eq!(profile.get(6), None);
+
+        let empty = SiiCategory {
+            kind: SII_CATEGORY_FMMU,
+            offset_words: 0,
+            data: &[],
+        };
+        assert_eq!(
+            empty.fmmu_usages(),
+            Err(SiiCategoryError::EmptyFmmuCategory)
+        );
+
+        let invalid = SiiCategory {
+            kind: SII_CATEGORY_FMMU,
+            offset_words: 0,
+            data: &[4, 0],
+        };
+        assert_eq!(
+            invalid.fmmu_usages(),
+            Err(SiiCategoryError::InvalidFmmuUsage(4))
+        );
+
+        let over_capacity = [0; MAX_SII_FMMU_USAGES + 2];
+        let over_capacity = SiiCategory {
+            kind: SII_CATEGORY_FMMU,
+            offset_words: 0,
+            data: &over_capacity,
+        };
+        assert_eq!(
+            over_capacity.fmmu_usages(),
+            Err(SiiCategoryError::FmmuCountOutOfBounds)
+        );
     }
 
     #[test]

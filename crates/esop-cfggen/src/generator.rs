@@ -1,6 +1,7 @@
 use crate::error::{GeneratorError, Result};
 use crate::esi::{
-    self, EsiCatalog, EsiDcMode, EsiDevice, EsiEntry, EsiMailbox, EsiPdo, EsiTransitionTimeouts,
+    self, EsiCatalog, EsiDcMode, EsiDevice, EsiEntry, EsiFmmuUsage, EsiMailbox, EsiPdo,
+    EsiTransitionTimeouts,
 };
 use crate::model::{
     AxisMode, AxisPolicyManifest, DomainManifest, HexU16, HexU32, ProductManifest, SlaveDcManifest,
@@ -10,8 +11,8 @@ use esop_ethercat_core::wire::{
     Command, ETHERCAT_FRAME_HEADER_LEN, ETHERNET_HEADER_LEN, MIN_ETHERNET_FRAME_LEN,
 };
 use esop_ethercat_core::{
-    DcSyncTiming, DomainConfig, DomainDatagramSpec, DomainRegistry, FramePlanSet, PdoDirection,
-    PdoRegistrationRequest, SiiDcMode,
+    DcSyncTiming, DomainConfig, DomainDatagramSpec, DomainRegistry, FramePlanSet,
+    MAX_SII_FMMU_USAGES, PdoDirection, PdoRegistrationRequest, SiiDcMode,
 };
 use esop_lifecycle_guard::procbuf::Cia402AxisCommandPolicy;
 use esop_procbuf::{ABI_VERSION, ProcBufDimensions, ProcBufLayoutDescriptor, describe_layout};
@@ -135,6 +136,8 @@ struct GeneratedSlave {
     esi_device_name: String,
     transition_timeouts: EsiTransitionTimeouts,
     mailbox: EsiMailbox,
+    sii_fmmu_count: u8,
+    sii_fmmu_usages: [EsiFmmuUsage; MAX_SII_FMMU_USAGES],
     sii_sync_manager_count: u8,
     sii_enabled_sync_managers: u16,
     op_only_outputs: Vec<GeneratedOpOnlySyncManager>,
@@ -325,6 +328,9 @@ fn build_artifacts(input: &Path) -> Result<GeneratedArtifacts> {
                     })
                 })
                 .transpose()?;
+            let mut sii_fmmu_usages = [EsiFmmuUsage::Unused; MAX_SII_FMMU_USAGES];
+            sii_fmmu_usages[..slave.device.fmmu_usages.len()]
+                .copy_from_slice(&slave.device.fmmu_usages);
             Ok(GeneratedSlave {
                 name: slave.manifest.name.clone(),
                 kind: slave.manifest.kind,
@@ -344,6 +350,8 @@ fn build_artifacts(input: &Path) -> Result<GeneratedArtifacts> {
                 esi_device_name: slave.device.name.clone(),
                 transition_timeouts: slave.device.transition_timeouts,
                 mailbox: slave.mailbox,
+                sii_fmmu_count: slave.device.fmmu_usages.len() as u8,
+                sii_fmmu_usages,
                 sii_sync_manager_count: slave.device.sync_managers.len() as u8,
                 sii_enabled_sync_managers: slave
                     .device
@@ -1399,7 +1407,8 @@ fn render_header(
     let mut header = String::from(
         "#ifndef ESOP_PRODUCT_CONFIG_H\n#define ESOP_PRODUCT_CONFIG_H\n\n#include <stdint.h>\n\n",
     );
-    header.push_str("typedef struct { const char *name; uint16_t position; uint16_t station_address; uint8_t domain_id; uint8_t kind; uint32_t vendor_id; uint32_t product_code; uint32_t revision; uint32_t serial; uint8_t has_serial; uint8_t dc_required; uint8_t dc_reference_clock; const char *dc_op_mode; uint8_t has_dc_op_mode; uint32_t dc_cycle_time0_ns; int32_t dc_shift_time0_ns; int32_t dc_shift_time1_ns; int16_t dc_sync1_cycle_factor; uint16_t dc_assign_activate; int16_t dc_sync0_cycle_factor; uint8_t has_dc_sync_timing; uint32_t dc_sync_cycle_time0_ns; uint32_t dc_sync_cycle_time1_ns; int32_t dc_sync_shift_time0_ns; uint16_t dc_sync_assign_activate; uint16_t mailbox_send_address; uint16_t mailbox_send_capacity; uint16_t mailbox_receive_address; uint16_t mailbox_receive_capacity; uint8_t sii_sync_manager_count; uint16_t sii_enabled_sync_managers; } esop_slave_config_t;\n");
+    header.push_str("#define ESOP_SII_FMMU_CAPACITY 16u\n\n");
+    header.push_str("typedef struct { const char *name; uint16_t position; uint16_t station_address; uint8_t domain_id; uint8_t kind; uint32_t vendor_id; uint32_t product_code; uint32_t revision; uint32_t serial; uint8_t has_serial; uint8_t dc_required; uint8_t dc_reference_clock; const char *dc_op_mode; uint8_t has_dc_op_mode; uint32_t dc_cycle_time0_ns; int32_t dc_shift_time0_ns; int32_t dc_shift_time1_ns; int16_t dc_sync1_cycle_factor; uint16_t dc_assign_activate; int16_t dc_sync0_cycle_factor; uint8_t has_dc_sync_timing; uint32_t dc_sync_cycle_time0_ns; uint32_t dc_sync_cycle_time1_ns; int32_t dc_sync_shift_time0_ns; uint16_t dc_sync_assign_activate; uint16_t mailbox_send_address; uint16_t mailbox_send_capacity; uint16_t mailbox_receive_address; uint16_t mailbox_receive_capacity; uint8_t sii_sync_manager_count; uint16_t sii_enabled_sync_managers; uint8_t sii_fmmu_count; uint8_t sii_fmmu_usages[ESOP_SII_FMMU_CAPACITY]; } esop_slave_config_t;\n");
     header.push_str("typedef struct { const char *name; uint8_t id; uint32_t logical_address; uint32_t image_offset; uint32_t image_bytes; uint32_t output_bytes; uint32_t input_bytes; uint32_t period_ticks; uint32_t phase_ticks; uint16_t expected_wkc; } esop_domain_config_t;\n");
     header.push_str("typedef struct { uint8_t domain_id; uint16_t slave_position; uint16_t assignment_index; uint8_t sync_manager; uint16_t object_index; uint8_t subindex; uint8_t direction; uint32_t bit_offset; uint8_t bit_length; uint8_t is_signed; } esop_pdo_config_t;\n");
     header.push_str("typedef struct { uint8_t domain_id; uint8_t command; uint8_t index; uint32_t logical_address; uint32_t image_offset; uint16_t payload_len; uint16_t expected_wkc; uint8_t input; } esop_datagram_config_t;\n");
@@ -1432,8 +1441,17 @@ fn render_header(
         for slave in slaves {
             let dc_mode = slave.sii_dc_mode.as_ref();
             let dc_sync_timing = slave.dc_sync_timing;
+            let fmmu_initializer = format!(
+                "{{{}}}",
+                slave
+                    .sii_fmmu_usages
+                    .iter()
+                    .map(|usage| format!("{}u", usage.raw()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
             header.push_str(&format!(
-                "  {{{}, {}u, UINT16_C(0x{:04x}), {}u, {}u, UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), {}u, {}u, {}u, {}, {}u, UINT32_C({}), INT32_C({}), INT32_C({}), INT16_C({}), UINT16_C(0x{:04x}), INT16_C({}), {}u, UINT32_C({}), UINT32_C({}), INT32_C({}), UINT16_C(0x{:04x}), UINT16_C(0x{:04x}), UINT16_C({}), UINT16_C(0x{:04x}), UINT16_C({}), {}u, UINT16_C(0x{:04x})}},\n",
+                "  {{{}, {}u, UINT16_C(0x{:04x}), {}u, {}u, UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), {}u, {}u, {}u, {}, {}u, UINT32_C({}), INT32_C({}), INT32_C({}), INT16_C({}), UINT16_C(0x{:04x}), INT16_C({}), {}u, UINT32_C({}), UINT32_C({}), INT32_C({}), UINT16_C(0x{:04x}), UINT16_C(0x{:04x}), UINT16_C({}), UINT16_C(0x{:04x}), UINT16_C({}), {}u, UINT16_C(0x{:04x}), {}u, {}}},\n",
                 c_string(&slave.name),
                 slave.position,
                 slave.station_address.0,
@@ -1465,6 +1483,8 @@ fn render_header(
                 slave.mailbox.receive_capacity,
                 slave.sii_sync_manager_count,
                 slave.sii_enabled_sync_managers,
+                slave.sii_fmmu_count,
+                fmmu_initializer,
             ));
         }
     }
@@ -1654,6 +1674,17 @@ use esop_product_config::{\n\
             .map(|byte| format!("0x{byte:02x}"))
             .collect::<Vec<_>>()
             .join(", ");
+        let fmmu_usages = slave
+            .sii_fmmu_usages
+            .iter()
+            .map(|usage| {
+                format!(
+                    "esop_product_config::SiiFmmuUsage::{}",
+                    usage.rust_variant()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         let sii_dc_mode = slave.sii_dc_mode.as_ref().map_or_else(
             || "None".to_owned(),
             |mode| {
@@ -1682,7 +1713,7 @@ use esop_product_config::{\n\
             },
         );
         output.push_str(&format!(
-            "        ProductSlaveConfig {{ name: {}, position: {}, station_address: 0x{:04x}, domain_id: {}, kind: ProductSlaveKind::{}, identity: SlaveIdentity {{ vendor_id: 0x{:08x}, product_code: 0x{:08x}, revision: 0x{:08x}, serial: 0x{:08x} }}, dc_required: {}, dc_reference_clock: {}, sii_dc_mode: {}, dc_sync_timing: {}, transition_timeouts: AlTransitionTimeouts::new({}, {}, {}, {}), mailbox_config: MailboxConfig::new(0x{:04x}, {}, 0x{:04x}, {}), op_only_outputs: OpOnlySyncManagerProfile::from_raw(0x{:04x}, [{}]), sii_sync_manager_count: {}, sii_enabled_sync_managers: 0x{:04x} }},\n",
+            "        ProductSlaveConfig {{ name: {}, position: {}, station_address: 0x{:04x}, domain_id: {}, kind: ProductSlaveKind::{}, identity: SlaveIdentity {{ vendor_id: 0x{:08x}, product_code: 0x{:08x}, revision: 0x{:08x}, serial: 0x{:08x} }}, dc_required: {}, dc_reference_clock: {}, sii_dc_mode: {}, dc_sync_timing: {}, transition_timeouts: AlTransitionTimeouts::new({}, {}, {}, {}), mailbox_config: MailboxConfig::new(0x{:04x}, {}, 0x{:04x}, {}), op_only_outputs: OpOnlySyncManagerProfile::from_raw(0x{:04x}, [{}]), sii_sync_manager_count: {}, sii_enabled_sync_managers: 0x{:04x}, sii_fmmu_count: {}, sii_fmmu_usages: [{}] }},\n",
             rust_string(&slave.name),
             slave.position,
             slave.station_address.0,
@@ -1708,6 +1739,8 @@ use esop_product_config::{\n\
             activation,
             slave.sii_sync_manager_count,
             slave.sii_enabled_sync_managers,
+            slave.sii_fmmu_count,
+            fmmu_usages,
         ));
     }
     output.push_str("    ],\n");

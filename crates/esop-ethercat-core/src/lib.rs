@@ -151,9 +151,9 @@ pub use scheduled_domains::{
     ScheduledServiceTxFailure, ScheduledServiceTxReport,
 };
 pub use sii::{
-    EEPROM_BUSY, EEPROM_ERROR_MASK, EEPROM_READ_COMMAND, SII_CATEGORY_DC, SII_CATEGORY_END,
-    SII_CATEGORY_FMMU, SII_CATEGORY_GENERAL, SII_CATEGORY_RX_PDO, SII_CATEGORY_STRINGS,
-    SII_CATEGORY_SYNC_MANAGER, SII_CATEGORY_TX_PDO, SII_MAILBOX_PROTOCOL_AOE,
+    EEPROM_BUSY, EEPROM_ERROR_MASK, EEPROM_READ_COMMAND, MAX_SII_FMMU_USAGES, SII_CATEGORY_DC,
+    SII_CATEGORY_END, SII_CATEGORY_FMMU, SII_CATEGORY_GENERAL, SII_CATEGORY_RX_PDO,
+    SII_CATEGORY_STRINGS, SII_CATEGORY_SYNC_MANAGER, SII_CATEGORY_TX_PDO, SII_MAILBOX_PROTOCOL_AOE,
     SII_MAILBOX_PROTOCOL_COE, SII_MAILBOX_PROTOCOL_EOE, SII_MAILBOX_PROTOCOL_FOE,
     SII_MAILBOX_PROTOCOL_SOE, SII_MAILBOX_PROTOCOL_VOE, SII_MAILBOX_PROTOCOLS_WORD,
     SII_PRODUCT_CODE_WORD, SII_REVISION_WORD, SII_SERIAL_WORD, SII_STANDARD_MAILBOX_WORD_COUNT,
@@ -161,9 +161,9 @@ pub use sii::{
     SII_STANDARD_SEND_MAILBOX_OFFSET_WORD, SII_STANDARD_SEND_MAILBOX_SIZE_WORD, SII_VENDOR_ID_WORD,
     SiiAction, SiiBlockError, SiiBlockReader, SiiBlockRequest, SiiCategory, SiiCategoryError,
     SiiCategoryReader, SiiDcCategory, SiiDcMode, SiiDcModeDescriptor, SiiDcModeExpectation,
-    SiiError, SiiIdentityReader, SiiMailboxError, SiiMailboxProtocols, SiiPdoCategory, SiiPdoEntry,
-    SiiPhase, SiiProgress, SiiStandardMailbox, SiiStringsCategory, SiiSyncManager,
-    SiiSyncManagerCategory, find_sii_dc_mode,
+    SiiError, SiiFmmuUsage, SiiFmmuUsageProfile, SiiIdentityReader, SiiMailboxError,
+    SiiMailboxProtocols, SiiPdoCategory, SiiPdoEntry, SiiPhase, SiiProgress, SiiStandardMailbox,
+    SiiStringsCategory, SiiSyncManager, SiiSyncManagerCategory, find_sii_dc_mode,
 };
 pub use sii_config::{
     SII_CONFIGURATION_SIGNATURE_SCHEMA, SiiConfigurationCandidate, SiiConfigurationError,

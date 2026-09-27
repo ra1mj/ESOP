@@ -102,6 +102,17 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert_eq!(product["slaves"][2]["mailbox"]["send_capacity"], 32);
     assert_eq!(product["slaves"][0]["sii_sync_manager_count"], 4);
     assert_eq!(product["slaves"][0]["sii_enabled_sync_managers"], 15);
+    assert_eq!(product["slaves"][0]["sii_fmmu_count"], 2);
+    assert_eq!(product["slaves"][0]["sii_fmmu_usages"][0], "outputs");
+    assert_eq!(product["slaves"][0]["sii_fmmu_usages"][1], "inputs");
+    assert_eq!(product["slaves"][0]["sii_fmmu_usages"][2], "unused");
+    assert_eq!(
+        product["slaves"][0]["sii_fmmu_usages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        16
+    );
     assert_eq!(product["slaves"][0]["dc"]["required"], true);
     assert_eq!(product["slaves"][0]["dc"]["reference_clock"], true);
     assert_eq!(product["slaves"][0]["dc"]["op_mode"], "DcSync");
@@ -127,6 +138,9 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(header.contains("uint16_t mailbox_send_address"));
     assert!(header.contains("uint8_t sii_sync_manager_count"));
     assert!(header.contains("uint16_t sii_enabled_sync_managers"));
+    assert!(header.contains("#define ESOP_SII_FMMU_CAPACITY 16u"));
+    assert!(header.contains("uint8_t sii_fmmu_count"));
+    assert!(header.contains("uint8_t sii_fmmu_usages[ESOP_SII_FMMU_CAPACITY]"));
     assert!(header.contains("uint8_t dc_required"));
     assert!(header.contains("uint8_t dc_reference_clock"));
     assert!(header.contains("const char *dc_op_mode"));
@@ -135,12 +149,16 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(header.contains("uint32_t dc_sync_cycle_time1_ns"));
     assert!(header.contains("UINT16_C(0x1000), UINT16_C(64), UINT16_C(0x1100), UINT16_C(64)"));
     assert!(header.contains("4u, UINT16_C(0x000f)"));
+    assert!(header.contains("2u, {1u, 2u, 0u, 0u"));
 
     let rust = fs::read_to_string(first.join("esop_product_config.rs")).unwrap();
     assert!(rust.contains("MailboxConfig::new(0x1000, 64, 0x1100, 64)"));
     assert!(rust.contains("MailboxConfig::new(0x1200, 32, 0x1300, 32)"));
     assert!(rust.contains("sii_sync_manager_count: 4"));
     assert!(rust.contains("sii_enabled_sync_managers: 0x000f"));
+    assert!(rust.contains("sii_fmmu_count: 2"));
+    assert!(rust.contains("SiiFmmuUsage::Outputs"));
+    assert!(rust.contains("SiiFmmuUsage::Inputs"));
     assert!(rust.contains("dc_required: true, dc_reference_clock: true"));
     assert!(rust.contains("dc_required: false, dc_reference_clock: false"));
     assert!(rust.contains("name: \"DcSync\", mode: SiiDcMode"));
@@ -461,6 +479,33 @@ fn invalid_esi_timeouts_and_op_only_directions_fail_closed() {
             .unwrap_err()
             .to_string()
             .contains("declares OpOnly for non-output direction")
+    );
+}
+
+#[test]
+fn invalid_or_excess_fmmu_usage_descriptors_fail_closed() {
+    let fixture = Fixture::new();
+    fixture.edit_esi(|xml| xml.replacen("<Fmmu>Outputs</Fmmu>", "<Fmmu>VendorSpecific</Fmmu>", 1));
+    assert!(
+        generate(&fixture.product, &fixture.output("invalid-fmmu-usage"))
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported Device Fmmu usage")
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_esi(|xml| {
+        xml.replacen(
+            "<Fmmu>Outputs</Fmmu>",
+            &"<Fmmu>Outputs</Fmmu>".repeat(16),
+            1,
+        )
+    });
+    assert!(
+        generate(&fixture.product, &fixture.output("excess-fmmu-usages"))
+            .unwrap_err()
+            .to_string()
+            .contains("exceeding supported capacity 16")
     );
 }
 

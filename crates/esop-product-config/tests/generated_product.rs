@@ -3,7 +3,8 @@ use esop_product_config::{
     ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, FramePlanSetError, MailboxConfig, MailboxConfigError,
     MailboxDirection, OperatingMode, PdoConfigBatchPlanError, PdoConfigPlanError, PdoSdoWrite,
     ProcBuf, ProcBufHeaderError, ProductActivationError, ProductMailboxBinding,
-    ProductPdoBatchError, ProductPdoPlanError, ProductSlaveKind, SlaveRecord, StartupDcRequirement,
+    ProductPdoBatchError, ProductPdoPlanError, ProductSlaveKind, ProductStartupError, SiiFmmuUsage,
+    SlaveRecord, StartupDcRequirement,
 };
 
 mod generated {
@@ -51,9 +52,9 @@ fn checked_in_product_activates_exact_generated_evidence() {
     assert_eq!(
         active.metadata().config_sha256,
         [
-            0xe1, 0xca, 0xbe, 0x9b, 0x4f, 0x85, 0xa4, 0x45, 0x87, 0xe5, 0xa7, 0x5e, 0xd5, 0xec,
-            0xfc, 0x73, 0xde, 0x49, 0x6b, 0xee, 0x55, 0x7c, 0x75, 0x54, 0x5a, 0xe5, 0x8a, 0xc2,
-            0x96, 0xb9, 0xc7, 0x68,
+            0xe1, 0x52, 0xc1, 0xb4, 0xb0, 0xd4, 0xae, 0x48, 0x99, 0x39, 0x48, 0x96, 0x2c, 0x10,
+            0x70, 0x57, 0x74, 0x67, 0x87, 0xfa, 0x4a, 0x5a, 0x53, 0xcf, 0xbf, 0x21, 0x46, 0x1f,
+            0x8e, 0x62, 0xe4, 0x3a,
         ]
     );
 
@@ -109,6 +110,10 @@ fn checked_in_product_activates_exact_generated_evidence() {
             expected_sii.op_only_sync_managers(),
             slave.op_only_outputs.mask()
         );
+        assert_eq!(expected_sii.fmmu_count(), slave.sii_fmmu_count);
+        assert_eq!(slave.sii_fmmu_count, 2);
+        assert_eq!(slave.sii_fmmu_usages[0], SiiFmmuUsage::Outputs);
+        assert_eq!(slave.sii_fmmu_usages[1], SiiFmmuUsage::Inputs);
     }
 
     assert_eq!(active.registry().domain_count(), 2);
@@ -126,6 +131,33 @@ fn checked_in_product_activates_exact_generated_evidence() {
     for map in active.axis_pdo_maps() {
         map.validate_for(OperatingMode::Csp).unwrap();
     }
+}
+
+#[test]
+fn checked_in_product_rejects_tampered_fmmu_usage_profiles() {
+    let mut wrong_direction = generated::PRODUCT_CONFIG;
+    wrong_direction.slaves[0].sii_fmmu_usages[0] = SiiFmmuUsage::Inputs;
+    assert_eq!(
+        wrong_direction.startup_profiles(),
+        Err(ProductStartupError::FmmuUsageMismatch {
+            position: 0,
+            index: 0,
+            expected: SiiFmmuUsage::Outputs,
+            actual: Some(SiiFmmuUsage::Inputs),
+        })
+    );
+
+    let mut missing_tx = generated::PRODUCT_CONFIG;
+    missing_tx.slaves[0].sii_fmmu_count = 1;
+    assert_eq!(
+        missing_tx.startup_profiles(),
+        Err(ProductStartupError::FmmuUsageMismatch {
+            position: 0,
+            index: 1,
+            expected: SiiFmmuUsage::Inputs,
+            actual: None,
+        })
+    );
 }
 
 #[test]

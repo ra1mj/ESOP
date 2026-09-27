@@ -11,13 +11,14 @@ pub use esop_ethercat_core::{
     AlTransitionTimeouts, DcSyncPlan, DcSyncPlanEntry, DcSyncPlanError, DcSyncTiming,
     DcSyncTimingError, DomainConfig, DomainDatagramSpec, DomainInfo, DomainRegistry,
     DomainRegistryError, ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, ExpectedSlave, FramePlanSet,
-    FramePlanSetError, MailboxConfig, MailboxConfigError, MailboxDirection, OpOnlyProfileError,
-    OpOnlySyncManagerProfile, PdoConfigBatch, PdoConfigBatchError, PdoConfigBatchPhase,
-    PdoConfigBatchPlan, PdoConfigBatchPlanError, PdoConfigBatchStatus, PdoConfigJob, PdoConfigPlan,
-    PdoConfigPlanError, PdoDirection, PdoEntry, PdoEntrySpec, PdoRegistrationRequest, PdoSdoWrite,
-    ScheduleTable, SiiConfigurationSignature, SiiConfigurationSignatureBuilder,
-    SiiConfigurationSignatureError, SiiDcMode, SiiDcModeExpectation, SlaveIdentity, SlaveRecord,
-    StartupConfig, StartupController, StartupDcRequirement, StartupError, StartupSlaveProfile,
+    FramePlanSetError, MAX_SII_FMMU_USAGES, MailboxConfig, MailboxConfigError, MailboxDirection,
+    OpOnlyProfileError, OpOnlySyncManagerProfile, PdoConfigBatch, PdoConfigBatchError,
+    PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigBatchPlanError, PdoConfigBatchStatus,
+    PdoConfigJob, PdoConfigPlan, PdoConfigPlanError, PdoDirection, PdoEntry, PdoEntrySpec,
+    PdoRegistrationRequest, PdoSdoWrite, ScheduleTable, SiiConfigurationSignature,
+    SiiConfigurationSignatureBuilder, SiiConfigurationSignatureError, SiiDcMode,
+    SiiDcModeExpectation, SiiFmmuUsage, SlaveIdentity, SlaveRecord, StartupConfig,
+    StartupController, StartupDcRequirement, StartupError, StartupSlaveProfile,
 };
 pub use esop_lifecycle_guard::procbuf::{Cia402AxisCommandPolicy, Cia402AxisCommandPolicyError};
 pub use esop_procbuf::{
@@ -66,6 +67,8 @@ pub struct ProductSlaveConfig {
     pub op_only_outputs: OpOnlySyncManagerProfile,
     pub sii_sync_manager_count: u8,
     pub sii_enabled_sync_managers: u16,
+    pub sii_fmmu_count: u8,
+    pub sii_fmmu_usages: [SiiFmmuUsage; MAX_SII_FMMU_USAGES],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -125,6 +128,16 @@ pub enum ProductStartupError {
     },
     EmptyPdoMapping {
         position: u16,
+    },
+    InvalidFmmuCount {
+        position: u16,
+        count: u8,
+    },
+    FmmuUsageMismatch {
+        position: u16,
+        index: u8,
+        expected: SiiFmmuUsage,
+        actual: Option<SiiFmmuUsage>,
     },
     SiiConfiguration {
         position: u16,
@@ -624,7 +637,24 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
             error,
         })?;
 
+        let fmmu_count = usize::from(slave.sii_fmmu_count);
+        if fmmu_count > MAX_SII_FMMU_USAGES {
+            return Err(ProductStartupError::InvalidFmmuCount {
+                position: slave.position,
+                count: slave.sii_fmmu_count,
+            });
+        }
+        for usage in slave.sii_fmmu_usages[..fmmu_count].iter().copied() {
+            builder
+                .fmmu_usage(usage)
+                .map_err(|error| ProductStartupError::SiiConfiguration {
+                    position: slave.position,
+                    error,
+                })?;
+        }
+
         let mut pdo_count = 0usize;
+        let mut fmmu_index = 0usize;
         for direction in [PdoDirection::Rx, PdoDirection::Tx] {
             let mut current_group = None;
             for (pdo_index, pdo) in self.pdos.iter().copied().enumerate() {
@@ -656,6 +686,21 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                             sync_manager: group.1,
                         });
                     }
+                    if fmmu_count != 0 {
+                        let expected = match direction {
+                            PdoDirection::Rx => SiiFmmuUsage::Outputs,
+                            PdoDirection::Tx => SiiFmmuUsage::Inputs,
+                        };
+                        let actual = slave.sii_fmmu_usages[..fmmu_count].get(fmmu_index).copied();
+                        if actual != Some(expected) {
+                            return Err(ProductStartupError::FmmuUsageMismatch {
+                                position: slave.position,
+                                index: fmmu_index as u8,
+                                expected,
+                                actual,
+                            });
+                        }
+                    }
                     builder
                         .begin_pdo(direction, group.0, group.1)
                         .map_err(|error| ProductStartupError::SiiConfiguration {
@@ -663,6 +708,7 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                             error,
                         })?;
                     current_group = Some(group);
+                    fmmu_index += 1;
                 }
                 builder
                     .entry(
@@ -1341,6 +1387,13 @@ mod tests {
                 op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
                 sii_sync_manager_count: 4,
                 sii_enabled_sync_managers: 0x000f,
+                sii_fmmu_count: 2,
+                sii_fmmu_usages: {
+                    let mut usages = [SiiFmmuUsage::Unused; MAX_SII_FMMU_USAGES];
+                    usages[0] = SiiFmmuUsage::Outputs;
+                    usages[1] = SiiFmmuUsage::Inputs;
+                    usages
+                },
             }],
             domains: [ProductDomainConfig {
                 name: "motion",
@@ -1470,6 +1523,7 @@ mod tests {
         assert_eq!(signature.sync_manager_count(), 4);
         assert_eq!(signature.enabled_sync_managers(), 0x000f);
         assert_eq!(signature.op_only_sync_managers(), 1 << 2);
+        assert_eq!(signature.fmmu_count(), 2);
         assert_eq!(signature.rx_pdo_count(), 1);
         assert_eq!(signature.tx_pdo_count(), 1);
         assert_eq!(signature.rx_entry_count(), 3);
@@ -1665,6 +1719,7 @@ mod tests {
         pdos[3].sync_manager = 2;
         pdos[3].request.direction = PdoDirection::Rx;
         let mut non_contiguous = config();
+        non_contiguous.slaves[0].sii_fmmu_count = 0;
         non_contiguous.pdos = &pdos;
         assert_eq!(
             non_contiguous.startup_profiles(),
@@ -1673,6 +1728,55 @@ mod tests {
                 direction: PdoDirection::Rx,
                 assignment_index: 0x1600,
                 sync_manager: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn product_rejects_invalid_or_incompatible_fmmu_profiles() {
+        let mut invalid_count = config();
+        invalid_count.slaves[0].sii_fmmu_count = (MAX_SII_FMMU_USAGES + 1) as u8;
+        assert_eq!(
+            invalid_count.startup_profiles(),
+            Err(ProductStartupError::InvalidFmmuCount {
+                position: 0,
+                count: 17,
+            })
+        );
+
+        let mut rx_mismatch = config();
+        rx_mismatch.slaves[0].sii_fmmu_usages[0] = SiiFmmuUsage::Inputs;
+        assert_eq!(
+            rx_mismatch.startup_profiles(),
+            Err(ProductStartupError::FmmuUsageMismatch {
+                position: 0,
+                index: 0,
+                expected: SiiFmmuUsage::Outputs,
+                actual: Some(SiiFmmuUsage::Inputs),
+            })
+        );
+
+        let mut tx_mismatch = config();
+        tx_mismatch.slaves[0].sii_fmmu_usages[1] = SiiFmmuUsage::SyncManagerStatus;
+        assert_eq!(
+            tx_mismatch.startup_profiles(),
+            Err(ProductStartupError::FmmuUsageMismatch {
+                position: 0,
+                index: 1,
+                expected: SiiFmmuUsage::Inputs,
+                actual: Some(SiiFmmuUsage::SyncManagerStatus),
+            })
+        );
+
+        let mut missing = config();
+        missing.slaves[0].sii_fmmu_count = 1;
+        assert_eq!(
+            missing.startup_profiles(),
+            Err(ProductStartupError::FmmuUsageMismatch {
+                position: 0,
+                index: 1,
+                expected: SiiFmmuUsage::Inputs,
+                actual: None,
             })
         );
     }

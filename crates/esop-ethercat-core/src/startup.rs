@@ -461,6 +461,11 @@ pub enum StartupError {
         expected: SiiConfigurationSignature,
         observed: SiiConfigurationSignature,
     },
+    SiiFmmuCountExceedsEsc {
+        position: u16,
+        described: u8,
+        reported: u8,
+    },
     SiiDcMode {
         position: u16,
         error: SiiCategoryError,
@@ -523,6 +528,7 @@ pub struct StartupController<const MAX_SLAVES: usize> {
     op_only: OpOnlySyncManagerController,
     table: SlaveTable<MAX_SLAVES>,
     device_emulation: [bool; MAX_SLAVES],
+    esc_fmmu_counts: [u8; MAX_SLAVES],
     verified_mailboxes: [Option<MailboxConfig>; MAX_SLAVES],
     verified_sii: [Option<SiiConfigurationSignature>; MAX_SLAVES],
     verified_dc_modes: [Option<SiiDcMode>; MAX_SLAVES],
@@ -557,6 +563,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             op_only: OpOnlySyncManagerController::new(),
             table: SlaveTable::new(),
             device_emulation: [false; MAX_SLAVES],
+            esc_fmmu_counts: [0; MAX_SLAVES],
             verified_mailboxes: [None; MAX_SLAVES],
             verified_sii: [None; MAX_SLAVES],
             verified_dc_modes: [None; MAX_SLAVES],
@@ -816,6 +823,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.op_only = OpOnlySyncManagerController::new();
         self.table = SlaveTable::new();
         self.device_emulation = [false; MAX_SLAVES];
+        self.esc_fmmu_counts = [0; MAX_SLAVES];
         self.verified_mailboxes = [None; MAX_SLAVES];
         self.verified_sii = [None; MAX_SLAVES];
         self.verified_dc_modes = [None; MAX_SLAVES];
@@ -1297,6 +1305,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.op_only = OpOnlySyncManagerController::new();
         self.table = SlaveTable::new();
         self.device_emulation = [false; MAX_SLAVES];
+        self.esc_fmmu_counts = [0; MAX_SLAVES];
         self.verified_mailboxes = [None; MAX_SLAVES];
         self.verified_sii = [None; MAX_SLAVES];
         self.verified_dc_modes = [None; MAX_SLAVES];
@@ -1518,6 +1527,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             return self.fail(StartupError::Table(error));
         }
         self.device_emulation[self.current_index] = scan_record.device_emulation;
+        self.esc_fmmu_counts[self.current_index] = scan_record.fmmu_count;
         if let Err(error) =
             self.table
                 .observe_status(scan_record.position, scan_record.al_status, 0)
@@ -1596,13 +1606,21 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             .copied()
             .ok_or(StartupError::ExpectedCountMismatch)?;
         let profile = self.profile_for_position(record.position)?;
+        let candidate = self
+            .sii_configuration
+            .candidate()
+            .ok_or(StartupError::NoPendingAction)?;
+        let described_fmmus = candidate.fmmu_usages().len() as u8;
+        let reported_fmmus = self.esc_fmmu_counts[self.current_index];
+        if described_fmmus > reported_fmmus {
+            return self.fail(StartupError::SiiFmmuCountExceedsEsc {
+                position: record.position,
+                described: described_fmmus,
+                reported: reported_fmmus,
+            });
+        }
         let observed_sii = if let Some(expected) = profile.expected_sii {
-            let observed = match self
-                .sii_configuration
-                .candidate()
-                .ok_or(StartupError::NoPendingAction)?
-                .signature()
-            {
+            let observed = match candidate.signature() {
                 Ok(signature) => signature,
                 Err(error) => return self.fail(StartupError::SiiConfigurationSignature(error)),
             };
@@ -1890,8 +1908,8 @@ mod tests {
         auto_increment_address, fixed_address, register_from_address,
     };
     use crate::sii::{
-        SII_CATEGORY_DC, SII_CATEGORY_END, SII_CATEGORY_RX_PDO, SII_CATEGORY_STRINGS,
-        SII_CATEGORY_SYNC_MANAGER, SII_CATEGORY_TX_PDO,
+        SII_CATEGORY_DC, SII_CATEGORY_END, SII_CATEGORY_FMMU, SII_CATEGORY_RX_PDO,
+        SII_CATEGORY_STRINGS, SII_CATEGORY_SYNC_MANAGER, SII_CATEGORY_TX_PDO, SiiFmmuUsage,
     };
     use crate::sii_config::SiiConfigurationSignatureBuilder;
     use crate::sii_stream::SII_CATEGORY_START_WORD;
@@ -1904,7 +1922,7 @@ mod tests {
     }
 
     fn basic_info() -> [u8; crate::BASIC_ESC_INFO_LEN as usize] {
-        [0x88, 0x02, 3, 4, 1, 2, 0x20, 0xE4, 0, 0, 0, 0]
+        [0x88, 0x02, 3, 4, 2, 2, 0x20, 0xE4, 0, 0, 0, 0]
     }
 
     fn basic_info_with_features(features: u16) -> [u8; crate::BASIC_ESC_INFO_LEN as usize] {
@@ -2265,8 +2283,9 @@ mod tests {
         bytes.extend_from_slice(payload);
     }
 
-    fn startup_sii_image(rx_object: u16) -> std::vec::Vec<u8> {
+    fn startup_sii_image_with_fmmu(rx_object: u16, usages: [u8; 2]) -> std::vec::Vec<u8> {
         let mut image = std::vec::Vec::new();
+        append_sii_category(&mut image, SII_CATEGORY_FMMU, &usages);
         append_sii_category(
             &mut image,
             SII_CATEGORY_SYNC_MANAGER,
@@ -2293,6 +2312,13 @@ mod tests {
         image
     }
 
+    fn startup_sii_image(rx_object: u16) -> std::vec::Vec<u8> {
+        startup_sii_image_with_fmmu(
+            rx_object,
+            [SiiFmmuUsage::Outputs.raw(), SiiFmmuUsage::Inputs.raw()],
+        )
+    }
+
     fn startup_sii_image_with_dc(rx_object: u16, mode: SiiDcMode) -> std::vec::Vec<u8> {
         let mut image = startup_sii_image(rx_object);
         image.truncate(image.len() - 4);
@@ -2315,8 +2341,14 @@ mod tests {
         image
     }
 
-    fn startup_sii_signature(rx_object: u16) -> SiiConfigurationSignature {
+    fn startup_sii_signature_with_fmmu(
+        rx_object: u16,
+        usages: [SiiFmmuUsage; 2],
+    ) -> SiiConfigurationSignature {
         let mut builder = SiiConfigurationSignatureBuilder::new(2, 0b11, 0).unwrap();
+        for usage in usages {
+            builder.fmmu_usage(usage).unwrap();
+        }
         builder
             .begin_pdo(crate::PdoDirection::Rx, 0x1600, 0)
             .unwrap();
@@ -2328,6 +2360,10 @@ mod tests {
         builder.entry(0x6041, 0, 16).unwrap();
         builder.end_pdo().unwrap();
         builder.finish().unwrap()
+    }
+
+    fn startup_sii_signature(rx_object: u16) -> SiiConfigurationSignature {
+        startup_sii_signature_with_fmmu(rx_object, [SiiFmmuUsage::Outputs, SiiFmmuUsage::Inputs])
     }
 
     fn prepared_sii_verification(expected_sii: SiiConfigurationSignature) -> StartupController<1> {
@@ -2351,6 +2387,7 @@ mod tests {
         };
         startup.profiles[0] = StartupSlaveProfile::new(0).with_expected_sii(expected_sii);
         startup.expected_count = 1;
+        startup.esc_fmmu_counts[0] = 2;
         startup
             .table
             .add(0, 0x1000, identity)
@@ -2397,6 +2434,7 @@ mod tests {
             };
             startup.profiles[index] =
                 StartupSlaveProfile::new(index as u16).with_expected_sii(expected_sii[index]);
+            startup.esc_fmmu_counts[index] = 2;
             startup
                 .table
                 .add(index as u16, 0x1000 + index as u16, identities[index])
@@ -2477,6 +2515,55 @@ mod tests {
         let mut now_ns = 1;
         assert_eq!(
             drive_sii_configuration(&mut startup, &startup_sii_image(0x607A), &mut now_ns),
+            Err(StartupError::SiiConfigurationMismatch {
+                position: 0,
+                expected,
+                observed,
+            })
+        );
+        assert_eq!(startup.phase(), StartupPhase::Faulted);
+        assert_eq!(startup.verified_sii(0), None);
+        assert_eq!(startup.next_action(now_ns), Ok(None));
+    }
+
+    #[test]
+    fn startup_fails_closed_when_sii_fmmu_descriptor_exceeds_esc_count() {
+        let expected = startup_sii_signature(0x6040);
+        let mut startup = prepared_sii_verification(expected);
+        startup.esc_fmmu_counts[0] = 1;
+        let mut now_ns = 1;
+
+        assert_eq!(
+            drive_sii_configuration(&mut startup, &startup_sii_image(0x6040), &mut now_ns),
+            Err(StartupError::SiiFmmuCountExceedsEsc {
+                position: 0,
+                described: 2,
+                reported: 1,
+            })
+        );
+        assert_eq!(startup.phase(), StartupPhase::Faulted);
+        assert_eq!(startup.verified_sii(0), None);
+        assert_eq!(startup.verified_dc_mode(0), None);
+        assert_eq!(startup.next_action(now_ns), Ok(None));
+    }
+
+    #[test]
+    fn startup_fails_closed_on_sii_fmmu_usage_mismatch() {
+        let expected = startup_sii_signature(0x6040);
+        let observed =
+            startup_sii_signature_with_fmmu(0x6040, [SiiFmmuUsage::Inputs, SiiFmmuUsage::Outputs]);
+        let mut startup = prepared_sii_verification(expected);
+        let mut now_ns = 1;
+
+        assert_eq!(
+            drive_sii_configuration(
+                &mut startup,
+                &startup_sii_image_with_fmmu(
+                    0x6040,
+                    [SiiFmmuUsage::Inputs.raw(), SiiFmmuUsage::Outputs.raw()],
+                ),
+                &mut now_ns,
+            ),
             Err(StartupError::SiiConfigurationMismatch {
                 position: 0,
                 expected,

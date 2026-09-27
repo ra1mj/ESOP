@@ -1,7 +1,7 @@
 use crate::error::{GeneratorError, Result};
 use esop_ethercat_core::{
-    ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, MAX_ESC_SYNC_MANAGERS, MailboxConfig,
-    SYNC_MANAGER_ENABLE_FLAG, SYNC_MANAGER_OP_ONLY_FLAG,
+    ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, MAX_ESC_SYNC_MANAGERS, MAX_SII_FMMU_USAGES,
+    MailboxConfig, SYNC_MANAGER_ENABLE_FLAG, SYNC_MANAGER_OP_ONLY_FLAG,
 };
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
@@ -22,12 +22,45 @@ pub struct EsiDevice {
     pub product_code: u32,
     pub revision: u32,
     pub transition_timeouts: EsiTransitionTimeouts,
+    pub fmmu_usages: Vec<EsiFmmuUsage>,
     pub sync_managers: Vec<EsiSyncManager>,
     pub mailbox: Option<EsiMailbox>,
     pub coe_supported: bool,
     pub dc_modes: Vec<EsiDcMode>,
     pub rx_pdos: Vec<EsiPdo>,
     pub tx_pdos: Vec<EsiPdo>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EsiFmmuUsage {
+    Unused,
+    Outputs,
+    Inputs,
+    SyncManagerStatus,
+    Unspecified,
+}
+
+impl EsiFmmuUsage {
+    pub const fn raw(self) -> u8 {
+        match self {
+            Self::Unused => 0,
+            Self::Outputs => 1,
+            Self::Inputs => 2,
+            Self::SyncManagerStatus => 3,
+            Self::Unspecified => 0xff,
+        }
+    }
+
+    pub const fn rust_variant(self) -> &'static str {
+        match self {
+            Self::Unused => "Unused",
+            Self::Outputs => "Outputs",
+            Self::Inputs => "Inputs",
+            Self::SyncManagerStatus => "SyncManagerStatus",
+            Self::Unspecified => "Unspecified",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -135,6 +168,7 @@ struct DeviceBuilder {
     product_code: Option<u32>,
     revision: Option<u32>,
     transition_timeouts: EsiTransitionTimeouts,
+    fmmu_usages: Vec<EsiFmmuUsage>,
     sync_managers: Vec<EsiSyncManager>,
     coe_supported: bool,
     dc_modes: Vec<EsiDcMode>,
@@ -144,6 +178,12 @@ struct DeviceBuilder {
 
 impl DeviceBuilder {
     fn finish(self) -> std::result::Result<EsiDevice, String> {
+        if self.fmmu_usages.len() > MAX_SII_FMMU_USAGES {
+            return Err(format!(
+                "Device declares {} FMMUs, exceeding supported capacity {MAX_SII_FMMU_USAGES}",
+                self.fmmu_usages.len()
+            ));
+        }
         let mailbox = mailbox_from_sync_managers(&self.sync_managers)?;
         for (index, mode) in self.dc_modes.iter().enumerate() {
             if self.dc_modes[..index]
@@ -161,6 +201,7 @@ impl DeviceBuilder {
                 .ok_or("Device Type ProductCode is missing")?,
             revision: self.revision.ok_or("Device Type RevisionNo is missing")?,
             transition_timeouts: self.transition_timeouts,
+            fmmu_usages: self.fmmu_usages,
             sync_managers: self.sync_managers,
             mailbox,
             coe_supported: self.coe_supported,
@@ -556,7 +597,7 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                 }
                 if matches!(
                     name.as_str(),
-                    "Device" | "RxPdo" | "TxPdo" | "Entry" | "Sm" | "OpMode"
+                    "Device" | "Fmmu" | "RxPdo" | "TxPdo" | "Entry" | "Sm" | "OpMode"
                 ) {
                     return xml_error(path, format!("empty {name} elements are unsupported"));
                 }
@@ -601,6 +642,24 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                             return xml_error(path, "Device Type text is empty");
                         }
                         device.as_mut().expect("device exists").type_name = Some(value.to_owned());
+                    }
+                    "Fmmu"
+                        if device.is_some()
+                            && pdo.is_none()
+                            && stack_ends_with(&stack, &["Device", "Fmmu"]) =>
+                    {
+                        let usage = parse_fmmu_usage(value).ok_or_else(|| GeneratorError::Xml {
+                            path: path.to_owned(),
+                            detail: format!("unsupported Device Fmmu usage {value:?}"),
+                        })?;
+                        device
+                            .as_mut()
+                            .expect("device exists")
+                            .fmmu_usages
+                            .push(usage);
+                    }
+                    "Fmmu" if device.is_some() && pdo.is_none() => {
+                        return xml_error(path, "Fmmu must be a direct Device child");
                     }
                     "Name"
                         if dc_mode.is_some()
@@ -920,6 +979,22 @@ fn stack_ends_with(stack: &[String], suffix: &[&str]) -> bool {
             .eq(suffix.iter().copied())
 }
 
+fn parse_fmmu_usage(value: &str) -> Option<EsiFmmuUsage> {
+    if value.eq_ignore_ascii_case("unused") {
+        Some(EsiFmmuUsage::Unused)
+    } else if value.eq_ignore_ascii_case("outputs") {
+        Some(EsiFmmuUsage::Outputs)
+    } else if value.eq_ignore_ascii_case("inputs") {
+        Some(EsiFmmuUsage::Inputs)
+    } else if value.eq_ignore_ascii_case("mboxstate") || value.eq_ignore_ascii_case("smstatus") {
+        Some(EsiFmmuUsage::SyncManagerStatus)
+    } else if value.eq_ignore_ascii_case("unspecified") {
+        Some(EsiFmmuUsage::Unspecified)
+    } else {
+        None
+    }
+}
+
 fn required_attribute(start: &BytesStart<'_>, name: &str, path: &Path) -> Result<String> {
     optional_attribute(start, name, path)?.ok_or_else(|| GeneratorError::Xml {
         path: path.to_owned(),
@@ -1165,6 +1240,29 @@ mod tests {
         assert_eq!(
             device.mailbox.unwrap().mailbox_config(),
             MailboxConfig::new(0x1000, 64, 0x1100, 32)
+        );
+    }
+
+    #[test]
+    fn direct_fmmu_usage_descriptors_preserve_standard_order() {
+        let xml = r##"<EtherCATInfo><Vendor><Id>1</Id></Vendor><Descriptions><Devices><Device>
+<Type ProductCode="1" RevisionNo="1">Drive</Type><Name>Drive</Name>
+<Fmmu>Unused</Fmmu><Fmmu>Outputs</Fmmu><Fmmu>Inputs</Fmmu>
+<Fmmu>MBoxState</Fmmu><Fmmu>SMStatus</Fmmu><Fmmu>Unspecified</Fmmu>
+<RxPdo Sm="2"><Index>#x1600</Index><Entry><Index>#x6040</Index><BitLen>16</BitLen>
+<DataType>UINT</DataType></Entry></RxPdo>
+</Device></Devices></Descriptions></EtherCATInfo>"##;
+        let catalog = parse_text(Path::new("fixture.xml"), xml).unwrap();
+        assert_eq!(
+            catalog.devices[0].fmmu_usages,
+            vec![
+                EsiFmmuUsage::Unused,
+                EsiFmmuUsage::Outputs,
+                EsiFmmuUsage::Inputs,
+                EsiFmmuUsage::SyncManagerStatus,
+                EsiFmmuUsage::SyncManagerStatus,
+                EsiFmmuUsage::Unspecified,
+            ]
         );
     }
 

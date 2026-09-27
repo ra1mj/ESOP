@@ -9,6 +9,8 @@
       <Device>
         <Type ProductCode="#x00004020" RevisionNo="#x00000001">ESOP-SIM-402</Type>
         <Name>ESOP simulated CiA 402 drive</Name>
+        <Fmmu>Outputs</Fmmu>
+        <Fmmu>Inputs</Fmmu>
         <Sm Enable="1" StartAddress="#x1000" DefaultSize="64" ControlByte="#x26">MBoxOut</Sm>
         <Sm Enable="1" StartAddress="#x1100" DefaultSize="64" ControlByte="#x22">MBoxIn</Sm>
         <Sm Enable="1" OpOnly="true">Outputs</Sm>
@@ -73,6 +75,8 @@
       <Device>
         <Type ProductCode="#x00007010" RevisionNo="#x00000001">ESOP-SIM-IO</Type>
         <Name>ESOP simulated digital IO</Name>
+        <Fmmu>Outputs</Fmmu>
+        <Fmmu>Inputs</Fmmu>
         <Sm Enable="1" StartAddress="#x1200" DefaultSize="32" ControlByte="#x26">MBoxOut</Sm>
         <Sm Enable="1" StartAddress="#x1300" DefaultSize="32" ControlByte="#x22">MBoxIn</Sm>
         <Sm Enable="1">Outputs</Sm>

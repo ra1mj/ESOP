@@ -53,11 +53,12 @@ ESI/ENI 的兼容声明。
 当前解析器支持 namespace-qualified XML 中的 vendor ID、Device Type
 identity/name、四类 `StateMachine/Timeout`、带 `Enable`/`OpOnly` 的有序
 SyncManager、`MBoxOut`/`MBoxIn` 的 `StartAddress`/`DefaultSize`/`ControlByte`、
-`Mailbox/CoE`、有序 `Device/Dc/OpMode`、RxPDO/TxPDO assignment，以及 byte-aligned PDO entry 的
+`Mailbox/CoE`、有序且直接位于 `Device` 下的重复 `Fmmu` usage、
+有序 `Device/Dc/OpMode`、RxPDO/TxPDO assignment，以及 byte-aligned PDO entry 的
 index/subindex/bit length/DataType。未提供 timeout 时使用版本化的 ETG.1020
 默认 profile。它明确拒绝：
 
-- 模块化设备和复杂 FMMU 规则；
+- 模块化设备、嵌套/错位/未知或超过 16 项的 FMMU 声明，以及 FMMU 寄存器/逻辑地址规则；
 - bit-packed 或嵌套 PDO entry；
 - 零值、非法或纳秒换算溢出的 timeout，以及非 output SyncManager 的 `OpOnly`；
 - 缺失 CoE、缺半边/重复/禁用的邮箱 SyncManager、缺失物理字段、容量越界及地址
@@ -86,9 +87,10 @@ index/subindex/bit length/DataType。未提供 timeout 时使用版本化的 ETG
 生成的 inventory、JSON、C 和 Rust product slave 均携带精确主站发送/接收邮箱
 地址与容量、显式 DC requirement/reference policy、所选 OpMode 的 SII 可表示描述符，
 以及由产品基准周期解析出的绝对 SYNC0/SYNC1 周期、signed SYNC0 shift 和完整
-16-bit `AssignActivate`；规范化 JSON、C 和 Rust 还携带 SII SyncManager 数量与 enabled mask，
+16-bit `AssignActivate`；规范化 JSON、C 和 Rust 还携带 SII FMMU usage 实际数量、固定
+16 项有序数组，以及 SyncManager 数量与 enabled mask，
 ESI inventory 保留两侧 control byte。ESI mailbox、timeout profile、`OpOnly` mask 及
-activation template 参与 ESI semantic hash 和配置 SHA-256；显式 DC policy 属于产品
+activation template、FMMU usage 顺序参与 ESI semantic hash 和配置 SHA-256；显式 DC policy 属于产品
 语义，只参与配置 SHA-256，不反向改写 ESI 内容 hash。配置 SHA-256 只依赖规范化产品语义和排序后的 ESI 语义内容，不依赖 JSON
 键顺序、XML 排版、输入/输出路径、主机或当前时间。同一语义输入必须生成
 逐字节相同的六个文件。
@@ -111,9 +113,10 @@ ProcBuf。激活按以下顺序 fail-closed：
 6. 逐轴校验连续索引、驱动归属、冻结策略和选定模式的 `Cia402PdoMap`。
 
 `PRODUCT_CONFIG.dc_sync_plan()` 和 `startup_profiles()` 会在任何 Startup 动作发出前校验每个从站的
-DC reference 必须同时 required、全产品最多一个 reference、DC-required 从站必须且只有一个模式期望、非 DC 从站不得携带模式期望、timeout 非零、position 一一对应、生成邮箱范围有效、SII SyncManager count/enabled
+DC reference 必须同时 required、全产品最多一个 reference、DC-required 从站必须且只有一个模式期望、非 DC 从站不得携带模式期望、timeout 非零、position 一一对应、生成邮箱范围有效、SII FMMU count 不超过 16、SyncManager count/enabled
 mask 有界、`OpOnly` mask/flag 有效，并要求每个 `OpOnly` SyncManager 只关联所选
-RxPDO、每个 PDO 分组连续。运行时从这些静态字段重新构建版本化 SII 结构签名，而不是
+RxPDO、每个 PDO 分组连续。运行时还按所有 RxPDO group 后所有 TxPDO group 的确定性顺序
+检查对应 FMMU usage 分别为 Outputs 和 Inputs，并从这些静态字段重新构建 schema-v2 SII 结构签名，而不是
 信任预生成摘要。共享 `DcSyncTiming` resolver 还会按产品基准周期重新计算绝对寄存器值，
 要求与生成值逐字段相等，并按产品从站顺序构造固定容量计划；非 DC 从站不得携带 timing，
 唯一 reference 必须属于计划。DC booleans 分别映射为 `StartupDcRequirement::None`、`SystemTime`
@@ -126,11 +129,12 @@ position-keyed 扫描证据验证所有 DC 要求：显式 reference 合格时�
 send/receive 地址和容量；轮询、超时、重试和 Status Bit 仍是运行期策略，不参与布局
 相等判定。匹配后才按 position 发布验证证据，任一读取、协议、范围或布局错误均闭锁
 Startup。随后，携带 SII 期望的 profile 进入独立 `ReadingConfiguration` 阶段：从标准
-`0x0040` 有界读取到 END，原子投影 SM/RxPDO/TxPDO candidate，并比较 SM 数量、
-enabled/OpOnly mask 以及按 Rx 后 Tx 冻结顺序排列的 PDO index、SM、object、subindex 和
+`0x0040` 有界读取到 END，原子投影有序 FMMU usage 与 SM/RxPDO/TxPDO candidate，并比较
+FMMU count/order/usage、SM 数量、enabled/OpOnly mask 以及按 Rx 后 Tx 冻结顺序排列的 PDO index、SM、object、subindex 和
 bit length。相同完整镜像还会以借用方式解析 Strings `0x000a` 与 DC `0x003c`
 固定 24-byte 条目，按精确模式名比较 cycle、shift、factor 与 AssignActivate。两类检查
-全部成功后才同时按 position 发布签名/DC 证据并开始 AL；任何 stream、容量、
+全部成功后才同时按 position 发布签名/DC 证据并开始 AL；在线 FMMU 条目数还必须不超过
+扫描时 ESC 基础信息报告的 FMMU 数量。任何 stream、容量、
 投影、动作所有权、deadline、结构或 DC 描述符差异均闭锁且不发布部分证据。未携带对应期望的 profile
 和旧 `start()` API 保持原有兼容路径。
 每个 ESM step 只建立一个绝对 deadline；相关 `OpOnly`
@@ -175,8 +179,9 @@ send/receive `MailboxConfig`。Startup 已将该读取和生成 ESI 布局交叉
 AL 之间的有界控制请求路径。独立 `SiiCategoryStreamReader` 现可从标准 `0x0040`
 开始，在一个绝对 deadline 内沿用同一 token/datagram 游标读取两字 header 和变长
 payload，直到 END 才公开完整镜像；`SiiStreamDiscoveryController` 使用调用方 scratch
-原子投影 SyncManager/RxPDO/TxPDO candidate，并保留显式 signedness。Startup 已复用
-同一流控制器和控制请求所有权，在首个 AL 动作前与生成产品重建的固定大小结构签名
+原子投影有序 FMMU usage 与 SyncManager/RxPDO/TxPDO candidate，并保留显式 signedness。
+Startup 已复用同一流控制器和控制请求所有权，在首个 AL 动作前与生成产品重建的
+schema-v2 固定大小结构签名
 精确比较；signedness 暂不属于在线签名，因为 SII flags 的数据类型语义尚未单独冻结。
 在线扫描现独立于生成 schema 精确采集 DC 端口接收时间和 Data Link Status，Startup
 根据已有 DC requirement/reference policy 事务式发布固定容量拓扑与参考钟相对传播延迟；
@@ -213,10 +218,11 @@ make build-report \
 跨周期请求所有权、重试/超时、精确回读、故障阻断和生命周期门控，但该软件
 证据还覆盖全从站 PREOP 屏障、真实服务 phase 释放、保留拓扑、合法 SAFEOP/OP
 顺序、逐转换 deadline 选择、`OpOnly` 写入读回顺序，以及调用方交付 SII 响应的邮箱
-布局比对、完整 category stream/candidate 投影和生成结构签名的 AL 前精确比较，以及调用方
+布局比对、完整 category stream/candidate 投影、ordered FMMU usage/schema-v2 生成结构签名
+和 ESC count 门的 AL 前精确比较，以及调用方
 交付 ESC/System Time 响应的能力判断和参考时钟选择；它不证明
 该响应来自真实目标从站，也不等于真实从站 PDO
-assignment/mapping、ESM timeout、SyncManager 或 DC 时钟响应证据；模拟端口覆盖生成
+assignment/mapping、ESM timeout、SyncManager/FMMU 寄存器或 DC 时钟响应证据；模拟端口覆盖生成
 双驱动计划的完整 DC SYNC 请求/RX/屏障路径，但不证明真实 ESC 定时行为。该证据更不证明驱动
 接受映射、完整周期 WKC、实际线缆时间、WCET、DMA/cache 正确性、制动/机械适配、
 STO/FSoE 或功能安全。生成示例和构建报告必须保持

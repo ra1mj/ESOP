@@ -9,15 +9,16 @@
 use crate::mapping::{FmmuConfig, MappingError, MappingTable, SyncManagerConfig};
 use crate::pdo::{PdoDirection, PdoEntry, PdoError, PdoLayout};
 use crate::sii::{
-    SII_CATEGORY_RX_PDO, SII_CATEGORY_SYNC_MANAGER, SII_CATEGORY_TX_PDO, SiiBlockError,
-    SiiBlockReader, SiiCategory, SiiCategoryError, SiiCategoryReader,
+    MAX_SII_FMMU_USAGES, SII_CATEGORY_FMMU, SII_CATEGORY_RX_PDO, SII_CATEGORY_SYNC_MANAGER,
+    SII_CATEGORY_TX_PDO, SiiBlockError, SiiBlockReader, SiiCategory, SiiCategoryError,
+    SiiCategoryReader, SiiFmmuUsage, SiiFmmuUsageProfile,
 };
 use crate::sii_stream::{SiiCategoryStreamError, SiiCategoryStreamReader};
 use sha2::{Digest, Sha256};
 
-pub const SII_CONFIGURATION_SIGNATURE_SCHEMA: u8 = 1;
+pub const SII_CONFIGURATION_SIGNATURE_SCHEMA: u8 = 2;
 
-const SII_CONFIGURATION_SIGNATURE_DOMAIN: &[u8] = b"esop.sii-configuration.v1";
+const SII_CONFIGURATION_SIGNATURE_DOMAIN: &[u8] = b"esop.sii-configuration.v2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SiiConfigurationSignatureError {
@@ -29,6 +30,8 @@ pub enum SiiConfigurationSignatureError {
     PdoNotOpen,
     EmptyPdo,
     InvalidBitLength,
+    FmmuCapacityExceeded,
+    FmmuAfterPdo,
     CountOverflow,
     DirectionOrder,
     EntryRangeOutOfBounds,
@@ -40,6 +43,7 @@ pub struct SiiConfigurationSignature {
     sync_manager_count: u8,
     enabled_sync_managers: u16,
     op_only_sync_managers: u16,
+    fmmu_count: u8,
     rx_pdo_count: u16,
     tx_pdo_count: u16,
     rx_entry_count: u16,
@@ -62,6 +66,10 @@ impl SiiConfigurationSignature {
 
     pub const fn op_only_sync_managers(self) -> u16 {
         self.op_only_sync_managers
+    }
+
+    pub const fn fmmu_count(self) -> u8 {
+        self.fmmu_count
     }
 
     pub const fn rx_pdo_count(self) -> u16 {
@@ -97,6 +105,10 @@ pub struct SiiConfigurationSignatureBuilder {
     open_direction: Option<PdoDirection>,
     open_entry_count: u16,
     tx_started: bool,
+    pdo_started: bool,
+    fmmu_usages: [SiiFmmuUsage; MAX_SII_FMMU_USAGES],
+    fmmu_count: u8,
+    fmmu_sealed: bool,
 }
 
 impl SiiConfigurationSignatureBuilder {
@@ -140,7 +152,27 @@ impl SiiConfigurationSignatureBuilder {
             open_direction: None,
             open_entry_count: 0,
             tx_started: false,
+            pdo_started: false,
+            fmmu_usages: [SiiFmmuUsage::Unused; MAX_SII_FMMU_USAGES],
+            fmmu_count: 0,
+            fmmu_sealed: false,
         })
+    }
+
+    pub fn fmmu_usage(
+        &mut self,
+        usage: SiiFmmuUsage,
+    ) -> Result<(), SiiConfigurationSignatureError> {
+        if self.pdo_started || self.open_direction.is_some() || self.fmmu_sealed {
+            return Err(SiiConfigurationSignatureError::FmmuAfterPdo);
+        }
+        let index = usize::from(self.fmmu_count);
+        if index >= MAX_SII_FMMU_USAGES {
+            return Err(SiiConfigurationSignatureError::FmmuCapacityExceeded);
+        }
+        self.fmmu_usages[index] = usage;
+        self.fmmu_count += 1;
+        Ok(())
     }
 
     pub fn begin_pdo(
@@ -163,6 +195,8 @@ impl SiiConfigurationSignatureBuilder {
         if direction == PdoDirection::Tx {
             self.tx_started = true;
         }
+        self.seal_fmmu();
+        self.pdo_started = true;
         let count = match direction {
             PdoDirection::Rx => &mut self.rx_pdo_count,
             PdoDirection::Tx => &mut self.tx_pdo_count,
@@ -225,6 +259,7 @@ impl SiiConfigurationSignatureBuilder {
         if self.open_direction.is_some() {
             return Err(SiiConfigurationSignatureError::PdoAlreadyOpen);
         }
+        self.seal_fmmu();
         self.hasher.update([0xff]);
         self.hasher.update(self.rx_pdo_count.to_le_bytes());
         self.hasher.update(self.tx_pdo_count.to_le_bytes());
@@ -236,12 +271,24 @@ impl SiiConfigurationSignatureBuilder {
             sync_manager_count: self.sync_manager_count,
             enabled_sync_managers: self.enabled_sync_managers,
             op_only_sync_managers: self.op_only_sync_managers,
+            fmmu_count: self.fmmu_count,
             rx_pdo_count: self.rx_pdo_count,
             tx_pdo_count: self.tx_pdo_count,
             rx_entry_count: self.rx_entry_count,
             tx_entry_count: self.tx_entry_count,
             digest,
         })
+    }
+
+    fn seal_fmmu(&mut self) {
+        if self.fmmu_sealed {
+            return;
+        }
+        self.hasher.update([0x20, self.fmmu_count]);
+        for usage in self.fmmu_usages.iter().take(usize::from(self.fmmu_count)) {
+            self.hasher.update([usage.raw()]);
+        }
+        self.fmmu_sealed = true;
     }
 }
 
@@ -279,6 +326,7 @@ pub enum SiiConfigurationError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SiiConfigurationProgress {
+    FmmuUsages(usize),
     SyncManagers(usize),
     RxPdo { index: u16, entries: usize },
     TxPdo { index: u16, entries: usize },
@@ -320,6 +368,8 @@ pub struct SiiConfigurationCandidate<
     const TX_ENTRIES: usize,
 > {
     mapping: MappingTable<SMS, FMMUS>,
+    fmmu_usages: SiiFmmuUsageProfile,
+    fmmu_category_seen: bool,
     rx_layout: PdoLayout<RX_ENTRIES>,
     tx_layout: PdoLayout<TX_ENTRIES>,
     rx_segments: [SiiProcessDataSegment; RX_ENTRIES],
@@ -409,6 +459,8 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
     pub const fn new() -> Self {
         Self {
             mapping: MappingTable::new(),
+            fmmu_usages: SiiFmmuUsageProfile::new(),
+            fmmu_category_seen: false,
             rx_layout: PdoLayout::new(),
             tx_layout: PdoLayout::new(),
             rx_segments: [SiiProcessDataSegment::EMPTY; RX_ENTRIES],
@@ -424,6 +476,10 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
 
     pub fn mapping(&self) -> &MappingTable<SMS, FMMUS> {
         &self.mapping
+    }
+
+    pub const fn fmmu_usages(&self) -> SiiFmmuUsageProfile {
+        self.fmmu_usages
     }
 
     pub fn rx_layout(&self) -> &PdoLayout<RX_ENTRIES> {
@@ -475,6 +531,9 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
             enabled_sync_managers,
             self.mapping.op_only_outputs().mask(),
         )?;
+        for usage in self.fmmu_usages.usages().iter().copied() {
+            builder.fmmu_usage(usage)?;
+        }
         append_signature_segments(&mut builder, self.rx_segments(), self.rx_layout.entries())?;
         append_signature_segments(&mut builder, self.tx_segments(), self.tx_layout.entries())?;
         builder.finish()
@@ -560,6 +619,7 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
         signed: bool,
     ) -> Result<SiiConfigurationProgress, SiiConfigurationError> {
         match category.kind {
+            SII_CATEGORY_FMMU => self.apply_fmmu_usages(category),
             SII_CATEGORY_SYNC_MANAGER => self.apply_sync_managers(category),
             SII_CATEGORY_RX_PDO => self.apply_pdo(category, PdoDirection::Rx, signed),
             SII_CATEGORY_TX_PDO => self.apply_pdo(category, PdoDirection::Tx, signed),
@@ -600,7 +660,10 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
         {
             if matches!(
                 category.kind,
-                SII_CATEGORY_SYNC_MANAGER | SII_CATEGORY_RX_PDO | SII_CATEGORY_TX_PDO
+                SII_CATEGORY_FMMU
+                    | SII_CATEGORY_SYNC_MANAGER
+                    | SII_CATEGORY_RX_PDO
+                    | SII_CATEGORY_TX_PDO
             ) {
                 self.apply_category_with_signed(category, signed)?;
                 applied += 1;
@@ -694,6 +757,23 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
         let summary = next.mapping.summary();
         *self = next;
         Ok(summary)
+    }
+
+    fn apply_fmmu_usages(
+        &mut self,
+        category: SiiCategory<'_>,
+    ) -> Result<SiiConfigurationProgress, SiiConfigurationError> {
+        if self.fmmu_category_seen {
+            return Err(SiiConfigurationError::Category(
+                SiiCategoryError::DuplicateFmmuCategory,
+            ));
+        }
+        let profile = category
+            .fmmu_usages()
+            .map_err(SiiConfigurationError::Category)?;
+        self.fmmu_usages = profile;
+        self.fmmu_category_seen = true;
+        Ok(SiiConfigurationProgress::FmmuUsages(profile.len()))
     }
 
     fn apply_sync_managers(
@@ -1059,7 +1139,9 @@ fn append_pdo_entries<const ENTRIES: usize>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sii::{SII_CATEGORY_END, SII_CATEGORY_RX_PDO, SII_CATEGORY_SYNC_MANAGER};
+    use crate::sii::{
+        SII_CATEGORY_END, SII_CATEGORY_FMMU, SII_CATEGORY_RX_PDO, SII_CATEGORY_SYNC_MANAGER,
+    };
 
     fn append_category(bytes: &mut std::vec::Vec<u8>, kind: u16, data: &[u8]) {
         assert_eq!(data.len() % 2, 0);
@@ -1070,6 +1152,7 @@ mod tests {
 
     fn configuration_bytes(rx_object: u16) -> std::vec::Vec<u8> {
         let mut bytes = std::vec::Vec::new();
+        append_category(&mut bytes, SII_CATEGORY_FMMU, &[1, 2]);
         append_category(
             &mut bytes,
             SII_CATEGORY_SYNC_MANAGER,
@@ -1100,6 +1183,8 @@ mod tests {
         rx_object: u16,
     ) -> Result<SiiConfigurationSignature, SiiConfigurationSignatureError> {
         let mut builder = SiiConfigurationSignatureBuilder::new(2, 0b11, 0)?;
+        builder.fmmu_usage(SiiFmmuUsage::Outputs)?;
+        builder.fmmu_usage(SiiFmmuUsage::Inputs)?;
         builder.begin_pdo(PdoDirection::Rx, 0x1600, 0)?;
         builder.entry(rx_object, 0, 16)?;
         builder.end_pdo()?;
@@ -1157,6 +1242,7 @@ mod tests {
         assert_eq!(signature.sync_manager_count(), 2);
         assert_eq!(signature.enabled_sync_managers(), 0b11);
         assert_eq!(signature.op_only_sync_managers(), 0);
+        assert_eq!(signature.fmmu_count(), 2);
         assert_eq!(signature.rx_pdo_count(), 1);
         assert_eq!(signature.tx_pdo_count(), 1);
         assert_eq!(signature.rx_entry_count(), 1);
@@ -1197,6 +1283,78 @@ mod tests {
             builder.end_pdo(),
             Err(SiiConfigurationSignatureError::EmptyPdo)
         );
+
+        let mut builder = SiiConfigurationSignatureBuilder::new(1, 1, 0).unwrap();
+        for _ in 0..MAX_SII_FMMU_USAGES {
+            builder.fmmu_usage(SiiFmmuUsage::Unused).unwrap();
+        }
+        assert_eq!(
+            builder.fmmu_usage(SiiFmmuUsage::Unused),
+            Err(SiiConfigurationSignatureError::FmmuCapacityExceeded)
+        );
+        builder.begin_pdo(PdoDirection::Rx, 0x1600, 0).unwrap();
+        assert_eq!(
+            builder.fmmu_usage(SiiFmmuUsage::Outputs),
+            Err(SiiConfigurationSignatureError::FmmuAfterPdo)
+        );
+    }
+
+    #[test]
+    fn configuration_signature_covers_fmmu_count_order_and_usage() {
+        fn signature(usages: &[SiiFmmuUsage]) -> SiiConfigurationSignature {
+            let mut builder = SiiConfigurationSignatureBuilder::new(2, 0b11, 0).unwrap();
+            for usage in usages.iter().copied() {
+                builder.fmmu_usage(usage).unwrap();
+            }
+            builder.begin_pdo(PdoDirection::Rx, 0x1600, 0).unwrap();
+            builder.entry(0x6040, 0, 16).unwrap();
+            builder.end_pdo().unwrap();
+            builder.begin_pdo(PdoDirection::Tx, 0x1A00, 1).unwrap();
+            builder.entry(0x6041, 0, 16).unwrap();
+            builder.end_pdo().unwrap();
+            builder.finish().unwrap()
+        }
+
+        let baseline = signature(&[SiiFmmuUsage::Outputs, SiiFmmuUsage::Inputs]);
+        assert_eq!(baseline.fmmu_count(), 2);
+        for changed in [
+            signature(&[]),
+            signature(&[SiiFmmuUsage::Outputs]),
+            signature(&[SiiFmmuUsage::Inputs, SiiFmmuUsage::Outputs]),
+            signature(&[SiiFmmuUsage::Outputs, SiiFmmuUsage::Unused]),
+        ] {
+            assert_ne!(changed, baseline);
+        }
+    }
+
+    #[test]
+    fn fmmu_category_application_is_atomic_across_invalid_and_duplicate_categories() {
+        let mut invalid = std::vec::Vec::new();
+        append_category(&mut invalid, SII_CATEGORY_FMMU, &[1, 4]);
+        invalid.extend_from_slice(&SII_CATEGORY_END.to_le_bytes());
+        invalid.extend_from_slice(&0u16.to_le_bytes());
+
+        let mut candidate = SiiConfigurationCandidate::<1, 0, 1, 1>::new();
+        assert_eq!(
+            candidate.apply_bytes(&invalid),
+            Err(SiiConfigurationError::Category(
+                SiiCategoryError::InvalidFmmuUsage(4)
+            ))
+        );
+        assert!(candidate.fmmu_usages().is_empty());
+
+        let mut duplicate = std::vec::Vec::new();
+        append_category(&mut duplicate, SII_CATEGORY_FMMU, &[1, 2]);
+        append_category(&mut duplicate, SII_CATEGORY_FMMU, &[1, 2]);
+        duplicate.extend_from_slice(&SII_CATEGORY_END.to_le_bytes());
+        duplicate.extend_from_slice(&0u16.to_le_bytes());
+        assert_eq!(
+            candidate.apply_bytes(&duplicate),
+            Err(SiiConfigurationError::Category(
+                SiiCategoryError::DuplicateFmmuCategory
+            ))
+        );
+        assert!(candidate.fmmu_usages().is_empty());
     }
 
     #[test]
