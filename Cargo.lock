@@ -728,6 +728,7 @@ dependencies = [
  "esop-ethercat-core",
  "esop-lifecycle-guard",
  "esop-procbuf",
+ "esop-product-config",
  "esop-profile-cia402",
  "libc",
 ]
