@@ -70,7 +70,8 @@
       "serial": "0x00000001",
       "dc": {
         "required": true,
-        "reference_clock": true
+        "reference_clock": true,
+        "op_mode": "DcSync"
       },
       "domain_id": 0,
       "rx_pdos": ["0x1600"],
@@ -91,7 +92,8 @@
       "serial": "0x00000002",
       "dc": {
         "required": true,
-        "reference_clock": false
+        "reference_clock": false,
+        "op_mode": "DcSync"
       },
       "domain_id": 0,
       "rx_pdos": ["0x1600"],

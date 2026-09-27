@@ -221,12 +221,12 @@ for (;;) {
 | ID | 优先级 | 需求 | 验收证据 |
 | --- | --- | --- | --- |
 | CFG-001 | P0 | 上电扫描以自动递增寻址发现从站，读取基本 ESC 信息并分配固定站地址。 | 1、8、32 从站 HIL 拓扑报告与地址唯一性测试。 |
-| CFG-002 | P0 | 支持 ESC 寄存器读写和 SII 基础读取，输出 vendor ID、product code、revision、serial、mailbox/SM/FMMU 能力及端口拓扑。 | 软件测试覆盖身份、ESC `0x0000..0x000B` 精确字段与 Features Supported、DC `0x0910` System Time 能力、`0x0900/16` 接收时间、`0x0110/2` 四端口链路状态、固定容量拓扑/传播延迟投影、标准 CoE 邮箱布局交叉验证、从 `0x0040` 到 END 的 SM/PDO category stream 及 Startup 结构比对；FMMU/DC category、物理时序真实性与真实从站证据由后续集成/HIL 补齐。 |
+| CFG-002 | P0 | 支持 ESC 寄存器读写和 SII 基础读取，输出 vendor ID、product code、revision、serial、mailbox/SM/FMMU 能力及端口拓扑。 | 软件测试覆盖身份、ESC `0x0000..0x000B` 精确字段与 Features Supported、DC `0x0910` System Time 能力、`0x0900/16` 接收时间、`0x0110/2` 四端口链路状态、固定容量拓扑/传播延迟投影、标准 CoE 邮箱布局交叉验证、从 `0x0040` 到 END 的 SM/PDO category stream、Strings/DC 模式描述符及 Startup 联合比对；FMMU 自动发现、物理时序真实性与真实从站证据由后续集成/HIL 补齐。 |
 | CFG-003 | P0 | 实现 INIT/PREOP/SAFEOP/OP 状态转换、错误确认和状态超时；失败事件必须带从站号、请求/实际状态、AL status code。 | 每条转换及错误状态的故障注入测试。 |
 | CFG-004 | P0 | 静态配置必须按 alias/position 和 vendor/product/revision 匹配从站；不匹配时禁止进入 OP。 | 正常、型号错误、位置错误三组测试。 |
 | CFG-005 | P0 | 支持 SM、FMMU、watchdog 和固定逻辑地址的配置；逻辑映像必须可复现。 | 对同一配置多次启动得到相同映射和帧计划。 |
 | CFG-006 | P0 | 支持程序化静态 PDO 配置以及由 `ecm_cfggen` 生成的等价 C 描述。 | 两种输入生成相同 SM/FMMU/PDO 写序列。 |
-| CFG-007 | P1 | 支持配置阶段读取完整 SII PDO/SM 类别，作为静态描述的校验来源。 | 已具备 Startup-owned 有界 stream、原子 candidate、版本化结构签名及生成配置的首个 AL 前精确比对；物理响应真实性、FMMU/DC 语义和 HIL 仍需独立证据。 |
+| CFG-007 | P1 | 支持配置阶段读取完整 SII PDO/SM 类别，作为静态描述的校验来源。 | 已具备 Startup-owned 有界 stream、原子 candidate、版本化结构签名、所选 ESI DC OpMode 与在线 SII `0x003c` 描述符的首个 AL 前联合比对；物理响应真实性、FMMU 自动发现和 HIL 仍需独立证据。 |
 | CFG-008 | P0 | 识别并正确处理带/不带 Device Emulation 的从站；不得对 Device Emulation 从站错误使用 AL Error Acknowledge。 | 两类虚拟 ESC 的状态切换与错误确认序列测试。 |
 | CFG-009 | P0 | ESM 转换使用 ESI/SII 提供的超时；缺失时使用受版本管理的 ETG.1020 默认值。`OpOnly` 设备在非 OP 状态必须禁用输出 SyncManager。 | 超时覆盖、默认回退和 `OpOnly` 输出隔离 HIL。 |
 | CFG-010 | P1 | 支持 Explicit Device Identification，并可按配置用于防止换线/错位设备进入 OP。 | 交换两个同型号设备或修改 Identification ADO 后拒绝激活。 |

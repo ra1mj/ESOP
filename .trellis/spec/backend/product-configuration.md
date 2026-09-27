@@ -75,12 +75,17 @@ Input schema `esop.product.v1` is strict (`deny_unknown_fields`) and owns:
 - period/deadline and platform metadata;
 - ordered Domain, slave, selected ESI PDO, and axis policy declarations;
 - an optional strict per-slave `dc` object whose `required` and
-  `reference_clock` booleans default false, where reference implies required
-  and at most one slave may select reference.
+  `reference_clock` booleans default false, where reference implies required,
+  at most one slave may select reference, every required slave selects one
+  exact ESI `Dc/OpMode` by `op_mode`, and a non-required slave selects none.
 
 ESI paths are confined relative paths and their canonical targets must remain
 under the product directory. Names/labels rendered into C are nonempty,
 NUL-free, and at most 128 UTF-8 bytes.
+Because `Name`, `Desc`, and timing element names overlap other ESI scopes, the
+DC builder may consume them only as direct `Device/Dc/OpMode` children. Nested
+`OpMode` records, wrapper elements around DC fields, or an `OpMode` outside
+that exact path must fail instead of falling through to Device/PDO parsing.
 
 Successful generation atomically replaces the output directory with exactly:
 
@@ -111,6 +116,9 @@ oversized mailbox ranges fail before publication. Timeout values are decimal
 milliseconds converted to checked nanoseconds; missing values use the named
 `ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1`. Mailbox data, timeout profiles, and
 activation templates participate in ESI semantic and configuration hashes.
+All ordered ESI DC mode metadata participates in the ESI semantic hash. The
+product-selected mode and its exact SII-representable descriptor participate
+in the normalized product, inventory, generated C/Rust and configuration hash.
 
 The core SII parser accepts only the exact five-word standard mailbox header,
 checks CoE support and the same address/capacity rules, and performs the same
@@ -136,7 +144,10 @@ after caller-owned scratch conversion and complete transactional SM/RxPDO/
 TxPDO projection; explicit PDO signedness is preserved. A versioned SHA-256
 structural signature covers exact SM count/enabled/OpOnly masks and ordered
 Rx-then-Tx PDO index/SM/object/subindex/bit-length records; signedness is
-intentionally excluded from live comparison.
+intentionally excluded from live comparison. The same completed caller-owned
+image exposes borrowed Strings and fixed 24-byte DC category parsers. Mode
+names use exact one-based string indices, reserved bytes must be zero, and all
+signed shifts/factors retain their protocol widths without allocation.
 
 `startup_profiles` validates timeout values, exact slave positions, generated
 mailbox ranges, generated SM count/enabled mask, OpOnly flags, exclusive
@@ -144,15 +155,18 @@ selected RxPDO ownership, and contiguous PDO groups before rebuilding the
 expected SII signature from the static fields used by runtime configuration.
 It first validates the product-wide DC invariant and maps each static policy to
 `StartupDcRequirement::{None,SystemTime,ReferenceClock}`; invalid policy must
-return before Startup mutation. The DC fields are present in normalized JSON,
-device inventory, generated C/Rust and the product configuration SHA-256. They
-are product semantics and must not alter an ESI source's semantic hash.
+return before Startup mutation. It also propagates the selected
+`SiiDcModeExpectation` only for required slaves. The DC policy and selected
+descriptor are present in normalized JSON, device inventory, generated C/Rust
+and the product configuration SHA-256.
 `start_startup` supplies those profiles to Startup. After identity and optional
 mailbox verification, profiles with this expectation enter a distinct bounded
-configuration stream phase. Startup publishes position-keyed signature
-evidence and emits the first AL action only after exact comparison; stream,
-projection, capacity, timeout, ownership, or signature mismatch faults publish
-no evidence. A nonzero legacy
+configuration stream phase. Startup stages both structural-signature and
+selected-DC observations from that one pass, then publishes both position-
+keyed evidence records only after every comparison succeeds. It emits the
+first AL action only after exact comparison; stream, projection, capacity,
+timeout, ownership, signature, missing category, malformed descriptor, unknown
+mode, or field mismatch faults publish neither record. A nonzero legacy
 `StartupConfig.transition_timeout_ns` is an explicit uniform override;
 otherwise each AL step selects its generated/default timeout. OpOnly and AL
 work for one step share one absolute deadline. Non-OP and leaving-OP paths
@@ -220,6 +234,9 @@ Configuration. The scheduler releases Startup only after the whole PDO batch
 and other required controllers reach real Complete phases, then resumes the
 retained topology through SAFEOP/OP. Full mapping/DC descriptor discovery,
 physical response authenticity and hardware qualification remain caller work.
+Selected DC descriptor discovery is already complete in Startup; common SYNC
+start-time calculation and topology-wide SYNC register programming remain
+caller work.
 
 The configuration SHA-256 covers normalized product semantics and a sorted
 label-to-semantic-ESI-hash map. It excludes timestamps, host paths, compiler,
@@ -247,6 +264,7 @@ datagrams, FCS, and inter-packet gap respectively.
 | Unknown/missing JSON field or unsupported schema | Reject before staging. |
 | Absolute, parent-traversing, or symlink-escaping ESI path | Reject as invalid product input. |
 | Ambiguous ESI identity/PDO, duplicate object, wrong direction/width | Reject with identity/PDO/CiA 402 context. |
+| Nested/misplaced ESI DC OpMode or wrapped DC field | Reject before mode or device metadata publication. |
 | Zero/malformed/overflowing ESM timeout or non-output OpOnly SM | Reject before staging or hash publication. |
 | Missing CoE, partial/duplicate/disabled ESI mailbox SM, or invalid mailbox range | Reject before staging or hash publication. |
 | Duplicate Domain/slave/axis identity or overlapping range | Reject before registry mutation/publication. |
@@ -286,8 +304,9 @@ datagrams, FCS, and inter-packet gap respectively.
   optional unmeasurable DC evidence remains explicitly `None`.
 - Bad: a selected RxPDO moved to TxPDO, a malformed Controlword width, a
   duplicate object, a path escape, zero product limit, reference-without-
-  required, duplicate reference, malformed port tree, required unmeasurable DC,
-  or forged qualification fails without partial publication.
+  required, duplicate reference, wrapped/misplaced DC mode field, malformed
+  port tree, required unmeasurable DC, or forged qualification fails without
+  partial publication.
 
 ## 6. Tests Required
 
@@ -302,6 +321,7 @@ datagrams, FCS, and inter-packet gap respectively.
   activate it in integration tests, and check `esop-product-config` for
   `aarch64-unknown-none`.
 - Cover omitted/default DC policy, unknown fields, reference invariants,
+  ESI multi-mode order, signed factor widths, nested/misplaced DC fields,
   configuration-hash changes, generated C/Rust/JSON/inventory fields, runtime
   profile propagation, 32/64-bit System Time reads, WKC 0/1/>1, malformed and
   timed-out responses, explicit/fallback selection, pre-identity mismatch and
@@ -393,6 +413,11 @@ dc_clock.start(
     monotonic_now_ns,
 )?;
 ```
+
+For ESI parsing, checking only the local element name is also wrong because a
+wrapped DC `Name` can otherwise be reinterpreted as the Device name. Keep an
+explicit DC builder and require the complete direct-child path before assigning
+any mode field; reject malformed nesting before the generic name handlers run.
 
 Do not treat a missing propagation delay as zero or program ESC delay/offset
 registers from an unpublished candidate. The only zero-delay exception is the

@@ -25,8 +25,21 @@ pub struct EsiDevice {
     pub sync_managers: Vec<EsiSyncManager>,
     pub mailbox: Option<EsiMailbox>,
     pub coe_supported: bool,
+    pub dc_modes: Vec<EsiDcMode>,
     pub rx_pdos: Vec<EsiPdo>,
     pub tx_pdos: Vec<EsiPdo>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct EsiDcMode {
+    pub name: String,
+    pub description: Option<String>,
+    pub cycle_time0_ns: u32,
+    pub shift_time0_ns: i32,
+    pub shift_time1_ns: i32,
+    pub sync1_cycle_factor: i16,
+    pub assign_activate: u16,
+    pub sync0_cycle_factor: i16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -124,6 +137,7 @@ struct DeviceBuilder {
     transition_timeouts: EsiTransitionTimeouts,
     sync_managers: Vec<EsiSyncManager>,
     coe_supported: bool,
+    dc_modes: Vec<EsiDcMode>,
     rx_pdos: Vec<EsiPdo>,
     tx_pdos: Vec<EsiPdo>,
 }
@@ -131,6 +145,14 @@ struct DeviceBuilder {
 impl DeviceBuilder {
     fn finish(self) -> std::result::Result<EsiDevice, String> {
         let mailbox = mailbox_from_sync_managers(&self.sync_managers)?;
+        for (index, mode) in self.dc_modes.iter().enumerate() {
+            if self.dc_modes[..index]
+                .iter()
+                .any(|existing| existing.name == mode.name)
+            {
+                return Err(format!("duplicate DC OpMode name {:?}", mode.name));
+            }
+        }
         Ok(EsiDevice {
             type_name: self.type_name.ok_or("Device Type text is missing")?,
             name: self.name.ok_or("Device Name is missing")?,
@@ -142,8 +164,42 @@ impl DeviceBuilder {
             sync_managers: self.sync_managers,
             mailbox,
             coe_supported: self.coe_supported,
+            dc_modes: self.dc_modes,
             rx_pdos: self.rx_pdos,
             tx_pdos: self.tx_pdos,
+        })
+    }
+}
+
+#[derive(Default)]
+struct DcModeBuilder {
+    name: Option<String>,
+    description: Option<String>,
+    cycle_time0_ns: u32,
+    shift_time0_ns: i32,
+    shift_time1_ns: i32,
+    sync1_cycle_factor: i16,
+    assign_activate: Option<u16>,
+    sync0_cycle_factor: i16,
+}
+
+impl DcModeBuilder {
+    fn finish(self) -> std::result::Result<EsiDcMode, String> {
+        let name = self.name.ok_or("DC OpMode Name is missing")?;
+        if name.is_empty() {
+            return Err("DC OpMode Name is empty".to_owned());
+        }
+        Ok(EsiDcMode {
+            name,
+            description: self.description.filter(|value| !value.is_empty()),
+            cycle_time0_ns: self.cycle_time0_ns,
+            shift_time0_ns: self.shift_time0_ns,
+            shift_time1_ns: self.shift_time1_ns,
+            sync1_cycle_factor: self.sync1_cycle_factor,
+            assign_activate: self
+                .assign_activate
+                .ok_or("DC OpMode AssignActivate is missing")?,
+            sync0_cycle_factor: self.sync0_cycle_factor,
         })
     }
 }
@@ -328,6 +384,7 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
     let mut pdo = None::<PdoBuilder>;
     let mut entry = None::<EntryBuilder>;
     let mut sync_manager = None::<SyncManagerBuilder>;
+    let mut dc_mode = None::<DcModeBuilder>;
 
     loop {
         let event = reader
@@ -416,6 +473,62 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                             control_byte,
                         });
                     }
+                    "OpMode" if dc_mode.is_some() => {
+                        return xml_error(path, "nested DC OpMode elements are unsupported");
+                    }
+                    "OpMode"
+                        if device.is_some()
+                            && pdo.is_none()
+                            && stack_ends_with(&stack, &["Device", "Dc", "OpMode"]) =>
+                    {
+                        dc_mode = Some(DcModeBuilder::default());
+                    }
+                    "OpMode" if device.is_some() && pdo.is_none() => {
+                        return xml_error(
+                            path,
+                            "DC OpMode must be nested directly under Device/Dc",
+                        );
+                    }
+                    "CycleTimeSync0"
+                        if dc_mode.is_some()
+                            && stack_ends_with(
+                                &stack,
+                                &["Device", "Dc", "OpMode", "CycleTimeSync0"],
+                            ) =>
+                    {
+                        dc_mode.as_mut().expect("DC mode exists").sync0_cycle_factor =
+                            optional_attribute(&start, "Factor", path)?
+                                .map(|value| parse_i16(&value))
+                                .transpose()
+                                .map_err(|detail| GeneratorError::Xml {
+                                    path: path.to_owned(),
+                                    detail: format!("invalid DC CycleTimeSync0 Factor: {detail}"),
+                                })?
+                                .unwrap_or(0);
+                    }
+                    "CycleTimeSync0" if dc_mode.is_some() => {
+                        return xml_error(path, "DC CycleTimeSync0 must be a direct OpMode child");
+                    }
+                    "CycleTimeSync1"
+                        if dc_mode.is_some()
+                            && stack_ends_with(
+                                &stack,
+                                &["Device", "Dc", "OpMode", "CycleTimeSync1"],
+                            ) =>
+                    {
+                        dc_mode.as_mut().expect("DC mode exists").sync1_cycle_factor =
+                            optional_attribute(&start, "Factor", path)?
+                                .map(|value| parse_i16(&value))
+                                .transpose()
+                                .map_err(|detail| GeneratorError::Xml {
+                                    path: path.to_owned(),
+                                    detail: format!("invalid DC CycleTimeSync1 Factor: {detail}"),
+                                })?
+                                .unwrap_or(0);
+                    }
+                    "CycleTimeSync1" if dc_mode.is_some() => {
+                        return xml_error(path, "DC CycleTimeSync1 must be a direct OpMode child");
+                    }
                     "CoE"
                         if device.is_some()
                             && pdo.is_none()
@@ -441,7 +554,10 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                 {
                     device.coe_supported = true;
                 }
-                if matches!(name.as_str(), "Device" | "RxPdo" | "TxPdo" | "Entry" | "Sm") {
+                if matches!(
+                    name.as_str(),
+                    "Device" | "RxPdo" | "TxPdo" | "Entry" | "Sm" | "OpMode"
+                ) {
                     return xml_error(path, format!("empty {name} elements are unsupported"));
                 }
             }
@@ -457,6 +573,21 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
             Event::End(end) => {
                 let name = local_name(end.name().as_ref());
                 let value = text.trim();
+                if dc_mode.is_some()
+                    && matches!(
+                        name.as_str(),
+                        "Name"
+                            | "Desc"
+                            | "AssignActivate"
+                            | "CycleTimeSync0"
+                            | "ShiftTimeSync0"
+                            | "CycleTimeSync1"
+                            | "ShiftTimeSync1"
+                    )
+                    && !stack_ends_with(&stack, &["Dc", "OpMode", name.as_str()])
+                {
+                    return xml_error(path, format!("DC {name} must be a direct OpMode child"));
+                }
                 match name.as_str() {
                     "Id" if device.is_none() && stack_ends_with(&stack, &["Vendor", "Id"]) => {
                         vendor_id =
@@ -470,6 +601,75 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                             return xml_error(path, "Device Type text is empty");
                         }
                         device.as_mut().expect("device exists").type_name = Some(value.to_owned());
+                    }
+                    "Name"
+                        if dc_mode.is_some()
+                            && stack_ends_with(&stack, &["Dc", "OpMode", "Name"]) =>
+                    {
+                        dc_mode.as_mut().expect("DC mode exists").name = Some(value.to_owned());
+                    }
+                    "Desc"
+                        if dc_mode.is_some()
+                            && stack_ends_with(&stack, &["Dc", "OpMode", "Desc"]) =>
+                    {
+                        dc_mode.as_mut().expect("DC mode exists").description =
+                            Some(value.to_owned());
+                    }
+                    "AssignActivate"
+                        if dc_mode.is_some()
+                            && stack_ends_with(&stack, &["Dc", "OpMode", "AssignActivate"]) =>
+                    {
+                        dc_mode.as_mut().expect("DC mode exists").assign_activate =
+                            Some(parse_u16(value).map_err(|detail| GeneratorError::Xml {
+                                path: path.to_owned(),
+                                detail: format!("invalid DC AssignActivate: {detail}"),
+                            })?);
+                    }
+                    "CycleTimeSync0"
+                        if dc_mode.is_some()
+                            && stack_ends_with(&stack, &["Dc", "OpMode", "CycleTimeSync0"]) =>
+                    {
+                        dc_mode.as_mut().expect("DC mode exists").cycle_time0_ns = parse_u32(value)
+                            .map_err(|detail| GeneratorError::Xml {
+                                path: path.to_owned(),
+                                detail: format!("invalid DC CycleTimeSync0: {detail}"),
+                            })?;
+                    }
+                    "ShiftTimeSync0"
+                        if dc_mode.is_some()
+                            && stack_ends_with(&stack, &["Dc", "OpMode", "ShiftTimeSync0"]) =>
+                    {
+                        dc_mode.as_mut().expect("DC mode exists").shift_time0_ns = parse_i32(value)
+                            .map_err(|detail| GeneratorError::Xml {
+                                path: path.to_owned(),
+                                detail: format!("invalid DC ShiftTimeSync0: {detail}"),
+                            })?;
+                    }
+                    "CycleTimeSync1"
+                        if dc_mode.is_some()
+                            && stack_ends_with(&stack, &["Dc", "OpMode", "CycleTimeSync1"]) =>
+                    {
+                        let cycle_time =
+                            parse_u32(value).map_err(|detail| GeneratorError::Xml {
+                                path: path.to_owned(),
+                                detail: format!("invalid DC CycleTimeSync1: {detail}"),
+                            })?;
+                        if cycle_time != 0 {
+                            return xml_error(
+                                path,
+                                "DC CycleTimeSync1 must be zero; SII stores only its factor",
+                            );
+                        }
+                    }
+                    "ShiftTimeSync1"
+                        if dc_mode.is_some()
+                            && stack_ends_with(&stack, &["Dc", "OpMode", "ShiftTimeSync1"]) =>
+                    {
+                        dc_mode.as_mut().expect("DC mode exists").shift_time1_ns = parse_i32(value)
+                            .map_err(|detail| GeneratorError::Xml {
+                                path: path.to_owned(),
+                                detail: format!("invalid DC ShiftTimeSync1: {detail}"),
+                            })?;
                     }
                     "Name" if entry.is_some() => {
                         entry.as_mut().expect("entry exists").name = Some(value.to_owned());
@@ -632,6 +832,28 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                             PdoDirection::Tx => builder.tx_pdos.push(finished),
                         }
                     }
+                    "OpMode"
+                        if dc_mode.is_some()
+                            && stack_ends_with(&stack, &["Device", "Dc", "OpMode"]) =>
+                    {
+                        let finished =
+                            dc_mode
+                                .take()
+                                .expect("DC mode exists")
+                                .finish()
+                                .map_err(|detail| GeneratorError::Xml {
+                                    path: path.to_owned(),
+                                    detail,
+                                })?;
+                        device
+                            .as_mut()
+                            .ok_or_else(|| GeneratorError::Xml {
+                                path: path.to_owned(),
+                                detail: "DC OpMode outside Device".to_owned(),
+                            })?
+                            .dc_modes
+                            .push(finished);
+                    }
                     "Device" => {
                         let finished = device
                             .take()
@@ -669,6 +891,7 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
         || pdo.is_some()
         || entry.is_some()
         || sync_manager.is_some()
+        || dc_mode.is_some()
         || !stack.is_empty()
     {
         return xml_error(path, "unterminated ESI element");
@@ -769,6 +992,34 @@ fn parse_u16(value: &str) -> std::result::Result<u16, String> {
 
 fn parse_u8(value: &str) -> std::result::Result<u8, String> {
     u8::try_from(parse_number(value)?).map_err(|_| "value exceeds u8".to_owned())
+}
+
+fn parse_i32(value: &str) -> std::result::Result<i32, String> {
+    let value = value.trim();
+    if value.starts_with("#x")
+        || value.starts_with("#X")
+        || value.starts_with("0x")
+        || value.starts_with("0X")
+    {
+        return u32::try_from(parse_number(value)?)
+            .map(|bits| bits as i32)
+            .map_err(|_| "value exceeds i32 storage width".to_owned());
+    }
+    value.parse::<i32>().map_err(|error| error.to_string())
+}
+
+fn parse_i16(value: &str) -> std::result::Result<i16, String> {
+    let value = value.trim();
+    if value.starts_with("#x")
+        || value.starts_with("#X")
+        || value.starts_with("0x")
+        || value.starts_with("0X")
+    {
+        return u16::try_from(parse_number(value)?)
+            .map(|bits| bits as i16)
+            .map_err(|_| "value exceeds i16 storage width".to_owned());
+    }
+    value.parse::<i16>().map_err(|error| error.to_string())
 }
 
 fn parse_bool(value: &str) -> std::result::Result<bool, String> {
@@ -915,6 +1166,96 @@ mod tests {
             device.mailbox.unwrap().mailbox_config(),
             MailboxConfig::new(0x1000, 64, 0x1100, 32)
         );
+    }
+
+    #[test]
+    fn dc_op_modes_preserve_the_sii_descriptor_fields() {
+        let xml = r##"<EtherCATInfo><Vendor><Id>1</Id></Vendor><Descriptions><Devices><Device>
+<Type ProductCode="1" RevisionNo="1">Drive</Type><Name>Drive</Name>
+<Dc><OpMode><Name>DcSync</Name><Desc>Primary sync mode</Desc><AssignActivate>#x0300</AssignActivate>
+<CycleTimeSync0 Factor="1">1000000</CycleTimeSync0><ShiftTimeSync0>-125</ShiftTimeSync0>
+<CycleTimeSync1 Factor="#xFFFE">0</CycleTimeSync1><ShiftTimeSync1>#x000000fa</ShiftTimeSync1>
+</OpMode><OpMode><Name>FreeRun</Name><AssignActivate>0</AssignActivate></OpMode></Dc>
+<RxPdo Sm="2"><Index>#x1600</Index><Entry><Index>#x6040</Index><BitLen>16</BitLen>
+<DataType>UINT</DataType></Entry></RxPdo>
+</Device></Devices></Descriptions></EtherCATInfo>"##;
+        let catalog = parse_text(Path::new("fixture.xml"), xml).unwrap();
+        assert_eq!(
+            catalog.devices[0].dc_modes,
+            vec![
+                EsiDcMode {
+                    name: "DcSync".to_owned(),
+                    description: Some("Primary sync mode".to_owned()),
+                    cycle_time0_ns: 1_000_000,
+                    shift_time0_ns: -125,
+                    shift_time1_ns: 250,
+                    sync1_cycle_factor: -2,
+                    assign_activate: 0x0300,
+                    sync0_cycle_factor: 1,
+                },
+                EsiDcMode {
+                    name: "FreeRun".to_owned(),
+                    description: None,
+                    cycle_time0_ns: 0,
+                    shift_time0_ns: 0,
+                    shift_time1_ns: 0,
+                    sync1_cycle_factor: 0,
+                    assign_activate: 0,
+                    sync0_cycle_factor: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_or_duplicate_dc_op_modes_are_rejected() {
+        let base = r##"<EtherCATInfo><Vendor><Id>1</Id></Vendor><Descriptions><Devices><Device>
+<Type ProductCode="1" RevisionNo="1">Drive</Type><Name>Drive</Name><Dc>{modes}</Dc>
+<RxPdo Sm="2"><Index>#x1600</Index><Entry><Index>#x6040</Index><BitLen>16</BitLen>
+<DataType>UINT</DataType></Entry></RxPdo>
+</Device></Devices></Descriptions></EtherCATInfo>"##;
+        for (modes, expected) in [
+            (
+                "<OpMode><Name>dc</Name><CycleTimeSync0>1</CycleTimeSync0></OpMode>",
+                "AssignActivate is missing",
+            ),
+            (
+                "<OpMode><Name>dc</Name><AssignActivate>1</AssignActivate><CycleTimeSync1>2</CycleTimeSync1></OpMode>",
+                "must be zero",
+            ),
+            (
+                "<OpMode><Name>dc</Name><AssignActivate>1</AssignActivate></OpMode><OpMode><Name>dc</Name><AssignActivate>2</AssignActivate></OpMode>",
+                "duplicate DC OpMode",
+            ),
+            (
+                "<OpMode><Name>dc</Name><AssignActivate>1</AssignActivate><ShiftTimeSync0>2147483648</ShiftTimeSync0></OpMode>",
+                "number too large",
+            ),
+            (
+                "<OpMode><Name>dc</Name><AssignActivate>1</AssignActivate><CycleTimeSync0 Factor=\"32768\">1</CycleTimeSync0></OpMode>",
+                "number too large",
+            ),
+            (
+                "<OpMode><Name>dc</Name><AssignActivate>1</AssignActivate><OpMode><Name>nested</Name><AssignActivate>2</AssignActivate></OpMode></OpMode>",
+                "nested DC OpMode",
+            ),
+            (
+                "<OpMode><Name>dc</Name><AssignActivate>1</AssignActivate><Wrapper><CycleTimeSync0 Factor=\"1\">1</CycleTimeSync0></Wrapper></OpMode>",
+                "direct OpMode child",
+            ),
+            (
+                "<OpMode><Wrapper><Name>dc</Name></Wrapper><AssignActivate>1</AssignActivate></OpMode>",
+                "DC Name must be a direct OpMode child",
+            ),
+        ] {
+            let error = parse_text(Path::new("fixture.xml"), &base.replace("{modes}", modes))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(expected),
+                "expected {expected:?} in {error:?}"
+            );
+        }
     }
 
     #[test]

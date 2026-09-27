@@ -21,8 +21,9 @@ use crate::scan::{
 };
 use crate::sii::{
     SII_STANDARD_MAILBOX_WORD_COUNT, SII_STANDARD_RECEIVE_MAILBOX_OFFSET_WORD, SiiAction,
-    SiiBlockReader, SiiBlockRequest, SiiError, SiiIdentityReader, SiiMailboxError, SiiPhase,
-    SiiProgress, SiiStandardMailbox,
+    SiiBlockReader, SiiBlockRequest, SiiCategoryError, SiiDcMode, SiiDcModeExpectation, SiiError,
+    SiiIdentityReader, SiiMailboxError, SiiPhase, SiiProgress, SiiStandardMailbox,
+    find_sii_dc_mode,
 };
 use crate::sii_config::{SiiConfigurationSignature, SiiConfigurationSignatureError};
 use crate::sii_discovery::{
@@ -73,6 +74,7 @@ pub struct StartupSlaveProfile {
     pub op_only_outputs: OpOnlySyncManagerProfile,
     pub expected_mailbox: Option<MailboxConfig>,
     pub expected_sii: Option<SiiConfigurationSignature>,
+    pub expected_dc_mode: Option<SiiDcModeExpectation>,
 }
 
 impl StartupSlaveProfile {
@@ -83,6 +85,7 @@ impl StartupSlaveProfile {
         op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
         expected_mailbox: None,
         expected_sii: None,
+        expected_dc_mode: None,
     };
 
     pub const fn new(position: u16) -> Self {
@@ -117,6 +120,11 @@ impl StartupSlaveProfile {
 
     pub const fn with_expected_sii(mut self, expected_sii: SiiConfigurationSignature) -> Self {
         self.expected_sii = Some(expected_sii);
+        self
+    }
+
+    pub const fn with_expected_dc_mode(mut self, expected_dc_mode: SiiDcModeExpectation) -> Self {
+        self.expected_dc_mode = Some(expected_dc_mode);
         self
     }
 }
@@ -420,6 +428,7 @@ pub enum StartupError {
         position: u16,
         error: MailboxConfigError,
     },
+    InvalidDcModeProfile(u16),
     OpOnlyProfile {
         position: u16,
         error: OpOnlyProfileError,
@@ -441,6 +450,15 @@ pub enum StartupError {
         position: u16,
         expected: SiiConfigurationSignature,
         observed: SiiConfigurationSignature,
+    },
+    SiiDcMode {
+        position: u16,
+        error: SiiCategoryError,
+    },
+    SiiDcModeMismatch {
+        position: u16,
+        expected: SiiDcMode,
+        observed: SiiDcMode,
     },
     MailboxMismatch {
         position: u16,
@@ -497,6 +515,7 @@ pub struct StartupController<const MAX_SLAVES: usize> {
     device_emulation: [bool; MAX_SLAVES],
     verified_mailboxes: [Option<MailboxConfig>; MAX_SLAVES],
     verified_sii: [Option<SiiConfigurationSignature>; MAX_SLAVES],
+    verified_dc_modes: [Option<SiiDcMode>; MAX_SLAVES],
     selected_reference_clock: Option<StartupReferenceClock>,
     dc_topology: Option<DcTopology<MAX_SLAVES>>,
     op_only_gate: [OpOnlyGateState; MAX_SLAVES],
@@ -530,6 +549,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             device_emulation: [false; MAX_SLAVES],
             verified_mailboxes: [None; MAX_SLAVES],
             verified_sii: [None; MAX_SLAVES],
+            verified_dc_modes: [None; MAX_SLAVES],
             selected_reference_clock: None,
             dc_topology: None,
             op_only_gate: [OpOnlyGateState::Unknown; MAX_SLAVES],
@@ -581,6 +601,14 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             .iter()
             .position(|record| record.position == position)
             .and_then(|index| self.verified_sii[index])
+    }
+
+    pub fn verified_dc_mode(&self, position: u16) -> Option<SiiDcMode> {
+        self.table
+            .records()
+            .iter()
+            .position(|record| record.position == position)
+            .and_then(|index| self.verified_dc_modes[index])
     }
 
     pub const fn expected_count(&self) -> usize {
@@ -737,6 +765,12 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                         });
                     }
                 }
+                if profile
+                    .expected_dc_mode
+                    .is_some_and(|mode| mode.name.is_empty())
+                {
+                    return Err(StartupError::InvalidDcModeProfile(profile.position));
+                }
             }
             for item in expected {
                 if !profiles
@@ -774,6 +808,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.device_emulation = [false; MAX_SLAVES];
         self.verified_mailboxes = [None; MAX_SLAVES];
         self.verified_sii = [None; MAX_SLAVES];
+        self.verified_dc_modes = [None; MAX_SLAVES];
         self.selected_reference_clock = None;
         self.dc_topology = None;
         self.op_only_gate = [OpOnlyGateState::Unknown; MAX_SLAVES];
@@ -1254,6 +1289,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.device_emulation = [false; MAX_SLAVES];
         self.verified_mailboxes = [None; MAX_SLAVES];
         self.verified_sii = [None; MAX_SLAVES];
+        self.verified_dc_modes = [None; MAX_SLAVES];
         self.selected_reference_clock = None;
         self.dc_topology = None;
         self.op_only_gate = [OpOnlyGateState::Unknown; MAX_SLAVES];
@@ -1489,7 +1525,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             self.phase = StartupPhase::ReadingMailbox;
             return Ok(StartupProgress::IdentityVerified(self.current_index));
         }
-        if profile.expected_sii.is_some() {
+        if profile.expected_sii.is_some() || profile.expected_dc_mode.is_some() {
             self.phase = StartupPhase::ReadingConfiguration;
             return Ok(StartupProgress::IdentityVerified(self.current_index));
         }
@@ -1524,11 +1560,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             });
         }
         self.verified_mailboxes[self.current_index] = Some(observed);
-        if self
-            .profile_for_position(record.position)?
-            .expected_sii
-            .is_some()
-        {
+        let profile = self.profile_for_position(record.position)?;
+        if profile.expected_sii.is_some() || profile.expected_dc_mode.is_some() {
             self.phase = StartupPhase::ReadingConfiguration;
             return Ok(StartupProgress::MailboxVerified(self.current_index));
         }
@@ -1546,33 +1579,57 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         {
             return self.fail(StartupError::SiiConfiguration(error));
         }
-        let observed = match self
-            .sii_configuration
-            .candidate()
-            .ok_or(StartupError::NoPendingAction)?
-            .signature()
-        {
-            Ok(signature) => signature,
-            Err(error) => return self.fail(StartupError::SiiConfigurationSignature(error)),
-        };
         let record = self
             .table
             .records()
             .get(self.current_index)
             .copied()
             .ok_or(StartupError::ExpectedCountMismatch)?;
-        let expected = self
-            .profile_for_position(record.position)?
-            .expected_sii
-            .ok_or(StartupError::NoPendingAction)?;
-        if observed != expected {
-            return self.fail(StartupError::SiiConfigurationMismatch {
-                position: record.position,
-                expected,
-                observed,
-            });
-        }
-        self.verified_sii[self.current_index] = Some(observed);
+        let profile = self.profile_for_position(record.position)?;
+        let observed_sii = if let Some(expected) = profile.expected_sii {
+            let observed = match self
+                .sii_configuration
+                .candidate()
+                .ok_or(StartupError::NoPendingAction)?
+                .signature()
+            {
+                Ok(signature) => signature,
+                Err(error) => return self.fail(StartupError::SiiConfigurationSignature(error)),
+            };
+            if observed != expected {
+                return self.fail(StartupError::SiiConfigurationMismatch {
+                    position: record.position,
+                    expected,
+                    observed,
+                });
+            }
+            Some(observed)
+        } else {
+            None
+        };
+        let observed_dc_mode = if let Some(expected) = profile.expected_dc_mode {
+            let observed = match find_sii_dc_mode(&self.sii_configuration_scratch, expected.name) {
+                Ok(mode) => mode,
+                Err(error) => {
+                    return self.fail(StartupError::SiiDcMode {
+                        position: record.position,
+                        error,
+                    });
+                }
+            };
+            if observed != expected.mode {
+                return self.fail(StartupError::SiiDcModeMismatch {
+                    position: record.position,
+                    expected: expected.mode,
+                    observed,
+                });
+            }
+            Some(observed)
+        } else {
+            None
+        };
+        self.verified_sii[self.current_index] = observed_sii;
+        self.verified_dc_modes[self.current_index] = observed_dc_mode;
         self.phase = StartupPhase::TransitioningAl;
         match self.start_al_for_current(now_ns)? {
             StartupProgress::IdentityVerified(index) => {
@@ -1823,7 +1880,8 @@ mod tests {
         auto_increment_address, fixed_address, register_from_address,
     };
     use crate::sii::{
-        SII_CATEGORY_END, SII_CATEGORY_RX_PDO, SII_CATEGORY_SYNC_MANAGER, SII_CATEGORY_TX_PDO,
+        SII_CATEGORY_DC, SII_CATEGORY_END, SII_CATEGORY_RX_PDO, SII_CATEGORY_STRINGS,
+        SII_CATEGORY_SYNC_MANAGER, SII_CATEGORY_TX_PDO,
     };
     use crate::sii_config::SiiConfigurationSignatureBuilder;
     use crate::sii_stream::SII_CATEGORY_START_WORD;
@@ -2225,6 +2283,28 @@ mod tests {
         image
     }
 
+    fn startup_sii_image_with_dc(rx_object: u16, mode: SiiDcMode) -> std::vec::Vec<u8> {
+        let mut image = startup_sii_image(rx_object);
+        image.truncate(image.len() - 4);
+        append_sii_category(
+            &mut image,
+            SII_CATEGORY_STRINGS,
+            &[1, 6, b'D', b'c', b'S', b'y', b'n', b'c'],
+        );
+        let mut descriptor = [0u8; 24];
+        descriptor[0..4].copy_from_slice(&mode.cycle_time0_ns.to_le_bytes());
+        descriptor[4..8].copy_from_slice(&mode.shift_time0_ns.to_le_bytes());
+        descriptor[8..12].copy_from_slice(&mode.shift_time1_ns.to_le_bytes());
+        descriptor[12..14].copy_from_slice(&mode.sync1_cycle_factor.to_le_bytes());
+        descriptor[14..16].copy_from_slice(&mode.assign_activate.to_le_bytes());
+        descriptor[16..18].copy_from_slice(&mode.sync0_cycle_factor.to_le_bytes());
+        descriptor[18] = 1;
+        append_sii_category(&mut image, SII_CATEGORY_DC, &descriptor);
+        image.extend_from_slice(&SII_CATEGORY_END.to_le_bytes());
+        image.extend_from_slice(&0u16.to_le_bytes());
+        image
+    }
+
     fn startup_sii_signature(rx_object: u16) -> SiiConfigurationSignature {
         let mut builder = SiiConfigurationSignatureBuilder::new(2, 0b11, 0).unwrap();
         builder
@@ -2274,6 +2354,15 @@ mod tests {
             .and_then(|_| startup.table.verify_identity(0, identity))
             .unwrap();
         startup.stage_target = EthercatState::Op;
+        startup
+    }
+
+    fn prepared_sii_dc_verification(
+        expected_sii: SiiConfigurationSignature,
+        expected_dc_mode: SiiDcModeExpectation,
+    ) -> StartupController<1> {
+        let mut startup = prepared_sii_verification(expected_sii);
+        startup.profiles[0] = startup.profiles[0].with_expected_dc_mode(expected_dc_mode);
         startup
     }
 
@@ -2387,6 +2476,99 @@ mod tests {
         assert_eq!(startup.phase(), StartupPhase::Faulted);
         assert_eq!(startup.verified_sii(0), None);
         assert_eq!(startup.next_action(now_ns), Ok(None));
+    }
+
+    #[test]
+    fn startup_publishes_sii_and_dc_evidence_only_after_both_match() {
+        let expected_sii = startup_sii_signature(0x6040);
+        let expected_dc = SiiDcMode {
+            cycle_time0_ns: 1_000_000,
+            shift_time0_ns: -125,
+            shift_time1_ns: 250,
+            sync1_cycle_factor: 0,
+            assign_activate: 0x0300,
+            sync0_cycle_factor: 1,
+        };
+        let expectation = SiiDcModeExpectation {
+            name: "DcSync",
+            mode: expected_dc,
+        };
+        let mut startup = prepared_sii_dc_verification(expected_sii, expectation);
+        let mut now_ns = 1;
+        assert_eq!(
+            drive_sii_configuration(
+                &mut startup,
+                &startup_sii_image_with_dc(0x6040, expected_dc),
+                &mut now_ns,
+            ),
+            Ok(StartupProgress::SiiConfigurationVerified(0))
+        );
+        assert_eq!(startup.verified_sii(0), Some(expected_sii));
+        assert_eq!(startup.verified_dc_mode(0), Some(expected_dc));
+
+        assert_eq!(
+            accept_al_state(&mut startup, EthercatState::Op, now_ns),
+            StartupProgress::Ready
+        );
+        let expected = startup.expected;
+        let profiles = startup.profiles;
+        startup
+            .start_with_profiles(
+                8,
+                now_ns + 4,
+                StartupConfig::new(EthercatState::Op),
+                &expected[..1],
+                &profiles[..1],
+            )
+            .unwrap();
+        assert_eq!(startup.verified_dc_modes, [None]);
+    }
+
+    #[test]
+    fn startup_dc_failure_does_not_publish_partial_sii_evidence() {
+        let expected_sii = startup_sii_signature(0x6040);
+        let expected_dc = SiiDcMode {
+            cycle_time0_ns: 1_000_000,
+            shift_time0_ns: 0,
+            shift_time1_ns: 0,
+            sync1_cycle_factor: 0,
+            assign_activate: 0x0300,
+            sync0_cycle_factor: 1,
+        };
+        let expectation = SiiDcModeExpectation {
+            name: "DcSync",
+            mode: expected_dc,
+        };
+        let mut mismatched = expected_dc;
+        mismatched.shift_time0_ns = 125;
+        let mut startup = prepared_sii_dc_verification(expected_sii, expectation);
+        let mut now_ns = 1;
+        assert_eq!(
+            drive_sii_configuration(
+                &mut startup,
+                &startup_sii_image_with_dc(0x6040, mismatched),
+                &mut now_ns,
+            ),
+            Err(StartupError::SiiDcModeMismatch {
+                position: 0,
+                expected: expected_dc,
+                observed: mismatched,
+            })
+        );
+        assert_eq!(startup.verified_sii(0), None);
+        assert_eq!(startup.verified_dc_mode(0), None);
+
+        let mut missing = prepared_sii_dc_verification(expected_sii, expectation);
+        let mut now_ns = 1;
+        assert_eq!(
+            drive_sii_configuration(&mut missing, &startup_sii_image(0x6040), &mut now_ns),
+            Err(StartupError::SiiDcMode {
+                position: 0,
+                error: SiiCategoryError::MissingStringsCategory,
+            })
+        );
+        assert_eq!(missing.verified_sii(0), None);
+        assert_eq!(missing.verified_dc_mode(0), None);
     }
 
     #[test]

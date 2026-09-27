@@ -133,13 +133,13 @@ Platform layer
 
 当前 `crates/esop-device/` 已提供固定容量的统一设备生命周期注册表和显式故障恢复迁移；profile、端口和外设驱动仍需在其上实现具体 probe/configure/cyclic 操作。
 
-当前 `crates/esop-ethercat-core/src/domain_registry.rs` 已提供固定容量的多 Domain/PDO/datagram 注册层：它在激活前分配稳定 bit offset、校验过程映像和逻辑地址范围、生成多速率调度表，并在激活后锁定配置。`SiiConfigurationCandidate` 可冻结为 `SiiDomainProjection`，将方向局部 PDO 布局与已核验的 FMMU/SyncManager 映射事务式登记到统一 Domain；字节对齐的 segment 可自动绑定 `LWR`/`LRD`，`FramePlanSet` 可按 MTU 拆分并在激活时原子发布。核心现可从标准 SII `0x0040` 有界读取 category stream 到 END，并原子投影 SM/RxPDO/TxPDO candidate；Startup 会在首个 AL 动作前将其版本化结构签名与生成产品期望精确比较。该路径不替代 FMMU/DC 语义发现、真实响应认证或硬件回读。
+当前 `crates/esop-ethercat-core/src/domain_registry.rs` 已提供固定容量的多 Domain/PDO/datagram 注册层：它在激活前分配稳定 bit offset、校验过程映像和逻辑地址范围、生成多速率调度表，并在激活后锁定配置。`SiiConfigurationCandidate` 可冻结为 `SiiDomainProjection`，将方向局部 PDO 布局与已核验的 FMMU/SyncManager 映射事务式登记到统一 Domain；字节对齐的 segment 可自动绑定 `LWR`/`LRD`，`FramePlanSet` 可按 MTU 拆分并在激活时原子发布。核心现可从标准 SII `0x0040` 有界读取 category stream 到 END，并原子投影 SM/RxPDO/TxPDO candidate；同一完整镜像还能借用解析 Strings 与固定 24-byte DC OpMode 描述。Startup 会在首个 AL 动作前将版本化结构签名和产品选定的精确 DC 描述与生成期望一起比较，任一失败均不发布两类验证证据。该路径不替代 FMMU 自动发现、真实响应认证或硬件回读。
 
-当前 `crates/esop-cfggen/` 已把上述注册层用于宿主机产品编译：显式 ESI identity/PDO 选择、稳定 Rx-then-Tx offset、每 Domain 的 LWR/LRD、expected WKC、多速率 schedule、CiA 402 对象/缩放/限幅、CoE 邮箱对和 ProcBuf ABI v6 布局会在发布前统一验证。`crates/esop-product-config/` 消费生成的 Rust 静态数据，在激活期通过相同注册/校验 API 重建并冻结计划；配置 hash、ProcBuf、精确从站记录、Domain 证据或轴映射任一不一致均拒绝。它既可按从站生成 assignment-clear/mapping/assignment-publish 启动计划，也可直接使用生成的逐从站 `MailboxConfig` 一次性构建覆盖全部从站的固定容量批次；position-keyed `ProductMailboxBinding` 保留为显式覆盖，非法邮箱、缺失/重复/未知覆盖、站地址重复或容量不足均在返回前拒绝。`PdoConfigBatch` 复用既有控制器，对每个 job 分配独立 generation，并仅在精确 upload 回读后推进。`ScheduledPdoConfiguration` 会在 PREOP 屏障内自动推进整批，生产报告公开 phase/index/count/current station；故障保留原 job，必须显式重启。只有整批及其他必需控制器真实 Complete 才复用已验证拓扑继续 SAFEOP/OP，且配置期间 Topology 始终由报告中的 Startup phase 收紧。Startup 已在身份后、AL 前完成严格 SII 标准邮箱固定头在线读取和生成布局交叉验证；完整映射/DC 描述、真实响应真实性、完整周期 WKC、从站互操作或 HIL 仍未完成，该软件证据不能替代产品资格。
+当前 `crates/esop-cfggen/` 已把上述注册层用于宿主机产品编译：显式 ESI identity/PDO 与 `Dc/OpMode` 选择、稳定 Rx-then-Tx offset、每 Domain 的 LWR/LRD、expected WKC、多速率 schedule、CiA 402 对象/缩放/限幅、CoE 邮箱对和 ProcBuf ABI v6 布局会在发布前统一验证。`crates/esop-product-config/` 消费生成的 Rust 静态数据，在激活期通过相同注册/校验 API 重建并冻结计划；配置 hash、ProcBuf、精确从站记录、Domain 证据、DC 选择或轴映射任一不一致均拒绝。它既可按从站生成 assignment-clear/mapping/assignment-publish 启动计划，也可直接使用生成的逐从站 `MailboxConfig` 一次性构建覆盖全部从站的固定容量批次；position-keyed `ProductMailboxBinding` 保留为显式覆盖，非法邮箱、缺失/重复/未知覆盖、站地址重复或容量不足均在返回前拒绝。`PdoConfigBatch` 复用既有控制器，对每个 job 分配独立 generation，并仅在精确 upload 回读后推进。`ScheduledPdoConfiguration` 会在 PREOP 屏障内自动推进整批，生产报告公开 phase/index/count/current station；故障保留原 job，必须显式重启。只有整批及其他必需控制器真实 Complete 才复用已验证拓扑继续 SAFEOP/OP，且配置期间 Topology 始终由报告中的 Startup phase 收紧。Startup 已在身份后、AL 前完成严格 SII 标准邮箱固定头、SM/PDO 结构和选定 DC 描述的在线读取与生成期望交叉验证；真实响应真实性、完整周期 WKC、从站互操作或 HIL 仍未完成，该软件证据不能替代产品资格。
 
 SII category stream/candidate 路径已成为独立 Startup 动作，并与
-`esop-product-config` 从冻结 PDO/SM 字段重建的结构签名比较；匹配前不允许 AL，失败不
-发布验证证据。FMMU/DC 描述、真实响应真实性、完整周期 WKC、从站互操作和 HIL 仍保持开放。
+`esop-product-config` 从冻结 PDO/SM 字段重建的结构签名及选定 ESI DC OpMode 描述比较；匹配前不允许 AL，失败不
+发布结构或 DC 验证证据。FMMU 自动发现、共同 SYNC 起始时刻计算、全从站 SYNC 寄存器编程、真实响应真实性、完整周期 WKC、从站互操作和 HIL 仍保持开放。
 
 ## 5. ProcBuf：机器人实时数据载体
 

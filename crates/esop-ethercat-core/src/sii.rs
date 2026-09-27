@@ -80,10 +80,21 @@ pub enum SiiCategoryError {
     TruncatedPayload,
     LengthOverflow,
     UnexpectedCategory,
+    InvalidStringsCategory,
+    StringIndexOutOfBounds(u8),
+    DuplicateStringsCategory,
+    MissingStringsCategory,
     InvalidSyncManagerLength,
     SyncManagerCountOutOfBounds,
     InvalidPdoHeader,
     InvalidPdoEntry,
+    InvalidDcLength,
+    InvalidDcReserved(usize),
+    MissingDcModeName(usize),
+    DuplicateDcCategory,
+    MissingDcCategory,
+    DcModeNotFound,
+    DuplicateDcMode,
     EntryOutOfBounds,
 }
 
@@ -205,6 +216,20 @@ impl<'a> SiiCategory<'a> {
         }
         SiiPdoCategory::parse(self.kind, self.data)
     }
+
+    pub fn strings(&self) -> Result<SiiStringsCategory<'a>, SiiCategoryError> {
+        if self.kind != SII_CATEGORY_STRINGS {
+            return Err(SiiCategoryError::UnexpectedCategory);
+        }
+        SiiStringsCategory::parse(self.data)
+    }
+
+    pub fn dc_modes(&self) -> Result<SiiDcCategory<'a>, SiiCategoryError> {
+        if self.kind != SII_CATEGORY_DC {
+            return Err(SiiCategoryError::UnexpectedCategory);
+        }
+        SiiDcCategory::parse(self.data)
+    }
 }
 
 pub struct SiiCategoryReader<'a> {
@@ -271,6 +296,203 @@ const SII_CATEGORY_HEADER_LEN: usize = 4;
 const SII_SYNC_MANAGER_ENTRY_LEN: usize = 8;
 const SII_PDO_HEADER_LEN: usize = 8;
 const SII_PDO_ENTRY_LEN: usize = 8;
+const SII_DC_ENTRY_LEN: usize = 24;
+
+pub struct SiiStringsCategory<'a> {
+    data: &'a [u8],
+    count: u8,
+}
+
+impl<'a> SiiStringsCategory<'a> {
+    fn parse(data: &'a [u8]) -> Result<Self, SiiCategoryError> {
+        let count = *data
+            .first()
+            .ok_or(SiiCategoryError::InvalidStringsCategory)?;
+        let mut offset = 1usize;
+        for _ in 0..count {
+            let length = *data
+                .get(offset)
+                .ok_or(SiiCategoryError::InvalidStringsCategory)? as usize;
+            offset = offset
+                .checked_add(1)
+                .and_then(|value| value.checked_add(length))
+                .ok_or(SiiCategoryError::LengthOverflow)?;
+            if offset > data.len() {
+                return Err(SiiCategoryError::InvalidStringsCategory);
+            }
+        }
+        if data[offset..].iter().any(|byte| *byte != 0) {
+            return Err(SiiCategoryError::InvalidStringsCategory);
+        }
+        Ok(Self { data, count })
+    }
+
+    pub const fn len(&self) -> usize {
+        self.count as usize
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn get(&self, index: u8) -> Result<Option<&'a [u8]>, SiiCategoryError> {
+        if index == 0 {
+            return Ok(None);
+        }
+        if index > self.count {
+            return Err(SiiCategoryError::StringIndexOutOfBounds(index));
+        }
+        let mut offset = 1usize;
+        for current in 1..=self.count {
+            let length = self.data[offset] as usize;
+            let start = offset + 1;
+            let end = start + length;
+            if current == index {
+                return Ok(Some(&self.data[start..end]));
+            }
+            offset = end;
+        }
+        Err(SiiCategoryError::StringIndexOutOfBounds(index))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SiiDcMode {
+    pub cycle_time0_ns: u32,
+    pub shift_time0_ns: i32,
+    pub shift_time1_ns: i32,
+    pub sync1_cycle_factor: i16,
+    pub assign_activate: u16,
+    pub sync0_cycle_factor: i16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SiiDcModeExpectation {
+    pub name: &'static str,
+    pub mode: SiiDcMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SiiDcModeDescriptor {
+    pub mode: SiiDcMode,
+    pub name_index: u8,
+    pub description_index: u8,
+}
+
+pub struct SiiDcCategory<'a> {
+    data: &'a [u8],
+}
+
+impl<'a> SiiDcCategory<'a> {
+    fn parse(data: &'a [u8]) -> Result<Self, SiiCategoryError> {
+        if data.is_empty() || data.len() % SII_DC_ENTRY_LEN != 0 {
+            return Err(SiiCategoryError::InvalidDcLength);
+        }
+        let category = Self { data };
+        for index in 0..category.len() {
+            category.get(index)?;
+        }
+        Ok(category)
+    }
+
+    pub const fn len(&self) -> usize {
+        self.data.len() / SII_DC_ENTRY_LEN
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    pub fn get(&self, index: usize) -> Result<SiiDcModeDescriptor, SiiCategoryError> {
+        let offset = index
+            .checked_mul(SII_DC_ENTRY_LEN)
+            .ok_or(SiiCategoryError::EntryOutOfBounds)?;
+        let end = offset
+            .checked_add(SII_DC_ENTRY_LEN)
+            .ok_or(SiiCategoryError::EntryOutOfBounds)?;
+        if end > self.data.len() {
+            return Err(SiiCategoryError::EntryOutOfBounds);
+        }
+        if self.data[offset + 20..end].iter().any(|byte| *byte != 0) {
+            return Err(SiiCategoryError::InvalidDcReserved(index));
+        }
+        Ok(SiiDcModeDescriptor {
+            mode: SiiDcMode {
+                cycle_time0_ns: u32::from_le_bytes([
+                    self.data[offset],
+                    self.data[offset + 1],
+                    self.data[offset + 2],
+                    self.data[offset + 3],
+                ]),
+                shift_time0_ns: i32::from_le_bytes([
+                    self.data[offset + 4],
+                    self.data[offset + 5],
+                    self.data[offset + 6],
+                    self.data[offset + 7],
+                ]),
+                shift_time1_ns: i32::from_le_bytes([
+                    self.data[offset + 8],
+                    self.data[offset + 9],
+                    self.data[offset + 10],
+                    self.data[offset + 11],
+                ]),
+                sync1_cycle_factor: i16::from_le_bytes([
+                    self.data[offset + 12],
+                    self.data[offset + 13],
+                ]),
+                assign_activate: u16::from_le_bytes([
+                    self.data[offset + 14],
+                    self.data[offset + 15],
+                ]),
+                sync0_cycle_factor: i16::from_le_bytes([
+                    self.data[offset + 16],
+                    self.data[offset + 17],
+                ]),
+            },
+            name_index: self.data[offset + 18],
+            description_index: self.data[offset + 19],
+        })
+    }
+}
+
+pub fn find_sii_dc_mode(bytes: &[u8], expected_name: &str) -> Result<SiiDcMode, SiiCategoryError> {
+    let mut reader = SiiCategoryReader::new(bytes);
+    let mut strings = None;
+    let mut dc_modes = None;
+    while let Some(category) = reader.next_category()? {
+        match category.kind {
+            SII_CATEGORY_STRINGS => {
+                if strings.is_some() {
+                    return Err(SiiCategoryError::DuplicateStringsCategory);
+                }
+                strings = Some(category.strings()?);
+            }
+            SII_CATEGORY_DC => {
+                if dc_modes.is_some() {
+                    return Err(SiiCategoryError::DuplicateDcCategory);
+                }
+                dc_modes = Some(category.dc_modes()?);
+            }
+            _ => {}
+        }
+    }
+    let strings = strings.ok_or(SiiCategoryError::MissingStringsCategory)?;
+    let dc_modes = dc_modes.ok_or(SiiCategoryError::MissingDcCategory)?;
+    let mut matched = None;
+    for index in 0..dc_modes.len() {
+        let descriptor = dc_modes.get(index)?;
+        let name = strings
+            .get(descriptor.name_index)?
+            .ok_or(SiiCategoryError::MissingDcModeName(index))?;
+        if descriptor.description_index != 0 {
+            strings.get(descriptor.description_index)?;
+        }
+        if name == expected_name.as_bytes() && matched.replace(descriptor.mode).is_some() {
+            return Err(SiiCategoryError::DuplicateDcMode);
+        }
+    }
+    matched.ok_or(SiiCategoryError::DcModeNotFound)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SiiSyncManager {
@@ -1471,6 +1693,113 @@ mod tests {
         assert_eq!(
             reader.next_category(),
             Err(SiiCategoryError::TruncatedPayload)
+        );
+    }
+
+    #[test]
+    fn strings_and_dc_categories_resolve_a_named_mode_without_allocating() {
+        let mut bytes = std::vec::Vec::new();
+        let strings = [
+            3, 7, b'D', b'c', b'S', b'y', b'n', b'c', b'0', 4, b'm', b'a', b'i', b'n', 6, b'b',
+            b'a', b'c', b'k', b'u', b'p', 0,
+        ];
+        append_category(&mut bytes, SII_CATEGORY_STRINGS, &strings);
+
+        let mut modes = [0u8; SII_DC_ENTRY_LEN * 2];
+        modes[0..4].copy_from_slice(&1_000_000u32.to_le_bytes());
+        modes[4..8].copy_from_slice(&(-125i32).to_le_bytes());
+        modes[8..12].copy_from_slice(&250i32.to_le_bytes());
+        modes[12..14].copy_from_slice(&(-2i16).to_le_bytes());
+        modes[14..16].copy_from_slice(&0x0300u16.to_le_bytes());
+        modes[16..18].copy_from_slice(&1i16.to_le_bytes());
+        modes[18] = 1;
+        modes[19] = 2;
+        modes[24..28].copy_from_slice(&2_000_000u32.to_le_bytes());
+        modes[42] = 3;
+        append_category(&mut bytes, SII_CATEGORY_DC, &modes);
+        bytes.extend_from_slice(&SII_CATEGORY_END.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+
+        assert_eq!(
+            find_sii_dc_mode(&bytes, "DcSync0"),
+            Ok(SiiDcMode {
+                cycle_time0_ns: 1_000_000,
+                shift_time0_ns: -125,
+                shift_time1_ns: 250,
+                sync1_cycle_factor: -2,
+                assign_activate: 0x0300,
+                sync0_cycle_factor: 1,
+            })
+        );
+        assert_eq!(
+            find_sii_dc_mode(&bytes, "missing"),
+            Err(SiiCategoryError::DcModeNotFound)
+        );
+    }
+
+    #[test]
+    fn dc_mode_lookup_rejects_malformed_indices_reserved_bytes_and_duplicates() {
+        let malformed_length = SiiCategory {
+            kind: SII_CATEGORY_DC,
+            offset_words: 0,
+            data: &[0; SII_DC_ENTRY_LEN - 2],
+        };
+        assert!(matches!(
+            malformed_length.dc_modes(),
+            Err(SiiCategoryError::InvalidDcLength)
+        ));
+
+        let mut missing_strings = std::vec::Vec::new();
+        let mut missing_strings_mode = [0u8; SII_DC_ENTRY_LEN];
+        missing_strings_mode[18] = 1;
+        append_category(&mut missing_strings, SII_CATEGORY_DC, &missing_strings_mode);
+        missing_strings.extend_from_slice(&SII_CATEGORY_END.to_le_bytes());
+        missing_strings.extend_from_slice(&0u16.to_le_bytes());
+        assert_eq!(
+            find_sii_dc_mode(&missing_strings, "dc"),
+            Err(SiiCategoryError::MissingStringsCategory)
+        );
+
+        let mut invalid_index = std::vec::Vec::new();
+        append_category(
+            &mut invalid_index,
+            SII_CATEGORY_STRINGS,
+            &[1, 2, b'd', b'c'],
+        );
+        let mut mode = [0u8; SII_DC_ENTRY_LEN];
+        mode[18] = 2;
+        append_category(&mut invalid_index, SII_CATEGORY_DC, &mode);
+        invalid_index.extend_from_slice(&SII_CATEGORY_END.to_le_bytes());
+        invalid_index.extend_from_slice(&0u16.to_le_bytes());
+        assert_eq!(
+            find_sii_dc_mode(&invalid_index, "dc"),
+            Err(SiiCategoryError::StringIndexOutOfBounds(2))
+        );
+
+        let mut reserved = mode;
+        reserved[18] = 1;
+        reserved[20] = 1;
+        let category = SiiCategory {
+            kind: SII_CATEGORY_DC,
+            offset_words: 0,
+            data: &reserved,
+        };
+        assert!(matches!(
+            category.dc_modes(),
+            Err(SiiCategoryError::InvalidDcReserved(0))
+        ));
+
+        let mut duplicate = std::vec::Vec::new();
+        append_category(&mut duplicate, SII_CATEGORY_STRINGS, &[1, 2, b'd', b'c']);
+        let mut modes = [0u8; SII_DC_ENTRY_LEN * 2];
+        modes[18] = 1;
+        modes[SII_DC_ENTRY_LEN + 18] = 1;
+        append_category(&mut duplicate, SII_CATEGORY_DC, &modes);
+        duplicate.extend_from_slice(&SII_CATEGORY_END.to_le_bytes());
+        duplicate.extend_from_slice(&0u16.to_le_bytes());
+        assert_eq!(
+            find_sii_dc_mode(&duplicate, "dc"),
+            Err(SiiCategoryError::DuplicateDcMode)
         );
     }
 }

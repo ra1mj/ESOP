@@ -159,13 +159,15 @@ pub struct SlaveManifest {
     pub tx_pdos: Vec<HexU16>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SlaveDcManifest {
     #[serde(default)]
     pub required: bool,
     #[serde(default)]
     pub reference_clock: bool,
+    #[serde(default)]
+    pub op_mode: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

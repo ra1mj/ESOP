@@ -104,6 +104,12 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert_eq!(product["slaves"][0]["sii_enabled_sync_managers"], 15);
     assert_eq!(product["slaves"][0]["dc"]["required"], true);
     assert_eq!(product["slaves"][0]["dc"]["reference_clock"], true);
+    assert_eq!(product["slaves"][0]["dc"]["op_mode"], "DcSync");
+    assert_eq!(product["slaves"][0]["sii_dc_mode"]["name"], "DcSync");
+    assert_eq!(
+        product["slaves"][0]["sii_dc_mode"]["assign_activate"],
+        0x0300
+    );
     assert_eq!(product["slaves"][1]["dc"]["required"], true);
     assert_eq!(product["slaves"][1]["dc"]["reference_clock"], false);
     assert_eq!(product["slaves"][2]["dc"]["required"], false);
@@ -114,6 +120,8 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(header.contains("uint16_t sii_enabled_sync_managers"));
     assert!(header.contains("uint8_t dc_required"));
     assert!(header.contains("uint8_t dc_reference_clock"));
+    assert!(header.contains("const char *dc_op_mode"));
+    assert!(header.contains("uint16_t dc_assign_activate"));
     assert!(header.contains("UINT16_C(0x1000), UINT16_C(64), UINT16_C(0x1100), UINT16_C(64)"));
     assert!(header.contains("4u, UINT16_C(0x000f)"));
 
@@ -124,6 +132,8 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(rust.contains("sii_enabled_sync_managers: 0x000f"));
     assert!(rust.contains("dc_required: true, dc_reference_clock: true"));
     assert!(rust.contains("dc_required: false, dc_reference_clock: false"));
+    assert!(rust.contains("name: \"DcSync\", mode: SiiDcMode"));
+    assert!(rust.contains("assign_activate: 0x0300"));
 
     fixture.edit_product(|_| {});
     let xml = fs::read_to_string(&fixture.esi).unwrap();
@@ -145,6 +155,10 @@ fn dc_policy_defaults_hashes_and_invalid_references_are_strict() {
     let baseline = generate(&fixture.product, &fixture.output("dc-baseline")).unwrap();
     fixture.edit_product(|product| {
         product["slaves"][1]["dc"]["required"] = Value::Bool(false);
+        product["slaves"][1]["dc"]
+            .as_object_mut()
+            .unwrap()
+            .remove("op_mode");
     });
     let changed = generate(&fixture.product, &fixture.output("dc-changed")).unwrap();
     assert_ne!(baseline.config_sha256, changed.config_sha256);
@@ -187,6 +201,48 @@ fn dc_policy_defaults_hashes_and_invalid_references_are_strict() {
 
     let fixture = Fixture::new();
     fixture.edit_product(|product| {
+        product["slaves"][0]["dc"]
+            .as_object_mut()
+            .unwrap()
+            .remove("op_mode");
+    });
+    assert!(
+        generate(
+            &fixture.product,
+            &fixture.output("dc-required-without-mode")
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("does not select dc.op_mode")
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        product["slaves"][2]["dc"]["op_mode"] = Value::String("DcSync".to_owned());
+    });
+    assert!(
+        generate(
+            &fixture.product,
+            &fixture.output("dc-mode-without-required")
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("without requiring DC System Time")
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
+        product["slaves"][0]["dc"]["op_mode"] = Value::String("Missing".to_owned());
+    });
+    assert!(
+        generate(&fixture.product, &fixture.output("dc-unknown-mode"))
+            .unwrap_err()
+            .to_string()
+            .contains("unknown DC OpMode")
+    );
+
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| {
         product["slaves"][0]["dc"]["unexpected"] = Value::Bool(true);
     });
     assert!(
@@ -225,6 +281,31 @@ fn mailbox_metadata_changes_esi_semantic_and_configuration_hashes() {
     let baseline = hashes(&fixture, "baseline-capacity");
     fixture.edit_esi(|xml| xml.replacen("DefaultSize=\"64\"", "DefaultSize=\"48\"", 1));
     let changed = hashes(&fixture, "changed-capacity");
+    assert_ne!(baseline.0, changed.0);
+    assert_ne!(baseline.1, changed.1);
+}
+
+#[test]
+fn dc_descriptor_changes_esi_semantic_and_configuration_hashes() {
+    fn hashes(fixture: &Fixture, name: &str) -> (String, String) {
+        let output = fixture.output(name);
+        let summary = generate(&fixture.product, &output).unwrap();
+        let inventory: Value =
+            serde_json::from_slice(&fs::read(output.join("device_inventory.json")).unwrap())
+                .unwrap();
+        (
+            summary.config_sha256,
+            inventory["devices"][0]["esi_semantic_sha256"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        )
+    }
+
+    let fixture = Fixture::new();
+    let baseline = hashes(&fixture, "baseline-dc");
+    fixture.edit_esi(|xml| xml.replacen("<ShiftTimeSync0>0", "<ShiftTimeSync0>125", 1));
+    let changed = hashes(&fixture, "changed-dc");
     assert_ne!(baseline.0, changed.0);
     assert_ne!(baseline.1, changed.1);
 }

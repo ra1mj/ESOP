@@ -39,7 +39,8 @@ CI 重新生成相同示例、校验产品化构建报告，并上传六个生�
 - Domain ID、逻辑地址、过程镜像范围、周期和相位；
 - 从站位置、站地址、ESI 来源、vendor/product/revision/serial、PDO 选择；
 - 每从站可选严格 `dc` 对象：`required` 表示必须确认 System Time 能力，
-  `reference_clock` 表示该从站是唯一参考钟且隐含 `required=true`；省略时两项均为 false；
+  `reference_clock` 表示该从站是唯一参考钟且隐含 `required=true`，`op_mode`
+  为 DC-required 从站显式选择一个 ESI `Device/Dc/OpMode`；非 DC 从站不得选择模式；
 - CiA 402 轴、CSP/CSV/CST 模式、带方向的 SI/raw 缩放、机械范围和每周期限幅。
 
 十六进制身份字段必须使用 `0x` 前缀。进入生成 C 字符串的名称/label 最长
@@ -52,7 +53,7 @@ ESI/ENI 的兼容声明。
 当前解析器支持 namespace-qualified XML 中的 vendor ID、Device Type
 identity/name、四类 `StateMachine/Timeout`、带 `Enable`/`OpOnly` 的有序
 SyncManager、`MBoxOut`/`MBoxIn` 的 `StartAddress`/`DefaultSize`/`ControlByte`、
-`Mailbox/CoE`、RxPDO/TxPDO assignment，以及 byte-aligned PDO entry 的
+`Mailbox/CoE`、有序 `Device/Dc/OpMode`、RxPDO/TxPDO assignment，以及 byte-aligned PDO entry 的
 index/subindex/bit length/DataType。未提供 timeout 时使用版本化的 ETG.1020
 默认 profile。它明确拒绝：
 
@@ -62,6 +63,8 @@ index/subindex/bit length/DataType。未提供 timeout 时使用版本化的 ETG
 - 缺失 CoE、缺半边/重复/禁用的邮箱 SyncManager、缺失物理字段、容量越界及地址
   溢出或重叠；
 - 未选择、重复、方向错误或宽度不匹配的对象；
+- 缺少名称/AssignActivate、重复名称、数值宽度错误或包含非零直接
+  `CycleTimeSync1` 的 DC OpMode；
 - vendor-specific scaling、替代对象和隐式默认映射。
 
 生成前会一次性完成身份唯一性、Domain/过程镜像范围、静态容量、PDO
@@ -81,7 +84,7 @@ index/subindex/bit length/DataType。未提供 timeout 时使用版本化的 ETG
 | `robot_build_input.json` | 设备数、PDO/frame/wire/WKC/copy、周期和资源输入。 |
 
 生成的 inventory、JSON、C 和 Rust product slave 均携带精确主站发送/接收邮箱
-地址与容量及显式 DC requirement/reference policy；规范化 JSON、C 和 Rust 还携带 SII SyncManager 数量与 enabled mask，
+地址与容量、显式 DC requirement/reference policy 及所选 OpMode 的 SII 可表示描述符；规范化 JSON、C 和 Rust 还携带 SII SyncManager 数量与 enabled mask，
 ESI inventory 保留两侧 control byte。ESI mailbox、timeout profile、`OpOnly` mask 及
 activation template 参与 ESI semantic hash 和配置 SHA-256；显式 DC policy 属于产品
 语义，只参与配置 SHA-256，不反向改写 ESI 内容 hash。配置 SHA-256 只依赖规范化产品语义和排序后的 ESI 语义内容，不依赖 JSON
@@ -106,7 +109,7 @@ ProcBuf。激活按以下顺序 fail-closed：
 6. 逐轴校验连续索引、驱动归属、冻结策略和选定模式的 `Cia402PdoMap`。
 
 `PRODUCT_CONFIG.startup_profiles()` 会在任何 Startup 动作发出前校验每个从站的
-DC reference 必须同时 required、全产品最多一个 reference、timeout 非零、position 一一对应、生成邮箱范围有效、SII SyncManager count/enabled
+DC reference 必须同时 required、全产品最多一个 reference、DC-required 从站必须且只有一个模式期望、非 DC 从站不得携带模式期望、timeout 非零、position 一一对应、生成邮箱范围有效、SII SyncManager count/enabled
 mask 有界、`OpOnly` mask/flag 有效，并要求每个 `OpOnly` SyncManager 只关联所选
 RxPDO、每个 PDO 分组连续。运行时从这些静态字段重新构建版本化 SII 结构签名，而不是
 信任预生成摘要。DC booleans 分别映射为 `StartupDcRequirement::None`、`SystemTime`
@@ -121,8 +124,10 @@ send/receive 地址和容量；轮询、超时、重试和 Status Bit 仍是运�
 Startup。随后，携带 SII 期望的 profile 进入独立 `ReadingConfiguration` 阶段：从标准
 `0x0040` 有界读取到 END，原子投影 SM/RxPDO/TxPDO candidate，并比较 SM 数量、
 enabled/OpOnly mask 以及按 Rx 后 Tx 冻结顺序排列的 PDO index、SM、object、subindex 和
-bit length。只有完全匹配才按 position 发布签名证据并开始 AL；任何 stream、容量、
-投影、动作所有权、deadline 或结构差异均闭锁且不发布证据。未携带对应期望的 profile
+bit length。相同完整镜像还会以借用方式解析 Strings `0x000a` 与 DC `0x003c`
+固定 24-byte 条目，按精确模式名比较 cycle、shift、factor 与 AssignActivate。两类检查
+全部成功后才同时按 position 发布签名/DC 证据并开始 AL；任何 stream、容量、
+投影、动作所有权、deadline、结构或 DC 描述符差异均闭锁且不发布部分证据。未携带对应期望的 profile
 和旧 `start()` API 保持原有兼容路径。
 每个 ESM step 只建立一个绝对 deadline；相关 `OpOnly`
 准备和 AL 请求/读回共享该 deadline。`StartupConfig.transition_timeout_ns != 0` 是
@@ -175,8 +180,8 @@ payload，直到 END 才公开完整镜像；`SiiStreamDiscoveryController` 使�
 拓扑构造固定容量计划，逐个精确读取 `0x0910/24`，以调用方应用时间样本和响应时单调时间
 计算 32-bit 回绕或 64-bit 有符号 offset 修正，并把新 offset 与累计 delay 作为一个
 `0x0920/12` 写入；参考钟 delay 为零，完整批次仅在所有精确 WKC 1 写入成功后发布，并可作为
-独立必需服务接入上述 PREOP 屏障。FMMU/SII DC category 语义、外部应用授时源、完整 start
-time、生成式全从站 SYNC 配置、物理响应真实性与时序精度和 HIL 仍待完成。
+独立必需服务接入上述 PREOP 屏障。FMMU 自动发现、DC factor 到产品调度周期的策略换算、
+外部应用授时源、完整 start time、生成式全从站 SYNC 配置、物理响应真实性与时序精度和 HIL 仍待完成。
 
 ## 6. 构建报告接入
 

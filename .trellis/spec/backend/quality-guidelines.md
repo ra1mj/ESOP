@@ -47,6 +47,12 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   explicit or first-capable fallback locally. Publish only after the complete
   pass succeeds, and clear scan-derived evidence on restart. WKC 0 System Time
   is delay-only and can never satisfy a requirement.
+- Treat a generated DC mode as an expectation, not proof. Required slaves must
+  select one exact ESI `Dc/OpMode`; Startup must resolve the matching one-based
+  SII string and 24-byte DC entry from the existing complete category image.
+  Stage structural and DC observations before publishing either, clear both on
+  restart, and do not infer start time or all-slave SYNC programming from a
+  successful descriptor comparison.
 - Preserve the existing `EthercatPort` copy-compatible path while adding a
   separate DMA trait for zero-copy platform adapters.
 - Keep ProcBuf as a standalone `no_std` ABI layer. Use its header/layout hash

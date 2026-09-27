@@ -157,9 +157,10 @@ pub use sii::{
     SII_STANDARD_RECEIVE_MAILBOX_OFFSET_WORD, SII_STANDARD_RECEIVE_MAILBOX_SIZE_WORD,
     SII_STANDARD_SEND_MAILBOX_OFFSET_WORD, SII_STANDARD_SEND_MAILBOX_SIZE_WORD, SII_VENDOR_ID_WORD,
     SiiAction, SiiBlockError, SiiBlockReader, SiiBlockRequest, SiiCategory, SiiCategoryError,
-    SiiCategoryReader, SiiError, SiiIdentityReader, SiiMailboxError, SiiMailboxProtocols,
-    SiiPdoCategory, SiiPdoEntry, SiiPhase, SiiProgress, SiiStandardMailbox, SiiSyncManager,
-    SiiSyncManagerCategory,
+    SiiCategoryReader, SiiDcCategory, SiiDcMode, SiiDcModeDescriptor, SiiDcModeExpectation,
+    SiiError, SiiIdentityReader, SiiMailboxError, SiiMailboxProtocols, SiiPdoCategory, SiiPdoEntry,
+    SiiPhase, SiiProgress, SiiStandardMailbox, SiiStringsCategory, SiiSyncManager,
+    SiiSyncManagerCategory, find_sii_dc_mode,
 };
 pub use sii_config::{
     SII_CONFIGURATION_SIGNATURE_SCHEMA, SiiConfigurationCandidate, SiiConfigurationError,

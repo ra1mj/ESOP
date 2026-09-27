@@ -14,6 +14,17 @@
         <Sm Enable="1" OpOnly="true">Outputs</Sm>
         <Sm Enable="1">Inputs</Sm>
         <Mailbox><CoE/></Mailbox>
+        <Dc>
+          <OpMode>
+            <Name>DcSync</Name>
+            <Desc>One millisecond distributed-clock synchronization</Desc>
+            <AssignActivate>#x0300</AssignActivate>
+            <CycleTimeSync0 Factor="1">1000000</CycleTimeSync0>
+            <ShiftTimeSync0>0</ShiftTimeSync0>
+            <CycleTimeSync1 Factor="0">0</CycleTimeSync1>
+            <ShiftTimeSync1>0</ShiftTimeSync1>
+          </OpMode>
+        </Dc>
         <StateMachine>
           <Timeout>
             <PreopTimeout>3500</PreopTimeout>

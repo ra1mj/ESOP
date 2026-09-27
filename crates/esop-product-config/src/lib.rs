@@ -15,8 +15,8 @@ pub use esop_ethercat_core::{
     PdoConfigBatchPlan, PdoConfigBatchPlanError, PdoConfigBatchStatus, PdoConfigJob, PdoConfigPlan,
     PdoConfigPlanError, PdoDirection, PdoEntry, PdoEntrySpec, PdoRegistrationRequest, PdoSdoWrite,
     ScheduleTable, SiiConfigurationSignature, SiiConfigurationSignatureBuilder,
-    SiiConfigurationSignatureError, SlaveIdentity, SlaveRecord, StartupConfig, StartupController,
-    StartupDcRequirement, StartupError, StartupSlaveProfile,
+    SiiConfigurationSignatureError, SiiDcMode, SiiDcModeExpectation, SlaveIdentity, SlaveRecord,
+    StartupConfig, StartupController, StartupDcRequirement, StartupError, StartupSlaveProfile,
 };
 pub use esop_lifecycle_guard::procbuf::{Cia402AxisCommandPolicy, Cia402AxisCommandPolicyError};
 pub use esop_procbuf::{
@@ -58,6 +58,7 @@ pub struct ProductSlaveConfig {
     pub identity: SlaveIdentity,
     pub dc_required: bool,
     pub dc_reference_clock: bool,
+    pub sii_dc_mode: Option<SiiDcModeExpectation>,
     pub transition_timeouts: AlTransitionTimeouts,
     pub mailbox_config: MailboxConfig,
     pub op_only_outputs: OpOnlySyncManagerProfile,
@@ -73,6 +74,12 @@ pub enum ProductStartupError {
     MultipleDcReferenceClocks {
         first_position: u16,
         second_position: u16,
+    },
+    DcModeRequired {
+        position: u16,
+    },
+    UnexpectedDcMode {
+        position: u16,
     },
     InvalidTransitionTimeoutProfile {
         position: u16,
@@ -419,6 +426,19 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
     pub fn startup_profiles(&self) -> Result<[StartupSlaveProfile; SLAVES], ProductStartupError> {
         let mut reference_position = None;
         for slave in self.slaves.iter().copied() {
+            match (slave.dc_required, slave.sii_dc_mode.is_some()) {
+                (true, false) => {
+                    return Err(ProductStartupError::DcModeRequired {
+                        position: slave.position,
+                    });
+                }
+                (false, true) => {
+                    return Err(ProductStartupError::UnexpectedDcMode {
+                        position: slave.position,
+                    });
+                }
+                _ => {}
+            }
             if slave.dc_reference_clock && !slave.dc_required {
                 return Err(ProductStartupError::DcReferenceRequiresRequired {
                     position: slave.position,
@@ -489,12 +509,16 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
             } else {
                 StartupDcRequirement::None
             };
-            profiles[index] = StartupSlaveProfile::new(slave.position)
+            let mut profile = StartupSlaveProfile::new(slave.position)
                 .with_dc_requirement(dc_requirement)
                 .with_transition_timeouts(slave.transition_timeouts)
                 .with_op_only_outputs(slave.op_only_outputs)
                 .with_expected_mailbox(slave.mailbox_config)
                 .with_expected_sii(expected_sii);
+            if let Some(expected_dc_mode) = slave.sii_dc_mode {
+                profile = profile.with_expected_dc_mode(expected_dc_mode);
+            }
+            profiles[index] = profile;
         }
         Ok(profiles)
     }
@@ -1223,6 +1247,7 @@ mod tests {
                 identity: IDENTITY,
                 dc_required: false,
                 dc_reference_clock: false,
+                sii_dc_mode: None,
                 transition_timeouts: ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
                 mailbox_config: MailboxConfig::new(0x1000, 32, 0x1100, 32),
                 op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
@@ -1310,6 +1335,17 @@ mod tests {
         config.slaves[0].op_only_outputs = op_only;
         config.slaves[0].dc_required = true;
         config.slaves[0].dc_reference_clock = true;
+        config.slaves[0].sii_dc_mode = Some(SiiDcModeExpectation {
+            name: "DcSync",
+            mode: SiiDcMode {
+                cycle_time0_ns: 1_000_000,
+                shift_time0_ns: 0,
+                shift_time1_ns: 0,
+                sync1_cycle_factor: 0,
+                assign_activate: 0x0300,
+                sync0_cycle_factor: 1,
+            },
+        });
 
         let profiles = config.startup_profiles().unwrap();
         assert_eq!(profiles[0].position, 0);
@@ -1319,6 +1355,7 @@ mod tests {
         );
         assert_eq!(profiles[0].transition_timeouts, timeouts);
         assert_eq!(profiles[0].op_only_outputs, op_only);
+        assert_eq!(profiles[0].expected_dc_mode, config.slaves[0].sii_dc_mode);
         assert_eq!(
             profiles[0].expected_mailbox,
             Some(config.slaves[0].mailbox_config)
@@ -1380,11 +1417,23 @@ mod tests {
             station_address: 0x1001,
             dc_required: true,
             dc_reference_clock: true,
+            sii_dc_mode: Some(SiiDcModeExpectation {
+                name: "DcSync",
+                mode: SiiDcMode {
+                    cycle_time0_ns: 1_000_000,
+                    shift_time0_ns: 0,
+                    shift_time1_ns: 0,
+                    sync1_cycle_factor: 0,
+                    assign_activate: 0x0300,
+                    sync0_cycle_factor: 1,
+                },
+            }),
             ..base.slaves[0]
         };
         let mut first = base.slaves[0];
         first.dc_required = true;
         first.dc_reference_clock = true;
+        first.sii_dc_mode = second.sii_dc_mode;
         let duplicate = StaticProductConfig {
             metadata: base.metadata,
             procbuf_layout: base.procbuf_layout,
@@ -1400,6 +1449,33 @@ mod tests {
                 first_position: 0,
                 second_position: 1,
             })
+        );
+    }
+
+    #[test]
+    fn product_requires_dc_mode_selection_to_match_dc_policy() {
+        let mut missing = config();
+        missing.slaves[0].dc_required = true;
+        assert_eq!(
+            missing.startup_profiles(),
+            Err(ProductStartupError::DcModeRequired { position: 0 })
+        );
+
+        let mut unexpected = config();
+        unexpected.slaves[0].sii_dc_mode = Some(SiiDcModeExpectation {
+            name: "DcSync",
+            mode: SiiDcMode {
+                cycle_time0_ns: 1_000_000,
+                shift_time0_ns: 0,
+                shift_time1_ns: 0,
+                sync1_cycle_factor: 0,
+                assign_activate: 0x0300,
+                sync0_cycle_factor: 1,
+            },
+        });
+        assert_eq!(
+            unexpected.startup_profiles(),
+            Err(ProductStartupError::UnexpectedDcMode { position: 0 })
         );
     }
 

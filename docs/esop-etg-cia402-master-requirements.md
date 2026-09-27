@@ -23,12 +23,13 @@
 9. CiA 402 驱动状态机、CSP/CSV/CST、对象绑定、模式切换和故障策略。
 10. 配置生成器、诊断、恢复、HIL、性能资格和一致性声明管理。
 
-**当前状态：仓库已包含 Rust `no_std` EtherCAT 核心、Linux AF_PACKET 开发/HIL 端口、固定 SPSC ring、固定诊断事件环、控制请求闭环、单 Domain PDO 接收提交路径、扫描/SII/AL 基础状态机、ESC `0x0141[0]` Device Emulation 识别、普通 ESC 的有界 AL Error Acknowledge、Device Emulation 禁止 ACK 与首故障诊断保留、ESI 四类 ESM timeout 与版本化 ETG.1020 默认值、严格 ESI CoE 邮箱对校验与生成配置传播、SII 标准邮箱固定头解析、SII/ESI `OpOnly` 输出校验及 OP 前后写入读回门控、SII SyncManager/RxPDO/TxPDO category 只读解析及事务式固定容量配置候选、SM/FMMU 写入读回配置 FSM、生成式固定容量 CoE PDO assignment/mapping 计划和逐写精确 SDO upload 回读、产品顺序的多从站 PDO 配置批次、PDO 配置到统一生产调度/邮箱/DC/共享 RX 与 Configuration 生命周期门的有界接入、可选全从站 PREOP 配置屏障、从实际整批 PDO/Mapping/DC Clock/DC SYNC Complete phase 自动释放并保留拓扑继续 SAFEOP/OP、独立生命周期守卫、Mailbox 轮询 FSM、有限预算重试与协议错帧恢复、可配置 Status Bit 轮询、CoE SDO expedited/segmented codec/事务 FSM、异步 CoE Emergency 固定事件环，以及拓扑范围驱动的精确 `0x0910/24` 时钟采样与 `0x0920/12` offset/delay 初始化、DC SYNC0/SYNC1 配置 FSM、FRMW reference-clock 周期同步槽和 offset/jitter 监测器。固定容量 `DomainRegistry` 已支持多 Domain/PDO/datagram、SII 字节对齐 segment 的 `LWR`/`LRD` 绑定、按 MTU 拆帧和原子激活。另有独立 `esop-profile-cia402` crate，已实现 Statusword FSA 解码、基础 Controlword 使能序列、生命周期拒绝、Fault reset 单脉冲、CSP/CSV/CST 模式监督、标准周期 PDO typed raw binding 和四项运动门槛。仍未形成完整主站；Startup 已完成实时 SII 标准邮箱布局的软件交叉验证，但完整 SM-FMMU/DC 描述符自动发现与批处理、完整周期 WKC 资格、完整 SII/ESI 自动发现、真实从站 ESM/PDO 互操作、外部应用授时、完整 start time/生成式全从站 SYNC 配置、全从站运行时同步、物理时序精度、厂商缩放/quirk、MCU DMA 端口和真实设备 HIL 仍未实现。**现有内容是架构与验收基线，不是 ETG 认证证据。
+**当前状态：仓库已包含 Rust `no_std` EtherCAT 核心、Linux AF_PACKET 开发/HIL 端口、固定 SPSC ring、固定诊断事件环、控制请求闭环、单 Domain PDO 接收提交路径、扫描/SII/AL 基础状态机、ESC `0x0141[0]` Device Emulation 识别、普通 ESC 的有界 AL Error Acknowledge、Device Emulation 禁止 ACK 与首故障诊断保留、ESI 四类 ESM timeout 与版本化 ETG.1020 默认值、严格 ESI CoE 邮箱对校验与生成配置传播、SII 标准邮箱固定头解析、SII/ESI `OpOnly` 输出校验及 OP 前后写入读回门控、SII SyncManager/RxPDO/TxPDO category 只读解析及事务式固定容量配置候选、ESI DC OpMode 选择与在线 SII Strings/DC 描述符交叉验证、SM/FMMU 写入读回配置 FSM、生成式固定容量 CoE PDO assignment/mapping 计划和逐写精确 SDO upload 回读、产品顺序的多从站 PDO 配置批次、PDO 配置到统一生产调度/邮箱/DC/共享 RX 与 Configuration 生命周期门的有界接入、可选全从站 PREOP 配置屏障、从实际整批 PDO/Mapping/DC Clock/DC SYNC Complete phase 自动释放并保留拓扑继续 SAFEOP/OP、独立生命周期守卫、Mailbox 轮询 FSM、有限预算重试与协议错帧恢复、可配置 Status Bit 轮询、CoE SDO expedited/segmented codec/事务 FSM、异步 CoE Emergency 固定事件环，以及拓扑范围驱动的精确 `0x0910/24` 时钟采样与 `0x0920/12` offset/delay 初始化、DC SYNC0/SYNC1 配置 FSM、FRMW reference-clock 周期同步槽和 offset/jitter 监测器。固定容量 `DomainRegistry` 已支持多 Domain/PDO/datagram、SII 字节对齐 segment 的 `LWR`/`LRD` 绑定、按 MTU 拆帧和原子激活。另有独立 `esop-profile-cia402` crate，已实现 Statusword FSA 解码、基础 Controlword 使能序列、生命周期拒绝、Fault reset 单脉冲、CSP/CSV/CST 模式监督、标准周期 PDO typed raw binding 和四项运动门槛。仍未形成完整主站；FMMU 自动发现与批处理、完整周期 WKC 资格、完整 SII/ESI 自动发现、真实从站 ESM/PDO 互操作、外部应用授时、完整 start time/生成式全从站 SYNC 配置、全从站运行时同步、物理时序精度、厂商缩放/quirk、MCU DMA 端口和真实设备 HIL 仍未实现。**现有内容是架构与验收基线，不是 ETG 认证证据。
 
 SII 增量现已包含从标准 `0x0040` 到 END 的固定容量 category stream acquisition，
 内部续读保持动作游标和绝对 deadline，并在完整读取后原子投影 signedness-aware
-SM/RxPDO/TxPDO candidate，并由 Startup 在首个 AL 动作前与生成配置重建的结构签名比对。FMMU/DC
-语义、物理响应真实性和实物资格不在此软件证据内。
+SM/RxPDO/TxPDO candidate，并由 Startup 在首个 AL 动作前与生成配置重建的结构签名比对；
+同一镜像还会把产品选择的 ESI DC OpMode 与 SII `0x003c` 固定描述符逐字段比较。FMMU
+自动发现、物理响应真实性和实物资格不在此软件证据内。
 
 ProcBuf 的固定 ABI、双页 Command/State 快照、Quality/Lifecycle/Runtime observation 和事件环已在 `esop-procbuf` crate 落地；它尚未替代 shared-memory/RPMsg/UDS IPC 或真实 MCU 端口。
 
@@ -202,8 +203,9 @@ ESC 基础寄存器与 Features Supported，并以 32/64-bit `0x0910` System Tim
 可要求 DC 并唯一指定参考钟，Startup 在 identity/SII/AL 前事务式校验并发布参考钟/拓扑，
 必需 DC 从站缺少可测累计延迟时闭锁。独立固定容量控制器随后逐个读取 `0x0910/24`，以
 调用方应用时间样本及响应时单调时间计算 32/64-bit offset 修正，并把新 offset 和累计 delay
-作为一个 `0x0920/12` 写入；完整结果只在所有精确 WKC 1 写入成功后发布。第 4 项完整
-start time/生成式全从站 SYNC 配置和第 5-7 项运行同步/质量仍保持开放；当前调用方交付响应
+作为一个 `0x0920/12` 写入；完整结果只在所有精确 WKC 1 写入成功后发布。产品配置还会
+显式选择 ESI DC OpMode，Startup 在相同 SII pass 中验证在线 cycle/shift/factor/AssignActivate
+描述符。第 4 项完整 start time/生成式全从站 SYNC 配置和第 5-7 项运行同步/质量仍保持开放；当前调用方交付响应
 也不证明应用时间真实性、真实硬件来源或传播延迟精度。
 
 ### 4.8 诊断与恢复
