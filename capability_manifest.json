@@ -174,9 +174,11 @@
     {
       "id": "ethercat_product_mailbox_config",
       "status": "implemented",
-      "scope": "Allocation-free strict ESI CoE mailbox-pair validation, generated MBoxIn/MBoxOut SyncManager evidence, canonical direct MBoxIn Status Bit derivation with PollTime fallback, Startup-owned exact SII 0x001C..0x0020 acquisition plus pre-AL indexed SyncManager/FMMU-usage verification, complete position-keyed policy publication, and generated all-slave PDO batch construction with an explicit override path",
+      "scope": "Allocation-free strict ESI CoE mailbox-pair validation, generated MBoxIn/MBoxOut SyncManager evidence, canonical direct MBoxIn Status Bit derivation with PollTime fallback, deterministic FMMU-mapped Domain-tail status generation and WKC accounting, Startup-owned exact SII 0x001C..0x0020 acquisition plus pre-AL indexed SyncManager/FMMU-usage verification, product-time mapping reconstruction/tamper rejection, complete position-keyed policy publication, and generated all-slave PDO batch construction with an explicit override path",
       "evidence": [
         "crates/esop-ethercat-core/src/mailbox.rs",
+        "crates/esop-ethercat-core/src/production_service.rs",
+        "crates/esop-ethercat-core/src/scheduled_domains.rs",
         "crates/esop-ethercat-core/src/sii.rs",
         "crates/esop-ethercat-core/src/startup.rs",
         "crates/esop-cfggen/src/esi.rs",
@@ -188,7 +190,7 @@
         "config/examples/sim-dual-axis/esi/esop-sim.xml",
         "docs/esop-product-configuration.md"
       ],
-      "limitation": "Deterministic software tests prove canonical direct SyncManager-register Status Bit generation, PollTime fallback, tamper rejection, caller-delivered SII descriptor verification and production-scheduler suppression of input-mailbox reads while inactive. FMMU-mapped mailbox status in cyclic process data, physical response authenticity, target timing/WCET, device interoperability and hardware HIL remain open"
+      "limitation": "Deterministic software tests prove canonical direct and FMMU-mapped Status Bit generation, PollTime compatibility, Domain/LRD/WKC propagation, product tamper rejection, exact Mapping write/readback behavior for caller-delivered responses, and production-scheduler suppression without direct fallback for inactive, invalid or stale cyclic input. Runtime callers must switch to mapped mode only after Mapping Complete; physical response authenticity, target timing/WCET, device interoperability, ETG conformance and hardware HIL remain open"
     },
     {
       "id": "product_runtime_attachment",

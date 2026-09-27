@@ -42,13 +42,16 @@ Linux 观测适配器位于 `crates/esop-ebpf-runtime/`：它使用 Rust/Aya 加
 
 2026-09-27 的 SyncManager register 增量补齐了 FMMU bank 之后的 live SM 证据：携带 expected SII 的 profile 会按 ESC 基础信息报告数量依次读取全部 `0x0600 + index * 16` FMMU page 和 `0x0800 + index * 8` SyncManager page，随后才读取 SII category stream。Startup 仅在 FMMU bank、SyncManager bank、SII 结构签名和可选 DC 描述全部成功时按 position 原子发布，并同时限制 SII 描述的 FMMU/SM 数量不超过 ESC 报告值。typed mapping bridge 在任何期望映射写入前先逐页清零并精确回读完整 SM bank，再处理完整 FMMU bank；旧 `start` 与 FMMU-only API 保持兼容。两类 live bank 都只作为证据和 reset bound，不是产品期望配置；物理响应真实性、目标 WCET、真实从站互操作、长时运行与实物 HIL 仍未资格化。
 
-同日的直接 Mailbox Status Bit 增量把 ESI `MBoxIn` SyncManager index 与 ordered
+同日的 Mailbox Status Bit 增量把 ESI `MBoxIn` SyncManager index 与 ordered
 `MBoxState` 能力声明编译为规范 `0x0800 + index * 8 + 5`、mask `0x08`、active-high
-策略；无声明产品保持 PollTime。该策略进入全部生成产物与配置 hash，产品运行时在
-构造 Startup/PDO batch 前重新推导并拒绝篡改。Startup 只有在标准邮箱布局、在线
-MBoxIn SM 地址/容量/control/enabled 和 ordered FMMU usage 全部匹配后才发布完整
-`MailboxConfig`；生产调度仿真证明状态未激活时不会读输入邮箱。FMMU-mapped
-Mailbox Status Bit、物理响应真实性、真实设备 HIL、目标 WCET 与互操作仍未资格化。
+直接策略；无声明产品保持 PollTime。Startup 只有在标准邮箱布局、在线 MBoxIn SM
+地址/容量/control/enabled 和 ordered FMMU usage 全部匹配后才发布完整
+`MailboxConfig`。对于声明 `MBoxState` 的产品，cfggen 还会按从站位置把同一物理位
+打包到 Domain 输入尾部，扩展 LRD 长度/WKC，并生成精确的读方向 FMMU 描述；产品运行时
+重新构造 Domain、位偏移、age 和 FMMU 字段并拒绝篡改，现有 Mapping 控制器负责写入与
+读回。Mapping 完成后显式启动的稳态邮箱只消费有效且未过期的 Domain 位，不会回退直接
+状态读取；PDO 配置阶段仍保留直接路径。物理响应真实性、真实设备 HIL、目标 WCET、
+ETG 一致性与互操作仍未资格化。
 
 2026-09-27 的 ESC watchdog 增量把每从站可选 `divider` 与 `process_data_intervals` 原始值纳入严格产品清单、配置 hash、六类生成产物和 `no_std` 运行时计划。核心按产品顺序对标准 `0x0400/2` 与 `0x0420/2` 执行两字节小端写入和独立精确读回，要求 WKC 1、固定 deadline、完整计划成功后才发布证据；未配置字段保持 ESC 默认且不发请求。生产调度优先级为 PDO、Watchdog、Mapping、DC Clock、DC SYNC、legacy DC，显式启用的 PREOP 屏障在 Watchdog `Complete` 前保持 Configuration/Topology fail-closed。该软件证据不计算实际 watchdog 时间，不证明物理响应来源、真实超时动作、设备互操作、目标 WCET、HIL、ETG 一致性或功能安全。
 

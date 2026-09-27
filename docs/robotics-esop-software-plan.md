@@ -139,8 +139,12 @@ Platform layer
 
 生成的 `MBoxState` 产品会从 MBoxIn index 推导直接 SyncManager 状态字节策略，
 并在在线 SII 的对应 SM 地址、容量、control、enabled 与 ordered FMMU usage 全部
-匹配后才发布。无该声明的产品继续 PollTime；FMMU-mapped 状态位、物理响应真实性、
-目标 WCET、从站互操作与 HIL 仍保持开放。
+匹配后才发布。cfggen 同时按从站位置把规范物理 bit 3 打包进 Domain 输入尾部，扩展
+LRD/WKC，并生成可交给现有 Mapping FSM 的精确 FMMU 描述；产品运行时会重新构造并
+拒绝任何 Domain/bit/age/FMMU 篡改。Mapping 完成后显式启动的稳态邮箱只接受新鲜有效
+Domain 输入，inactive、invalid 或 stale 时不读取输入邮箱且不直接回退。PDO 配置继续
+使用直接状态字节，无声明产品继续 PollTime；物理响应真实性、目标 WCET、ETG 一致性、
+从站互操作与 HIL 仍保持开放。
 
 生成产品的 `SlaveCopyPlanSet` 现由稳定 `ScheduledProductionCycleOwner` 自动执行。周期 N 的共享 RX 完成后，Bank 为 N+1 预检全部到期计划并在固定双页全局过程映像上事务式发布；共享辅助输出必须验证 typed 发布快照的周期、长度和页地址后才能构帧。失败会保留旧页、阻止输出结算并把所有者闭锁到 `Faulted`，且运动 Domain 不能作为自动复制目标。该闭环只证明软件所有权、顺序和字节结果，不证明真实从站执行、WCET、HIL 或功能安全。
 

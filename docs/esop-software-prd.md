@@ -180,7 +180,7 @@ FR-006 当前增量由宿主机 `esop-cfggen` 与 `no_std` 的 `esop-product-con
 | --- | --- | --- | --- |
 | FR-014 | P0 | 邮箱收发、超时、计数器、重复帧和错误响应应通过异步请求状态机执行。 | 请求跨多个服务周期完成，周期数据面无等待；丢帧、重复、计数器回绕和超时测试通过。 |
 | FR-015 | P0 | 系统应支持 CoE SDO expedited 与 segmented upload/download，并返回 abort code 和请求上下文。 | 标准对象读写、分段读写、abort、超时与缓冲不足测试通过。 |
-| FR-016 | P0 | 系统应实现 Mailbox Resilient Layer、输入邮箱轮询/Status Bit 和 CoE Emergency 接收。 | PollTime、Status Bit、多驱动 Emergency、事件环满和邮箱恢复测试通过。 |
+| FR-016 | P0 | 系统应实现 Mailbox Resilient Layer、输入邮箱 PollTime/直接 Status Bit/FMMU-mapped Status Bit 和 CoE Emergency 接收。 | PollTime、直接与生成式映射 Status Bit、失效/过期 Domain 抑制、多驱动 Emergency、事件环满和邮箱恢复测试通过。 |
 | FR-017 | P1 | 系统应按设备能力支持 Complete Access 和 SDO Information，且允许在产品配置中禁用。 | 支持与拒绝 Complete Access 的设备均可正确配置；对象能力与 ESI/对象字典交叉验证。 |
 | FR-018 | P0 | 系统应识别 DC 能力、选择参考时钟、配置应用时间、SYNC0 周期/相位并监测时钟质量。 | DC 与非 DC 拓扑启动均通过；记录 offset、jitter、last sync、失锁次数和同步窗口状态。 |
 | FR-019 | P0 | 当 DC 未锁定、WKC 无效、命令过期或驱动状态异常时，系统不得发布新的有效运动目标。 | DC 失锁、WKC 异常、命令超时、驱动 fault 联合故障矩阵通过。 |
@@ -549,8 +549,8 @@ inventory、规范化 JSON、C/Rust 静态配置、ESI semantic hash 和最终�
 `0x001C..0x0020`，要求 CoE，只比较 SII 可表示的 send/receive 地址与容量，并在匹配后
 按 position 保留验证证据。独立 `SiiMailbox` 动作避免身份读与邮箱读串线；generation、
 token、WKC、长度、deadline 和控制请求池所有权继续沿用原有闭环。旧 `start()` 和无
-邮箱 profile 保持兼容。物理响应真实性与 HIL 仍未完成；下述增量已补齐直接
-SyncManager-register Status Bit 发现，FMMU-mapped 路径保持开放。
+邮箱 profile 保持兼容。物理响应真实性与 HIL 仍未完成；下述两个增量分别补齐直接
+SyncManager-register Status Bit 发现和稳态 FMMU-mapped Domain 路径。
 
 R2 直接 Mailbox Status Bit 增量：cfggen 现保留 ESI `MBoxOut`/`MBoxIn` 的
 SyncManager index，并把 ordered `MBoxState`/SyncManager-status FMMU usage 解释为
@@ -562,8 +562,21 @@ index 或存在性篡改。Startup 在标准邮箱头匹配后仍不发布策略
 category 精确核对 MBoxIn SM 的地址、容量、control byte、enabled 状态以及 ordered
 FMMU usage，全部一致后才原子发布完整 `MailboxConfig`。Linux 生产调度仿真证明状态
 未激活时不读输入邮箱，激活后下一周期才读；手工 Status Bit 与 PollTime 路径保持兼容。
-本增量不包含把 Mailbox Status Bit 通过 FMMU 映射到周期过程映像，也不证明物理响应
-真实性、目标 WCET、互操作或实物 HIL。
+直接路径仍用于 Mapping 生效前的 PDO 配置和手工 Status Bit 兼容入口；它不证明物理
+响应真实性、目标 WCET、互操作或实物 HIL。
+
+R2 FMMU-mapped Mailbox Status Bit 增量：cfggen 对每个声明 `MBoxState` 的从站按
+position 排序，在所属 Domain 的 TxPDO 输入区之后逐位打包状态尾部，并把尾部一次
+byte-align。生成绑定携带 Domain/bit/最大 age、ordered FMMU index、逻辑位和规范
+MBoxIn 物理 bit 3；聚合 LRD 覆盖尾部，input WKC 为每个映射额外加一。JSON、inventory、
+C/Rust、周期指标、语义 hash 与配置 hash 均反映该变化。`esop-product-config` 从 PDO
+终点、Domain 周期、从站顺序、MBoxIn index 和 ordered usage 重建全部字段，在激活前
+拒绝缺失、重复、越界、age、Domain、WKC 或 FMMU 篡改，并公开可直接交给现有 Mapping
+写入/读回 FSM 的精确 `FmmuConfig`。Mapping `Complete` 后调用方可显式以 mapped mode
+启动稳态邮箱；调度器只读取对应 Domain 的已提交、完整、有效且未过期输入，inactive、
+invalid 或 stale 均不读输入邮箱，也不会回退直接寄存器。PDO 配置邮箱继续使用直接状态
+字节，无 `MBoxState` 产品继续 PollTime。该软件闭环不证明物理响应来源、真实从站互操作、
+目标 WCET、长时运行、ETG 一致性、实物 HIL 或功能安全资格。
 
 R2 SII category stream 增量：`SiiCategoryStreamReader<WORDS>` 复用现有 EEPROM
 寄存器动作与控制请求池，从标准 word `0x0040` 读取两字 category header 和精确

@@ -221,7 +221,13 @@ SyncManager-status / `MBoxState` FMMU usage requires the canonical direct
 MBoxIn status policy `0x0800 + index * 8 + 5`, mask `0x08`, active-high;
 absence retains PollTime. JSON, inventory, C and Rust must expose the indexes
 and derived policy, and no product input may override its address, mask or
-polarity.
+polarity. For every declared status usage, cfggen also appends one bit to the
+owning Domain after its byte-aligned PDO input region, ordered by slave
+position. The tail is byte-aligned once, the aggregate LRD covers it, and
+input WKC increases once per mapped status FMMU. The generated binding freezes
+Domain bit offset, maximum age equal to the Domain period, ordered FMMU index,
+logical bit, canonical physical bit 3, read type and enable state. Those fields
+participate in every artifact and semantic/configuration hash.
 All ordered ESI DC mode metadata participates in the ESI semantic hash. The
 product-selected mode, its exact SII-representable descriptor, and the resolved
 absolute SYNC0/SYNC1 cycle, signed SYNC0 shift, and exact 16-bit
@@ -276,7 +282,15 @@ data FMMU index must declare Outputs for Rx or Inputs for Tx; missing or other
 usage values fail before Startup mutation. A SyncManager-status declaration
 requires the canonical Status Bit, while its absence requires PollTime; no
 silent fallback is allowed. Generated PDO batches repeat the same validation
-before exposing jobs to the production scheduler.
+before exposing jobs to the production scheduler. Product activation also
+reconstructs every mapped status tail and exact FMMU descriptor from PDO
+layout, Domain timing, slave order, MBoxIn index and ordered usage. It rejects
+missing, duplicate, out-of-bounds, stale-policy, Domain/datagram/WKC or
+descriptor drift before publishing position-keyed bindings. The existing
+Mapping controller remains the only writer/readback authority. PDO
+configuration retains direct polling; mapped mailbox mode is selected
+explicitly after Mapping Complete and consumes only fresh valid committed
+Domain input, without direct-register fallback.
 It first validates the product-wide DC invariant and maps each static policy to
 `StartupDcRequirement::{None,SystemTime,ReferenceClock}`; invalid policy must
 return before Startup mutation. It also propagates the selected
@@ -469,6 +483,8 @@ datagrams, FCS, and inter-packet gap respectively.
 | Shared auxiliary publication is absent, has the wrong cycle/length, or does not point to the exact safe image | Return `InvalidAuxiliaryOutputs` before frame acquisition, TX, State mutation, or event publication. |
 | PDO plan owner/SM/group/capacity mismatch | Reject before returning any startup plan. |
 | Invalid generated mailbox or invalid/missing/duplicate/unknown override binding | Reject before returning any batch. |
+| Missing, duplicate, out-of-bounds or tampered mapped mailbox status, or inconsistent Domain/LRD/WKC coverage | Reject before product activation and publish no mapped binding. |
+| Mapped mailbox status input is inactive, invalid or stale | Suppress the input-mailbox read, report bounded progress, and never issue a direct status-register fallback. |
 | Duplicate batch station, insufficient jobs/operations, or generation overflow | Reject before replacing or starting a batch. |
 | PDO upload readback length or byte mismatch | Latch controller fault and keep the current operation index. |
 | PDO mailbox terminal failure | Latch the exact typed transport fault and keep the current operation index. |
@@ -479,8 +495,9 @@ datagrams, FCS, and inter-packet gap respectively.
 ## 5. Good / Base / Bad Cases
 
 - Good: the checked-in dual-drive plus IO example generates six artifacts, a
-  C11-clean header, a byte-identical compiled Rust module, 36 PDO bytes, 2
-  frames, WKC 6, 20 copy bytes, 180 wire bytes, a 4144-byte ProcBuf region,
+  C11-clean header, a byte-identical compiled Rust module, 42 process-image
+  bytes, 2 frames, WKC 8, 4 maximum due copy bytes, 181 wire bytes, a
+  4144-byte ProcBuf region,
   two DC-required drives, one explicit left-drive reference, Startup-owned
   measurable propagation-delay evidence for both required drives, and a
   two-entry 1 ms DC SYNC plan with exact `AssignActivate=0x0300`; both drives
@@ -554,6 +571,12 @@ datagrams, FCS, and inter-packet gap respectively.
   SII fixed-header direction conversion, Startup exact-range acquisition,
   generated-versus-live layout comparison, action ownership, timeout,
   multi-slave order, legacy opt-out and all shape/protocol/range failures.
+- Cover deterministic per-Domain mailbox status tail packing, aggregate LRD
+  length/WKC and hash propagation; reject Domain, bit, age, FMMU index,
+  logical/physical address, direction, duplicate or coverage tampering. Pass
+  the exact generated descriptor through Mapping write/readback, then prove
+  mapped mailbox inactive/invalid/stale suppression, fresh recovery and no
+  direct-register fallback while preserving PDO direct polling and PollTime.
 - Cover bounded SII category-stream acquisition through END, unknown and
   zero-length categories, capacity/missing-END/address failures, non-reset
   action cursors, one absolute deadline, request-pool ownership, stale

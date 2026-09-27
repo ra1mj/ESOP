@@ -93,8 +93,10 @@ pub use frame_pool::{FrameHandle, FramePool, FramePoolError, FrameSlot};
 pub use mailbox::{
     MAILBOX_FULL_STATUS_MASK, MAILBOX_HEADER_LEN, MAX_MAILBOX_BYTES, MailboxAction, MailboxConfig,
     MailboxConfigError, MailboxController, MailboxDirection, MailboxError, MailboxFrame,
-    MailboxHeader, MailboxPhase, MailboxProgress, MailboxProtocol, MailboxReceiveSyncManager,
-    MailboxReceiveSyncManagerError, MailboxRetryPolicy, MailboxStatusBit,
+    MailboxHeader, MailboxMappedStatusBit, MailboxMappedStatusError,
+    MailboxMappedStatusObservation, MailboxMappedStatusUnavailable, MailboxPhase, MailboxProgress,
+    MailboxProtocol, MailboxReceiveSyncManager, MailboxReceiveSyncManagerError, MailboxRetryPolicy,
+    MailboxStatusBit, MailboxStatusSource,
 };
 pub use mapping::{
     ESC_FMMU_BASE, ESC_FMMU_STRIDE, ESC_SYNC_MANAGER_BASE, ESC_SYNC_MANAGER_STRIDE, FMMU_IMAGE_LEN,

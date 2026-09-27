@@ -1,14 +1,18 @@
 use esop_ethercat_core::wire::{Command, DatagramHeader, FrameView, MAX_ETHERNET_FRAME_LEN};
-use esop_ethercat_core::{Domain, DomainSegment, SlaveCopyStatus};
+use esop_ethercat_core::{
+    Domain, DomainSegment, FMMU_IMAGE_LEN, MappingConfigController, MappingConfigItem,
+    MappingConfigPhase, MappingConfigProgress, MappingTable, SlaveCopyStatus,
+};
 use esop_product_config::{
     ActivatedProduct, AlTransitionTimeouts, Cia402AxisCommandPolicyError, DomainRegistryError,
     ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, EscWatchdogConfig, FramePlanSetError,
     MAX_PRODUCT_SLAVE_COPIES, MailboxConfig, MailboxConfigError, MailboxDirection,
-    MailboxReceiveSyncManager, MailboxStatusBit, OperatingMode, PdoConfigBatchPlanError,
-    PdoConfigPlanError, PdoSdoWrite, ProcBuf, ProcBufHeaderError, ProductActivationError,
-    ProductMailboxBinding, ProductMailboxPolicyError, ProductPdoBatchError, ProductPdoPlanError,
-    ProductSlaveKind, ProductStartupError, SiiConfigurationSignatureError, SiiFmmuUsage,
-    SlaveCopyPlanSetError, SlaveRecord, StartupDcRequirement,
+    MailboxMappedStatusError, MailboxReceiveSyncManager, MailboxStatusBit, OperatingMode,
+    PdoConfigBatchPlanError, PdoConfigPlanError, PdoSdoWrite, ProcBuf, ProcBufHeaderError,
+    ProductActivationError, ProductMailboxBinding, ProductMailboxPolicyError,
+    ProductMailboxStatusMappingError, ProductPdoBatchError, ProductPdoPlanError, ProductSlaveKind,
+    ProductStartupError, SiiConfigurationSignatureError, SiiFmmuUsage, SlaveCopyPlanSetError,
+    SlaveRecord, StartupDcRequirement,
 };
 
 mod generated {
@@ -56,9 +60,9 @@ fn checked_in_product_activates_exact_generated_evidence() {
     assert_eq!(
         active.metadata().config_sha256,
         [
-            0x88, 0xdb, 0x86, 0x1d, 0x4c, 0x7d, 0x43, 0xce, 0x20, 0xf4, 0xa8, 0xce, 0x76, 0x4d,
-            0xd6, 0x71, 0x6a, 0x9e, 0x40, 0x6b, 0x57, 0x8d, 0xf8, 0x7a, 0x26, 0x5e, 0xe5, 0xdb,
-            0xa5, 0x79, 0xc6, 0x07,
+            0x3c, 0x8f, 0x14, 0x7c, 0x09, 0x12, 0x7a, 0x85, 0x53, 0x04, 0x4f, 0x8a, 0x5f, 0xbf,
+            0x8c, 0x3f, 0xb7, 0xb2, 0xc6, 0x06, 0xb1, 0xb6, 0x50, 0x38, 0xf5, 0x97, 0x30, 0x63,
+            0x39, 0xb7, 0x49, 0x03,
         ]
     );
 
@@ -132,7 +136,7 @@ fn checked_in_product_activates_exact_generated_evidence() {
 
     assert_eq!(active.registry().domain_count(), 2);
     assert_eq!(active.registry().domain(0).unwrap().pdo_count, 14);
-    assert_eq!(active.registry().domain(0).unwrap().expected_wkc, 4);
+    assert_eq!(active.registry().domain(0).unwrap().expected_wkc, 6);
     assert_eq!(active.registry().domain(1).unwrap().pdo_count, 4);
     assert_eq!(active.registry().domain(1).unwrap().expected_wkc, 2);
     assert_eq!(active.schedule().hyperperiod_ticks(), 4);
@@ -143,6 +147,12 @@ fn checked_in_product_activates_exact_generated_evidence() {
     assert_eq!(active.frame_plans()[1].datagram_count(), 2);
     assert_eq!(active.slave_copy_plans().len(), 1);
     assert_eq!(active.slave_copy_plans().plans()[0].payload_len(), 4);
+    assert_eq!(active.mapped_mailbox_status_count(), 2);
+    assert_eq!(
+        active.mapped_mailbox_status(0),
+        generated::PRODUCT_CONFIG.slaves[0].mapped_mailbox_status
+    );
+    assert_eq!(active.mapped_mailbox_status(2), None);
     assert_eq!(active.axis_modes(), &[OperatingMode::Csp; 2]);
     for map in active.axis_pdo_maps() {
         map.validate_for(OperatingMode::Csp).unwrap();
@@ -150,13 +160,13 @@ fn checked_in_product_activates_exact_generated_evidence() {
 }
 
 fn receive_motion_position(
-    domain: &mut Domain<32, 1>,
+    domain: &mut Domain<33, 1>,
     generation: u16,
     cycle: u64,
     wkc: u16,
     position: i32,
 ) -> bool {
-    let mut payload = [0u8; 18];
+    let mut payload = [0u8; 19];
     payload[5..9].copy_from_slice(&position.to_le_bytes());
     domain.begin_receive(generation).unwrap();
     domain
@@ -183,18 +193,18 @@ fn generated_slave_copy_runs_from_verified_receive_into_the_due_target_frame() {
     let active = activate(&generated::PRODUCT_CONFIG, &observed_slaves(), &procbuf).unwrap();
     let plan = active.slave_copy_plans().plans()[0];
 
-    let mut source = Domain::<32, 1>::new(0x1000);
+    let mut source = Domain::<33, 1>::new(0x1000);
     source
         .add_segment(DomainSegment {
             datagram_index: 1,
             input_offset: 14,
-            len: 18,
-            expected_wkc: 2,
+            len: 19,
+            expected_wkc: 4,
         })
         .unwrap();
     let mut target = Domain::<9, 1>::new(0x1100);
 
-    assert!(receive_motion_position(&mut source, 1, 1, 2, 0x1234_5678));
+    assert!(receive_motion_position(&mut source, 1, 1, 4, 0x1234_5678));
     let copied = plan.apply_to_domains(&source, &mut target, 1).unwrap();
     assert_eq!(copied.status, SlaveCopyStatus::Valid);
     assert_eq!(target.output(), &[0, 0, 0x78, 0x56, 0x34, 0x12, 1, 0, 0]);
@@ -214,7 +224,7 @@ fn generated_slave_copy_runs_from_verified_receive_into_the_due_target_frame() {
     assert_eq!(stale.status, SlaveCopyStatus::StaleSource);
     assert_eq!(target.output(), &[0; 9]);
 
-    assert!(receive_motion_position(&mut source, 2, 5, 2, -123));
+    assert!(receive_motion_position(&mut source, 2, 5, 4, -123));
     assert_eq!(
         plan.apply_to_domains(&source, &mut target, 5)
             .unwrap()
@@ -384,6 +394,150 @@ fn checked_in_product_rejects_tampered_mailbox_status_policy() {
         None
     );
     assert!(generated::PRODUCT_CONFIG.startup_profiles().is_ok());
+}
+
+#[test]
+fn checked_in_product_rejects_tampered_mapped_mailbox_status() {
+    let procbuf =
+        ProcBuf::<2, 16, 2, 64>::new(generated::PRODUCT_CONFIG.metadata.robot_id, BOOT_ID);
+
+    let mut missing = generated::PRODUCT_CONFIG;
+    missing.slaves[0].mapped_mailbox_status = None;
+    assert!(matches!(
+        activate(&missing, &observed_slaves(), &procbuf),
+        Err(ProductActivationError::MailboxStatusMapping {
+            position: 0,
+            error: ProductMailboxStatusMappingError::Missing,
+        })
+    ));
+
+    let mut wrong_offset = generated::PRODUCT_CONFIG;
+    wrong_offset.slaves[0]
+        .mapped_mailbox_status
+        .as_mut()
+        .unwrap()
+        .domain_bit_offset = 257;
+    assert!(matches!(
+        activate(&wrong_offset, &observed_slaves(), &procbuf),
+        Err(ProductActivationError::MailboxStatusMapping {
+            position: 0,
+            error: ProductMailboxStatusMappingError::BitOffsetMismatch { .. },
+        })
+    ));
+
+    let mut wrong_age = generated::PRODUCT_CONFIG;
+    wrong_age.slaves[0]
+        .mapped_mailbox_status
+        .as_mut()
+        .unwrap()
+        .max_age_cycles = 2;
+    assert!(matches!(
+        activate(&wrong_age, &observed_slaves(), &procbuf),
+        Err(ProductActivationError::MailboxStatusMapping {
+            position: 0,
+            error: ProductMailboxStatusMappingError::MaximumAgeMismatch { .. },
+        })
+    ));
+
+    let mut wrong_index = generated::PRODUCT_CONFIG;
+    wrong_index.slaves[0]
+        .mapped_mailbox_status
+        .as_mut()
+        .unwrap()
+        .fmmu
+        .index = 3;
+    assert!(matches!(
+        activate(&wrong_index, &observed_slaves(), &procbuf),
+        Err(ProductActivationError::MailboxStatusMapping {
+            position: 0,
+            error: ProductMailboxStatusMappingError::FmmuIndexMismatch { .. },
+        })
+    ));
+
+    let mut wrong_logical = generated::PRODUCT_CONFIG;
+    wrong_logical.slaves[0]
+        .mapped_mailbox_status
+        .as_mut()
+        .unwrap()
+        .fmmu
+        .logical_start = 0x1021;
+    assert!(matches!(
+        activate(&wrong_logical, &observed_slaves(), &procbuf),
+        Err(ProductActivationError::MailboxStatusMapping {
+            position: 0,
+            error: ProductMailboxStatusMappingError::Descriptor(
+                MailboxMappedStatusError::InvalidFmmu
+            ),
+        })
+    ));
+
+    let mut wrong_physical = generated::PRODUCT_CONFIG;
+    wrong_physical.slaves[0]
+        .mapped_mailbox_status
+        .as_mut()
+        .unwrap()
+        .fmmu
+        .physical_start = 0x080c;
+    assert!(matches!(
+        activate(&wrong_physical, &observed_slaves(), &procbuf),
+        Err(ProductActivationError::MailboxStatusMapping {
+            position: 0,
+            error: ProductMailboxStatusMappingError::Descriptor(
+                MailboxMappedStatusError::StatusBitMismatch
+            ),
+        })
+    ));
+
+    let mut duplicate_declaration = generated::PRODUCT_CONFIG;
+    duplicate_declaration.slaves[0].sii_fmmu_count = 4;
+    duplicate_declaration.slaves[0].sii_fmmu_usages[3] = SiiFmmuUsage::SyncManagerStatus;
+    assert!(matches!(
+        activate(&duplicate_declaration, &observed_slaves(), &procbuf),
+        Err(ProductActivationError::MailboxStatusMapping {
+            position: 0,
+            error: ProductMailboxStatusMappingError::DeclarationCount(2),
+        })
+    ));
+
+    let mut datagrams: [_; 4] =
+        core::array::from_fn(|index| generated::PRODUCT_CONFIG.datagrams[index]);
+    datagrams[1].spec.expected_wkc = 3;
+    let mut wrong_lrd = generated::PRODUCT_CONFIG;
+    wrong_lrd.datagrams = &datagrams;
+    assert!(matches!(
+        activate(&wrong_lrd, &observed_slaves(), &procbuf),
+        Err(ProductActivationError::MailboxStatusDomainMismatch { domain_id: 0 })
+    ));
+}
+
+#[test]
+fn generated_mailbox_status_fmmu_passes_mapping_write_and_readback() {
+    let binding = generated::PRODUCT_CONFIG.slaves[0]
+        .mapped_mailbox_status
+        .unwrap();
+    let mut table = MappingTable::<0, 1>::new();
+    table.add_fmmu(binding.fmmu).unwrap();
+
+    let mut controller = MappingConfigController::<0, 1>::new();
+    controller.start(0x1001, 7, 0, 1_000, 100, &table).unwrap();
+    let write = controller.next_action(1).unwrap().unwrap();
+    assert_eq!(write.item, MappingConfigItem::Fmmu(2));
+    assert_eq!(write.payload().len(), FMMU_IMAGE_LEN);
+    let mut expected = [0; FMMU_IMAGE_LEN];
+    binding.fmmu.encode(&mut expected).unwrap();
+    assert_eq!(write.payload(), &expected);
+    assert_eq!(
+        controller.accept(write, 7, &[], 1, 2),
+        Ok(MappingConfigProgress::Advanced)
+    );
+
+    let read = controller.next_action(3).unwrap().unwrap();
+    assert_eq!(read.item, MappingConfigItem::Fmmu(2));
+    assert_eq!(
+        controller.accept(read, 7, &expected, 1, 4),
+        Ok(MappingConfigProgress::Complete)
+    );
+    assert_eq!(controller.phase(), MappingConfigPhase::Complete);
 }
 
 #[test]
@@ -779,7 +933,7 @@ fn runtime_capacities_and_generated_domain_evidence_are_enforced() {
     config.domains[0].expected_wkc += 1;
     assert!(matches!(
         activate(&config, &observed_slaves(), &procbuf),
-        Err(ProductActivationError::DomainEvidenceMismatch { domain_id: 0 })
+        Err(ProductActivationError::MailboxStatusDomainMismatch { domain_id: 0 })
     ));
 }
 

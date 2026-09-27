@@ -77,11 +77,11 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
 
     let build_input: Value =
         serde_json::from_slice(&fs::read(first.join("robot_build_input.json")).unwrap()).unwrap();
-    assert_eq!(build_input["process_data"]["pdo_bytes_per_cycle"], 41);
+    assert_eq!(build_input["process_data"]["pdo_bytes_per_cycle"], 42);
     assert_eq!(build_input["process_data"]["frame_count"], 2);
-    assert_eq!(build_input["process_data"]["expected_wkc"], 6);
+    assert_eq!(build_input["process_data"]["expected_wkc"], 8);
     assert_eq!(build_input["process_data"]["copy_bytes_per_cycle"], 4);
-    assert_eq!(build_input["process_data"]["wire_bytes_per_cycle"], 180);
+    assert_eq!(build_input["process_data"]["wire_bytes_per_cycle"], 181);
 
     let inventory: Value =
         serde_json::from_slice(&fs::read(first.join("device_inventory.json")).unwrap()).unwrap();
@@ -128,6 +128,37 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert_eq!(product["slaves"][0]["sii_enabled_sync_managers"], 15);
     assert_eq!(product["slaves"][0]["sii_fmmu_count"], 3);
     assert_eq!(product["slaves"][2]["sii_fmmu_count"], 2);
+    assert_eq!(product["domains"][0]["process_image_bytes"], 33);
+    assert_eq!(product["domains"][0]["input_bytes"], 19);
+    assert_eq!(product["domains"][0]["expected_wkc"], 6);
+    assert_eq!(product["domains"][0]["input_expected_wkc"], 4);
+    assert_eq!(product["datagrams"][1]["payload_len"], 19);
+    assert_eq!(product["datagrams"][1]["expected_wkc"], 4);
+    assert_eq!(
+        product["slaves"][0]["mapped_mailbox_status"]["domain_bit_offset"],
+        256
+    );
+    assert_eq!(
+        product["slaves"][1]["mapped_mailbox_status"]["domain_bit_offset"],
+        257
+    );
+    assert_eq!(
+        product["slaves"][0]["mapped_mailbox_status"]["fmmu_index"],
+        2
+    );
+    assert_eq!(
+        product["slaves"][0]["mapped_mailbox_status"]["logical_start"],
+        "0x00001020"
+    );
+    assert_eq!(
+        product["slaves"][1]["mapped_mailbox_status"]["logical_start_bit"],
+        1
+    );
+    assert_eq!(
+        product["slaves"][0]["mapped_mailbox_status"]["physical_start"],
+        "0x080d"
+    );
+    assert!(product["slaves"][2].get("mapped_mailbox_status").is_none());
     assert_eq!(product["slaves"][0]["sii_fmmu_usages"][0], "outputs");
     assert_eq!(product["slaves"][0]["sii_fmmu_usages"][1], "inputs");
     assert_eq!(
@@ -181,6 +212,13 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(header.contains("uint8_t has_mailbox_status_bit"));
     assert!(header.contains("uint16_t mailbox_status_bit_address"));
     assert!(header.contains("uint8_t mailbox_status_bit_mask"));
+    assert!(header.contains("esop_mailbox_status_mapping_t"));
+    assert!(
+        header.contains("static const esop_mailbox_status_mapping_t esop_mailbox_status_mappings")
+    );
+    assert!(header.contains(
+        "0u, 1u, 0u, 256u, 1u, 2u, UINT32_C(0x00001020), 0u, 0u, UINT16_C(0x080d), 3u, 1u, 1u"
+    ));
     assert!(header.contains("uint8_t sii_sync_manager_count"));
     assert!(header.contains("uint16_t sii_enabled_sync_managers"));
     assert!(header.contains("#define ESOP_SII_FMMU_CAPACITY 16u"));
@@ -220,6 +258,9 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert!(rust.contains("SiiFmmuUsage::SyncManagerStatus"));
     assert!(rust.contains("SiiFmmuUsage::Outputs"));
     assert!(rust.contains("SiiFmmuUsage::Inputs"));
+    assert!(rust.contains("mapped_mailbox_status: Some(MailboxMappedStatusBit::new(0, 256, 1, FmmuConfig { index: 2, logical_start: 0x00001020"));
+    assert!(rust.contains("mapped_mailbox_status: Some(MailboxMappedStatusBit::new(0, 257, 1, FmmuConfig { index: 2, logical_start: 0x00001020"));
+    assert!(rust.contains("mapped_mailbox_status: None"));
     assert!(rust.contains("dc_required: true, dc_reference_clock: true"));
     assert!(rust.contains("dc_required: false, dc_reference_clock: false"));
     assert!(rust.contains("name: \"DcSync\", mode: SiiDcMode"));

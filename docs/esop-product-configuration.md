@@ -74,9 +74,11 @@ index/subindex/bit length/DataType。未提供 timeout 时使用版本化的 ETG
 解析器同时保留 `MBoxOut`/`MBoxIn` 的 SyncManager index。若 ordered
 `Fmmu` usage 声明 `MBoxState`，cfggen 必须从 `MBoxIn` index 推导直接
 SyncManager 状态寄存器策略：地址为 `0x0800 + index * 8 + 5`、mask 为
-`0x08`、active-high；不得从产品输入接受任意地址、mask 或极性。没有该声明
-的设备继续生成 PollTime 策略。两种策略以及 mailbox SyncManager 证据都进入
-JSON、inventory、C/Rust 和配置 hash。
+`0x08`、active-high；不得从产品输入接受任意地址、mask 或极性。它还按从站
+position 把该物理 bit 3 作为一位读 FMMU 打包到所属 Domain 的输入尾部，扩展
+聚合 LRD 长度并把 input WKC 每映射增加一。生成绑定携带 Domain bit offset、
+最大 age 和完整 FMMU 描述。没有该声明的设备继续生成 PollTime 策略。直接策略、
+映射绑定和 mailbox SyncManager 证据都进入 JSON、inventory、C/Rust 和配置 hash。
 
 生成前会一次性完成身份唯一性、Domain/过程镜像范围、静态容量、PDO
 偏移、datagram、Frame Plan、多速率 schedule、expected WKC、CiA 402
@@ -197,9 +199,14 @@ mask、极性、index 或声明存在性被篡改的配置；调用方不需要�
 启动一次后复用同一 PDO/邮箱控制器，以 `base_generation + job_index` 自动推进；
 空计划有界跳过，故障保留当前 index/station，只有显式重启才替换计划和清除故障。
 `ScheduledPdoConfiguration::batch` 将当前 job 接入原有邮箱/DC/共享 RX 路径，报告
-公开批 phase、当前 index、总 job 数和当前站地址。直接 SM 状态位未激活时只读状态
-字节而不读输入邮箱，激活后才读取输入邮箱；无 `MBoxState` 声明的设备保持 PollTime。
-FMMU 映射状态位到周期过程映像不在当前合同内。
+公开批 phase、当前 index、总 job 数和当前站地址。PDO 配置发生在 Mapping 生效前，
+因此仍由直接 SM 状态字节抑制输入邮箱读取。产品激活会从 PDO 输入终点、Domain 周期、
+从站顺序、MBoxIn index 和 ordered usage 重建 mapped binding，并拒绝 Domain、bit、age、
+FMMU index、逻辑/物理地址、方向、覆盖范围或 LRD/WKC 被篡改。通过校验的绑定公开精确
+`FmmuConfig` 给现有 Mapping 写入/读回 FSM；Mapping `Complete` 后，调用方显式启动
+mapped mailbox，生产调度器只消费对应 Domain 的新鲜有效提交。inactive、invalid 或
+stale 输入均抑制输入邮箱读取且不回退直接寄存器。无 `MBoxState` 声明的设备保持
+PollTime，手工直接 Status Bit API 保持兼容。
 
 核心另提供严格的 SII 标准邮箱五字固定头解析：只接受精确 word 起点/长度和已完成
 `SiiBlockReader`，检查 CoE 协议位，并把从站 receive/send 字段转换为主站

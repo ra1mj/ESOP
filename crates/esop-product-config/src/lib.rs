@@ -11,8 +11,9 @@ pub use esop_ethercat_core::{
     AlTransitionTimeouts, DcSyncPlan, DcSyncPlanEntry, DcSyncPlanError, DcSyncTiming,
     DcSyncTimingError, DomainConfig, DomainDatagramSpec, DomainInfo, DomainRegistry,
     DomainRegistryError, ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1, EscWatchdogConfig,
-    EscWatchdogConfigError, ExpectedSlave, FramePlanSet, FramePlanSetError, MAX_SII_FMMU_USAGES,
-    MailboxConfig, MailboxConfigError, MailboxDirection, MailboxReceiveSyncManager,
+    EscWatchdogConfigError, ExpectedSlave, FmmuConfig, FramePlanSet, FramePlanSetError,
+    MAX_SII_FMMU_USAGES, MailboxConfig, MailboxConfigError, MailboxDirection,
+    MailboxMappedStatusBit, MailboxMappedStatusError, MailboxReceiveSyncManager,
     MailboxReceiveSyncManagerError, MailboxStatusBit, OpOnlyProfileError, OpOnlySyncManagerProfile,
     PdoConfigBatch, PdoConfigBatchError, PdoConfigBatchPhase, PdoConfigBatchPlan,
     PdoConfigBatchPlanError, PdoConfigBatchStatus, PdoConfigJob, PdoConfigPlan, PdoConfigPlanError,
@@ -35,6 +36,7 @@ pub const CONFIG_SHA256_BYTES: usize = 32;
 pub const MAX_PRODUCT_AXIS_PDOS: usize = 32;
 pub const MAX_PRODUCT_PDO_ENTRIES_PER_DOMAIN: usize = 256;
 pub const MAX_PRODUCT_SLAVE_COPIES: usize = 32;
+pub const MAX_PRODUCT_MAILBOX_STATUS_MAPPINGS: usize = 32;
 const MAX_PRODUCT_SYNC_MANAGERS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,11 +74,49 @@ pub struct ProductSlaveConfig {
     pub mailbox_send_sync_manager: u8,
     pub mailbox_send_control_byte: u8,
     pub mailbox_receive_sync_manager: MailboxReceiveSyncManager,
+    pub mapped_mailbox_status: Option<MailboxMappedStatusBit>,
     pub op_only_outputs: OpOnlySyncManagerProfile,
     pub sii_sync_manager_count: u8,
     pub sii_enabled_sync_managers: u16,
     pub sii_fmmu_count: u8,
     pub sii_fmmu_usages: [SiiFmmuUsage; MAX_SII_FMMU_USAGES],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProductMappedMailboxStatusBinding {
+    pub slave_position: u16,
+    pub status: MailboxMappedStatusBit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductMailboxStatusMappingError {
+    InvalidFmmuCount(u8),
+    DeclarationCount(u8),
+    Missing,
+    Unexpected,
+    UnknownDomain(u8),
+    DomainMismatch {
+        expected: u8,
+        actual: u8,
+    },
+    BitOffsetMismatch {
+        expected: u32,
+        actual: u32,
+    },
+    MaximumAgeMismatch {
+        expected: u32,
+        actual: u32,
+    },
+    FmmuIndexMismatch {
+        expected: u8,
+        actual: u8,
+    },
+    StatusBitMismatch {
+        expected: Option<MailboxStatusBit>,
+        actual: Option<MailboxStatusBit>,
+    },
+    Descriptor(MailboxMappedStatusError),
+    InputOutOfBounds,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -458,6 +498,14 @@ pub enum ProductActivationError {
     DomainEvidenceMismatch {
         domain_id: u8,
     },
+    MailboxStatusMapping {
+        position: u16,
+        error: ProductMailboxStatusMappingError,
+    },
+    MailboxStatusDomainMismatch {
+        domain_id: u8,
+    },
+    MailboxStatusCapacityExceeded,
     SlaveCopyPdoIndexOutOfRange {
         copy_index: usize,
         pdo_index: usize,
@@ -517,6 +565,9 @@ pub struct ActivatedProduct<
     axis_modes: [OperatingMode; AXES],
     axis_policies: [Cia402AxisCommandPolicy; AXES],
     axis_pdo_maps: [Cia402PdoMap; AXES],
+    mapped_mailbox_status:
+        [Option<ProductMappedMailboxStatusBinding>; MAX_PRODUCT_MAILBOX_STATUS_MAPPINGS],
+    mapped_mailbox_status_count: usize,
 }
 
 impl<
@@ -560,6 +611,18 @@ impl<
     pub const fn axis_pdo_maps(&self) -> &[Cia402PdoMap; AXES] {
         &self.axis_pdo_maps
     }
+
+    pub fn mapped_mailbox_status(&self, slave_position: u16) -> Option<MailboxMappedStatusBit> {
+        self.mapped_mailbox_status[..self.mapped_mailbox_status_count]
+            .iter()
+            .flatten()
+            .find(|binding| binding.slave_position == slave_position)
+            .map(|binding| binding.status)
+    }
+
+    pub const fn mapped_mailbox_status_count(&self) -> usize {
+        self.mapped_mailbox_status_count
+    }
 }
 
 const EMPTY_AXIS_POLICY: Cia402AxisCommandPolicy = Cia402AxisCommandPolicy {
@@ -579,6 +642,33 @@ type ActivatedAxes<const AXES: usize> = (
     [Cia402AxisCommandPolicy; AXES],
     [Cia402PdoMap; AXES],
 );
+
+type ActivatedMailboxStatus = (
+    [Option<ProductMappedMailboxStatusBinding>; MAX_PRODUCT_MAILBOX_STATUS_MAPPINGS],
+    usize,
+);
+
+fn sync_manager_status_fmmu_index(
+    slave: ProductSlaveConfig,
+) -> Result<Option<u8>, ProductMailboxStatusMappingError> {
+    let fmmu_count = usize::from(slave.sii_fmmu_count);
+    if fmmu_count > MAX_SII_FMMU_USAGES {
+        return Err(ProductMailboxStatusMappingError::InvalidFmmuCount(
+            slave.sii_fmmu_count,
+        ));
+    }
+    let mut indexes = slave.sii_fmmu_usages[..fmmu_count]
+        .iter()
+        .enumerate()
+        .filter_map(|(index, usage)| (*usage == SiiFmmuUsage::SyncManagerStatus).then_some(index));
+    let Some(index) = indexes.next() else {
+        return Ok(None);
+    };
+    if indexes.next().is_some() {
+        return Err(ProductMailboxStatusMappingError::DeclarationCount(2));
+    }
+    Ok(Some(index as u8))
+}
 
 impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
     StaticProductConfig<'a, SLAVES, DOMAINS, AXES>
@@ -1159,6 +1249,279 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
         })
     }
 
+    fn validate_mapped_mailbox_status(
+        &self,
+    ) -> Result<ActivatedMailboxStatus, ProductActivationError> {
+        for slave in self.slaves.iter().copied() {
+            let declared = sync_manager_status_fmmu_index(slave).map_err(|error| {
+                ProductActivationError::MailboxStatusMapping {
+                    position: slave.position,
+                    error,
+                }
+            })?;
+            let expected_status = declared
+                .is_some()
+                .then(|| slave.mailbox_receive_sync_manager.status_bit());
+            if slave.mailbox_config.status_bit != expected_status {
+                return Err(ProductActivationError::MailboxStatusMapping {
+                    position: slave.position,
+                    error: ProductMailboxStatusMappingError::StatusBitMismatch {
+                        expected: expected_status,
+                        actual: slave.mailbox_config.status_bit,
+                    },
+                });
+            }
+            match (declared, slave.mapped_mailbox_status) {
+                (Some(_), None) => {
+                    return Err(ProductActivationError::MailboxStatusMapping {
+                        position: slave.position,
+                        error: ProductMailboxStatusMappingError::Missing,
+                    });
+                }
+                (None, Some(_)) => {
+                    return Err(ProductActivationError::MailboxStatusMapping {
+                        position: slave.position,
+                        error: ProductMailboxStatusMappingError::Unexpected,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        for domain in self.domains.iter().copied() {
+            let status_count = self
+                .slaves
+                .iter()
+                .copied()
+                .filter(|slave| slave.domain_id == domain.config.id)
+                .filter(|slave| matches!(sync_manager_status_fmmu_index(*slave), Ok(Some(_))))
+                .count();
+            if status_count == 0 {
+                continue;
+            }
+            let mut pdo_end_bits = 0usize;
+            let mut output_end_bits = 0usize;
+            let mut output_wkc = 0u16;
+            let mut input_wkc = u16::try_from(status_count).map_err(|_| {
+                ProductActivationError::MailboxStatusDomainMismatch {
+                    domain_id: domain.config.id,
+                }
+            })?;
+            for (pdo_index, pdo) in self.pdos.iter().copied().enumerate() {
+                if pdo.domain_id != domain.config.id {
+                    continue;
+                }
+                let end = pdo
+                    .bit_offset
+                    .checked_add(usize::from(pdo.request.bit_length))
+                    .ok_or(ProductActivationError::MailboxStatusDomainMismatch {
+                        domain_id: domain.config.id,
+                    })?;
+                pdo_end_bits = pdo_end_bits.max(end);
+                if pdo.request.direction == PdoDirection::Rx {
+                    output_end_bits = output_end_bits.max(end);
+                }
+                let first_for_slave_direction = !self.pdos[..pdo_index].iter().any(|previous| {
+                    previous.domain_id == domain.config.id
+                        && previous.request.slave_position == pdo.request.slave_position
+                        && previous.request.direction == pdo.request.direction
+                });
+                if first_for_slave_direction {
+                    match pdo.request.direction {
+                        PdoDirection::Rx => {
+                            output_wkc = output_wkc.checked_add(1).ok_or(
+                                ProductActivationError::MailboxStatusDomainMismatch {
+                                    domain_id: domain.config.id,
+                                },
+                            )?
+                        }
+                        PdoDirection::Tx => {
+                            input_wkc = input_wkc.checked_add(1).ok_or(
+                                ProductActivationError::MailboxStatusDomainMismatch {
+                                    domain_id: domain.config.id,
+                                },
+                            )?
+                        }
+                    }
+                }
+            }
+            let output_bytes = output_end_bits.div_ceil(8);
+            let status_base_bits = pdo_end_bits.div_ceil(8) * 8;
+            let image_bytes = status_base_bits
+                .checked_add(status_count)
+                .map(|bits| bits.div_ceil(8))
+                .ok_or(ProductActivationError::MailboxStatusDomainMismatch {
+                    domain_id: domain.config.id,
+                })?;
+            let input_bytes = image_bytes.checked_sub(output_bytes).ok_or(
+                ProductActivationError::MailboxStatusDomainMismatch {
+                    domain_id: domain.config.id,
+                },
+            )?;
+            let expected_wkc = output_wkc.checked_add(input_wkc).ok_or(
+                ProductActivationError::MailboxStatusDomainMismatch {
+                    domain_id: domain.config.id,
+                },
+            )?;
+            if domain.config.process_image_len != image_bytes
+                || domain.expected_wkc != expected_wkc
+                || domain.input_expected_wkc != input_wkc
+            {
+                return Err(ProductActivationError::MailboxStatusDomainMismatch {
+                    domain_id: domain.config.id,
+                });
+            }
+            let expected_address = domain
+                .config
+                .logical_address
+                .checked_add(output_bytes as u32)
+                .ok_or(ProductActivationError::MailboxStatusDomainMismatch {
+                    domain_id: domain.config.id,
+                })?;
+            let mut input_datagrams = self
+                .datagrams
+                .iter()
+                .filter(|datagram| datagram.domain_id == domain.config.id && datagram.spec.input);
+            let input = input_datagrams.next().ok_or(
+                ProductActivationError::MailboxStatusDomainMismatch {
+                    domain_id: domain.config.id,
+                },
+            )?;
+            if input_datagrams.next().is_some()
+                || input.spec.command != Command::Lrd
+                || input.spec.address != expected_address
+                || input.spec.payload_offset != output_bytes
+                || input.spec.payload_len != input_bytes
+                || input.spec.expected_wkc != input_wkc
+            {
+                return Err(ProductActivationError::MailboxStatusDomainMismatch {
+                    domain_id: domain.config.id,
+                });
+            }
+        }
+
+        let mut bindings = [None; MAX_PRODUCT_MAILBOX_STATUS_MAPPINGS];
+        let mut binding_count = 0usize;
+        for slave in self.slaves.iter().copied() {
+            let Some(expected_fmmu_index) =
+                sync_manager_status_fmmu_index(slave).map_err(|error| {
+                    ProductActivationError::MailboxStatusMapping {
+                        position: slave.position,
+                        error,
+                    }
+                })?
+            else {
+                continue;
+            };
+            if binding_count == bindings.len() {
+                return Err(ProductActivationError::MailboxStatusCapacityExceeded);
+            }
+            let domain = self
+                .domains
+                .iter()
+                .find(|domain| domain.config.id == slave.domain_id)
+                .ok_or(ProductActivationError::MailboxStatusMapping {
+                    position: slave.position,
+                    error: ProductMailboxStatusMappingError::UnknownDomain(slave.domain_id),
+                })?;
+            let pdo_end_bits = self
+                .pdos
+                .iter()
+                .filter(|pdo| pdo.domain_id == slave.domain_id)
+                .filter_map(|pdo| {
+                    pdo.bit_offset
+                        .checked_add(usize::from(pdo.request.bit_length))
+                })
+                .max()
+                .unwrap_or(0);
+            let rank = self
+                .slaves
+                .iter()
+                .copied()
+                .filter(|candidate| {
+                    candidate.domain_id == slave.domain_id
+                        && candidate.position < slave.position
+                        && matches!(sync_manager_status_fmmu_index(*candidate), Ok(Some(_)))
+                })
+                .count();
+            let expected_bit_offset = pdo_end_bits
+                .div_ceil(8)
+                .checked_mul(8)
+                .and_then(|base| base.checked_add(rank))
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or(ProductActivationError::MailboxStatusMapping {
+                    position: slave.position,
+                    error: ProductMailboxStatusMappingError::InputOutOfBounds,
+                })?;
+            let binding = slave.mapped_mailbox_status.ok_or(
+                ProductActivationError::MailboxStatusMapping {
+                    position: slave.position,
+                    error: ProductMailboxStatusMappingError::Missing,
+                },
+            )?;
+            if binding.domain_id != slave.domain_id {
+                return Err(ProductActivationError::MailboxStatusMapping {
+                    position: slave.position,
+                    error: ProductMailboxStatusMappingError::DomainMismatch {
+                        expected: slave.domain_id,
+                        actual: binding.domain_id,
+                    },
+                });
+            }
+            if binding.domain_bit_offset != expected_bit_offset {
+                return Err(ProductActivationError::MailboxStatusMapping {
+                    position: slave.position,
+                    error: ProductMailboxStatusMappingError::BitOffsetMismatch {
+                        expected: expected_bit_offset,
+                        actual: binding.domain_bit_offset,
+                    },
+                });
+            }
+            if binding.max_age_cycles != domain.config.period_ticks {
+                return Err(ProductActivationError::MailboxStatusMapping {
+                    position: slave.position,
+                    error: ProductMailboxStatusMappingError::MaximumAgeMismatch {
+                        expected: domain.config.period_ticks,
+                        actual: binding.max_age_cycles,
+                    },
+                });
+            }
+            if binding.fmmu.index != expected_fmmu_index {
+                return Err(ProductActivationError::MailboxStatusMapping {
+                    position: slave.position,
+                    error: ProductMailboxStatusMappingError::FmmuIndexMismatch {
+                        expected: expected_fmmu_index,
+                        actual: binding.fmmu.index,
+                    },
+                });
+            }
+            binding
+                .validate(
+                    domain.config.logical_address,
+                    slave.mailbox_receive_sync_manager.status_bit(),
+                )
+                .map_err(|error| ProductActivationError::MailboxStatusMapping {
+                    position: slave.position,
+                    error: ProductMailboxStatusMappingError::Descriptor(error),
+                })?;
+            if usize::try_from(binding.domain_bit_offset)
+                .ok()
+                .is_none_or(|offset| offset >= domain.config.process_image_len * 8)
+            {
+                return Err(ProductActivationError::MailboxStatusMapping {
+                    position: slave.position,
+                    error: ProductMailboxStatusMappingError::InputOutOfBounds,
+                });
+            }
+            bindings[binding_count] = Some(ProductMappedMailboxStatusBinding {
+                slave_position: slave.position,
+                status: binding,
+            });
+            binding_count += 1;
+        }
+        Ok((bindings, binding_count))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn activate<
         const IO: usize,
@@ -1181,6 +1544,8 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
         self.validate_identity(expected_config_sha256)?;
         self.validate_procbuf::<IO, EVENTS>(procbuf, boot_id)?;
         self.validate_topology(observed_slaves)?;
+        let (mapped_mailbox_status, mapped_mailbox_status_count) =
+            self.validate_mapped_mailbox_status()?;
 
         let mut registry = DomainRegistry::<DOMAINS, PDOS, DATAGRAMS>::new();
         let mut slave_copy_handles = [[None; 3]; MAX_PRODUCT_SLAVE_COPIES];
@@ -1237,6 +1602,8 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
             axis_modes,
             axis_policies,
             axis_pdo_maps,
+            mapped_mailbox_status,
+            mapped_mailbox_status_count,
         })
     }
 
@@ -1617,6 +1984,7 @@ mod tests {
                 mailbox_send_sync_manager: 0,
                 mailbox_send_control_byte: 0x26,
                 mailbox_receive_sync_manager: MailboxReceiveSyncManager::new(1, 0x1100, 32, 0x22),
+                mapped_mailbox_status: None,
                 op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
                 sii_sync_manager_count: 4,
                 sii_enabled_sync_managers: 0x000f,

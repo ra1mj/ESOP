@@ -10,7 +10,9 @@ use crate::control::{
     RequestState,
 };
 use crate::diag::{CoeEmergencyEvent, EmergencySink};
-use crate::mapping::{ESC_SYNC_MANAGER_BASE, ESC_SYNC_MANAGER_STRIDE, SYNC_MANAGER_STATUS_OFFSET};
+use crate::mapping::{
+    ESC_SYNC_MANAGER_BASE, ESC_SYNC_MANAGER_STRIDE, FmmuConfig, SYNC_MANAGER_STATUS_OFFSET,
+};
 use crate::op_only::MAX_ESC_SYNC_MANAGERS;
 use crate::registers::fixed_address;
 
@@ -154,6 +156,97 @@ pub struct MailboxStatusBit {
     pub address: u16,
     pub mask: u8,
     pub active_high: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MailboxMappedStatusBit {
+    pub domain_id: u8,
+    pub domain_bit_offset: u32,
+    pub max_age_cycles: u32,
+    pub fmmu: FmmuConfig,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MailboxMappedStatusError {
+    ZeroMaximumAge,
+    LogicalAddressOverflow,
+    InvalidFmmu,
+    StatusBitMismatch,
+    InputOutOfBounds,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MailboxMappedStatusUnavailable {
+    DomainBusy,
+    MissingDomain,
+    InvalidQuality,
+    NeverCommitted,
+    Stale,
+    InputOutOfBounds,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MailboxMappedStatusObservation {
+    Active,
+    Inactive,
+    Unavailable(MailboxMappedStatusUnavailable),
+}
+
+impl MailboxMappedStatusBit {
+    pub const fn new(
+        domain_id: u8,
+        domain_bit_offset: u32,
+        max_age_cycles: u32,
+        fmmu: FmmuConfig,
+    ) -> Self {
+        Self {
+            domain_id,
+            domain_bit_offset,
+            max_age_cycles,
+            fmmu,
+        }
+    }
+
+    pub fn validate(
+        self,
+        domain_logical_start: u32,
+        status_bit: MailboxStatusBit,
+    ) -> Result<(), MailboxMappedStatusError> {
+        if self.max_age_cycles == 0 {
+            return Err(MailboxMappedStatusError::ZeroMaximumAge);
+        }
+        let logical_start = domain_logical_start
+            .checked_add(self.domain_bit_offset / 8)
+            .ok_or(MailboxMappedStatusError::LogicalAddressOverflow)?;
+        let logical_bit = (self.domain_bit_offset % 8) as u8;
+        if self.fmmu.length != 1
+            || self.fmmu.logical_start != logical_start
+            || self.fmmu.logical_start_bit != logical_bit
+            || self.fmmu.logical_end_bit != logical_bit
+            || self.fmmu.fmmu_type != 1
+            || !self.fmmu.enable
+        {
+            return Err(MailboxMappedStatusError::InvalidFmmu);
+        }
+        if status_bit.mask.count_ones() != 1
+            || !status_bit.active_high
+            || self.fmmu.physical_start != status_bit.address
+            || self.fmmu.physical_start_bit != status_bit.mask.trailing_zeros() as u8
+        {
+            return Err(MailboxMappedStatusError::StatusBitMismatch);
+        }
+        Ok(())
+    }
+
+    pub fn read(self, input: &[u8]) -> Result<bool, MailboxMappedStatusError> {
+        let byte = usize::try_from(self.domain_bit_offset / 8)
+            .map_err(|_| MailboxMappedStatusError::InputOutOfBounds)?;
+        let bit = (self.domain_bit_offset % 8) as u8;
+        let value = input
+            .get(byte)
+            .ok_or(MailboxMappedStatusError::InputOutOfBounds)?;
+        Ok(value & (1 << bit) != 0)
+    }
 }
 
 impl MailboxStatusBit {
@@ -374,6 +467,7 @@ impl MailboxAction {
 pub enum MailboxProgress {
     Advanced,
     NoMessage,
+    StatusUnavailable,
     RetryScheduled,
     EmergencyConsumed,
     Complete,
@@ -391,6 +485,7 @@ pub enum MailboxError {
     UnexpectedWorkingCounter,
     Timeout,
     InvalidConfiguration,
+    MissingMappedStatusBinding,
     BufferTooSmall,
     LengthOutOfBounds,
     HeaderTruncated,
@@ -400,6 +495,13 @@ pub enum MailboxError {
     CounterMismatch,
     EmergencyUnconsumed,
     Control(ControlError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MailboxStatusSource {
+    PollTime,
+    Direct,
+    Mapped,
 }
 
 pub struct MailboxController {
@@ -424,6 +526,7 @@ pub struct MailboxController {
     retry_count: u8,
     last_retry_error: Option<MailboxError>,
     discarded_frames: u32,
+    status_source: MailboxStatusSource,
 }
 
 impl MailboxController {
@@ -450,6 +553,7 @@ impl MailboxController {
             retry_count: 0,
             last_retry_error: None,
             discarded_frames: 0,
+            status_source: MailboxStatusSource::PollTime,
         }
     }
 
@@ -475,6 +579,10 @@ impl MailboxController {
 
     pub const fn discarded_frames(&self) -> u32 {
         self.discarded_frames
+    }
+
+    pub const fn status_source(&self) -> MailboxStatusSource {
+        self.status_source
     }
 
     pub(crate) fn transaction_matches(
@@ -509,6 +617,56 @@ impl MailboxController {
         now_ns: u64,
         protocol: MailboxProtocol,
         payload: &[u8],
+    ) -> Result<(), MailboxError> {
+        let status_source = if config.status_bit.is_some() {
+            MailboxStatusSource::Direct
+        } else {
+            MailboxStatusSource::PollTime
+        };
+        self.start_impl(
+            config,
+            station_address,
+            generation,
+            now_ns,
+            protocol,
+            payload,
+            status_source,
+        )
+    }
+
+    pub fn start_with_mapped_status(
+        &mut self,
+        config: MailboxConfig,
+        station_address: u16,
+        generation: u16,
+        now_ns: u64,
+        protocol: MailboxProtocol,
+        payload: &[u8],
+    ) -> Result<(), MailboxError> {
+        if config.status_bit.is_none() {
+            return Err(MailboxError::InvalidConfiguration);
+        }
+        self.start_impl(
+            config,
+            station_address,
+            generation,
+            now_ns,
+            protocol,
+            payload,
+            MailboxStatusSource::Mapped,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_impl(
+        &mut self,
+        config: MailboxConfig,
+        station_address: u16,
+        generation: u16,
+        now_ns: u64,
+        protocol: MailboxProtocol,
+        payload: &[u8],
+        status_source: MailboxStatusSource,
     ) -> Result<(), MailboxError> {
         if !matches!(
             self.phase,
@@ -557,8 +715,44 @@ impl MailboxController {
         self.retry_count = 0;
         self.last_retry_error = None;
         self.discarded_frames = 0;
+        self.status_source = status_source;
         self.phase = MailboxPhase::Sending;
         Ok(())
+    }
+
+    pub fn mapped_status_due(&self, now_ns: u64) -> bool {
+        self.status_source == MailboxStatusSource::Mapped
+            && self.phase == MailboxPhase::CheckingStatus
+            && self.pending.is_none()
+            && now_ns >= self.poll_due_ns
+    }
+
+    pub fn observe_mapped_status(
+        &mut self,
+        observation: MailboxMappedStatusObservation,
+        now_ns: u64,
+    ) -> Result<MailboxProgress, MailboxError> {
+        if !self.mapped_status_due(now_ns) {
+            return Err(MailboxError::InvalidConfiguration);
+        }
+        if now_ns >= self.configuration_deadline_ns {
+            return self.fail(MailboxError::Timeout);
+        }
+        match observation {
+            MailboxMappedStatusObservation::Active => {
+                self.phase = MailboxPhase::Polling;
+                self.poll_due_ns = now_ns;
+                Ok(MailboxProgress::Advanced)
+            }
+            MailboxMappedStatusObservation::Inactive => {
+                self.poll_due_ns = now_ns.saturating_add(self.config.poll_interval_ns);
+                Ok(MailboxProgress::NoMessage)
+            }
+            MailboxMappedStatusObservation::Unavailable(_) => {
+                self.poll_due_ns = now_ns.saturating_add(self.config.poll_interval_ns);
+                Ok(MailboxProgress::StatusUnavailable)
+            }
+        }
     }
 
     pub fn next_action(&mut self, now_ns: u64) -> Result<Option<MailboxAction>, MailboxError> {
@@ -587,6 +781,9 @@ impl MailboxController {
                 self.send_len as u8,
             ),
             MailboxPhase::CheckingStatus => {
+                if self.status_source == MailboxStatusSource::Mapped {
+                    return Ok(None);
+                }
                 let status_bit = self
                     .config
                     .status_bit
@@ -702,15 +899,18 @@ impl MailboxController {
 
         let progress = match self.phase {
             MailboxPhase::Sending => {
-                self.phase = if self.config.status_bit.is_some() {
-                    MailboxPhase::CheckingStatus
-                } else {
+                self.phase = if self.status_source == MailboxStatusSource::PollTime {
                     MailboxPhase::Polling
+                } else {
+                    MailboxPhase::CheckingStatus
                 };
                 self.poll_due_ns = now_ns;
                 MailboxProgress::Advanced
             }
             MailboxPhase::CheckingStatus => {
+                if self.status_source != MailboxStatusSource::Direct {
+                    return self.fail(MailboxError::InvalidConfiguration);
+                }
                 let status_bit = self
                     .config
                     .status_bit
@@ -1227,6 +1427,86 @@ mod tests {
         );
         assert_eq!(controller.phase(), MailboxPhase::Polling);
         let poll = controller.next_action(1_006).unwrap().unwrap();
+        assert_eq!(poll.address, fixed_address(0x1000, 0x1100));
+        assert_eq!(poll.read_len, 32);
+    }
+
+    #[test]
+    fn mapped_status_binding_validates_and_reads_the_canonical_fmmu_bit() {
+        let binding = MailboxMappedStatusBit::new(
+            1,
+            257,
+            4,
+            FmmuConfig {
+                index: 2,
+                logical_start: 0x1020,
+                length: 1,
+                logical_start_bit: 1,
+                logical_end_bit: 1,
+                physical_start: 0x0815,
+                physical_start_bit: 3,
+                fmmu_type: 1,
+                enable: true,
+            },
+        );
+        let status = MailboxStatusBit::sync_manager_mailbox_full(2);
+
+        assert_eq!(binding.validate(0x1000, status), Ok(()));
+        let mut input = [0; 33];
+        assert_eq!(binding.read(&input), Ok(false));
+        input[32] = 0x02;
+        assert_eq!(binding.read(&input), Ok(true));
+
+        let mut tampered = binding;
+        tampered.fmmu.physical_start_bit = 2;
+        assert_eq!(
+            tampered.validate(0x1000, status),
+            Err(MailboxMappedStatusError::StatusBitMismatch)
+        );
+        assert_eq!(
+            MailboxMappedStatusBit::new(1, 264, 4, binding.fmmu).read(&input),
+            Err(MailboxMappedStatusError::InputOutOfBounds)
+        );
+    }
+
+    #[test]
+    fn mapped_status_never_emits_a_direct_read_and_gates_the_mailbox_read() {
+        let mut config = MailboxConfig::new(0x1000, 32, 0x1100, 32)
+            .with_status_bit(MailboxStatusBit::sync_manager_mailbox_full(1));
+        config.poll_interval_ns = 10;
+        let mut controller = MailboxController::new();
+        controller
+            .start_with_mapped_status(config, 0x1000, 7, 0, MailboxProtocol::CoE, &[1])
+            .unwrap();
+        assert_eq!(controller.status_source(), MailboxStatusSource::Mapped);
+
+        let send = controller.next_action(1).unwrap().unwrap();
+        controller.accept(send, 7, &[0; 7], 1, 2).unwrap();
+        assert_eq!(controller.phase(), MailboxPhase::CheckingStatus);
+        assert!(controller.next_action(3).unwrap().is_none());
+        assert_eq!(
+            controller.observe_mapped_status(MailboxMappedStatusObservation::Inactive, 3),
+            Ok(MailboxProgress::NoMessage)
+        );
+        assert!(controller.next_action(4).unwrap().is_none());
+
+        assert_eq!(
+            controller.observe_mapped_status(
+                MailboxMappedStatusObservation::Unavailable(
+                    MailboxMappedStatusUnavailable::InvalidQuality,
+                ),
+                13,
+            ),
+            Ok(MailboxProgress::StatusUnavailable)
+        );
+        assert!(controller.next_action(14).unwrap().is_none());
+
+        assert_eq!(
+            controller.observe_mapped_status(MailboxMappedStatusObservation::Active, 23),
+            Ok(MailboxProgress::Advanced)
+        );
+        let poll = controller.next_action(23).unwrap().unwrap();
+        assert_eq!(poll.operation, RegisterOperation::Read);
         assert_eq!(poll.address, fixed_address(0x1000, 0x1100));
         assert_eq!(poll.read_len, 32);
     }

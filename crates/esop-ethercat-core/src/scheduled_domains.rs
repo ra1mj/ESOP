@@ -7,7 +7,10 @@ use crate::dc::{DcCyclicError, DcCyclicSync};
 use crate::domain::{Domain, DomainError, DomainQuality, DomainSegment};
 use crate::engine::{CycleError, CycleReport, EthercatMaster, RxConsumerMux, RxDatagramConsumer};
 use crate::frame_pool::FramePoolError;
-use crate::mailbox::{MailboxController, MailboxError, MailboxProgress};
+use crate::mailbox::{
+    MailboxController, MailboxError, MailboxMappedStatusBit, MailboxMappedStatusObservation,
+    MailboxMappedStatusUnavailable, MailboxProgress,
+};
 use crate::plan::{FramePlan, FramePlanSet};
 use crate::port::{EthercatPort, LinkState};
 use crate::rx_index::RxMatch;
@@ -1587,6 +1590,54 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
             .downcast_ref()
     }
 
+    /// Resolve one generated mailbox status bit from the latest committed
+    /// Domain input. Invalid or stale quality never exposes the retained page
+    /// as a current observation.
+    pub fn mailbox_status(
+        &self,
+        binding: MailboxMappedStatusBit,
+    ) -> MailboxMappedStatusObservation {
+        if self.active.is_some() {
+            return MailboxMappedStatusObservation::Unavailable(
+                MailboxMappedStatusUnavailable::DomainBusy,
+            );
+        }
+        let Some(entry) = self
+            .domains
+            .iter()
+            .find(|entry| entry.id == binding.domain_id)
+        else {
+            return MailboxMappedStatusObservation::Unavailable(
+                MailboxMappedStatusUnavailable::MissingDomain,
+            );
+        };
+        let quality = entry.domain.quality();
+        if quality.last_valid_cycle == 0 {
+            return MailboxMappedStatusObservation::Unavailable(
+                MailboxMappedStatusUnavailable::NeverCommitted,
+            );
+        }
+        if !quality.valid || !quality.complete {
+            return MailboxMappedStatusObservation::Unavailable(
+                MailboxMappedStatusUnavailable::InvalidQuality,
+            );
+        }
+        if self.last_cycle.saturating_sub(quality.last_valid_cycle)
+            >= u64::from(binding.max_age_cycles)
+        {
+            return MailboxMappedStatusObservation::Unavailable(
+                MailboxMappedStatusUnavailable::Stale,
+            );
+        }
+        match binding.read(entry.domain.input()) {
+            Ok(true) => MailboxMappedStatusObservation::Active,
+            Ok(false) => MailboxMappedStatusObservation::Inactive,
+            Err(_) => MailboxMappedStatusObservation::Unavailable(
+                MailboxMappedStatusUnavailable::InputOutOfBounds,
+            ),
+        }
+    }
+
     /// Bind every input-bearing datagram to exactly one actual RX segment and
     /// every pure output datagram to the same Domain's process-image range.
     /// A split frame plan may rearrange frame boundaries but not addresses,
@@ -1758,6 +1809,7 @@ impl<const DOMAINS: usize, const SLOTS: usize> RxDatagramConsumer
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mapping::FmmuConfig;
     use crate::plan::{DatagramPlan, FramePlanSet};
     use crate::schedule::ScheduleDomain;
     use crate::wire::Command;
@@ -1773,6 +1825,81 @@ mod tests {
             })
             .unwrap();
         domain
+    }
+
+    #[test]
+    fn mapped_mailbox_status_requires_a_fresh_committed_domain_input() {
+        let schedule = ScheduleTable::<1, 2>::build(
+            100_000,
+            &[ScheduleDomain {
+                id: 0,
+                period_ticks: 2,
+                phase_ticks: 0,
+            }],
+        )
+        .unwrap();
+        let mut process = domain::<1>(12);
+        let binding = MailboxMappedStatusBit::new(
+            0,
+            0,
+            1,
+            FmmuConfig {
+                index: 0,
+                logical_start: 0x1000,
+                length: 1,
+                logical_start_bit: 0,
+                logical_end_bit: 0,
+                physical_start: 0x080d,
+                physical_start_bit: 3,
+                fmmu_type: 1,
+                enable: true,
+            },
+        );
+        let mut bank = ScheduledDomainBank::new(
+            &schedule,
+            [ScheduledDomainEntry {
+                id: 0,
+                domain: &mut process,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            bank.mailbox_status(binding),
+            MailboxMappedStatusObservation::Unavailable(
+                MailboxMappedStatusUnavailable::NeverCommitted
+            )
+        );
+
+        bank.begin_due(1, 1).unwrap();
+        assert!(bank.accept(
+            1,
+            100,
+            RxMatch {
+                slot_id: 0,
+                generation: 1,
+                working_counter: 1,
+            },
+            DatagramHeader {
+                command: Command::Lrd,
+                index: 12,
+                address: 0x1000,
+                length: 1,
+                last: true,
+            },
+            &[1],
+        ));
+        bank.finish_due(1, 1).unwrap();
+        assert_eq!(
+            bank.mailbox_status(binding),
+            MailboxMappedStatusObservation::Active
+        );
+
+        bank.begin_due(2, 2).unwrap();
+        bank.finish_due(2, 2).unwrap();
+        assert_eq!(
+            bank.mailbox_status(binding),
+            MailboxMappedStatusObservation::Unavailable(MailboxMappedStatusUnavailable::Stale)
+        );
     }
 
     #[test]

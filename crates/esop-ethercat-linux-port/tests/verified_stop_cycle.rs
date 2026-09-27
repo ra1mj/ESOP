@@ -1054,7 +1054,7 @@ fn generated_product_copy_plan_publishes_the_next_due_io_frame_through_the_owner
             .unwrap(),
         1
     );
-    let mut motion = Domain::<32, 1>::new(motion_info.config.logical_address);
+    let mut motion = Domain::<33, 1>::new(motion_info.config.logical_address);
     motion.add_segment(motion_segments[0]).unwrap();
     let mut io = Domain::<9, 1>::new(io_info.config.logical_address);
     io.add_segment(io_segments[0]).unwrap();
@@ -1176,7 +1176,7 @@ fn generated_product_copy_plan_publishes_the_next_due_io_frame_through_the_owner
     assert_eq!(published.published_cycle(), 2);
     assert_eq!(published.published(), &initial_published);
 
-    port.inner.set_response_wkc(2);
+    port.inner.set_response_wkc(4);
     for cycle in 2..=3u64 {
         let generation = cycle as u16;
         port.inner.set_now_ns(cycle * 1_000_000);
@@ -1260,7 +1260,7 @@ fn generated_product_copy_plan_publishes_the_next_due_io_frame_through_the_owner
     assert_eq!(io_output.payload, &[0, 0, 0x78, 0x56, 0x34, 0x12, 1]);
     assert_eq!(owner.phase(), ScheduledProductionPhase::OutputPending);
 
-    port.inner.set_response_wkc(2);
+    port.inner.set_response_wkc(4);
     for cycle in 5..=7u64 {
         let generation = cycle as u16;
         port.inner.set_now_ns(cycle * 1_000_000);

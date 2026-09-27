@@ -1,5 +1,5 @@
 {
-  "config_sha256": "88db861d4c7d43ce20f4a8ce764dd6716a9e406b578df87a265ee5dba579c607",
+  "config_sha256": "3c8f147c09127a8553044f8a5fbf8c3fb7b2c606b1b65038f597306339b74903",
   "cycle_budget": {
     "deadline_ns": 800000,
     "period_ns": 1000000,
@@ -20,10 +20,10 @@
   },
   "process_data": {
     "copy_bytes_per_cycle": 4,
-    "expected_wkc": 6,
+    "expected_wkc": 8,
     "frame_count": 2,
-    "pdo_bytes_per_cycle": 41,
-    "wire_bytes_per_cycle": 180
+    "pdo_bytes_per_cycle": 42,
+    "wire_bytes_per_cycle": 181
   },
   "qualification": {
     "failures": [

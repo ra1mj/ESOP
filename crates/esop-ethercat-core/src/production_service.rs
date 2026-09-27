@@ -13,8 +13,8 @@ use crate::dc::{
 };
 use crate::engine::EthercatMaster;
 use crate::mailbox::{
-    MAX_MAILBOX_BYTES, MailboxConfig, MailboxController, MailboxError, MailboxPhase,
-    MailboxProgress, MailboxProtocol,
+    MAX_MAILBOX_BYTES, MailboxConfig, MailboxController, MailboxError, MailboxMappedStatusBit,
+    MailboxPhase, MailboxProgress, MailboxProtocol,
 };
 use crate::mapping_config::{
     MappingConfigController, MappingConfigError, MappingConfigPhase, MappingConfigProgress,
@@ -214,6 +214,7 @@ pub struct ScheduledProductionServices<
     pub dc_sync_configuration: Option<&'a mut DcSyncController<MAX_SLAVES>>,
     pub dc_configuration: Option<&'a mut DcController>,
     pub mailbox: Option<&'a mut MailboxController>,
+    mapped_mailbox_status: Option<MailboxMappedStatusBit>,
 }
 
 impl<
@@ -240,6 +241,7 @@ impl<
             dc_sync_configuration: None,
             dc_configuration,
             mailbox,
+            mapped_mailbox_status: None,
         }
     }
 
@@ -272,6 +274,14 @@ impl<
         dc_sync_configuration: &'a mut DcSyncController<MAX_SLAVES>,
     ) -> Self {
         self.dc_sync_configuration = Some(dc_sync_configuration);
+        self
+    }
+
+    pub const fn with_mapped_mailbox_status(
+        mut self,
+        mapped_mailbox_status: MailboxMappedStatusBit,
+    ) -> Self {
+        self.mapped_mailbox_status = Some(mapped_mailbox_status);
         self
     }
 }
@@ -496,15 +506,15 @@ impl ScheduledProductionServiceScheduler {
         }
         self.ensure_request_matches(controls, services)
             .map_err(ScheduledProductionServiceCycleError::RequestMismatch)?;
-        let mut pre_progress = None;
-        let mut pre_fault = None;
+        let (mut pre_progress, mut pre_fault) =
+            self.observe_mapped_mailbox_status(bank, port.now_ns(), services);
         if self.request.is_none() {
             let outcome = self
                 .enqueue_due(port.now_ns(), controls, services)
                 .map_err(ScheduledProductionServiceCycleError::Control)?;
             self.request = outcome.request;
-            pre_progress = outcome.progress;
-            pre_fault = outcome.fault;
+            pre_progress = outcome.progress.or(pre_progress);
+            pre_fault = outcome.fault.or(pre_fault);
         }
 
         if selected == ScheduledProductionServiceKind::Mailbox
@@ -683,7 +693,9 @@ impl ScheduledProductionServiceScheduler {
             let service_ready = fault.is_none()
                 && !matches!(
                     progress,
-                    ScheduledProductionServiceProgress::Mailbox(MailboxProgress::RetryScheduled)
+                    ScheduledProductionServiceProgress::Mailbox(
+                        MailboxProgress::RetryScheduled | MailboxProgress::StatusUnavailable
+                    )
                 )
                 && cycle.tx.service.failure.is_none();
             let startup_phase = services.startup.as_deref().map(StartupController::phase);
@@ -1609,6 +1621,59 @@ impl ScheduledProductionServiceScheduler {
         Ok(())
     }
 
+    fn observe_mapped_mailbox_status<
+        const DOMAINS: usize,
+        const SCHEDULE_SLOTS: usize,
+        const MAX_SLAVES: usize,
+        const SMS: usize,
+        const FMMUS: usize,
+        const PDO_OPS: usize,
+        const PDO_JOBS: usize,
+    >(
+        &self,
+        bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        now_ns: u64,
+        services: &mut ScheduledProductionServices<'_, MAX_SLAVES, SMS, FMMUS, PDO_OPS, PDO_JOBS>,
+    ) -> (
+        Option<ScheduledProductionServiceProgress>,
+        Option<ScheduledProductionServiceFault>,
+    ) {
+        if self.request.is_some() || self.active != ScheduledProductionServiceKind::Mailbox {
+            return (None, None);
+        }
+        let mapped_status_due = services
+            .mailbox
+            .as_deref()
+            .is_some_and(|mailbox| mailbox.mapped_status_due(now_ns));
+        if !mapped_status_due {
+            return (None, None);
+        }
+        let Some(binding) = services.mapped_mailbox_status else {
+            return (
+                None,
+                Some(ScheduledProductionServiceFault::Mailbox(
+                    MailboxError::MissingMappedStatusBinding,
+                )),
+            );
+        };
+        let observation = bank.mailbox_status(binding);
+        let Some(mailbox) = services.mailbox.as_deref_mut() else {
+            return (
+                None,
+                Some(ScheduledProductionServiceFault::Control(
+                    ControlError::InvalidState,
+                )),
+            );
+        };
+        match mailbox.observe_mapped_status(observation, now_ns) {
+            Ok(progress) => (
+                Some(ScheduledProductionServiceProgress::Mailbox(progress)),
+                None,
+            ),
+            Err(error) => (None, Some(ScheduledProductionServiceFault::Mailbox(error))),
+        }
+    }
+
     fn consume_terminal<
         const REQUESTS: usize,
         const MAX_SLAVES: usize,
@@ -1858,20 +1923,26 @@ impl Default for ScheduledProductionServiceScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RegisterOperation;
     use crate::coe::{CoeHeader, CoeService};
     use crate::dc::{
         DcClockConfig, DcSyncConfig, DcSyncPlan, DcSyncPlanEntry, DcSyncTiming, DcTopology,
     };
+    use crate::engine::RxDatagramConsumer;
     use crate::mapping::MappingTable;
     use crate::pdo_config::{PdoConfigBatchPlan, PdoConfigJob, PdoConfigPlan, PdoSdoWrite};
     use crate::scan::{EscDcRange, ScanDcCapabilities, ScanPortLink, ScanRecord};
+    use crate::schedule::{ScheduleDomain, ScheduleTable};
     use crate::slave::{AlStatus, EthercatState, SlaveIdentity};
     use crate::startup::{
         ExpectedSlave, StartupAction, StartupConfig, StartupConfigurationServices,
     };
     use crate::watchdog::{
         EscWatchdogConfig, WatchdogControllerConfig, WatchdogPlan, WatchdogPlanEntry,
+    };
+    use crate::wire::{Command, DatagramHeader};
+    use crate::{
+        Domain, DomainSegment, FmmuConfig, MailboxMappedStatusBit, RegisterOperation,
+        ScheduledDomainEntry,
     };
 
     const EXPECTED: [ExpectedSlave; 1] = [ExpectedSlave {
@@ -1944,6 +2015,206 @@ mod tests {
         })
         .unwrap();
         plan
+    }
+
+    #[test]
+    fn scheduler_uses_mapped_status_without_direct_fallback() {
+        let schedule = ScheduleTable::<1, 1>::build(
+            100_000,
+            &[ScheduleDomain {
+                id: 0,
+                period_ticks: 1,
+                phase_ticks: 0,
+            }],
+        )
+        .unwrap();
+        let mut domain = Domain::<1, 1>::new(0x1000);
+        domain
+            .add_segment(DomainSegment {
+                datagram_index: 12,
+                input_offset: 0,
+                len: 1,
+                expected_wkc: 1,
+            })
+            .unwrap();
+        let mut bank = ScheduledDomainBank::new(
+            &schedule,
+            [ScheduledDomainEntry {
+                id: 0,
+                domain: &mut domain,
+            }],
+        )
+        .unwrap();
+        let binding = MailboxMappedStatusBit::new(
+            0,
+            0,
+            1,
+            FmmuConfig {
+                index: 2,
+                logical_start: 0x1000,
+                length: 1,
+                logical_start_bit: 0,
+                logical_end_bit: 0,
+                physical_start: 0x080d,
+                physical_start_bit: 3,
+                fmmu_type: 1,
+                enable: true,
+            },
+        );
+        let mut config = MailboxConfig::new(0x1000, 32, 0x1100, 32)
+            .with_status_bit(crate::MailboxStatusBit::sync_manager_mailbox_full(1));
+        config.poll_interval_ns = 1;
+
+        let mut mailbox = MailboxController::new();
+        mailbox
+            .start_with_mapped_status(config, 0x1000, 7, 0, MailboxProtocol::CoE, &[1])
+            .unwrap();
+        let send = mailbox.next_action(1).unwrap().unwrap();
+        mailbox.accept(send, 7, &[0; 7], 1, 2).unwrap();
+
+        bank.begin_due(1, 1).unwrap();
+        assert!(bank.accept(
+            1,
+            100,
+            crate::RxMatch {
+                slot_id: 0,
+                generation: 1,
+                working_counter: 1,
+            },
+            DatagramHeader {
+                command: Command::Lrd,
+                index: 12,
+                address: 0x1000,
+                length: 1,
+                last: true,
+            },
+            &[0],
+        ));
+        bank.finish_due(1, 1).unwrap();
+
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+        {
+            let services = ScheduledProductionServices::<0, 0, 0, 0>::new(
+                None,
+                None,
+                None,
+                Some(&mut mailbox),
+            )
+            .with_mapped_mailbox_status(binding);
+            scheduler.refresh_selection(&services);
+        }
+        let (progress, fault) = {
+            let mut services = ScheduledProductionServices::<0, 0, 0, 0>::new(
+                None,
+                None,
+                None,
+                Some(&mut mailbox),
+            )
+            .with_mapped_mailbox_status(binding);
+            scheduler.observe_mapped_mailbox_status(&bank, 3, &mut services)
+        };
+        assert_eq!(
+            progress,
+            Some(ScheduledProductionServiceProgress::Mailbox(
+                MailboxProgress::NoMessage
+            ))
+        );
+        assert_eq!(fault, None);
+        assert_eq!(mailbox.pending(), None);
+
+        bank.begin_due(2, 2).unwrap();
+        assert!(bank.accept(
+            2,
+            200,
+            crate::RxMatch {
+                slot_id: 0,
+                generation: 2,
+                working_counter: 1,
+            },
+            DatagramHeader {
+                command: Command::Lrd,
+                index: 12,
+                address: 0x1000,
+                length: 1,
+                last: true,
+            },
+            &[1],
+        ));
+        bank.finish_due(2, 2).unwrap();
+        {
+            let mut services = ScheduledProductionServices::<0, 0, 0, 0>::new(
+                None,
+                None,
+                None,
+                Some(&mut mailbox),
+            )
+            .with_mapped_mailbox_status(binding);
+            assert_eq!(
+                scheduler.observe_mapped_mailbox_status(&bank, 4, &mut services),
+                (
+                    Some(ScheduledProductionServiceProgress::Mailbox(
+                        MailboxProgress::Advanced
+                    )),
+                    None,
+                )
+            );
+        }
+        let mut controls = ControlRequestPool::<1>::new();
+        {
+            let mut services = ScheduledProductionServices::<0, 0, 0, 0>::new(
+                None,
+                None,
+                None,
+                Some(&mut mailbox),
+            )
+            .with_mapped_mailbox_status(binding);
+            let outcome = scheduler
+                .enqueue_due(4, &mut controls, &mut services)
+                .unwrap();
+            assert!(outcome.request.is_some());
+        }
+        let poll = mailbox.pending().unwrap();
+        assert_eq!(poll.address, crate::fixed_address(0x1000, 0x1100));
+        assert_ne!(poll.address, crate::fixed_address(0x1000, 0x080d));
+
+        let mut unavailable = MailboxController::new();
+        unavailable
+            .start_with_mapped_status(config, 0x1000, 8, 0, MailboxProtocol::CoE, &[1])
+            .unwrap();
+        let send = unavailable.next_action(1).unwrap().unwrap();
+        unavailable.accept(send, 8, &[0; 7], 1, 2).unwrap();
+        bank.begin_due(3, 3).unwrap();
+        bank.finish_due(3, 3).unwrap();
+        let mut unavailable_scheduler = ScheduledProductionServiceScheduler::new();
+        {
+            let services = ScheduledProductionServices::<0, 0, 0, 0>::new(
+                None,
+                None,
+                None,
+                Some(&mut unavailable),
+            )
+            .with_mapped_mailbox_status(binding);
+            unavailable_scheduler.refresh_selection(&services);
+        }
+        let (progress, fault) = {
+            let mut services = ScheduledProductionServices::<0, 0, 0, 0>::new(
+                None,
+                None,
+                None,
+                Some(&mut unavailable),
+            )
+            .with_mapped_mailbox_status(binding);
+            unavailable_scheduler.observe_mapped_mailbox_status(&bank, 3, &mut services)
+        };
+        assert_eq!(
+            progress,
+            Some(ScheduledProductionServiceProgress::Mailbox(
+                MailboxProgress::StatusUnavailable
+            ))
+        );
+        assert_eq!(fault, None);
+        assert_eq!(unavailable.pending(), None);
+        assert!(unavailable.next_action(3).unwrap().is_none());
     }
 
     fn watchdog_plan() -> WatchdogPlan<1> {

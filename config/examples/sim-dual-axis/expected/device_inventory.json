@@ -1,5 +1,5 @@
 {
-  "config_sha256": "88db861d4c7d43ce20f4a8ce764dd6716a9e406b578df87a265ee5dba579c607",
+  "config_sha256": "3c8f147c09127a8553044f8a5fbf8c3fb7b2c606b1b65038f597306339b74903",
   "devices": [
     {
       "dc": {
@@ -33,6 +33,19 @@
           "address": "0x080d",
           "mask": 8
         }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 256,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 0,
+        "logical_start": "0x00001020",
+        "logical_start_bit": 0,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
       },
       "name": "drive_left",
       "op_only_outputs": [
@@ -127,6 +140,19 @@
           "address": "0x080d",
           "mask": 8
         }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 257,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 1,
+        "logical_start": "0x00001020",
+        "logical_start_bit": 1,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
       },
       "name": "drive_right",
       "op_only_outputs": [
