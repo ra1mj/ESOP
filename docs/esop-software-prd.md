@@ -272,6 +272,13 @@ DC 门同时要求本周期完整 FRMW/BRD 证据与组合锁定。广播聚合�
 | FR-037 | P1 | 每个构建应生成 `robot_build_report.json`，包含设备清单、静态内存、ProcBuf、PDO、帧、线缆、WKC、copy 与周期预算。 | CI 审核报告，且配置/资源超限时输出明确的失败项。 |
 | FR-038 | P0 | 每次性能资格测试应生成 `performance_report.json`，记录配置、平台、拓扑、周期、jitter、fast path、错误、资源和结论。 | 缺少 cycles、最大值、错误计数或配置 hash 的报告不得判定通过。 |
 
+2026-09-28 运行时诊断增量：`RobotState` 已以 additive field 14 发布同一 State 快照中的
+link/AL/fault、命令年龄、deadline、DC、逐 Domain exact WKC/完整性/age 和 eBPF observation
+摘要。`esop` 只读命令已提供 status、domain list、dc、lifecycle、incident list、doctor 和
+bounded watch；类型化查询允许 `boot_id=0` 仅用于绑定当前 provider boot，非零错误 boot
+继续拒绝。loopback Zenoh 测试覆盖运行状态与 eBPF incident 的共同查询。该命令不加载
+BPF、不写命令、不执行恢复，不替代生产 ACL、真实从站/DC/HIL/WCET 或功能安全证据。
+
 FR-037 当前增量允许 `robot_build_report.json` 消费 cfggen 的严格 `esop.product-build-input.v1`，复制配置 hash、设备、PDO/frame/wire/WKC/copy、周期与 ProcBuf 资源。生成产物不会把 HIL、目标资源或周期测量升级为通过，伪造 `passed: true`、未知字段和无效预算会在报告发布前被拒绝。
 
 ### 7.7 运动生命周期安全检测
@@ -473,6 +480,7 @@ ProcBuf 是实时数据 ABI，而不是通用消息总线。它必须是固定�
 2. 消息应包含适用的 `robot_id`、`boot_id`、schema version、单调时间和 source sequence。
 3. Zenoh 推荐命名空间为 `esop/<fleet>/<robot_id>/{state,event,diagnostic,cmd,query}`。
 4. Zenoh、Protobuf 和记录服务的状态/事件只从已校验的 ProcBuf 快照读取；Linux eBPF runtime incident 只从固定 agent 记录经 host adapter 投影。两条路径都不能持有 EtherCAT MAC/DMA 或调用周期 API。
+5. `esop` 诊断命令只使用类型化 query 读取同一投影；`boot_id=0` 只表示只读发现当前 boot，命令入口和 permit 仍要求精确非零 identity。
 
 ### 9.3 ROS 2
 
@@ -785,5 +793,6 @@ R2 资格证据门增量：验证器先校验所有证据路径仍位于仓库�
 | `esop-etg-cia402-master-requirements.md` | ETG.1500 Class B、Motion Control Feature Pack、CiA 402、无锁交接与一致性边界。 |
 | `esop-motion-lifecycle-guard.md` | MLG 状态机、门槛模型、停止/恢复策略、数据契约和测试证据要求。 |
 | `esop-ebpf-runtime-observability.md` | Linux eBPF agent、内核/用户态观测点、事件关联、RuntimeIncident 和观测安全边界。 |
+| `esop-runtime-diagnostics-cli.md` | 只读运行时命令、Domain/DC/生命周期/eBPF 状态语义、watch 边界和退出码。 |
 
 对每个实现里程碑，需求 ID、测试用例、HIL 场景、报告 hash 和兼容矩阵项必须可相互追溯。任何改变 P0 范围、性能门槛、故障策略、支持声明或安全边界的变更，都必须更新本 PRD 并重新评审相应验收证据。

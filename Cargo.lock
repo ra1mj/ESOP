@@ -686,6 +686,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "esop-cli"
+version = "0.1.0"
+dependencies = [
+ "esop-ebpf-agent",
+ "esop-procbuf",
+ "esop-proto",
+ "esop-zenoh-gateway",
+ "tokio",
+ "zenoh",
+]
+
+[[package]]
 name = "esop-command-gateway"
 version = "0.1.0"
 dependencies = [

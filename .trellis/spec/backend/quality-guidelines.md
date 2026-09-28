@@ -2292,6 +2292,27 @@ from actual hosted fault injection and performance claims.
   workspace CI and dependency-tree proof that real-time crates do not acquire
   `esop-ipc` or POSIX transport dependencies.
 
+### 6.1 Runtime Diagnostic Commands
+
+- Keep operator commands read-only. Status, Domain, DC, lifecycle, incident,
+  doctor and watch paths must not submit commands, load BPF, acknowledge
+  faults, alter AL/DC state or call EtherCAT cycle APIs.
+- Project operational facts only in `esop-ipc::payloads::ProcBufProjector`.
+  CLI and transport code consume typed Protobuf and must not reinterpret
+  ProcBuf bytes or recreate lifecycle/WKC validation.
+- A zero boot ID is allowed only for typed read-only query discovery. Normalize
+  it to the provider's current nonzero boot before provider invocation; retain
+  strict rejection for stale nonzero boot IDs and every command path.
+- Treat missing operational, quality, lifecycle or eBPF evidence as unavailable
+  or degraded. Agent health zero is not sufficient when `agent_epoch` is zero,
+  and event loss must remain visible.
+- Bound query records, payload, wall-clock timeout, watch interval and optional
+  iteration count. Watch processes one reply at a time and advances only from
+  a contract-validated State sequence.
+- Parser/renderer tests cover all commands and degraded evidence. The live
+  Zenoh gate must query one projected operational State plus one correlated
+  RuntimeIncident through the same public client used by the binary.
+
 ### 7. Wrong vs Correct
 
 #### Wrong

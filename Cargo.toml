@@ -15,6 +15,7 @@ members = [
     "crates/esop-ipc",
     "crates/esop-product-config",
     "crates/esop-cfggen",
+    "crates/esop-cli",
 ]
 
 [workspace.package]

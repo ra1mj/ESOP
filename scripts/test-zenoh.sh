@@ -9,4 +9,5 @@ fi
 
 export ZENOHD="${zenohd_bin}"
 # Tests own isolated router processes and reap them even on panic.
-exec "${CARGO:-cargo}" test -p esop-zenoh-gateway --features zenoh --test zenoh_live -- --ignored --nocapture
+"${CARGO:-cargo}" test -p esop-zenoh-gateway --features zenoh --test zenoh_live -- --ignored --nocapture
+exec "${CARGO:-cargo}" test -p esop-cli --test zenoh_live -- --ignored --nocapture

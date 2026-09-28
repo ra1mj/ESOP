@@ -1,0 +1,25 @@
+[package]
+name = "esop-cli"
+version = "0.1.0"
+description = "Read-only ESOP runtime diagnostics command line"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+esop-proto = { path = "../esop-proto" }
+esop-zenoh-gateway = { path = "../esop-zenoh-gateway", features = ["zenoh"] }
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "time"] }
+zenoh = "1.10.1"
+
+[dev-dependencies]
+esop-ebpf-agent = { path = "../esop-ebpf-agent" }
+esop-procbuf = { path = "../esop-procbuf" }
+
+[lib]
+name = "esop_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "esop"
+path = "src/main.rs"

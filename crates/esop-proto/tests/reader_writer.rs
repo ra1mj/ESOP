@@ -28,43 +28,42 @@ macro_rules! samples {
             boot_id: 9,
             schema_version: 1,
         };
-        let state = $schema::RobotState {
-            robot_id: "robot_01".into(),
-            boot_id: 9,
-            sequence: 21,
-            monotonic_time_ns: 1234,
-            ecat_time_ns: 1230,
-            schema_version: 1,
-            lifecycle: Some($schema::LifecycleSummary {
-                state: 3,
-                stop_action: 4,
-                permit_epoch: 8,
-                transition_sequence: 19,
-                motion_permit_current: true,
-                ..Default::default()
-            }),
-            quality: Some($schema::QualitySummary {
-                domain_valid: true,
-                wkc_valid: true,
-                first_fault_code: 17,
-                ..Default::default()
-            }),
-            joints: vec![$schema::JointState {
-                axis: 1,
-                position: -1.25,
-                velocity: 2.5,
-                torque: -3.75,
-                statusword: 0x27,
-                actual_mode: 8,
-                ..Default::default()
-            }],
-            io: vec![$schema::IoState {
-                channel: 2,
-                input_bits: 0x55,
-                quality: 1,
-            }],
-            events: vec![event.clone()],
-        };
+        let mut state = $schema::RobotState::default();
+        state.robot_id = "robot_01".into();
+        state.boot_id = 9;
+        state.sequence = 21;
+        state.monotonic_time_ns = 1234;
+        state.ecat_time_ns = 1230;
+        state.schema_version = 1;
+        state.lifecycle = Some($schema::LifecycleSummary {
+            state: 3,
+            stop_action: 4,
+            permit_epoch: 8,
+            transition_sequence: 19,
+            motion_permit_current: true,
+            ..Default::default()
+        });
+        state.quality = Some($schema::QualitySummary {
+            domain_valid: true,
+            wkc_valid: true,
+            first_fault_code: 17,
+            ..Default::default()
+        });
+        state.joints = vec![$schema::JointState {
+            axis: 1,
+            position: -1.25,
+            velocity: 2.5,
+            torque: -3.75,
+            statusword: 0x27,
+            actual_mode: 8,
+            ..Default::default()
+        }];
+        state.io = vec![$schema::IoState {
+            channel: 2,
+            input_bits: 0x55,
+            quality: 1,
+        }];
+        state.events = vec![event.clone()];
         let command = $schema::MotionCommand {
             robot_id: "robot_01".into(),
             boot_id: 9,
@@ -249,6 +248,58 @@ fn additive_drive_error_code_is_visible_to_current_readers_only() {
             .unwrap()
             .drive_error_code,
         0
+    );
+}
+
+#[test]
+fn additive_operational_status_is_visible_to_current_readers_only() {
+    let message = v1::RobotState {
+        robot_id: "robot_01".into(),
+        boot_id: 11,
+        sequence: 12,
+        schema_version: 1,
+        operational: Some(v1::OperationalStatus {
+            link_up: true,
+            al_state: 8,
+            dc_locked: true,
+            fault_bitmap: 3,
+            command_age_cycles: 4,
+            deadline_misses: 5,
+            dc_offset_ns: -17,
+            domains: vec![v1::DomainStatus {
+                domain: 0,
+                expected_wkc: 6,
+                actual_wkc: 5,
+                valid: false,
+                complete: true,
+                consecutive_wkc_mismatches: 2,
+                last_valid_cycle: 10,
+                input_age_cycles: 2,
+            }],
+            runtime_observation: Some(v1::RuntimeObservationStatus {
+                latest_incident_id: 9,
+                agent_epoch: 3,
+                observed_at_ns: 1_000,
+                observation_window_ns: 500,
+                lost_events: 1,
+                incident_count: 2,
+                health: 2,
+            }),
+        }),
+        ..Default::default()
+    };
+    let bytes = message.encode_to_vec();
+    let old = baseline::RobotState::decode(bytes.as_slice()).unwrap();
+    assert_eq!(old.robot_id, message.robot_id);
+    assert_eq!(old.boot_id, message.boot_id);
+
+    let projected = v1::RobotState::decode(bytes.as_slice()).unwrap();
+    assert_eq!(projected.operational, message.operational);
+    assert!(
+        v1::RobotState::decode(old.encode_to_vec().as_slice())
+            .unwrap()
+            .operational
+            .is_none()
     );
 }
 

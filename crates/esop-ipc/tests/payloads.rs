@@ -3,17 +3,17 @@
 use esop_command_gateway::{CommandIngress, IngressPolicy};
 use esop_ipc::payloads::{
     CommandDecodeError, CommandFrameError, CommandFrameIdentity, CommandPublicationError,
-    CommandTargetError, JointTargetField, ProcBufCommandFrameError, ProcBufProjector, RobotId,
-    RobotIdError, admit_command_frame, admit_procbuf_command_frame, decode_motion_command,
-    encode_command_frame,
+    CommandTargetError, JointTargetField, ProcBufCommandFrameError, ProcBufProjector,
+    ProjectionError, RobotId, RobotIdError, admit_command_frame, admit_procbuf_command_frame,
+    decode_motion_command, encode_command_frame,
 };
 use esop_ipc::{IpcFrame, IpcHeader, MAX_PAYLOAD_BYTES, MessageKind, UnixDatagramEndpoint};
 use esop_lifecycle_guard::{
     GuardPolicy, LifecycleGuard, StopAction, procbuf::motion_permit_from_command,
 };
 use esop_procbuf::{
-    ControlMode, EventSeverity as ProcSeverity, IoCommand, JointCommand, ProcBuf, ProcBufEvent,
-    QualityFact, StatePage,
+    ControlMode, DomainQuality, EventSeverity as ProcSeverity, IoCommand, JointCommand, ProcBuf,
+    ProcBufEvent, QualityFact, RuntimeObservation, StatePage,
 };
 use esop_proto::v1::{DiagnosticEvent, JointTarget, MotionCommand, RobotState};
 use esop_proto::{CURRENT_SCHEMA_VERSION, Message};
@@ -202,8 +202,34 @@ fn state_and_event_frames_cross_real_unix_datagrams_with_bound_identity() {
     state.axes[0].position = 1.5;
     state.axes[0].error_code = 0x2310;
     state.quality.sequence = 9;
+    state.quality.link_up = 1;
+    state.quality.al_state = 8;
+    state.quality.dc_locked = 1;
+    state.quality.fault_bitmap = 0x12;
+    state.quality.command_age_cycles = 3;
+    state.quality.deadline_misses = 4;
+    state.quality.dc_offset_ns = -25;
+    state.quality.domains[0] = DomainQuality {
+        expected_wkc: 6,
+        actual_wkc: 5,
+        valid: 0,
+        complete: 1,
+        consecutive_wkc_mismatches: 2,
+        last_valid_cycle: 8,
+        input_age_cycles: 1,
+    };
     state.quality.cyclic.known_mask = QualityFact::ALL_MASK;
     state.quality.cyclic.good_mask = QualityFact::Platform.bit() | QualityFact::Wkc.bit();
+    state.runtime_observation = RuntimeObservation {
+        latest_incident_id: 10,
+        agent_epoch: 2,
+        observed_at_ns: 122_500,
+        observation_window_ns: 10_000,
+        lost_events: 1,
+        incident_count: 3,
+        health: 2,
+        reserved: [0; 7],
+    };
     buffer.publish_state(state).unwrap();
 
     let state_frame = projector.read_state_frame(&buffer, 17).unwrap().unwrap();
@@ -232,6 +258,31 @@ fn state_and_event_frames_cross_real_unix_datagrams_with_bound_identity() {
     );
     assert_eq!(decoded.joints[0].position, 1.5);
     assert_eq!(decoded.joints[0].drive_error_code, 0x2310);
+    let operational = decoded.operational.unwrap();
+    assert!(operational.link_up);
+    assert_eq!(operational.al_state, 8);
+    assert!(operational.dc_locked);
+    assert_eq!(operational.fault_bitmap, 0x12);
+    assert_eq!(operational.command_age_cycles, 3);
+    assert_eq!(operational.deadline_misses, 4);
+    assert_eq!(operational.dc_offset_ns, -25);
+    assert_eq!(operational.domains.len(), 1);
+    assert_eq!(operational.domains[0].domain, 0);
+    assert_eq!(operational.domains[0].expected_wkc, 6);
+    assert_eq!(operational.domains[0].actual_wkc, 5);
+    assert!(!operational.domains[0].valid);
+    assert!(operational.domains[0].complete);
+    assert_eq!(operational.domains[0].consecutive_wkc_mismatches, 2);
+    assert_eq!(operational.domains[0].last_valid_cycle, 8);
+    assert_eq!(operational.domains[0].input_age_cycles, 1);
+    let observation = operational.runtime_observation.unwrap();
+    assert_eq!(observation.latest_incident_id, 10);
+    assert_eq!(observation.agent_epoch, 2);
+    assert_eq!(observation.observed_at_ns, 122_500);
+    assert_eq!(observation.observation_window_ns, 10_000);
+    assert_eq!(observation.lost_events, 1);
+    assert_eq!(observation.incident_count, 3);
+    assert_eq!(observation.health, 2);
     let quality = decoded.quality.unwrap();
     assert!(quality.platform_ready && quality.wkc_valid);
     assert!(!quality.drive_ready && !quality.command_current);
@@ -266,6 +317,21 @@ fn state_and_event_frames_cross_real_unix_datagrams_with_bound_identity() {
         (decoded.boot_id, decoded.source, decoded.code),
         (7, 8, 0x22)
     );
+}
+
+#[test]
+fn state_projection_rejects_malformed_operational_flags() {
+    let buffer = TestBuf::new(41, 7);
+    let mut projector = ProcBufProjector::new(robot_id(), 41, 7);
+    let mut state = StatePage::new(7);
+    state.sequence = 1;
+    state.quality.sequence = 1;
+    state.quality.link_up = 2;
+    buffer.publish_state(state).unwrap();
+    assert!(matches!(
+        projector.read_state(&buffer),
+        Err(ProjectionError::InvalidOperationalStatus)
+    ));
 }
 
 #[test]

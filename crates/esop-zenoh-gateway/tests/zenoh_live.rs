@@ -14,7 +14,10 @@ use esop_lifecycle_guard::{
     CyclicQuality, GateId, GuardPolicy, LifecycleAction, LifecycleGuard, LifecycleState,
     StopAction, StopFeedback, procbuf::cyclic_quality_to_procbuf,
 };
-use esop_procbuf::{EventSeverity as ProcSeverity, ProcBuf, ProcBufEvent, StatePage};
+use esop_procbuf::{
+    DomainQuality, EventSeverity as ProcSeverity, ProcBuf, ProcBufEvent, RuntimeObservation,
+    StatePage,
+};
 use esop_proto::v1::{
     DiagnosticEvent, MotionCommand, QueryReply, QueryRequest, RobotState,
     RuntimeIncident as ProtoRuntimeIncident,
@@ -187,6 +190,38 @@ fn router_round_trip_covers_gateway_contracts() {
                     cycle_within_budget: true,
                 },
             );
+            state.quality.link_up = 1;
+            state.quality.al_state = 8;
+            state.quality.dc_locked = 0;
+            state.quality.dc_offset_ns = 75;
+            state.quality.domains[0] = DomainQuality {
+                expected_wkc: 6,
+                actual_wkc: 5,
+                valid: 0,
+                complete: 1,
+                consecutive_wkc_mismatches: 1,
+                last_valid_cycle: 0,
+                input_age_cycles: 1,
+            };
+            state.quality.domains[1] = DomainQuality {
+                expected_wkc: 2,
+                actual_wkc: 2,
+                valid: 1,
+                complete: 1,
+                consecutive_wkc_mismatches: 0,
+                last_valid_cycle: 1,
+                input_age_cycles: 0,
+            };
+            state.runtime_observation = RuntimeObservation {
+                latest_incident_id: 9,
+                agent_epoch: 3,
+                observed_at_ns: 900,
+                observation_window_ns: 1_000,
+                lost_events: 0,
+                incident_count: 1,
+                health: 1,
+                reserved: [0; 7],
+            };
             buffer.publish_state(state).expect("RT state publishes");
             let projected = projector
                 .read_state(&buffer)
@@ -245,6 +280,24 @@ fn router_round_trip_covers_gateway_contracts() {
             assert!(!quality.wkc_valid);
             assert!(!quality.external_safety_clear);
             assert_eq!(quality.first_fault_code, 0x1001);
+            let operational = state_payload
+                .operational
+                .as_ref()
+                .expect("operational status arrives");
+            assert!(operational.link_up);
+            assert!(!operational.dc_locked);
+            assert_eq!(operational.dc_offset_ns, 75);
+            assert_eq!(operational.domains.len(), 2);
+            assert_eq!(operational.domains[0].actual_wkc, 5);
+            assert_eq!(operational.domains[1].actual_wkc, 2);
+            assert_eq!(
+                operational
+                    .runtime_observation
+                    .as_ref()
+                    .expect("runtime observation arrives")
+                    .agent_epoch,
+                3
+            );
             assert_eq!(state_priority, zenoh::qos::Priority::Data);
             assert_eq!(state_congestion, zenoh::qos::CongestionControl::Drop);
             assert!(!state_express);
@@ -353,6 +406,7 @@ fn router_round_trip_covers_gateway_contracts() {
                 1
             );
 
+            let query_incident = incident.clone();
             gateway
                 .serve_typed_queries(7, move |request| {
                     Ok(QueryReply {
@@ -363,6 +417,7 @@ fn router_round_trip_covers_gateway_contracts() {
                             .then(|| projected.clone())
                             .into_iter()
                             .collect(),
+                        incidents: vec![query_incident.clone()],
                         ..QueryReply::default()
                     })
                 })
@@ -374,7 +429,7 @@ fn router_round_trip_covers_gateway_contracts() {
                 robot_id: "robot_01".to_owned(),
                 boot_id: 7,
                 after_sequence: 0,
-                limit: 1,
+                limit: 2,
                 schema_version: CURRENT_SCHEMA_VERSION,
             };
             let replies = observer
@@ -395,7 +450,29 @@ fn router_round_trip_covers_gateway_contracts() {
             assert_eq!(response.states.len(), 1);
             assert_eq!(response.states[0].sequence, 1);
             assert_eq!(response.states[0], state_payload);
+            assert_eq!(response.incidents, vec![incident.clone()]);
             assert_eq!(response.schema_version, CURRENT_SCHEMA_VERSION);
+
+            let query_client = ZenohGateway::open(space, client_config(&router.endpoint()))
+                .await
+                .expect("typed query client opens");
+            let discovered = tokio::time::timeout(
+                Duration::from_secs(5),
+                query_client.query_typed(&QueryRequest {
+                    robot_id: "robot_01".to_owned(),
+                    boot_id: 0,
+                    after_sequence: 0,
+                    limit: 2,
+                    schema_version: CURRENT_SCHEMA_VERSION,
+                }),
+            )
+            .await
+            .expect("typed query is bounded")
+            .expect("zero boot query discovers the provider");
+            assert_eq!(discovered.boot_id, 7);
+            assert_eq!(discovered.states, vec![state_payload.clone()]);
+            assert_eq!(discovered.incidents, vec![incident.clone()]);
+            query_client.close().await.expect("query client closes");
 
             let newer_only = QueryRequest {
                 after_sequence: 1,

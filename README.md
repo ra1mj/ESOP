@@ -73,6 +73,23 @@ ETG 一致性与互操作仍未资格化。
 
 `capability_manifest.json` 是当前能力声明基线，每项能力都绑定仓库内源码、测试或设计证据，并明确实现状态和限制。`make capability-manifest` 会校验 JSON 结构、状态枚举、重复 ID 和证据路径；该校验已纳入 `make ci`。
 
+运行中的 Linux 监督域可使用只读 `esop` 命令查询同一份版本化状态：
+
+```bash
+cargo run -p esop-cli -- --robot robot_01 status
+cargo run -p esop-cli -- --robot robot_01 domain list
+cargo run -p esop-cli -- --robot robot_01 dc
+cargo run -p esop-cli -- --robot robot_01 lifecycle
+cargo run -p esop-cli -- --robot robot_01 incident list
+cargo run -p esop-cli -- --robot robot_01 doctor
+cargo run -p esop-cli -- --robot robot_01 watch status --interval-ms 1000
+```
+
+命令默认以 `boot_id=0` 只读发现当前 provider boot，首次应答后固定该 boot，并在
+`watch` 中按最新 State sequence 推进游标。它只读取 ProcBuf 投影后的 Domain/WKC、DC、
+生命周期和 eBPF 观测摘要/incident，不加载 BPF、不写命令、不执行恢复，也不构成功能安全
+或真实设备 HIL 证据。完整合同见 [运行时诊断命令](docs/esop-runtime-diagnostics-cli.md)。
+
 `make cfggen-example` 会从 `config/examples/sim-dual-axis/` 生成六个确定性产品产物并以严格 GCC 规则校验 C header；`make cfggen-runtime-example` 还会逐字节比较生成 Rust 模块与检入黄金文件并执行 `no_std` 运行时激活测试。完整合同见 [产品配置生成器](docs/esop-product-configuration.md)。`make build-report` 保持原有未配置主机报告，也可通过 `PRODUCT_INPUT=.../robot_build_input.json` 投影严格校验后的产品 hash、拓扑、PDO/frame/wire/WKC/copy、周期与 ProcBuf 资源。`make cfggen-build-report` 执行运行时示例门和产品化报告；报告始终保持 fail-closed，CI 会校验并上传这些构建证据。
 
 `make performance-report` 会生成完整字段的 `build/performance_report.json`，覆盖周期、延迟分位数、错误计数、拷贝和资源测量；未提供目标板测量时报告保持 `passed: false`，CI 会校验并上传它。

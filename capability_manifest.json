@@ -510,7 +510,7 @@
     {
       "id": "protobuf_v1_contract",
       "status": "partial",
-      "scope": "Versioned esop.v1 state, command, diagnostic and additive-compatible full-provenance runtime-incident contract with generated Rust bindings",
+      "scope": "Versioned esop.v1 state, command and diagnostic contract with additive-compatible full-provenance runtime incidents plus operational link/AL/DC/Domain/eBPF observation status and generated Rust bindings",
       "evidence": [
         "proto/esop/v1/esop.proto",
         "scripts/validate-proto-schema.py",
@@ -538,7 +538,7 @@
     {
       "id": "zenoh_runtime_adapter",
       "status": "partial",
-      "scope": "Optional host-domain Zenoh session adapter with bounded health, typed v1 publish/query, validated eBPF RuntimeIncident projection, stable v1 publish and command/query callback observation markers, shared single-reader ProcBuf state/event projection, and shared strict command-target ProcBuf handoff",
+      "scope": "Optional host-domain Zenoh session adapter with bounded health, typed v1 publish/query client and server, read-only zero-boot discovery, validated eBPF RuntimeIncident projection, stable v1 publish and command/query callback observation markers, shared single-reader ProcBuf operational state/event projection, and shared strict command-target ProcBuf handoff",
       "evidence": [
         "crates/esop-zenoh-gateway/src/runtime.rs",
         "crates/esop-zenoh-gateway/src/runtime_incident.rs",
@@ -551,7 +551,7 @@
         "scripts/test-zenoh.sh",
         "docs/esop-zenoh-gateway.md"
       ],
-      "limitation": "State/event projection and strict command-target mapping are shared with IPC; remote ACL, certificate lifecycle, product target semantics, actual drive behavior and production topology still require environment-level tests"
+      "limitation": "State/event projection, typed query validation and strict command-target mapping are shared with IPC; zero boot applies only to read-only queries. Remote ACL, certificate lifecycle, product target semantics, actual drive behavior and production topology still require environment-level tests"
     },
     {
       "id": "ebpf_observation",
@@ -610,6 +610,23 @@
         "docs/esop-ebpf-runtime-observability.md"
       ],
       "limitation": "Hosted privileged Linux qualifies the gateway publish/callback and raw-port shared marker chains, one synchronized worker-suppression/leader-exit chain, one controlled single-process cgroup-v2 OOM victim-PID chain, one exact-TID two-CPU scheduler-migration threshold chain, one exact-TID controlled FIFO-contention wake-to-switch scheduler-runqueue chain, one CPU/vector-filtered and counter-bounded loopback NET_RX softirq-duration chain, one isolated virtual-veth unhandled-EtherType receive-drop threshold chain, one pinned-child 16-page anonymous first-write page-fault count-window chain, and one production 4 MiB ringbuf saturation/loss-projection plus epoch unload/reload recovery chain through CO-RE verifier/load, real tracepoint or uprobe attachment, ringbuf decode, statistics, incident correlation and observer health projection. The degradation qualification proves only bounded page-fault-driven saturation on one hosted x86_64 kernel, exact new-loss projection, same-epoch sticky Degraded health, restart reset and new-epoch recovery. Missing BTF, ringbuf, required attach, verifier and permission states are deterministic policy tests rather than actual hosted fault injection. The network-drop evidence proves protocol and receive-ifindex filtering plus one hosted virtual protocol-stack drop path only; it does not qualify physical NICs, drivers, NAPI, XDP, qdisc, queue pressure, congestion, real EtherCAT devices or a production root cause. The OOM evidence proves one hosted leaf-cgroup memory.max injection, exact local oom_kill count, SIGKILL exit and raw mark_victim PID only; it does not resolve victim TGID, namespace/cgroup identity, trigger task, allocation, global pressure, delegated-container behavior or restart policy. The page-fault evidence proves one hosted x86_64 user-write/not-present error-code and count-threshold chain only; it does not expose address/IP, classify major/minor from BPF, measure handler duration, or qualify memory pressure, swap/storage, natural workload cause or product thresholds. The softirq evidence proves one controlled UDP GSO loopback execution with the exact CPU/vector filter open only across the measured send interval; it does not qualify hard IRQ, real NIC/driver/NAPI behavior, product interrupt budgets, sustained pressure or causal task ownership. Migration evidence proves controlled A-to-B-to-A movement and count-threshold correlation only; it does not prove migration cause, affinity-policy failure, measured stall latency or cache/NUMA impact. Runqueue evidence proves one injected wake-to-switch interval only; it does not qualify natural workload causes, ordinary scheduler behavior, product priorities or CPU isolation. Process-exit evidence contains no exit code/signal and does not prove complete thread-group death or restart supervision. Gateway evidence does not qualify a live Zenoh session, router/transport queue, IPC, serialization, permit or reconnect cause. Raw-port evidence does not qualify real AF_PACKET/NIC load or cycle/driver/NIC/wire/slave timing. Production event pressure, target kernels, ringbuf watermarks, overhead/WCET, long-duration stability, ROS2, recorder, natural-load runqueue root cause and hard-IRQ or production-NIC/sustained softirq pressure, physical-NIC/cpufreq-limit injection, global OOM behavior, portable page-fault semantics, major/minor fault attribution, OOM victim TGID/cgroup resolution and instantaneous-frequency/residency/cause qualification remain open"
+    },
+    {
+      "id": "runtime_diagnostics_cli",
+      "status": "implemented",
+      "scope": "Read-only esop status, domain list, DC, lifecycle, incident list, doctor and bounded watch commands over contract-validated Zenoh queries with current-boot discovery and ProcBuf-projected eBPF observation health",
+      "evidence": [
+        "crates/esop-cli/src/lib.rs",
+        "crates/esop-cli/src/main.rs",
+        "crates/esop-ipc/src/payloads.rs",
+        "crates/esop-ipc/tests/payloads.rs",
+        "crates/esop-zenoh-gateway/src/runtime.rs",
+        "crates/esop-zenoh-gateway/tests/query.rs",
+        "crates/esop-zenoh-gateway/tests/zenoh_live.rs",
+        "proto/esop/v1/esop.proto",
+        "docs/esop-runtime-diagnostics-cli.md"
+      ],
+      "limitation": "The CLI is observation-only and uses the existing provider's bounded snapshot retention. It does not configure EtherCAT, load BPF, execute recovery, provide ROS 2 discovery, qualify remote ACL/certificates, prove production retention or establish real-device DC/WKC provenance, WCET, HIL, ETG conformance or functional safety"
     },
     {
       "id": "stm32_hpmicro_ports",

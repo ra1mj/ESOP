@@ -10,8 +10,9 @@ use esop_procbuf::{
     ProcBufHeader, QualityFact, StateSnapshot,
 };
 use esop_proto::v1::{
-    AxisStopEvidence, DiagnosticEvent, EventSeverity, IoState, JointState, LifecycleState,
-    LifecycleSummary, MotionCommand, QualitySummary, RobotState, StopAction,
+    AxisStopEvidence, DiagnosticEvent, DomainStatus, EventSeverity, IoState, JointState,
+    LifecycleState, LifecycleSummary, MotionCommand, OperationalStatus, QualitySummary, RobotState,
+    RuntimeObservationStatus, StopAction,
 };
 use esop_proto::{
     CURRENT_SCHEMA_VERSION, Message, SchemaCompatibilityError, validate_schema_version,
@@ -76,6 +77,7 @@ pub enum ProjectionError {
     InvalidLifecycleState(u8),
     InvalidStopAction(u8),
     InvalidAxisStopEvidence(usize),
+    InvalidOperationalStatus,
     NonFiniteJoint(usize),
     InvalidQualityMask,
     ReplayedState,
@@ -339,6 +341,7 @@ impl ProcBufProjector {
             state.quality.cyclic,
             state.lifecycle.first_blocking_code,
         )?;
+        let operational = project_operational_status(&state)?;
 
         let mut joints = Vec::with_capacity(AXES);
         for (axis, joint) in state.axes.iter().enumerate() {
@@ -403,10 +406,68 @@ impl ProcBufProjector {
                 io,
                 events: Vec::new(),
                 schema_version: CURRENT_SCHEMA_VERSION,
+                operational,
             },
             quality_bits,
         ))
     }
+}
+
+fn project_operational_status<const AXES: usize, const IO: usize, const DOMAINS: usize>(
+    state: &esop_procbuf::StatePage<AXES, IO, DOMAINS>,
+) -> Result<Option<OperationalStatus>, ProjectionError> {
+    if state.quality.sequence != state.sequence {
+        return Ok(None);
+    }
+    if state.quality.link_up > 1
+        || state.quality.dc_locked > 1
+        || state.quality.reserved != 0
+        || state
+            .quality
+            .domains
+            .iter()
+            .any(|domain| domain.valid > 1 || domain.complete > 1)
+        || state.runtime_observation.reserved != [0; 7]
+    {
+        return Err(ProjectionError::InvalidOperationalStatus);
+    }
+
+    let domains = state
+        .quality
+        .domains
+        .iter()
+        .enumerate()
+        .map(|(domain, quality)| DomainStatus {
+            domain: domain as u32,
+            expected_wkc: u32::from(quality.expected_wkc),
+            actual_wkc: u32::from(quality.actual_wkc),
+            valid: quality.valid != 0,
+            complete: quality.complete != 0,
+            consecutive_wkc_mismatches: u32::from(quality.consecutive_wkc_mismatches),
+            last_valid_cycle: quality.last_valid_cycle,
+            input_age_cycles: quality.input_age_cycles,
+        })
+        .collect();
+    let observation = state.runtime_observation;
+    Ok(Some(OperationalStatus {
+        link_up: state.quality.link_up != 0,
+        al_state: u32::from(state.quality.al_state),
+        dc_locked: state.quality.dc_locked != 0,
+        fault_bitmap: state.quality.fault_bitmap,
+        command_age_cycles: state.quality.command_age_cycles,
+        deadline_misses: state.quality.deadline_misses,
+        dc_offset_ns: state.quality.dc_offset_ns,
+        domains,
+        runtime_observation: Some(RuntimeObservationStatus {
+            latest_incident_id: observation.latest_incident_id,
+            agent_epoch: observation.agent_epoch,
+            observed_at_ns: observation.observed_at_ns,
+            observation_window_ns: observation.observation_window_ns,
+            lost_events: observation.lost_events,
+            incident_count: observation.incident_count,
+            health: u32::from(observation.health),
+        }),
+    }))
 }
 
 struct ProjectedState {

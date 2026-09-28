@@ -105,6 +105,31 @@ fn v1_query_round_trip_preserves_cursor_and_result() {
 }
 
 #[test]
+fn zero_boot_query_binds_to_the_current_provider_boot() {
+    let request = QueryRequest {
+        boot_id: 0,
+        ..query_request()
+    };
+    let decoded = decode_query_payload(space(), 7, &request.encode_to_vec()).unwrap();
+    assert_eq!(decoded.boot_id, 7);
+    assert_eq!(decoded.robot_id, request.robot_id);
+    assert_eq!(decoded.after_sequence, request.after_sequence);
+    assert_eq!(decoded.limit, request.limit);
+}
+
+#[test]
+fn zero_provider_boot_cannot_satisfy_discovery() {
+    let request = QueryRequest {
+        boot_id: 0,
+        ..query_request()
+    };
+    assert!(matches!(
+        decode_query_payload(space(), 0, &request.encode_to_vec()),
+        Err(QueryAdapterError::ProviderUnavailable)
+    ));
+}
+
+#[test]
 fn incident_validation_does_not_apply_the_state_sequence_cursor() {
     let request = QueryRequest {
         after_sequence: u64::MAX,

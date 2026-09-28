@@ -1,8 +1,8 @@
 # ESOP Protobuf v1 契约
 
 - 文档版本：1.0
-- 日期：2026-09-26
-- 状态：schema 源、结构校验、Rust 生成绑定、v1 版本准入、冻结基线 descriptor 门禁、新旧 reader/writer 双向测试、RuntimeIncident additive 无损字段和 loopback transport round-trip 已实现；跨语言与生产滚动升级仍待验证
+- 日期：2026-09-28
+- 状态：schema 源、结构校验、Rust 生成绑定、v1 版本准入、冻结基线 descriptor 门禁、新旧 reader/writer 双向测试、RuntimeIncident additive 无损字段、RobotState additive 运行状态和 loopback transport round-trip 已实现；跨语言与生产滚动升级仍待验证
 - 上游需求：PRD FR-030、FR-031、FR-045、FR-049、FR-051
 
 ## 1. 边界
@@ -12,6 +12,7 @@
 当前契约覆盖：
 
 - `RobotState`、`JointState`、`IoState` 和 `QualitySummary`；`JointState.drive_error_code = 11` 以 additive 字段暴露 CiA 402 `0x603F`
+- `RobotState.operational = 14` 以 additive nested message 暴露 link/AL/fault、命令年龄、deadline 累计、DC lock/offset、有序逐 Domain 精确 WKC/完整性/新鲜度和 eBPF agent epoch/window/loss/health 摘要
 - `LifecycleSummary`（包括可选逐轴 `AxisStopEvidence`）、`DiagnosticEvent` 和审计关联字段
 - `MotionCommand`、`CommandReply` 和外部命令来源/TTL/序号/策略版本
 - `RuntimeIncident`、`RuntimeEvidence`、查询请求与查询响应；incident 追加字段保留 boot/agent epoch、配置证据窗口、完整 cycle 范围、组件标识、置信度和 64-bit 观测值，evidence 追加字段保留稳定 ID、epoch、domain、transition、IRQ/ifindex、duration/count/detail 和完整 64-bit 值
@@ -29,7 +30,7 @@
 
 ## 3. CI 校验
 
-`make proto-schema` 检查 proto3/package、顶层消息的 `schema_version`、字段号和名称唯一性、reserved 不复用及 enum 零值。`crates/esop-proto/` 使用 vendored `protoc` 生成 Rust bindings；workspace 测试另外执行第 4 节的 descriptor 门禁和新旧 reader/writer 矩阵。`esop-ipc/payloads` 统一拥有 ProcBuf State/Event 投影和 `MotionCommand` 到固定策略字段的解码；IPC 命令入口还会把 frame schema/layout/numeric robot/boot/source/sequence 与 Protobuf payload 交叉核对，所有结构检查通过后才转交 `CommandIngress`。Zenoh 复用同一投影与字段解码。host-only incident adapter 在编码前校验 agent identity、窗口、证据数量、boot/epoch 和证据所属范围。类型化查询入口校验请求的 schema、robot、boot 和大小，并对 incident 及其 evidence 重做相同的 Protobuf 合同校验。`make test-ipc` 验证真实 Unix datagram 的 State/Event/Command payload 边界，`make test-zenoh` 验证类型化发布、真实 agent incident 投影、命令路由、查询往返/拒绝及 router 重启后的旧命令拒绝。生产认证和部署仍是后续验收项。
+`make proto-schema` 检查 proto3/package、顶层消息的 `schema_version`、字段号和名称唯一性、reserved 不复用及 enum 零值。`crates/esop-proto/` 使用 vendored `protoc` 生成 Rust bindings；workspace 测试另外执行第 4 节的 descriptor 门禁和新旧 reader/writer 矩阵。`esop-ipc/payloads` 统一拥有 ProcBuf State/Event 投影和 `MotionCommand` 到固定策略字段的解码；IPC 命令入口还会把 frame schema/layout/numeric robot/boot/source/sequence 与 Protobuf payload 交叉核对，所有结构检查通过后才转交 `CommandIngress`。Zenoh 复用同一投影与字段解码。host-only incident adapter 在编码前校验 agent identity、窗口、证据数量、boot/epoch 和证据所属范围。类型化查询入口校验请求的 schema、robot、boot 和大小，并对 incident 及其 evidence 重做相同的 Protobuf 合同校验。只读查询的 `boot_id=0` 在 server decoder 内绑定当前 provider boot；任意非零错误 boot 继续拒绝，该通配语义不适用于命令或 permit。`make test-ipc` 验证真实 Unix datagram 的 State/Event/Command payload 边界，`make test-zenoh` 验证类型化发布、真实 agent incident 投影、命令路由、查询往返/拒绝及 router 重启后的旧命令拒绝。生产认证和部署仍是后续验收项。
 
 ## 4. Frozen v1 Compatibility Gate
 
@@ -50,6 +51,7 @@ independently; baseline bindings are included only by integration tests.
 | Current v1 axis stop evidence / Frozen v1 reader | Old reader preserves legacy summary but ignores new per-axis evidence; re-encoding loses the evidence |
 | Current v1 drive error code / Frozen v1 reader | Old reader preserves legacy joint fields but ignores field 11; current reader sees the error code and old re-encoding drops it |
 | Current v1 runtime incident / Frozen v1 reader | Old reader preserves legacy incident/evidence fields and saturated 32-bit value, ignores additive provenance/full-width fields, and drops them on re-encode |
+| Current v1 operational status / Frozen v1 reader | Old reader preserves legacy RobotState fields, ignores field 14, and drops Domain/DC/eBPF status on re-encode; current reader preserves the complete nested status |
 | Unknown enum writer / Both v1 readers | Numeric value remains unknown and typed conversion fails |
 
 The descriptor gate rejects package/syntax changes, removed messages, field

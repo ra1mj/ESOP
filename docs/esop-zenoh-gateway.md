@@ -1,8 +1,8 @@
 # ESOP Zenoh 路由边界
 
 - 文档版本：1.0
-- 日期：2026-09-26
-- 状态：固定 key namespace、方向策略、可选 Zenoh Session、与 IPC 共享的 ProcBuf v7 状态/事件投影及严格 MotionCommand target 到 Command page 路径、CiA 402 实际反馈/错误码/逐字段质量、逐轴停止证据与原始周期质量投影、eBPF RuntimeIncident 无损投影、类型化查询边界、host QoS、稳定 publish 与 command/query callback 观测 marker、生产安全配置准入及 loopback router 验证已实现；真实设备质量采集、远程 ACL、目标内核 uprobe/开销和生产认证部署待完成
+- 日期：2026-09-28
+- 状态：固定 key namespace、方向策略、可选 Zenoh Session、与 IPC 共享的 ProcBuf v7 状态/事件投影及严格 MotionCommand target 到 Command page 路径、CiA 402 实际反馈/错误码/逐字段质量、逐轴停止证据、Domain/DC/eBPF 运行状态投影、eBPF RuntimeIncident 无损投影、零 boot 只读发现、类型化查询客户端/服务端边界、host QoS、稳定 publish 与 command/query callback 观测 marker、生产安全配置准入及 loopback router 验证已实现；真实设备质量采集、远程 ACL、目标内核 uprobe/开销和生产认证部署待完成
 - 上游需求：PRD FR-031、FR-030、FR-045、FR-051
 
 ## 1. Key namespace
@@ -45,6 +45,7 @@ Zenoh session、router、发现、重连、QoS 和 transport security 均属于 
 - `admit_authenticated_command`：要求可信监督服务先将认证主体映射为固定 `source_id`，再比较 transport identity 与 payload identity；不匹配时不会进入实时准入；
 - `serve_queries`：在固定 `query` key 上注册底层后台 queryable；
 - `serve_typed_queries`：绑定当前 boot ID，校验 `QueryRequest` 的 payload（最大 4096 bytes）、schema 版本、robot ID 和 `limit`（1-32），将请求交给监督域的快照提供者；应答校验 `QueryReply` 及嵌套记录的版本、robot/boot、incident/证据稳定 ID、共享 agent epoch、窗口/周期范围、证据数量和编码后的大小，不符合条件时返回稳定的 Zenoh error reply，不发送数据回复。`after_sequence` 对返回的 `RobotState.sequence` 实施严格递增检查；incident 的查询/分页语义由提供者定义，不应误用 `cycle_sequence` 作为状态序号。请求与回复失败计数可通过 `TransportHealth` 读取。
+- `query_typed`：执行同一合同的只读客户端查询并重验完整回复；调用方提供显式 wall-clock timeout。请求 `boot_id=0` 只在服务端解码时绑定当前非零 boot，客户端随后用应答 boot 重验全部 State/incident。非零错误 boot 继续返回稳定拒绝。
 - `TransportHealth`：记录连接状态、发布失败数和 handler 注册数。
 - `PublishQos`：state 使用可丢弃的 data 队列，event/diagnostic 使用可丢弃的高优先级队列；不会因 Zenoh 背压阻塞监督域任务。
 - publish 观测 ABI：用稳定的 `esop_zenoh_gateway_publish_begin_v1(request_id, route_kind)` / `esop_zenoh_gateway_publish_end_v1(request_id, route_kind, outcome)` 标记完整异步 publish 生命周期；request ID 为进程内非零原子序号，outcome 固定为 success、transport failure 或 cancellation。
@@ -52,7 +53,7 @@ Zenoh session、router、发现、重连、QoS 和 transport security 均属于 
 - `TransportSecurityPolicy` / `open_secure`：在建立 Session 前检查传输协议、TLS 根证书、名称校验、mTLS 客户端证书/私钥和公钥或用户名密码认证材料；生产调用方应使用 `TransportSecurityPolicy::production()`，开发/HIL 可显式使用 `open` 或 `development()`。
 - `decode_command` / `admit_command`：复用 `esop-ipc/payloads` 的 `MotionCommand` 字段解码，校验 schema 和 robot ID，并转交 `CommandIngress` 执行来源、权限、TTL、epoch、序号、轴掩码、限流和审计。Zenoh 仍负责 namespace 与认证主体映射；共享解码器不授予 permit。
 - `prepare_procbuf_command` / `admit_procbuf_command` 及 authenticated 变体：复用 IPC 的严格 target mapper，在 ingress 前验证 CSP/CSV/CST、轴容量/掩码/覆盖、有限值和非负限值；准入后返回绑定目标 ProcBuf identity/layout 的 `AdmittedProcBufCommand`，调用方可借用该值重试发布而不重复准入。该路径不证明驱动已执行目标。
-- `ProcBufProjector`：Zenoh 兼容 wrapper 委托给 `esop-ipc/payloads` 的监督域单读者。共享实现校验 ABI/layout、数值 robot ID 和 boot ID 后读取完整状态页与事件环，转换为外部 `RobotState` / `DiagnosticEvent`；原样投影 required/valid/qualified/ready 门槛位图、permit epoch/expiry、转换周期、恢复计数和 permit 审计序号，并在原始质量事实完整且与 State 序号相同时生成 `QualitySummary`；拒绝状态序号回退、无效生命周期值、非法质量位图、非有限关节值和超 4096-byte 状态。数值 robot ID 与外部文本 ID 的配对须由部署配置提供，不从字符串猜测哈希。
+- `ProcBufProjector`：Zenoh 兼容 wrapper 委托给 `esop-ipc/payloads` 的监督域单读者。共享实现校验 ABI/layout、数值 robot ID 和 boot ID 后读取完整状态页与事件环，转换为外部 `RobotState` / `DiagnosticEvent`；原样投影 required/valid/qualified/ready 门槛位图、permit epoch/expiry、转换周期、恢复计数和 permit 审计序号，并在原始质量事实完整且与 State 序号相同时生成 `QualitySummary` 和 `OperationalStatus`。后者包含 link/AL/fault、DC、deadline、逐 Domain WKC/完整性/新鲜度和 eBPF 观测摘要；序号不匹配时保持 absent，不把旧证据解释为当前健康。投影拒绝状态序号回退、无效生命周期值、非法质量/运行状态布尔值、非零 reserved、非有限关节值和超 4096-byte 状态。数值 robot ID 与外部文本 ID 的配对须由部署配置提供，不从字符串猜测哈希。
 
 marker 是无阻塞、无字符串解析的可选观测边界；没有附加 uprobe 时只执行固定参数的空 marker，不改变 publish 或 callback 结果。Rust `async fn` 的普通 entry/return 只覆盖 future 构造，不能表示 await 生命周期，因此 publish guard 在 Session put 前 begin，并在健康刷新、传输失败处理或 future drop 后恰好 end 一次。callback guard 则紧贴 gateway 所有的调用边界，在调用用户 callback 前 begin，并在正常返回或 Rust unwind 时恰好 end 一次；进程 abort 不伪造 terminal marker，遗留状态由固定容量 LRU 约束。eBPF runtime 分别对 publish 和 callback 的 begin/end 符号实行原子成对附加，缺失可选符号时保留内核 tracepoint 基线；是否把任一探针对设为 required 由监督域显式决定。该 ABI 不提供运动许可、投递确认或功能安全保证。
 

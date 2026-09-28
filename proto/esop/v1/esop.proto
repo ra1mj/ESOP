@@ -59,6 +59,40 @@ message RobotState {
   reserved 11, 12;
   reserved "runtime_observation";
   uint32 schema_version = 13;
+  OperationalStatus operational = 14;
+}
+
+message OperationalStatus {
+  bool link_up = 1;
+  uint32 al_state = 2;
+  bool dc_locked = 3;
+  uint32 fault_bitmap = 4;
+  uint64 command_age_cycles = 5;
+  uint64 deadline_misses = 6;
+  sint64 dc_offset_ns = 7;
+  repeated DomainStatus domains = 8;
+  RuntimeObservationStatus runtime_observation = 9;
+}
+
+message DomainStatus {
+  uint32 domain = 1;
+  uint32 expected_wkc = 2;
+  uint32 actual_wkc = 3;
+  bool valid = 4;
+  bool complete = 5;
+  uint32 consecutive_wkc_mismatches = 6;
+  uint64 last_valid_cycle = 7;
+  uint64 input_age_cycles = 8;
+}
+
+message RuntimeObservationStatus {
+  uint64 latest_incident_id = 1;
+  uint64 agent_epoch = 2;
+  uint64 observed_at_ns = 3;
+  uint64 observation_window_ns = 4;
+  uint32 lost_events = 5;
+  uint32 incident_count = 6;
+  uint32 health = 7;
 }
 
 message LifecycleSummary {

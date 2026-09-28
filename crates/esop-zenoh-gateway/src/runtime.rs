@@ -438,6 +438,16 @@ pub enum QueryAdapterError {
     ProviderUnavailable,
 }
 
+/// Errors returned by the read-only typed query client.
+#[derive(Debug)]
+pub enum QueryClientError {
+    Request(QueryAdapterError),
+    Transport(zenoh::Error),
+    Remote(String),
+    Decode(esop_proto::DecodeError),
+    Reply(QueryAdapterError),
+}
+
 impl QueryAdapterError {
     pub const fn code(&self) -> &'static str {
         match self {
@@ -460,13 +470,18 @@ pub fn decode_query_payload(
     expected_boot_id: u64,
     payload: &[u8],
 ) -> Result<QueryRequest, QueryAdapterError> {
+    if expected_boot_id == 0 {
+        return Err(QueryAdapterError::ProviderUnavailable);
+    }
     KeySpace::validate_payload(payload).map_err(QueryAdapterError::Payload)?;
-    let request = QueryRequest::decode(payload).map_err(QueryAdapterError::Decode)?;
+    let mut request = QueryRequest::decode(payload).map_err(QueryAdapterError::Decode)?;
     validate_schema_version(request.schema_version).map_err(QueryAdapterError::Schema)?;
     if request.robot_id.as_bytes() != key_space.robot() {
         return Err(QueryAdapterError::RobotMismatch);
     }
-    if request.boot_id != expected_boot_id {
+    if request.boot_id == 0 {
+        request.boot_id = expected_boot_id;
+    } else if request.boot_id != expected_boot_id {
         return Err(QueryAdapterError::BootMismatch);
     }
     if request.limit == 0 || request.limit > MAX_QUERY_RECORDS {
@@ -475,10 +490,24 @@ pub fn decode_query_payload(
     Ok(request)
 }
 
-pub fn encode_query_reply(
+pub fn validate_query_request(
+    key_space: KeySpace,
+    request: &QueryRequest,
+) -> Result<(), QueryAdapterError> {
+    validate_schema_version(request.schema_version).map_err(QueryAdapterError::Schema)?;
+    if request.robot_id.as_bytes() != key_space.robot() {
+        return Err(QueryAdapterError::RobotMismatch);
+    }
+    if request.limit == 0 || request.limit > MAX_QUERY_RECORDS {
+        return Err(QueryAdapterError::LimitOutOfRange);
+    }
+    KeySpace::validate_payload(&request.encode_to_vec()).map_err(QueryAdapterError::Payload)
+}
+
+pub fn validate_query_reply(
     request: &QueryRequest,
     reply: &QueryReply,
-) -> Result<Vec<u8>, QueryAdapterError> {
+) -> Result<(), QueryAdapterError> {
     validate_schema_version(reply.schema_version).map_err(QueryAdapterError::Schema)?;
     if reply.robot_id != request.robot_id {
         return Err(QueryAdapterError::RobotMismatch);
@@ -517,6 +546,14 @@ pub fn encode_query_reply(
     if reply.encoded_len() > MAX_PAYLOAD_BYTES {
         return Err(QueryAdapterError::Payload(RouteError::PayloadTooLarge));
     }
+    Ok(())
+}
+
+pub fn encode_query_reply(
+    request: &QueryRequest,
+    reply: &QueryReply,
+) -> Result<Vec<u8>, QueryAdapterError> {
+    validate_query_reply(request, reply)?;
     Ok(reply.encode_to_vec())
 }
 
@@ -623,6 +660,55 @@ impl ZenohGateway {
 
     pub fn key_space(&self) -> KeySpace {
         self.key_space
+    }
+
+    /// Perform one bounded, read-only typed query. Callers own the wall-clock
+    /// timeout so different operator environments can set an explicit policy.
+    pub async fn query_typed(
+        &self,
+        request: &QueryRequest,
+    ) -> Result<QueryReply, QueryClientError> {
+        validate_query_request(self.key_space, request).map_err(QueryClientError::Request)?;
+        let (key, length) = self
+            .key(RouteKind::Query, RouteDirection::Publish)
+            .map_err(|error| match error {
+                RuntimeError::Zenoh(error) => QueryClientError::Transport(error),
+                RuntimeError::Route(error) => {
+                    QueryClientError::Request(QueryAdapterError::Payload(error))
+                }
+                _ => QueryClientError::Request(QueryAdapterError::ProviderUnavailable),
+            })?;
+        let key = str::from_utf8(&key[..length])
+            .map_err(|_| QueryClientError::Request(QueryAdapterError::ProviderUnavailable))?;
+        let replies = self
+            .session
+            .get(key)
+            .payload(request.encode_to_vec())
+            .await
+            .map_err(QueryClientError::Transport)?;
+        let reply = replies
+            .recv_async()
+            .await
+            .map_err(QueryClientError::Transport)?;
+        let sample = reply.into_result().map_err(|error| {
+            let payload = error.payload().to_bytes();
+            let length = payload.len().min(128);
+            QueryClientError::Remote(String::from_utf8_lossy(&payload[..length]).into_owned())
+        })?;
+        let payload = sample.payload().to_bytes();
+        KeySpace::validate_payload(&payload)
+            .map_err(QueryAdapterError::Payload)
+            .map_err(QueryClientError::Reply)?;
+        let reply = QueryReply::decode(payload.as_ref()).map_err(QueryClientError::Decode)?;
+        let mut bound_request = request.clone();
+        if bound_request.boot_id == 0 {
+            if reply.boot_id == 0 {
+                return Err(QueryClientError::Reply(QueryAdapterError::BootMismatch));
+            }
+            bound_request.boot_id = reply.boot_id;
+        }
+        validate_query_reply(&bound_request, &reply).map_err(QueryClientError::Reply)?;
+        Ok(reply)
     }
 
     /// Decode a v1 command and map only its fixed policy fields into the
