@@ -170,3 +170,36 @@ Added unified allocation-free recovery status/result/fault projections and fixed
 ### Next Steps
 
 - None - task complete
+
+
+## Session 64: Runtime diagnostics CLI and eBPF status
+
+**Date**: 2026-09-28
+**Task**: Runtime diagnostics CLI and eBPF status
+**Branch**: `main`
+
+### Summary
+
+Added read-only ESOP status/domain/DC/lifecycle/incident/doctor/watch commands, additive operational telemetry, zero-boot typed Zenoh discovery, live query/render coverage, and retained the next SOEM/DC parity task.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4159e0a` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
