@@ -68,6 +68,53 @@ fn artifact_bytes(output: &Path) -> Vec<Vec<u8>> {
 }
 
 #[test]
+fn executable_help_generation_and_failures() {
+    use std::process::Command;
+
+    for flag in ["-h", "--help"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_esop-cfggen"))
+            .arg(flag)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "help must succeed: {output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("usage:"));
+        assert!(output.stderr.is_empty());
+    }
+    let fixture = Fixture::new();
+    let directory = fixture.output("cli");
+    let output = Command::new(env!("CARGO_BIN_EXE_esop-cfggen"))
+        .arg("--input")
+        .arg(&fixture.product)
+        .arg("--output")
+        .arg(&directory)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let golden =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/examples/sim-dual-axis/expected");
+    assert_eq!(artifact_bytes(&directory), artifact_bytes(&golden));
+
+    for args in [vec![], vec!["--unknown"], vec!["--input"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_esop-cfggen"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+    }
+    fixture.edit_product(|product| product["unknown"] = Value::Bool(true));
+    let failed = fixture.output("invalid");
+    let output = Command::new(env!("CARGO_BIN_EXE_esop-cfggen"))
+        .arg("--input")
+        .arg(&fixture.product)
+        .arg("--output")
+        .arg(&failed)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!failed.exists());
+}
+
+#[test]
 fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     let fixture = Fixture::new();
     let first = fixture.output("first");
