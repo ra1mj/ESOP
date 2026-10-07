@@ -11,7 +11,9 @@
     "retained_dedicated_records": 24,
     "indexed_historical_tasks": 66,
     "local_sha256_preserved": true,
-    "history_rewritten": false
+    "history_rewritten": false,
+    "final_tree_files": 346,
+    "tree_bytes_at_clean_validation": 6094572
   },
   "validation": {
     "make_ci": {
@@ -31,8 +33,14 @@
       "core_product_config_aarch64_unknown_none": "passed"
     },
     "release_process_smoke_cases": 17,
-    "clean_checkout": "pending",
-    "remote_publication": "pending"
+    "clean_checkout": {
+      "commit": "433158f",
+      "make_ci": "passed",
+      "archives_and_personal_journals_absent": true,
+      "golden_and_shared_tooling_preserved": true,
+      "make_test_zenoh": "passed (6 tests)",
+      "make_footprint": "passed"
+    }
   },
   "footprint": {
     "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)\nbinary: rustc\ncommit-hash: 2d8144b7880597b6e6d3dfd63a9a9efae3f533d3\ncommit-date: 2026-07-07\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.0\nLLVM version: 22.1.6",

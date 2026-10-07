@@ -44,6 +44,10 @@ covered by the full regression suite.
 - `make test-zenoh`: all six live router tests pass, including four CLI suites.
 - Rust **1.88.0**: `cargo check --locked --workspace --all-targets --all-features`
   and the `aarch64-unknown-none` core/product-config check pass.
+- A detached clean checkout at `433158f` passes `make ci`, all six live router
+  tests and `make footprint`, with all archived
+  task directories and personal journals absent; protected fixtures and ignore
+  behavior were checked in that committed tree.
 - `make core-check`, `make core-example`, `make host-build`, `make footprint`
   and the existing cfggen golden-output gate pass.
 - CLI coverage includes all six views and their finite watches; help/usage;
@@ -140,6 +144,11 @@ The initial snapshot had 621 tracked files totaling 6,970,596 bytes. Removed
 from the current Git tree: **286 archived task files and three personal journal
 files**, totaling **1,034,715 bytes**. All 289 original local files were retained
 and verified against their frozen SHA-256 and the baseline Git objects.
+
+At the committed clean-checkout validation, the resulting tree has 346 files
+and 6,094,572 bytes (including new code, regression tests and retained evidence),
+versus 621 files and 6,970,596 bytes at baseline: about 12.6% fewer tree bytes.
+Subsequent verification metadata can slightly change that byte count.
 
 The 24 dedicated research/acceptance/run-result records were consolidated into
 three retained documents, with original citations, run/commit/artifact details,
