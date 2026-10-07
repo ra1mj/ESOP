@@ -2,3 +2,22 @@
 /bpf/build/
 /build/
 __pycache__/
+
+# Personal session history and completed task bookkeeping stay local.
+/.trellis/workspace/*/
+/.trellis/tasks/archive/
+
+# Local credentials and machine-specific environment overrides.
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Editor/OS leftovers and logs; intentional repository fixtures stay tracked.
+*~
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+*.log
