@@ -34,6 +34,13 @@ phase walkthroughs and entry skills consistent with those blocks.
   Ready planning plus an existing request to implement can advance through
   Phase 1.4. Planning-only requests, explicit review requirements, and unresolved
   scope decisions remain boundaries. Automatic wakeups create no new consent.
+- Phase 3.4 applies the same authorization rule to scoped commits and remote
+  delivery. An existing GitHub delivery request can cover those actions;
+  explicit review/manual-commit constraints still win. Merely committing or
+  pushing does not authorize a merge or release. Unrelated dirty paths stay
+  untouched and do not force a new approval for the known batch.
+- Archive/journal bookkeeping honors `session_auto_commit: false` and ignore
+  policy. Do not force-add local records to satisfy a fixed number of commits.
 - Small explicit fixes can use the direct path with development guidelines and
   quality checks. A workflow repair does not activate an unrelated larger task.
 - Keep template hashes unchanged after local customization so future Trellis
@@ -69,7 +76,8 @@ modes, source-of-truth block injection, and no task/runtime mutation from prompt
 Review policy text separately: tests verify routing and state isolation, not
 the model's interpretation of user intent. Check workflow blocks, Phase 1.4,
 and all three entry skills for unconditional interview or repeated approval
-rules when changing authorization policy.
+rules when changing authorization policy. Include both in-progress blocks and
+Phase 3.4 so the same approval loop cannot reappear during delivery.
 
 ## Wrong vs Correct
 

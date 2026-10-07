@@ -240,6 +240,7 @@ Sub-agent dispatch protocol applies to all platforms and all sub-agents, includi
 [workflow-state:in_progress]
 Tools: `trellis-implement` / `trellis-research` are sub-agent types only (Task/Agent tool, NOT Skill; there is no skill by these names). `trellis-update-spec` is a skill. `trellis-check` exists as both; prefer the Agent form when verifying after code changes.
 Flow: `trellis-implement` -> `trellis-check` -> `trellis-update-spec` -> commit (Phase 3.4) -> `/trellis:finish-work`.
+Phase 3.4 reuses existing authorization for scoped commits; ask only if that authorization is missing or the user required review first. Keep unrelated changes outside the batch.
 Main-session default: dispatch implement/check sub-agents. Sub-agent self-exemption: if already running as `trellis-implement`, do NOT spawn another `trellis-implement` or `trellis-check`; if already running as `trellis-check`, do NOT spawn another `trellis-check` or `trellis-implement`. Dispatch is main session only.
 Dispatch prompt starts with `Active task: <task path from task.py current>`. Read context: jsonl entries -> `prd.md` -> `design.md if present` -> `implement.md if present`.
 [/workflow-state:in_progress]
@@ -251,6 +252,7 @@ Dispatch prompt starts with `Active task: <task path from task.py current>`. Rea
 
 [workflow-state:in_progress-inline]
 Flow: `trellis-before-dev` -> edit -> `trellis-check` -> validation -> `trellis-update-spec` -> commit (Phase 3.4) -> `/trellis:finish-work`.
+Phase 3.4 reuses existing authorization for scoped commits; ask only if that authorization is missing or the user required review first. Keep unrelated changes outside the batch.
 Do not dispatch implement/check sub-agents in inline mode.
 Read context: `prd.md` -> `design.md if present` -> `implement.md if present`, plus relevant spec/research loaded by skills.
 [/workflow-state:in_progress-inline]
@@ -606,7 +608,7 @@ Update the docs under `.trellis/spec/` accordingly. Even if the conclusion is "n
 
 **Spec-sync preamble**: before drafting commits, ask: did this task fix a bug or surface non-obvious knowledge that should land in `.trellis/spec/` so future-you (or future-AI) doesn't repeat the mistake? If yes, return to Phase 3.3 first — spec writes belong in the same task's commit batch, not as a forgotten follow-up.
 
-The AI drives a batched commit of this task's code changes so `/finish-work` can run cleanly afterwards. Goal: produce work commits FIRST, then bookkeeping (archive + journal) commits land after — never interleaved.
+The AI drives a batched commit of this task's code changes so `/finish-work` can run cleanly afterwards. Reuse authorization from the request and prior decisions, including authorization implicit in delivering the requested GitHub change. An explicit request to review before committing or to leave changes uncommitted still applies. Produce work commits before bookkeeping; archive/journal commits are conditional on `session_auto_commit` and tracked-path policy.
 
 **Step-by-step**:
 
@@ -628,31 +630,17 @@ The AI drives a batched commit of this task's code changes so `/finish-work` can
 
 4. **Draft a commit plan**. Group AI-edited files into logical commits (1 commit per coherent change unit, not 1 commit per file). Each entry: `<commit message>` + file list. List unrecognized files separately at the bottom.
 
-5. **Present the plan once, ask for one-shot confirmation**. Format:
-   ```
-   Proposed commits (in order):
-     1. <message>
-        - <file>
-        - <file>
-     2. <message>
-        - <file>
+5. **Summarize the scoped batch and check existing authorization**. If it covers the commits, continue in the same turn. Do not require a special reply or reopen unchanged approval. If authorization is missing or the user required prior review, present the concrete file grouping and messages, explain the boundary, and ask once. Leave unrelated or unrecognized files untouched; their presence alone does not block the known batch.
 
-   Unrecognized dirty files (NOT in any commit — confirm include/exclude):
-     - <file>
-     - <file>
+6. **Execute the authorized batch**: run `git add <files>` + `git commit -m "<msg>"` for each batch in order. Do not amend. Push only when the user's request or prior authorization includes remote delivery; a local commit does not itself authorize publishing.
 
-   Reply 'ok' / '行' to execute. Reply with edits, or '我自己来' / 'manual' to abort.
-   ```
-
-6. **On confirmation**: run `git add <files>` + `git commit -m "<msg>"` for each batch in order. Do not amend. Do not push.
-
-7. **On rejection** (user replies "不行" / "我自己来" / "manual" / any pushback on the plan): stop. Do not attempt a second plan. The user will commit by hand; you skip ahead to 3.5 once they confirm.
+7. **Respect user steering**: apply requested wording/grouping changes within the authorized scope without restarting approval. If the user asks to commit manually or refuses the commit action, stop committing and leave the work available; do not repeatedly propose the same action.
 
 **Rules**:
-- No `git commit --amend` anywhere — three-stage three-commit flow (work commits → archive commit → journal commit).
-- Never push to remote in this step.
-- If the user wants different message wording but accepts the file grouping, edit the message and re-confirm once — but if they reject the grouping, exit to manual mode.
-- The batched plan is one prompt; do not prompt per commit.
+- No `git commit --amend`; preserve existing commits and other work.
+- Commit, remote delivery, merge and release have distinct scopes. Reuse existing authorization for each; do not infer merge or release authorization solely from a commit or push.
+- Honor `session_auto_commit: false` and ignored local bookkeeping; never force-add those files to satisfy a fixed commit count.
+- When a confirmation is actually needed, ask for the batch once, not per commit or on every continuation.
 
 #### 3.5 Wrap-up reminder
 
