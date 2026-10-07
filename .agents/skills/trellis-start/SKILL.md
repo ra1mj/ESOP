@@ -41,13 +41,17 @@ Index files list the specific guideline docs to read when you actually start cod
 ## Step 4: Decide next action
 From Step 1 you know the current task and status. Check the task directory:
 
+Reuse authorization and decisions already given in this conversation. A small explicit fix (including workflow maintenance) may follow the direct path in `.trellis/workflow.md`: inspect, load `trellis-before-dev`, edit, and run `trellis-check`. It does not require a new task or advance a larger planning task.
+
 - **Active task status `planning` + no `prd.md`** → Phase 1.1. Load the `trellis-brainstorm` skill.
-- **Active task status `planning` + `prd.md` exists** → stay in Phase 1. Lightweight tasks can be PRD-only; complex tasks need `design.md` + `implement.md`. Load the relevant Phase 1 step detail before `task.py start`.
+- **Active task status `planning` + `prd.md` exists** → complete remaining planning work. Lightweight tasks can be PRD-only; complex tasks need `design.md` + `implement.md`. Once artifacts are reviewed and existing authorization covers implementation, load Phase 1.4, run `task.py start`, and continue. Ask only about unresolved decisions or missing authorization.
 - **Active task status `in_progress`** → Phase 2 step 2.1. Load the step detail:
   ```bash
   python3 ./.trellis/scripts/get_context.py --mode phase --step 2.1 --platform codex
   ```
-- **No active task** → classify first. For simple conversation / small task, ask only whether this turn should create a Trellis task. For complex work, ask whether you may create a Trellis task and enter planning. If the user says no, skip Trellis for this session.
+- **No active task** → classify first. Answer conversation directly; handle small explicit fixes via the direct path. For complex work, create or reuse a task within the requested scope and prepare artifacts, without a separate bookkeeping permission request. Respect an explicit request to avoid Trellis tasks.
+
+A planning status is a progress marker, not a permanent stop. Automatic goal continuations reuse existing authorization and do not create new authorization. An explicit planning-only or review-before-implementation constraint still applies.
 
 ---
 

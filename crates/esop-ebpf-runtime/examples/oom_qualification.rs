@@ -498,7 +498,9 @@ fn run_parent(object_path: PathBuf, output_path: PathBuf) -> Result<(), Box<dyn 
         return Err(io::Error::last_os_error().into());
     }
     let page_size = u64::try_from(page_size)?;
-    if MAPPING_BYTES as u64 <= MEMORY_LIMIT_BYTES || MAPPING_BYTES as u64 % page_size != 0 {
+    if MAPPING_BYTES as u64 <= MEMORY_LIMIT_BYTES
+        || !(MAPPING_BYTES as u64).is_multiple_of(page_size)
+    {
         return Err(invalid_data("OOM mapping geometry was invalid").into());
     }
 

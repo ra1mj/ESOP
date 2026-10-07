@@ -27,12 +27,14 @@ Shows the Phase Index (Plan / Execute / Finish) with routing + skill mapping.
 
 ## Step 3: Decide Where You Are
 
-`get_context.py` shows the active task's `status` field. Route by `status` + artifact presence. This command replaces the user needing to remember the Trellis flow; it does not itself approve implementation.
+`get_context.py` shows the active task's `status` field. Route by `status`, artifact readiness, and existing user authorization. This command and automatic goal continuations create no new authorization; neither resets authorization already given. Do not repeat a permission request for unchanged scope.
+
+For a small explicitly requested fix, including workflow maintenance while a larger task is planning, use the direct path in `.trellis/workflow.md` with `trellis-before-dev` and `trellis-check`. Keep the larger task's phase and unresolved scope separate.
 
 - `status=planning` + no `prd.md` → **1.1** (load `trellis-brainstorm`)
 - `status=planning` + `prd.md` only → decide whether the task is lightweight or complex. Lightweight can move to **1.4** review; complex returns to **1.1** to add `design.md` + `implement.md`.
 - `status=planning` + complex artifacts complete + sub-agent jsonl not curated (only the seed `_example` row) → **1.3**
-- `status=planning` + required artifacts complete + required jsonl curated or inline mode → **1.4** (ask for start review; only run `task.py start` after user confirms)
+- `status=planning` + required artifacts complete + required jsonl curated or inline mode → **1.4** (review artifacts against the request; if existing authorization covers implementation and no blocking decision remains, run `task.py start` and continue; ask only for missing decisions or authorization)
 - `status=in_progress` + implementation not started → **2.1**
 - `status=in_progress` + implementation done, not yet checked → **2.2**
 - `status=in_progress` + check passed → **3.3** (spec update) → **3.4** (commit)

@@ -60,6 +60,8 @@ The roadmap must not describe planned SOEM parity as implemented support.
 
 1. `09-28-runtime-diagnostics-cli-ebpf`: versioned runtime status projection,
    ROS2-like read-only commands, incremental watch, and eBPF incident display.
+   Completed task records and the later executable-test correction are indexed
+   in [development history](../../../docs/development-history.md#runtime-diagnostic-child).
 2. `09-28-soem-dc-parity`: ordered capability plan and implementation slices
    for missing SOEM-class behavior while retaining DC invariants.
 

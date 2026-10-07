@@ -1,0 +1,120 @@
+{
+  "date": "2026-10-07",
+  "baseline_commit": "c7d43e51ed0a5e12107bad8f55267087801568fe",
+  "soem_tag": "v2.0.0",
+  "soem_commit": "304d1c05eab77dc0d426f1a5cf09c8cc7dc03713",
+  "cleanup": {
+    "removed_files": 289,
+    "removed_bytes": 1034715,
+    "archived_task_files": 286,
+    "personal_files": 3,
+    "retained_dedicated_records": 24,
+    "indexed_historical_tasks": 66,
+    "local_sha256_preserved": true,
+    "history_rewritten": false,
+    "final_tree_files": 346,
+    "tree_bytes_at_clean_validation": 6094572
+  },
+  "validation": {
+    "make_ci": {
+      "exit": 0,
+      "rust_tests_initial": 748,
+      "rust_tests_repeated_config": 36,
+      "python_tests": 98,
+      "live_tests_ignored_here": 6
+    },
+    "make_test_zenoh": {
+      "exit": 0,
+      "tests": 6
+    },
+    "minimum_rust": {
+      "version": "1.88.0",
+      "workspace_all_targets_all_features": "passed",
+      "core_product_config_aarch64_unknown_none": "passed",
+      "sdo_and_terminal_health_regressions": "passed"
+    },
+    "release_process_smoke_cases": 17,
+    "clean_checkout": {
+      "commit": "433158f",
+      "make_ci": "passed",
+      "archives_and_personal_journals_absent": true,
+      "golden_and_shared_tooling_preserved": true,
+      "make_test_zenoh": "passed (6 tests)",
+      "make_footprint": "passed"
+    },
+    "stable_rust": {
+      "version": "1.99.0",
+      "make_ci": "passed",
+      "make_test_zenoh": "passed (6 tests)"
+    }
+  },
+  "footprint": {
+    "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)\nbinary: rustc\ncommit-hash: 2d8144b7880597b6e6d3dfd63a9a9efae3f533d3\ncommit-date: 2026-07-07\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.0\nLLVM version: 22.1.6",
+    "host": "x86_64",
+    "profile": "release, default features",
+    "artifacts": [
+      {
+        "file": "esop",
+        "sha256": "40b075e7c60448090249df5db430dceca1ff93b7fcbb12f85c74d0f83e24ae9a",
+        "file_bytes": 24382672,
+        "stripped_copy_bytes": 17165976,
+        "elf_sections_bytes": {
+          "text": 16576445,
+          "data": 582616,
+          "bss": 5044
+        },
+        "preserved_markers": []
+      },
+      {
+        "file": "esop-cfggen",
+        "sha256": "9ee788d29f6b46e13724f769684b1770e7fa03f7e33af16fec4a566d185ad436",
+        "file_bytes": 1531032,
+        "stripped_copy_bytes": 1186280,
+        "elf_sections_bytes": {
+          "text": 1157458,
+          "data": 25408,
+          "bss": 2952
+        },
+        "preserved_markers": []
+      },
+      {
+        "file": "wire_round_trip",
+        "sha256": "e189083f3a16df5e9ea63afdac509b2a52ba67f7227ed3df39b659d3e3c15faf",
+        "file_bytes": 454600,
+        "stripped_copy_bytes": 349256,
+        "elf_sections_bytes": {
+          "text": 332883,
+          "data": 13008,
+          "bss": 4266
+        },
+        "preserved_markers": []
+      }
+    ],
+    "cli_startup_wait": {
+      "measured": true,
+      "scenario": "waiting for a nonresponsive loopback Zenoh handshake",
+      "samples": 367,
+      "sample_interval_ms": 5,
+      "peak_sampled_rss_kib": 11076,
+      "peak_sampled_threads": 5,
+      "elapsed_seconds": 2.007,
+      "exit_code": 5
+    },
+    "limits": [
+      "wire_round_trip links only the wire layer plus host std; it is not a full master",
+      "sampled startup RSS is not a steady-state, peak-bound or WCET claim",
+      "embedded flash/RAM/stack, complete distribution and HIL are not measured",
+      "stripped copies are measurement artifacts, not qualified release packages"
+    ]
+  },
+  "dependency_counts": {
+    "esop-ethercat-core": 8,
+    "esop-product-config": 8,
+    "esop-cli": 338
+  },
+  "verdict": {
+    "development": "usable with documented provider/host limits",
+    "software_complete_rc": "no-go",
+    "hardware_qualified_v1": "no-go"
+  }
+}

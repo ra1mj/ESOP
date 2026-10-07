@@ -348,11 +348,20 @@ impl TransportHealth {
 
     fn set(&self, state: ConnectionState) {
         // A refresh racing with close must not resurrect a terminal session.
-        let _ = self
-            .state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                (current != STATE_CLOSED).then_some(state as u8)
-            });
+        // Use CAS to support Rust 1.88 as well as toolchains that deprecate
+        // fetch_update in favor of the newer try_update API.
+        let mut current = self.state.load(Ordering::Acquire);
+        while current != STATE_CLOSED {
+            match self.state.compare_exchange_weak(
+                current,
+                state as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     fn close(&self) {

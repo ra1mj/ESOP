@@ -6,9 +6,10 @@
 
 ## Overview
 
-This directory documents conventions for the Rust workspace. The project has
-no HTTP server, database, or conventional request/response backend; most code
-runs in `no_std` protocol, lifecycle, and profile crates.
+This directory documents conventions for the Rust workspace and local
+development tooling. The project has no HTTP server, database, or conventional
+request/response backend; most code runs in `no_std` protocol, lifecycle, and
+profile crates.
 
 ---
 
@@ -20,6 +21,7 @@ runs in `no_std` protocol, lifecycle, and profile crates.
 | [Database Guidelines](./database-guidelines.md) | Persistence and database scope | Not applicable |
 | [Error Handling](./error-handling.md) | Error types, handling strategies | Filled |
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | Filled |
+| [Trellis Workflow](./trellis-workflow.md) | Session isolation, hook state and authorization reuse | Filled |
 | [EtherCAT Register Requests](./ethercat-register-requests.md) | Fixed-capacity asynchronous ESC register request contract | Filled |
 | [EtherCAT State Requests](./ethercat-state-requests.md) | Bounded explicit runtime ESM request contract | Filled |
 | [EtherCAT Explicit Rescan](./ethercat-rescan.md) | Bounded retained-plan PREOP topology verification contract | Filled |

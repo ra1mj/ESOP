@@ -285,7 +285,7 @@ impl<'a> SiiCategory<'a> {
         if self.kind != SII_CATEGORY_SYNC_MANAGER {
             return Err(SiiCategoryError::UnexpectedCategory);
         }
-        if self.data.len() % SII_SYNC_MANAGER_ENTRY_LEN != 0 {
+        if !self.data.len().is_multiple_of(SII_SYNC_MANAGER_ENTRY_LEN) {
             return Err(SiiCategoryError::InvalidSyncManagerLength);
         }
         Ok(SiiSyncManagerCategory { data: self.data })
@@ -483,7 +483,7 @@ pub struct SiiDcCategory<'a> {
 
 impl<'a> SiiDcCategory<'a> {
     fn parse(data: &'a [u8]) -> Result<Self, SiiCategoryError> {
-        if data.is_empty() || data.len() % SII_DC_ENTRY_LEN != 0 {
+        if data.is_empty() || !data.len().is_multiple_of(SII_DC_ENTRY_LEN) {
             return Err(SiiCategoryError::InvalidDcLength);
         }
         let category = Self { data };

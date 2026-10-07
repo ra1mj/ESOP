@@ -5,11 +5,11 @@ description: "Guides collaborative requirements discovery before implementation.
 
 # Trellis Brainstorm
 
-## Non-Negotiable Interview Contract
+## Requirements Discovery Contract
 
-Interview me relentlessly about every aspect of this plan until we reach a shared understanding. Walk down each branch of the design tree, resolving dependencies between decisions one-by-one. For each question, provide your recommended answer.
+Resolve material uncertainty in the requested scope. Reuse prior user decisions and authorization; investigate repository-answerable questions directly. Ask only when a remaining decision affects the result and cannot reasonably be resolved from available evidence.
 
-Ask the questions one at a time.
+When a question is needed, ask one at a time and provide your recommended answer. If no blocking question remains, finish the artifacts and proceed according to existing authorization; do not invent a question to satisfy a process step.
 
 ## Non-Negotiable Evidence Rule
 
@@ -25,7 +25,7 @@ Use this skill during Phase 1 planning to turn the user's request into clear req
 
 ## Preconditions
 
-Use this skill only after task-creation consent has been given and the user is ready to enter Trellis planning.
+Use this skill when the requested work needs requirements discovery. Routine local task bookkeeping is covered by the work request; do not require a separate task-creation confirmation. Small explicit fixes can use the direct path in `.trellis/workflow.md` without brainstorming or creating a task. Respect any explicit request to avoid Trellis tasks.
 
 If no task exists yet, create one:
 
@@ -49,8 +49,8 @@ Use a concise title from the user's request. Use a slug without a date prefix. `
    - product intent still needed from the user
    - scope or risk decisions still needed from the user
    - likely out-of-scope items
-4. Ask the single highest-value remaining question.
-5. Include your recommended answer with the question.
+4. If a material unresolved decision remains, ask the single highest-value question; otherwise continue preparing the artifacts.
+5. Include your recommended answer whenever a question is needed.
 6. After each user answer, update `prd.md` before continuing.
 7. For complex tasks, create or update `design.md` and `implement.md` before implementation starts.
 8. Before final review or `task.py start`, run the PRD convergence pass below.
@@ -69,6 +69,8 @@ Each question must include:
 - the trade-off if the user chooses differently
 
 Do not ask process questions such as whether to search, inspect files, or continue brainstorming. Do the evidence work directly. Ask the user only when the remaining issue is a product decision, preference, scope boundary, or risk tolerance choice.
+
+Do not reopen answered questions or ask again for authorization already covering the work. A request to fix or implement is execution authorization within that scope. Approval only to plan is not; an explicit review-before-implementation requirement still applies. Automatic wakeups do not supply missing answers or authorize wider scope.
 
 ## Thinking Framework: First Principles Analysis
 
@@ -168,6 +170,6 @@ Before declaring planning ready:
 - Remaining open questions are genuinely about user intent or scope.
 - Complex tasks have `design.md` and `implement.md`.
 - Sub-agent-dispatch tasks have real curated entries in both `implement.jsonl` and `check.jsonl`; seed-only manifests are not ready.
-- The user has reviewed the final planning artifacts or explicitly approved proceeding.
+- The artifacts have been reviewed against the request and recorded decisions; existing user authorization covers implementation and no blocking decision remains.
 
-Do not start implementation until the user approves or asks for implementation.
+Once ready, use Phase 1.4 to run `task.py start` and continue when implementation is already authorized. Ask for review only if the user requested that gate, authorized planning only, or a material unresolved decision changes the scope. A `planning` breadcrumb must not restart a completed interview.

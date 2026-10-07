@@ -1,7 +1,7 @@
 # ESOP 运行时诊断命令
 
-- 文档版本：1.0
-- 日期：2026-09-28
+- 文档版本：1.1
+- 日期：2026-10-07
 - 状态：初始只读命令集、类型化 Zenoh 查询、零 boot 发现、Domain/DC/生命周期/eBPF 渲染、doctor 和 bounded watch 已实现
 - 上游需求：PRD FR-030、FR-031、FR-035、FR-045、FR-047、FR-051
 
@@ -28,6 +28,16 @@ esop --robot <id> watch [status|dc|lifecycle|doctor|domain list|incident list]
 `watch` 另接受 50-60000 ms 的 `--interval-ms`，以及测试/资格场景使用的有限
 `--iterations`。默认 boot 为 0，表示只读发现当前 provider boot；首次成功应答后 watch
 固定该非零 boot，并将最新 State sequence 用作下一请求的 `after_sequence`。
+收到只有 incident 的增量应答时，watch 会立即显示 incident；doctor 会将新错误合并到
+上一份状态的健康结论，不会因缺少新 State 而忽略错误，也不会用该增量恢复此前的 degraded。
+完全空的增量表示没有新记录，不重印或伪造 State。首次非 incident 查询没有 State 则失败。
+
+`--timeout-ms` 分别限制会话建立和每次查询；关闭阶段另有固定 1000 ms 上限。
+Zenoh 1.10.1 的部分 builder 即使使用 `.await` 也会同步等待，因此 CLI 用一个支持
+Zenoh 的多线程 Tokio runtime，并将 session open/close 放入 blocking worker，确保
+主调用方的计时器能运行。无法取消的建立/关闭操作超时后退出进程，由操作系统回收资源。
+总运行时间还包含 watch 间隔、查询次数和本地输出；该参数不是整个 watch 的总时长。
+输出每次刷新；下游正常关闭管道时结束成功，其他输出错误返回 8。
 
 ## 3. 状态语义
 
@@ -53,14 +63,20 @@ eBPF health 数字沿用 ProcBuf 的 `ObservationState`：0 healthy、1 degraded
 | 2 | 参数或命令错误 |
 | 3 | doctor 完成但结果 degraded |
 | 4 | fleet/robot/Zenoh 配置或 session 创建失败 |
-| 5 | 调用方 wall-clock timeout |
+| 5 | session 建立、查询或关闭触发调用方 wall-clock timeout |
 | 6 | Zenoh 发送/接收、远端拒绝、Protobuf decode 或查询合同失败 |
 | 7 | 返回状态存在未知 enum、乱序 Domain 或非法 observation health |
+| 8 | 标准输出写入/刷新失败（正常关闭的管道除外） |
 
 ## 5. 证据与限制
 
 纯逻辑测试覆盖所有命令、help、缺参、未知命令、limit/interval/iterations 边界以及
-healthy/degraded 渲染。`make test-zenoh` 使用真实 loopback `zenohd 1.10.1`，验证零 boot
-查询同时返回 ProcBuf 投影的运行状态和一条 eBPF incident。该证据不证明远程 ACL、证书
+healthy/degraded 渲染。普通 `make ci` 还启动真实 `esop`/`esop-cfggen` 进程，覆盖 help、
+参数/配置错误、所有视图缺少 provider 的退出行为、无法完成握手时的建立超时，以及六个
+cfggen 黄金产物。`make test-zenoh` 使用真实 loopback `zenohd 1.10.1`，验证零 boot
+查询的 ProcBuf 状态和 eBPF incident，并启动真实 CLI 覆盖六个视图及其有限 watch、
+doctor 0/3、慢 provider、错误 Protobuf/schema/robot/boot、乱序 Domain/非法 enum、
+空 State、过时 sequence、boot 改变、incident-only 增量和关闭的输出管道。
+该证据不证明远程 ACL、证书
 生命周期、生产 provider retention、真实网卡/从站、DC 纳秒精度、目标 WCET、长期压力、
 ROS 2 discovery、实物 HIL 或功能安全。

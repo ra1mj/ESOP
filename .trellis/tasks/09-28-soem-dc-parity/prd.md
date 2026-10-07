@@ -57,6 +57,15 @@ statement of the remaining real-device/HIL boundary.
 
 ## Acceptance Criteria
 
+The pinned full-family/sample baseline and current closure evidence are in
+[the 2026-10-07 readiness audit](../../../docs/v1-readiness-audit.md).
+Its missing raw/EEPROM/CoE workflows, adapter enumeration, ENI, daemon/package
+integration and maintenance command namespaces are part of the full SOEM
+behavioral target in addition to the protocol order above. Complete every
+in-scope family for a software RC; hardware qualification is a separate gate.
+The published root license is currently MIT; a prior Apache proposal is not
+an approved relicensing.
+
 - [ ] The ordered capability matrix maps SOEM behavior to ESOP modules,
   scheduler priority, product fields, feature gates and tests.
 - [ ] Each implementation child includes a DC coexistence regression and P0

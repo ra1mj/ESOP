@@ -73,7 +73,9 @@ python3 ./.trellis/scripts/task.py create-pr [name] [--dry-run]
 
 > Run `python3 ./.trellis/scripts/task.py --help` to see the authoritative, up-to-date list.
 
-**Current-task mechanism**: `task.py create` creates the task directory and (when session identity is available) auto-sets the per-session active-task pointer so the planning breadcrumb fires immediately. `task.py start` writes the same pointer (idempotent if already set) and flips `task.json.status` from `planning` to `in_progress`. State is stored under `.trellis/.runtime/sessions/`. If no context key is available from hook input, `TRELLIS_CONTEXT_ID`, or a platform-native session environment variable, there is no active task and `task.py start` fails with a session identity hint. `task.py finish` deletes the current session file (status unchanged). `task.py archive <task>` writes `status=completed`, moves the directory to `archive/`, and deletes any runtime session files that still point at the archived task.
+**Current-task mechanism**: `task.py create` creates the task directory and (when session identity is available) auto-sets the per-session active-task pointer so the planning breadcrumb fires immediately. `task.py start` writes the same pointer (idempotent if already set) and flips `task.json.status` from `planning` to `in_progress`. State is stored under `.trellis/.runtime/sessions/`. A known session reads only its own pointer: a missing, empty, or malformed pointer means no active task; a stale reference stays visible as stale. Only readers without session identity may infer the sole runtime session's task; zero or multiple session files mean no task. Writes still require identity from hook input, `TRELLIS_CONTEXT_ID`, or a platform-native session environment variable. `task.py finish` deletes the current session file (status unchanged) without switching to another session's task. `task.py archive <task>` writes `status=completed`, moves the directory to `archive/`, and deletes any runtime session files that still point at the archived task.
+
+Binding a known task to the current session via `common.active_task.set_active_task` changes only the pointer. Use this for session recovery when task identity is established; do not call `task.py start` merely to repair a binding, since it also advances the phase.
 
 ### Workspace System
 
@@ -144,16 +146,25 @@ python3 ./.trellis/scripts/get_context.py --mode phase --step <X.Y>  # detailed 
 ## Phase Index
 
 ```
-Phase 1: Plan    → classify, get task-creation consent, then write planning artifacts
+Phase 1: Plan    → classify, establish scope and authorization, write planning artifacts
 Phase 2: Execute → implement only after task status is in_progress
 Phase 3: Finish  → verify, update spec, commit, and wrap up
 ```
 
 ### Request Triage
 
-- Simple conversation or small task: ask only whether this turn should create a Trellis task. If the user says no, skip Trellis for this session.
-- Complex task: ask whether you may create a Trellis task and enter planning. If the user says no, do not do broad inline implementation; explain, clarify scope, or suggest a smaller split.
-- User approval to create a task is not approval to start implementation. Planning still happens first.
+- Simple conversation: answer directly. A small, explicitly requested fix may use the direct path: inspect, load `trellis-before-dev`, edit, and run `trellis-check`, without a task-creation question.
+- Complex task: create or reuse a task and prepare the required artifacts within the user's requested scope. Routine local task bookkeeping is covered by the request; respect any explicit request to avoid Trellis tasks.
+- Approval only to plan or create a task is not implementation approval. A request to implement or fix already authorizes that work; reuse it after planning is ready.
+
+### Authorization and Progress
+
+- User authorization and constraints persist across turns. Check the conversation and recorded decisions before asking; do not ask again for an unchanged, already authorized action.
+- Complete and review the required artifacts before activation. If existing authorization covers their scope and no blocking decision remains, run `task.py start` and continue in the same turn. No special approval phrase or extra round trip is required.
+- Ask only for a material unresolved decision or an action outside existing authorization. State the concrete question and why it blocks that action, and continue independent authorized work.
+- A planning breadcrumb describes stored state; it is not an instruction to remain there forever. A goal continuation or automatic wakeup resumes existing authorization but creates no new authorization.
+- A directly requested workflow repair can follow the small-fix path while a larger task is planning. Keep the larger task's scope and phase separate; the repair does not authorize its unresolved product or release decisions.
+- Hooks only report state. Never infer approval from prompt keywords or automatically mutate task status inside a hook.
 
 ### Planning Artifacts
 
@@ -174,13 +185,13 @@ Create new children with `task.py create "<title>" --slug <name> --parent <paren
 <!-- Per-turn breadcrumb: shown when there is no active task (before Phase 1) -->
 
 [workflow-state:no_task]
-No active task. First classify the current turn and ask for task-creation consent before creating any Trellis task.
-Simple conversation / small task: ask only whether this turn should create a Trellis task. If the user says no, skip Trellis for this session.
-Complex task: ask the user if you can create a Trellis task and enter the planning phase. If the user says no, explain, clarify scope, or suggest a smaller split.
+No active task. Classify the current request and reuse existing authorization.
+Simple conversation: answer directly. Small explicit fix: inspect, use `trellis-before-dev`, edit, and use `trellis-check`; no task-creation question is needed.
+Complex work: create or reuse a task within the requested scope and prepare planning artifacts. Ask only about unresolved scope or missing authorization; respect an explicit request to avoid Trellis tasks.
 [/workflow-state:no_task]
 
 ### Phase 1: Plan
-- 1.0 Create task `[required · once]` (only after task-creation consent)
+- 1.0 Create task `[required · once]` (for work that needs a task, within authorized scope)
 - 1.1 Requirement exploration `[required · repeatable]` (`prd.md`; complex tasks also need `design.md` + `implement.md`)
 - 1.2 Research `[optional · repeatable]`
 - 1.3 Configure context `[required · once]` — Claude Code, Cursor, OpenCode, Codex, Kiro, Gemini, Qoder, CodeBuddy, Copilot, Droid, Pi, Oh My Pi, ZCode, Reasonix (sub-agent-dispatch platforms only; inline platforms skip)
@@ -190,8 +201,10 @@ Complex task: ask the user if you can create a Trellis task and enter the planni
 <!-- Per-turn breadcrumb: shown throughout Phase 1 (status='planning') -->
 
 [workflow-state:planning]
-Load `trellis-brainstorm`; stay in planning.
-Lightweight: `prd.md` can be enough. Complex: finish `prd.md`, `design.md`, and `implement.md`; ask for review before `task.py start`.
+Check remaining planning work; use `trellis-brainstorm` for unresolved requirements.
+Lightweight: `prd.md` can be enough. Complex: finish and review `prd.md`, `design.md`, and `implement.md`.
+When artifacts are ready and existing user authorization covers implementation, run `task.py start` and continue. Ask only for unresolved decisions or missing authorization; do not repeat an approval request. Automatic continuation creates no new authorization.
+An explicit small workflow fix may use the direct path without advancing this larger task.
 Multi-deliverable scope: consider a parent task plus independently verifiable child tasks; dependencies must be written in child artifacts, not implied by tree position.
 Sub-agent mode: curate `implement.jsonl` and `check.jsonl` as spec/research manifests before start.
 [/workflow-state:planning]
@@ -203,8 +216,10 @@ Sub-agent mode: curate `implement.jsonl` and `check.jsonl` as spec/research mani
      into a sub-agent. -->
 
 [workflow-state:planning-inline]
-Load `trellis-brainstorm`; stay in planning.
-Lightweight: `prd.md` can be enough. Complex: finish `prd.md`, `design.md`, and `implement.md`; ask for review before `task.py start`.
+Check remaining planning work; use `trellis-brainstorm` for unresolved requirements.
+Lightweight: `prd.md` can be enough. Complex: finish and review `prd.md`, `design.md`, and `implement.md`.
+When artifacts are ready and existing user authorization covers implementation, run `task.py start` and continue. Ask only for unresolved decisions or missing authorization; do not repeat an approval request. Automatic continuation creates no new authorization.
+An explicit small workflow fix may use the direct path without advancing this larger task.
 Multi-deliverable scope: consider a parent task plus independently verifiable child tasks; dependencies must be written in child artifacts, not implied by tree position.
 Inline mode: skip jsonl curation; Phase 2 reads artifacts/specs via `trellis-before-dev`.
 [/workflow-state:planning-inline]
@@ -225,6 +240,7 @@ Sub-agent dispatch protocol applies to all platforms and all sub-agents, includi
 [workflow-state:in_progress]
 Tools: `trellis-implement` / `trellis-research` are sub-agent types only (Task/Agent tool, NOT Skill; there is no skill by these names). `trellis-update-spec` is a skill. `trellis-check` exists as both; prefer the Agent form when verifying after code changes.
 Flow: `trellis-implement` -> `trellis-check` -> `trellis-update-spec` -> commit (Phase 3.4) -> `/trellis:finish-work`.
+Phase 3.4 reuses existing authorization for scoped commits; ask only if that authorization is missing or the user required review first. Keep unrelated changes outside the batch.
 Main-session default: dispatch implement/check sub-agents. Sub-agent self-exemption: if already running as `trellis-implement`, do NOT spawn another `trellis-implement` or `trellis-check`; if already running as `trellis-check`, do NOT spawn another `trellis-check` or `trellis-implement`. Dispatch is main session only.
 Dispatch prompt starts with `Active task: <task path from task.py current>`. Read context: jsonl entries -> `prd.md` -> `design.md if present` -> `implement.md if present`.
 [/workflow-state:in_progress]
@@ -236,6 +252,7 @@ Dispatch prompt starts with `Active task: <task path from task.py current>`. Rea
 
 [workflow-state:in_progress-inline]
 Flow: `trellis-before-dev` -> edit -> `trellis-check` -> validation -> `trellis-update-spec` -> commit (Phase 3.4) -> `/trellis:finish-work`.
+Phase 3.4 reuses existing authorization for scoped commits; ask only if that authorization is missing or the user required review first. Keep unrelated changes outside the batch.
 Do not dispatch implement/check sub-agents in inline mode.
 Read context: `prd.md` -> `design.md if present` -> `implement.md if present`, plus relevant spec/research loaded by skills.
 [/workflow-state:in_progress-inline]
@@ -274,7 +291,7 @@ When a user request matches one of these intents inside an active task, route fi
 
 [Claude Code, Cursor, OpenCode, codex-sub-agent, Kiro, Gemini, Qoder, CodeBuddy, Copilot, Droid, Pi, Oh My Pi, ZCode, Reasonix, Trae]
 
-- Planning or unclear requirements -> `trellis-brainstorm`.
+- Unresolved planning requirements -> `trellis-brainstorm`; ready artifacts with existing implementation authorization -> Phase 1.4.
 - `in_progress` implementation/check -> dispatch `trellis-implement` / `trellis-check`.
 - Repeated debugging -> `trellis-break-loop`; spec updates -> `trellis-update-spec`.
 
@@ -282,7 +299,7 @@ When a user request matches one of these intents inside an active task, route fi
 
 [codex-inline, Kilo, Antigravity, Devin]
 
-- Planning or unclear requirements -> `trellis-brainstorm`.
+- Unresolved planning requirements -> `trellis-brainstorm`; ready artifacts with existing implementation authorization -> Phase 1.4.
 - Before editing -> `trellis-before-dev`; after editing -> `trellis-check`.
 - Repeated debugging -> `trellis-break-loop`; spec updates -> `trellis-update-spec`.
 
@@ -290,7 +307,7 @@ When a user request matches one of these intents inside an active task, route fi
 
 ### Guardrails
 
-- Task creation approval is not implementation approval; implementation waits for `task.py start` after artifact review.
+- Planning-only approval is not implementation approval. Reuse an existing request to implement or fix; for tracked tasks, review ready artifacts and run `task.py start` before implementation without repeating permission.
 - PRD-only is valid for lightweight tasks; complex tasks need `design.md` + `implement.md`.
 - Planning must be persisted to task artifacts; checks must run before reporting completion.
 
@@ -307,11 +324,11 @@ python3 ./.trellis/scripts/get_context.py --mode phase --step <step>
 
 ## Phase 1: Plan
 
-Goal: classify the request, get task-creation consent when a task is needed, and produce the planning artifacts required before implementation.
+Goal: classify the request, establish scope using existing authorization, and produce the planning artifacts required before implementation. Small direct fixes follow Request Triage instead of creating a task.
 
 #### 1.0 Create task `[required · once]`
 
-Create the task directory only after task-creation consent. The command sets status to `planning`, writes `task.json`, creates a default `prd.md`, and auto-targets the new task when session identity is available:
+Create the task directory when the requested work needs task tracking. Reuse existing authorization for this local bookkeeping; do not ask a separate process question. The command sets status to `planning`, writes `task.json`, creates a default `prd.md`, and auto-targets the new task when session identity is available:
 
 ```bash
 python3 ./.trellis/scripts/task.py create "<task title>" --slug <name>
@@ -321,18 +338,18 @@ python3 ./.trellis/scripts/task.py create "<task title>" --slug <name>
 
 For task trees, create the parent task first and then create each child with `--parent <parent-dir>`. Do not start the parent just because children exist; start the child that owns the next independently verifiable deliverable.
 
-After this command succeeds, the per-turn breadcrumb auto-switches to `[workflow-state:planning]`, telling the AI to stay in planning.
+After this command succeeds, the per-turn breadcrumb auto-switches to `[workflow-state:planning]`, showing remaining planning work and the activation path.
 
-Run only `create` here — do not also run `start`. `start` flips status to `in_progress`, which switches the breadcrumb to the implementation phase before planning artifacts are reviewed. Save `start` for step 1.4.
+Save `start` for step 1.4 after preparing and reviewing artifacts. Continue through those steps in the same turn when scope and authorization are already clear.
 
 Skip when `python3 ./.trellis/scripts/task.py current --source` already points to a task.
 
 #### 1.1 Requirement exploration `[required · repeatable]`
 
-Load the `trellis-brainstorm` skill and explore requirements interactively with the user per the skill's guidance.
+Load `trellis-brainstorm` for unresolved requirements. Resolve what you can from repository evidence and prior user decisions; ask only questions that remain material to the task.
 
 The brainstorm skill will guide you to:
-- Ask one question at a time
+- Ask one material unresolved question at a time, when needed
 - Prefer researching over asking the user
 - Prefer offering options over open-ended questions
 - Update `prd.md` immediately after each user answer
@@ -435,13 +452,15 @@ Skip this step. Context is loaded directly by the `trellis-before-dev` skill in 
 
 #### 1.4 Activate task `[required · once]`
 
-After artifact review, flip the task status to `in_progress`:
+Review the completed artifacts against the user's request and recorded decisions. When existing authorization covers implementation and no blocking decision remains, flip the task status to `in_progress` and continue without another permission request:
 
 ```bash
 python3 ./.trellis/scripts/task.py start <task-dir>
 ```
 
 For lightweight tasks, `prd.md` can be enough. For complex tasks, `prd.md`, `design.md`, and `implement.md` must exist and be reviewed before start. On sub-agent-dispatch platforms, `implement.jsonl` and `check.jsonl` must both have real curated entries before start. Runtime consumers tolerate missing or seed-only manifests for compatibility, but that tolerance is not a planning-ready state.
+
+If the user requested planning only, explicitly required a review before implementation, or a material scope decision is unresolved, present the concrete artifacts and ask only for that missing decision or authorization. Preserve any answer across turns. Task status and automatic goal wakeups are not authorization signals.
 
 After this command succeeds, the breadcrumb auto-switches to `[workflow-state:in_progress]`, and the rest of Phase 2 / 3 follows.
 
@@ -452,7 +471,7 @@ If `task.py start` errors with a session-identity message (no context key from h
 | Condition | Required |
 |------|:---:|
 | `prd.md` exists | ✅ |
-| User confirms task should enter implementation | ✅ |
+| Existing user authorization covers implementation; no blocking scope decision remains | ✅ |
 | `task.py start` has been run (status = in_progress) | ✅ |
 | `research/` has artifacts (complex tasks) | recommended |
 | `design.md` exists (complex tasks) | ✅ |
@@ -589,7 +608,7 @@ Update the docs under `.trellis/spec/` accordingly. Even if the conclusion is "n
 
 **Spec-sync preamble**: before drafting commits, ask: did this task fix a bug or surface non-obvious knowledge that should land in `.trellis/spec/` so future-you (or future-AI) doesn't repeat the mistake? If yes, return to Phase 3.3 first — spec writes belong in the same task's commit batch, not as a forgotten follow-up.
 
-The AI drives a batched commit of this task's code changes so `/finish-work` can run cleanly afterwards. Goal: produce work commits FIRST, then bookkeeping (archive + journal) commits land after — never interleaved.
+The AI drives a batched commit of this task's code changes so `/finish-work` can run cleanly afterwards. Reuse authorization from the request and prior decisions, including authorization implicit in delivering the requested GitHub change. An explicit request to review before committing or to leave changes uncommitted still applies. Produce work commits before bookkeeping; archive/journal commits are conditional on `session_auto_commit` and tracked-path policy.
 
 **Step-by-step**:
 
@@ -611,31 +630,17 @@ The AI drives a batched commit of this task's code changes so `/finish-work` can
 
 4. **Draft a commit plan**. Group AI-edited files into logical commits (1 commit per coherent change unit, not 1 commit per file). Each entry: `<commit message>` + file list. List unrecognized files separately at the bottom.
 
-5. **Present the plan once, ask for one-shot confirmation**. Format:
-   ```
-   Proposed commits (in order):
-     1. <message>
-        - <file>
-        - <file>
-     2. <message>
-        - <file>
+5. **Summarize the scoped batch and check existing authorization**. If it covers the commits, continue in the same turn. Do not require a special reply or reopen unchanged approval. If authorization is missing or the user required prior review, present the concrete file grouping and messages, explain the boundary, and ask once. Leave unrelated or unrecognized files untouched; their presence alone does not block the known batch.
 
-   Unrecognized dirty files (NOT in any commit — confirm include/exclude):
-     - <file>
-     - <file>
+6. **Execute the authorized batch**: run `git add <files>` + `git commit -m "<msg>"` for each batch in order. Do not amend. Push only when the user's request or prior authorization includes remote delivery; a local commit does not itself authorize publishing.
 
-   Reply 'ok' / '行' to execute. Reply with edits, or '我自己来' / 'manual' to abort.
-   ```
-
-6. **On confirmation**: run `git add <files>` + `git commit -m "<msg>"` for each batch in order. Do not amend. Do not push.
-
-7. **On rejection** (user replies "不行" / "我自己来" / "manual" / any pushback on the plan): stop. Do not attempt a second plan. The user will commit by hand; you skip ahead to 3.5 once they confirm.
+7. **Respect user steering**: apply requested wording/grouping changes within the authorized scope without restarting approval. If the user asks to commit manually or refuses the commit action, stop committing and leave the work available; do not repeatedly propose the same action.
 
 **Rules**:
-- No `git commit --amend` anywhere — three-stage three-commit flow (work commits → archive commit → journal commit).
-- Never push to remote in this step.
-- If the user wants different message wording but accepts the file grouping, edit the message and re-confirm once — but if they reject the grouping, exit to manual mode.
-- The batched plan is one prompt; do not prompt per commit.
+- No `git commit --amend`; preserve existing commits and other work.
+- Commit, remote delivery, merge and release have distinct scopes. Reuse existing authorization for each; do not infer merge or release authorization solely from a commit or push.
+- Honor `session_auto_commit: false` and ignored local bookkeeping; never force-add those files to satisfy a fixed commit count.
+- When a confirmation is actually needed, ask for the batch once, not per commit or on every continuation.
 
 #### 3.5 Wrap-up reminder
 
@@ -650,7 +655,7 @@ This section is for developers who want to modify the Trellis workflow itself. A
 ### Changing what a step means
 
 Edit the corresponding step's walkthrough body in the Phase 1 / 2 / 3 sections above. Critical invariants:
-- No active task must triage first and ask for task-creation consent before creating a Trellis task.
+- No active task must triage first: handle small explicit fixes directly, and reuse authorization for routine task bookkeeping and already requested implementation.
 - Planning must distinguish lightweight PRD-only tasks from complex tasks that require `prd.md`, `design.md`, and `implement.md` before start.
 - Every required execution path must keep the Phase 3.4 commit reminder reachable before `/trellis:finish-work`.
 
@@ -667,7 +672,7 @@ All tag blocks live in the `## Phase Index` section above, immediately after eac
 
 ### Changing the per-turn prompt text
 
-Directly edit the body of the corresponding `[workflow-state:STATUS]` block. After editing, run `trellis update` (if you're a template maintainer) or restart your AI session (if you're customizing your own project) — no script changes required.
+Directly edit the body of the corresponding `[workflow-state:STATUS]` block. The local hook reads this file on each invocation, so the next prompt picks up the edited text; no restart or `trellis update` is required. Keep local customization hashes unchanged so a future template update can detect the edits.
 
 ### Adding a custom status
 

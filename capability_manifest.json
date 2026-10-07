@@ -618,6 +618,7 @@
       "evidence": [
         "crates/esop-cli/src/lib.rs",
         "crates/esop-cli/src/main.rs",
+        "crates/esop-cli/tests/command.rs",
         "crates/esop-ipc/src/payloads.rs",
         "crates/esop-ipc/tests/payloads.rs",
         "crates/esop-zenoh-gateway/src/runtime.rs",

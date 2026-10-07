@@ -678,17 +678,15 @@ impl<const MAX_OBJECTS: usize> SdoInformationTransfer<MAX_OBJECTS> {
         if fragments_left != 0 && !incomplete {
             return self.fail(SdoInformationError::FragmentState);
         }
-        if !first {
-            if let Some(expected) = self.next_fragments_left {
-                if expected != fragments_left {
-                    return self.fail(SdoInformationError::FragmentSequence {
-                        expected,
-                        actual: fragments_left,
-                    });
-                }
-                if expected == 0 && incomplete {
-                    return self.fail(SdoInformationError::FragmentState);
-                }
+        if !first && let Some(expected) = self.next_fragments_left {
+            if expected != fragments_left {
+                return self.fail(SdoInformationError::FragmentSequence {
+                    expected,
+                    actual: fragments_left,
+                });
+            }
+            if expected == 0 && incomplete {
+                return self.fail(SdoInformationError::FragmentState);
             }
         }
         Ok(())
@@ -781,10 +779,10 @@ impl<const MAX_OBJECTS: usize> SdoInformationTransfer<MAX_OBJECTS> {
     }
 
     fn append_object_indices(&mut self, bytes: &[u8]) -> Result<(), SdoInformationError> {
-        if bytes.len() % 2 != 0 {
+        if !bytes.len().is_multiple_of(2) {
             return self.fail(SdoInformationError::MalformedList);
         }
-        for chunk in bytes.chunks_exact(2) {
+        for chunk in bytes.as_chunks::<2>().0 {
             let index = u16::from_le_bytes([chunk[0], chunk[1]]);
             if index == 0 {
                 return self.fail(SdoInformationError::InvalidObjectIndex);

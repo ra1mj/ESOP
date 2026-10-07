@@ -2312,6 +2312,16 @@ from actual hosted fault injection and performance claims.
 - Parser/renderer tests cover all commands and degraded evidence. The live
   Zenoh gate must query one projected operational State plus one correlated
   RuntimeIncident through the same public client used by the binary.
+- Execute the real CLI in tests: library-only tests cannot catch a broken
+  Tokio scheduler in `main`. Zenoh 1.10.1 requires the multi-thread runtime;
+  its open builder synchronously calls `wait` during `IntoFuture`, so a timeout
+  wrapped directly around `open().await` cannot bound a blocked handshake.
+  Keep CLI open/close on blocking workers and enforce deadlines from the
+  caller, exiting the process if an uncancellable blocking operation times out.
+- Watch must surface incident-only deltas without inventing a fresh State or
+  recovering an earlier degraded result. Test all six real views/watch forms,
+  doctor exits, malformed/foreign/stale replies, startup/query timeouts, and
+  bounded process cleanup through `tests/command.rs` and `tests/zenoh_live.rs`.
 
 ### 7. Wrong vs Correct
 

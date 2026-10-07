@@ -940,24 +940,24 @@ impl MailboxController {
                     self.poll_due_ns = now_ns.saturating_add(self.config.poll_interval_ns);
                     return Ok(MailboxProgress::NoMessage);
                 }
-                if frame.header.protocol == MailboxProtocol::CoE {
-                    if let Ok(emergency) = CoeEmergency::parse(frame.payload) {
-                        let Some(emergency_sink) = emergency_sink else {
-                            return self.retry_or_fail(MailboxError::EmergencyUnconsumed, now_ns);
-                        };
-                        let event = CoeEmergencyEvent::new(
-                            now_ns,
-                            self.station_address,
-                            self.generation,
-                            frame.header.counter,
-                            emergency,
-                        );
-                        let _ = emergency_sink.record(event);
-                        self.pending = None;
-                        self.poll_due_ns = now_ns.saturating_add(self.config.poll_interval_ns);
-                        self.discarded_frames = self.discarded_frames.saturating_add(1);
-                        return Ok(MailboxProgress::EmergencyConsumed);
-                    }
+                if frame.header.protocol == MailboxProtocol::CoE
+                    && let Ok(emergency) = CoeEmergency::parse(frame.payload)
+                {
+                    let Some(emergency_sink) = emergency_sink else {
+                        return self.retry_or_fail(MailboxError::EmergencyUnconsumed, now_ns);
+                    };
+                    let event = CoeEmergencyEvent::new(
+                        now_ns,
+                        self.station_address,
+                        self.generation,
+                        frame.header.counter,
+                        emergency,
+                    );
+                    let _ = emergency_sink.record(event);
+                    self.pending = None;
+                    self.poll_due_ns = now_ns.saturating_add(self.config.poll_interval_ns);
+                    self.discarded_frames = self.discarded_frames.saturating_add(1);
+                    return Ok(MailboxProgress::EmergencyConsumed);
                 }
                 if frame.header.protocol != self.protocol {
                     return self.retry_or_fail(MailboxError::ProtocolMismatch, now_ns);

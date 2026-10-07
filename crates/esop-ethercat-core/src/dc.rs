@@ -1108,7 +1108,7 @@ impl DcSyncTiming {
             )?
         } else if mode.sync0_cycle_factor < 0 {
             let divisor = i32::from(mode.sync0_cycle_factor).unsigned_abs() as u64;
-            if base_period_ns % divisor != 0 {
+            if !base_period_ns.is_multiple_of(divisor) {
                 return Err(DcSyncTimingError::InexactCycle0Division);
             }
             checked_u32(base_period_ns / divisor, DcSyncTimingError::Cycle0Overflow)?

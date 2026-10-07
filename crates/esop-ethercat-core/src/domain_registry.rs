@@ -1027,10 +1027,10 @@ impl<const DOMAINS: usize, const PDOS: usize, const DATAGRAMS: usize>
         fmmu_index: usize,
         spec: SiiSegmentDatagramSpec,
     ) -> Result<(), DomainRegistryError> {
-        if segment.logical_bit_offset % 8 != 0
-            || segment.physical_bit_offset % 8 != 0
+        if !segment.logical_bit_offset.is_multiple_of(8)
+            || !segment.physical_bit_offset.is_multiple_of(8)
             || segment.bit_length == 0
-            || segment.bit_length % 8 != 0
+            || !segment.bit_length.is_multiple_of(8)
         {
             return Err(DomainRegistryError::SiiSegmentNotByteAddressable);
         }

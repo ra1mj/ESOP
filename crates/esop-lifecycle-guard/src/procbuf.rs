@@ -749,12 +749,12 @@ pub fn lifecycle_events_to_procbuf<
         return Err(LifecycleEventError::CursorAhead);
     }
     let oldest = guard.transition_at(0);
-    if let Some(record) = oldest {
-        if cursor.next_sequence < record.sequence {
-            return Err(LifecycleEventError::HistoryOverrun {
-                missed: record.sequence - cursor.next_sequence,
-            });
-        }
+    if let Some(record) = oldest
+        && cursor.next_sequence < record.sequence
+    {
+        return Err(LifecycleEventError::HistoryOverrun {
+            missed: record.sequence - cursor.next_sequence,
+        });
     }
     if cursor.next_sequence == guard.transition_sequence.saturating_add(1)
         && guard.pending_stop_timeout_events_mask == 0
