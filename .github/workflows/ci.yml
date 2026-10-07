@@ -8,6 +8,18 @@ permissions:
   contents: read
 
 jobs:
+  msrv:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          targets: aarch64-unknown-none
+      - name: Check declared minimum Rust version
+        run: |
+          cargo check --locked --workspace --all-targets --all-features
+          cargo check --locked -p esop-ethercat-core -p esop-product-config --target aarch64-unknown-none
+
   rust:
     runs-on: ubuntu-24.04
     steps:

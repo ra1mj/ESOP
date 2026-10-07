@@ -598,10 +598,10 @@ impl Cia402PdoMap {
 
     fn preflight_input(&self, image: &[u8]) -> Result<(), Cia402PdoError> {
         for field in ALL_FIELDS {
-            if let Some(entry) = self.entry(field) {
-                if entry.direction == PdoDirection::Tx {
-                    entry.read_unsigned(image).map_err(Cia402PdoError::Pdo)?;
-                }
+            if let Some(entry) = self.entry(field)
+                && entry.direction == PdoDirection::Tx
+            {
+                entry.read_unsigned(image).map_err(Cia402PdoError::Pdo)?;
             }
         }
         Ok(())

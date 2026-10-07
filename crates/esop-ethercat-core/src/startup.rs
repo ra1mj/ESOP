@@ -1450,13 +1450,13 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                         error,
                     });
                 }
-                if let Some(mailbox) = profile.expected_mailbox {
-                    if let Err(error) = mailbox.validate() {
-                        return Err(StartupError::InvalidMailboxProfile {
-                            position: profile.position,
-                            error,
-                        });
-                    }
+                if let Some(mailbox) = profile.expected_mailbox
+                    && let Err(error) = mailbox.validate()
+                {
+                    return Err(StartupError::InvalidMailboxProfile {
+                        position: profile.position,
+                        error,
+                    });
                 }
                 if let Some(receive_sync_manager) = profile.expected_mailbox_receive_sync_manager {
                     let mailbox = profile.expected_mailbox.ok_or(

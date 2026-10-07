@@ -53,7 +53,7 @@ fn system_page_size() -> io::Result<usize> {
 }
 
 fn touch_anonymous_chunk(page_size: usize) -> io::Result<usize> {
-    if CHUNK_BYTES % page_size != 0 {
+    if !CHUNK_BYTES.is_multiple_of(page_size) {
         return Err(invalid_data(
             "qualification chunk was not aligned to the system page size",
         ));
@@ -169,7 +169,7 @@ fn run(object_path: PathBuf, output_path: PathBuf) -> Result<(), Box<dyn Error>>
     let _ = fs::remove_file(&temp_path);
 
     let page_size = system_page_size()?;
-    if page_size < 4096 || !page_size.is_power_of_two() || CHUNK_BYTES % page_size != 0 {
+    if page_size < 4096 || !page_size.is_power_of_two() || !CHUNK_BYTES.is_multiple_of(page_size) {
         return Err(invalid_data("system page geometry was unsupported").into());
     }
     let chunk_pages = CHUNK_BYTES / page_size;

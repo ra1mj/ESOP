@@ -1,4 +1,5 @@
 SHELL := /bin/sh
+.DEFAULT_GOAL := test
 
 CARGO ?= cargo
 RUSTUP ?= rustup
@@ -7,6 +8,20 @@ CFGGEN_EXAMPLE ?= config/examples/sim-dual-axis/product.json
 CFGGEN_OUTPUT ?= build/generated/sim-dual-axis
 CFGGEN_EXPECTED ?= config/examples/sim-dual-axis/expected
 CFGGEN_ARTIFACTS := device_inventory.json esop_product_config.h esop_product_config.rs procbuf_layout.json product_config.json robot_build_input.json
+
+.PHONY: core-check host-build core-example footprint
+
+# Keep the minimal core graph separate from host transports and observability.
+core-check: no-std
+
+host-build:
+	$(CARGO) build --locked --release -p esop-cli -p esop-cfggen
+
+core-example:
+	$(CARGO) run --locked --release -p esop-ethercat-core --example wire_round_trip
+
+footprint: host-build core-example
+	python3 scripts/measure-footprint.py --output build/footprint_report.json
 
 .PHONY: test test-hil test-ipc test-zenoh test-ebpf-gateway-runtime test-ebpf-raw-port-runtime test-ebpf-process-exit-runtime test-ebpf-oom-runtime test-ebpf-scheduler-migration-runtime test-ebpf-scheduler-runqueue-runtime test-ebpf-softirq-runtime test-ebpf-page-fault-runtime test-ebpf-network-drop-runtime test-ebpf-observability-degradation-runtime check fmt-check workflow-check lint release no-std bpf-syntax bpf capability-manifest proto-schema cfggen-example cfggen-runtime-example build-report cfggen-build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-oom-report ebpf-scheduler-migration-report ebpf-scheduler-runqueue-report ebpf-softirq-report ebpf-page-fault-report ebpf-network-drop-report ebpf-observability-degradation-report r2-qualification zenoh-check setup-rust ci
 

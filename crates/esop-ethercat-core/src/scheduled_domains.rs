@@ -813,10 +813,10 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
         mailbox: &mut MailboxController,
         request: Option<RequestHandle>,
     ) -> Result<ScheduledMailboxReceiveReport<P::Error, DOMAINS>, ScheduledReceiveError> {
-        if let Some(handle) = request {
-            if !mailbox_request_matches(mailbox, controls, handle) {
-                return Err(ScheduledReceiveError::MailboxRequestMismatch);
-            }
+        if let Some(handle) = request
+            && !mailbox_request_matches(mailbox, controls, handle)
+        {
+            return Err(ScheduledReceiveError::MailboxRequestMismatch);
         }
         let received =
             self.receive_with_dc_and_control(master, port, scratch, generation, dc, controls)?;
@@ -909,16 +909,15 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
                 return Err(ScheduledMailboxTxError::Service(error));
             }
         };
-        if let Some(handle) = request {
-            if controls
+        if let Some(handle) = request
+            && controls
                 .get(handle)
                 .is_some_and(|item| item.state == RequestState::Prepared)
-            {
-                controls
-                    .release(handle)
-                    .map_err(ScheduledMailboxTxError::Control)?;
-                request = None;
-            }
+        {
+            controls
+                .release(handle)
+                .map_err(ScheduledMailboxTxError::Control)?;
+            request = None;
         }
         Ok(ScheduledMailboxTxReport { service, request })
     }
@@ -1077,35 +1076,34 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
         if report.failure.is_none() && port.now_ns() >= cycle_deadline_ns {
             report.failure = Some(ScheduledServiceTxFailure::Deadline);
         }
-        if report.failure.is_none() {
-            if let Some((handle, (control_generation, control_deadline_ns))) =
+        if report.failure.is_none()
+            && let Some((handle, (control_generation, control_deadline_ns))) =
                 request.zip(control_deadline_ns)
-            {
-                if port.now_ns() >= control_deadline_ns {
-                    // The request is still Prepared; the service can consume
-                    // the terminal error without waiting for an RX timeout.
-                    let _ = controls.fail_transmit(handle);
-                    report.failure = Some(ScheduledServiceTxFailure::Deadline);
-                } else {
-                    master.reap_expired_rx_before_tx(port.now_ns());
-                    let sent = match master.acquire_frame(control_generation, control_deadline_ns) {
-                        Ok(frame) => match master.build_control_request(controls, handle, frame) {
-                            Ok(_) => master
-                                .submit_frame(port, frame)
-                                .map_err(ScheduledServiceFrameError::Transmit),
-                            Err(error) => {
-                                let _ = master.release_unarmed_frame(frame);
-                                Err(ScheduledServiceFrameError::Build(error))
-                            }
-                        },
-                        Err(error) => Err(ScheduledServiceFrameError::FramePool(error)),
-                    };
-                    match sent {
-                        Ok(()) => report.control_sent = true,
+        {
+            if port.now_ns() >= control_deadline_ns {
+                // The request is still Prepared; the service can consume
+                // the terminal error without waiting for an RX timeout.
+                let _ = controls.fail_transmit(handle);
+                report.failure = Some(ScheduledServiceTxFailure::Deadline);
+            } else {
+                master.reap_expired_rx_before_tx(port.now_ns());
+                let sent = match master.acquire_frame(control_generation, control_deadline_ns) {
+                    Ok(frame) => match master.build_control_request(controls, handle, frame) {
+                        Ok(_) => master
+                            .submit_frame(port, frame)
+                            .map_err(ScheduledServiceFrameError::Transmit),
                         Err(error) => {
-                            let _ = controls.fail_transmit(handle);
-                            report.failure = Some(ScheduledServiceTxFailure::Control(error));
+                            let _ = master.release_unarmed_frame(frame);
+                            Err(ScheduledServiceFrameError::Build(error))
                         }
+                    },
+                    Err(error) => Err(ScheduledServiceFrameError::FramePool(error)),
+                };
+                match sent {
+                    Ok(()) => report.control_sent = true,
+                    Err(error) => {
+                        let _ = controls.fail_transmit(handle);
+                        report.failure = Some(ScheduledServiceTxFailure::Control(error));
                     }
                 }
             }

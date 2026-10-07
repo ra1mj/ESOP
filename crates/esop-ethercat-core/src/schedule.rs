@@ -103,8 +103,8 @@ impl<const DOMAINS: usize, const SLOTS: usize> ScheduleTable<DOMAINS, SLOTS> {
         for slot in 0..hyperperiod as usize {
             let mut due_mask = 0u64;
             for domain in table.domains[..table.domain_count].iter() {
-                if (slot as u32 + domain.period_ticks - domain.phase_ticks) % domain.period_ticks
-                    == 0
+                if (slot as u32 + domain.period_ticks - domain.phase_ticks)
+                    .is_multiple_of(domain.period_ticks)
                 {
                     due_mask |= 1u64 << domain.id;
                 }

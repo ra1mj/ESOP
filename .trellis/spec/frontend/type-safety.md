@@ -5,7 +5,7 @@
 
 ## Current Scope
 
-The workspace uses Rust 2024 with `rust-version = 1.85`; there is no
+The workspace uses Rust 2024 with `rust-version = 1.88`; there is no
 TypeScript compiler or runtime validation library.
 
 ## Type Organization

@@ -790,14 +790,14 @@ impl ScheduledProductionServiceScheduler {
                         }
                     }
                 }
-                if fault.is_none() {
-                    if let Err(error) = reconcile_reconfigure_progress(
+                if fault.is_none()
+                    && let Err(error) = reconcile_reconfigure_progress(
                         services,
                         progress,
                         cycle.receive.received.report.cycle,
-                    ) {
-                        fault = Some(error);
-                    }
+                    )
+                {
+                    fault = Some(error);
                 }
                 fault = fault.or_else(|| {
                     services

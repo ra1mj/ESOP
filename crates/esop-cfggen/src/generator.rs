@@ -881,13 +881,12 @@ fn resolve_slaves(base: &Path, slaves: &[SlaveManifest]) -> Result<Vec<ResolvedS
         }))?;
         if let Some(previous) =
             source_labels.insert(manifest.esi.label.clone(), semantic_sha256.clone())
+            && previous != semantic_sha256
         {
-            if previous != semantic_sha256 {
-                return Err(GeneratorError::Invalid(format!(
-                    "ESI label {:?} refers to different semantic content",
-                    manifest.esi.label
-                )));
-            }
+            return Err(GeneratorError::Invalid(format!(
+                "ESI label {:?} refers to different semantic content",
+                manifest.esi.label
+            )));
         }
         resolved.push(ResolvedSlave {
             manifest: manifest.clone(),
@@ -1495,7 +1494,7 @@ fn append_slave_pdos(
                 .ok_or_else(|| GeneratorError::Invalid("PDO bit offset overflows".to_owned()))?;
         }
     }
-    if *bit_offset % 8 != 0 {
+    if !(*bit_offset).is_multiple_of(8) {
         return Err(GeneratorError::Invalid(format!(
             "slave {} {:?} PDO selection is not byte-addressable",
             slave.manifest.name, direction
