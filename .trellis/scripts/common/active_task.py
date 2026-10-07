@@ -2,8 +2,8 @@
 """Session-scoped active task resolution.
 
 The user-facing concept is a single "active task". Trellis stores that pointer
-per AI session/window under `.trellis/.runtime/sessions/`; without a stable
-session key there is no active task.
+per AI session/window under `.trellis/.runtime/sessions/`. Identity-less
+readers may infer a task only when exactly one session file exists.
 """
 
 from __future__ import annotations
@@ -474,12 +474,12 @@ def resolve_active_task(
 ) -> ActiveTask:
     """Resolve the active task from session runtime state only.
 
-    A stale session task is returned as stale. Missing context identity or a
-    missing/empty session context falls back to single-session inference: if
-    exactly one session file exists in the runtime, return its task with
-    source_type="session-fallback" — covers class-2 platform sub-agents (codex,
-    copilot, gemini, qoder) that don't inherit the parent's session id. ≥2
-    files or 0 files yield ActiveTask(None) — refuses to guess across windows.
+    A known context resolves only its own pointer, including stale references.
+    A missing, empty, or malformed pointer means that session has no active
+    task; it must never borrow another session's task. Only readers without
+    context identity may use single-session inference: exactly one runtime
+    session file yields source_type="session-fallback". This supports agents
+    that don't inherit session identity; zero or multiple files yield no task.
     """
     context_key = resolve_context_key(platform_input, platform)
     if context_key:
@@ -488,6 +488,7 @@ def resolve_active_task(
         active = _active_from_ref(task_ref, repo_root, "session", context_key)
         if active:
             return active
+        return ActiveTask(None, "none", context_key)
 
     fallback = _resolve_single_session_fallback(repo_root)
     if fallback is not None:

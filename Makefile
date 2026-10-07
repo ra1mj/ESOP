@@ -8,7 +8,7 @@ CFGGEN_OUTPUT ?= build/generated/sim-dual-axis
 CFGGEN_EXPECTED ?= config/examples/sim-dual-axis/expected
 CFGGEN_ARTIFACTS := device_inventory.json esop_product_config.h esop_product_config.rs procbuf_layout.json product_config.json robot_build_input.json
 
-.PHONY: test test-hil test-ipc test-zenoh test-ebpf-gateway-runtime test-ebpf-raw-port-runtime test-ebpf-process-exit-runtime test-ebpf-oom-runtime test-ebpf-scheduler-migration-runtime test-ebpf-scheduler-runqueue-runtime test-ebpf-softirq-runtime test-ebpf-page-fault-runtime test-ebpf-network-drop-runtime test-ebpf-observability-degradation-runtime check fmt-check lint release no-std bpf-syntax bpf capability-manifest proto-schema cfggen-example cfggen-runtime-example build-report cfggen-build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-oom-report ebpf-scheduler-migration-report ebpf-scheduler-runqueue-report ebpf-softirq-report ebpf-page-fault-report ebpf-network-drop-report ebpf-observability-degradation-report r2-qualification zenoh-check setup-rust ci
+.PHONY: test test-hil test-ipc test-zenoh test-ebpf-gateway-runtime test-ebpf-raw-port-runtime test-ebpf-process-exit-runtime test-ebpf-oom-runtime test-ebpf-scheduler-migration-runtime test-ebpf-scheduler-runqueue-runtime test-ebpf-softirq-runtime test-ebpf-page-fault-runtime test-ebpf-network-drop-runtime test-ebpf-observability-degradation-runtime check fmt-check workflow-check lint release no-std bpf-syntax bpf capability-manifest proto-schema cfggen-example cfggen-runtime-example build-report cfggen-build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-oom-report ebpf-scheduler-migration-report ebpf-scheduler-runqueue-report ebpf-softirq-report ebpf-page-fault-report ebpf-network-drop-report ebpf-observability-degradation-report r2-qualification zenoh-check setup-rust ci
 
 test:
 	$(CARGO) test --workspace --all-features
@@ -58,6 +58,9 @@ check:
 fmt-check:
 	$(CARGO) fmt --all -- --check
 	git diff --check
+
+workflow-check:
+	python3 -m unittest discover -s scripts/tests -p 'test_trellis_workflow.py'
 
 lint:
 	$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
@@ -156,4 +159,4 @@ zenoh-check:
 setup-rust:
 	$(RUSTUP) target add $(RUST_TARGET)
 
-ci: fmt-check check test lint release no-std bpf-syntax capability-manifest proto-schema cfggen-build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-oom-report ebpf-scheduler-migration-report ebpf-scheduler-runqueue-report ebpf-softirq-report ebpf-page-fault-report ebpf-network-drop-report ebpf-observability-degradation-report r2-qualification zenoh-check
+ci: fmt-check workflow-check check test lint release no-std bpf-syntax capability-manifest proto-schema cfggen-build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-oom-report ebpf-scheduler-migration-report ebpf-scheduler-runqueue-report ebpf-softirq-report ebpf-page-fault-report ebpf-network-drop-report ebpf-observability-degradation-report r2-qualification zenoh-check
