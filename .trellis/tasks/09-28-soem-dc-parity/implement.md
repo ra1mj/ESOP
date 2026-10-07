@@ -1,5 +1,20 @@
 # Implementation plan
 
+## Readiness-audit dependencies
+
+The [readiness audit](../../../docs/v1-readiness-audit.md#ordered-v1-closure)
+owns the complete family/sample matrix and current binary-test evidence.
+Before enabling maintenance writes or file transfers, provide single-NIC
+runtime ownership and bounded local maintenance admission. Mailbox protocols
+depend on a shared fair broker, not independent per-protocol RX owners. ENI
+depends on normalized product configuration. Redundancy depends on shared RX
+duplicate authority and one authoritative DC sample. Complete API/CLI/process
+and daemon/package evidence before software RC; then qualify the frozen product
+and target with physical hardware. The ordered steps below must carry these
+dependencies into each child artifact.
+
+## Protocol implementation sequence
+
 1. Complete and archive the runtime diagnostics CLI child so every later
    capability has stable status and incident visibility.
 2. Create a cyclic-mailbox child task covering fixed fairness, protocol

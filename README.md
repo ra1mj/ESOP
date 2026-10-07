@@ -1,97 +1,74 @@
 # ESOP
 
-**ESOP = EtherCAT Simple Operating System**
+**EtherCAT Simple Operating System**：以 Rust `no_std` 核心为基础的 EtherCAT
+实时控制框架，主机侧提供产品配置生成、只读诊断和可选 eBPF 观测。
 
-ESOP 是面向嵌入式实时控制的 EtherCAT 简易操作系统；EtherCAT 主站是其首个核心组件。
+目前是 **0.1.0 开发框架**，还不是与 SOEM 2.0 功能齐全对齐的 V1：FoE、SoE、EoE、
+双网卡冗余、ENI 和完整主站服务/维护命令仍待实现，实物 HIL/WCET 也未完成。
+具体矩阵、CLI 验证和体积测量见 [V1 审计](docs/v1-readiness-audit.md)。
 
-项目的第一份交付物是基于 SOEM 与 IgH EtherCAT Master 源码分析形成的主站需求文档：
+## 快速开始
 
-- [EtherCAT 主站需求与架构说明](docs/ethercat-master-requirements.md)
-- [机器人 ESOP 软件规划](docs/robotics-esop-software-plan.md)
-- [ESOP 实时与性能架构决策](docs/esop-performance-architecture-decision.md)
-- [ETG.1500、Beckhoff 与 CiA 402 主站决策](docs/esop-etg-cia402-master-requirements.md)
-- [eBPF 运行时观测与问题归因设计](docs/esop-ebpf-runtime-observability.md)
+Linux 开发环境需要 Rust **1.88+**、Python 3 和 GCC。普通构建和测试不需要 root。
+体积测量另需 binutils（`size`、`nm`、`strip`）。
 
-Linux 观测适配器位于 `crates/esop-ebpf-runtime/`：它使用 Rust/Aya 加载预编译 CO-RE BPF ELF，按能力挂载 tracepoint，从 ringbuf 解码固定证据并送入 `RuntimeAgent`。当前 BPF bundle 已包含固定容量的调度唤醒延迟、按受跟踪 TID 聚合的 CPU 迁移窗口、硬 IRQ/softirq entry/exit 时长采集、按 EtherType/可选 ifindex 聚合的 `kfree_skb` 丢包窗口、按 CPU/进程聚合的用户态页错误窗口、按 cpufreq policy CPU 去重的低于产品频率下限 episode、受跟踪进程的主线程退出和 OOM victim PID 硬事实归因，以及可选的 Zenoh gateway publish/callback 与 Linux raw-port syscall begin/end uprobe 对。gateway 使用稳定 v1 C ABI marker 和一套进程内非零 request ID；raw port 使用独立稳定 v1 marker 和固定 1024 项 per-thread LRU 状态，只测量合法 TX 的 `send(2)` 及每次非阻塞 `recv(2)` 调用。两类证据都只在严格超过各自阈值并关联 transport-risk cycle 时生成事件，分别归因为 `GATEWAY_STALL` 和 `HOST_PORT_STALL`。普通工作线程退出只增加诊断计数，不生成 `USER_COMPONENT_EXIT`。其他超阈值软证据只有与 cycle 风险窗口相关时才分别归因为 `HOST_SCHEDULER_STALL`、`HOST_IRQ_STORM`、`HOST_NIC_DROP`、`HOST_PAGE_FAULT` 或 `HOST_CPU_THROTTLE`，OOM 与主线程退出则保持无需 cycle 上下文的 critical 事件。迁移、限频、gateway 和 raw-port syscall 证据都不证明单一根因；raw-port 证据不覆盖驱动队列、NIC DMA、线缆、从站或完整周期。用户探针缺失不会阻止内核观测基线运行，实时主站核心不依赖 Aya，也不等待观测器。
-
-`make test-ebpf-scheduler-runqueue-runtime` 在至少允许两个 CPU 且可进入 `SCHED_FIFO` 的特权托管 Linux 上验证真实调度唤醒延迟链：控制线程留在 CPU B，精确跟踪的普通 target 在 CPU A 进入私有 futex 睡眠，CPU A 的有界 FIFO blocker 激活后从 CPU B 唤醒唯一 waiter。target 在 25 ms blocker 持有期间必须保持未完成，释放后由 `sched_switch` 生成唯一 `KernelScheduler/SchedulerRunqueueLatency` 记录、Error `HostSchedulerStall`/`ControlledStop` incident 和 Degraded heartbeat；完整调度前提、精确 TID/CPU、时长、ringbuf、统计、cycle、incident 与健康字段原子写入 `build/ebpf_scheduler_runqueue_qualification.json` 后做严格 schema 校验。该证据只证明 hosted-kernel controlled wake-to-switch 共享链，不代表普通调度负载、产品优先级/CPU 隔离、自然根因、生产内核、开销或 WCET。
-
-`make test-ebpf-softirq-runtime` 在特权托管 Linux 上验证受控 loopback `NET_RX` softirq 时长链：夹具从实际 allowed affinity 选择并固定一个安静 CPU，只要求 `softirq_entry`/`softirq_exit`，并把 kernel context 的精确 CPU/vector 过滤器默认置于关闭向量，只在目标 CPU `NET_RX` 计数采样包围的一次 GSO 发送期间短时开放 vector 3，随后在接收与轮询前关闭。一次 `UDP_SEGMENT=1200` 的 64,800 字节发送必须得到 54 个 datagram 和恰好一次目标 CPU `NET_RX` 执行；独立校准运行测得 handler 时长后，正式运行使用其八分之一作为阈值，要求唯一 `KernelIrq/SoftirqCpuTime` 记录、Error `HostIrqStorm`/`ControlledStop` incident、零 loss 和 Degraded heartbeat，门控前/中/后状态与完整字段原子写入 `build/ebpf_softirq_qualification.json` 后做严格 schema 校验。该证据只证明 hosted-kernel controlled loopback softirq 共享链；它不代表硬 IRQ、真实 NIC/driver/NAPI、产品中断预算、持续压力、生产内核、开销或 WCET。
-
-`make test-ebpf-page-fault-runtime` 在特权托管 x86_64 Linux 上验证受控用户态页错误计数链：夹具先启动并固定一个独立子进程，在 BPF 加载前完成代码、栈、管道热身和 16 个带 guard page 的匿名映射准备；只要求 `exceptions:page_fault_user` 并精确跟踪子进程 TGID，放行后对子进程的 16 个未驻留页各执行一次首次写入。夹具同时要求 `ru_minflt` 增量、BPF `page_faults` 和 evidence count 都精确为 16，只生成一个 Warning `HostPageFault`/`DegradeHostObservation` incident、零 loss 和 Degraded heartbeat，并把完整字段原子写入 `build/ebpf_page_fault_qualification.json` 后做严格 schema 校验。该证据只证明 hosted x86_64 user-write/not-present error-code 和计数阈值共享链；它不暴露 fault address/IP，不从 BPF 区分 major/minor，不测量 handler 时长，也不代表内存压力、swap/storage、自然负载根因、产品阈值、生产内核、开销或 WCET。
-
-`make test-ebpf-network-drop-runtime` 在特权托管 Linux 上验证受控虚拟链路协议栈丢包链：夹具创建唯一 veth 对并固定到一个 allowed CPU，只要求 `skb:kfree_skb`，精确过滤接收端 ifindex 与 EtherCAT EtherType `0x88a4`。错误 EtherType 的正向帧和 EtherCAT 反向帧必须只推进各自接口的独立 `rx_dropped` 而不产生 BPF 记录；随后四个正向 EtherCAT 帧必须使接收端 drop delta 至少增加四、BPF 精确计数四次并只生成一个 `KernelNetwork/NetworkDrop`、Error/confidence-75 `HostNicDrop`/`ControlledStop` incident、零 loss 和 Degraded heartbeat。完整链路、控制、统计、证据、健康与清理字段在 BPF 卸载、socket 关闭、veth 删除和 affinity 恢复后原子写入 `build/ebpf_network_drop_qualification.json` 并做严格 schema 校验。该证据只证明 hosted virtual-veth unhandled-EtherType 接收丢包链，不代表物理 NIC、driver/NAPI/XDP/qdisc、队列压力、拥塞、真实 EtherCAT 设备、生产内核、开销或 WCET。
-
-`make test-ebpf-observability-degradation-runtime` 在特权托管 x86_64 Linux 上验证观测生命周期降级与恢复链：夹具保持生产 4 MiB ringbuf 不变，只要求 `exceptions:page_fault_user`，以当前 TGID、阈值 1 和 1 ns 窗口反复首次写入有界 64 MiB 匿名映射，并在内核 `lost_events` 变为正数前不消费事件。一次有界 poll 必须把精确的新 loss 投影为 fault `0x45421004` 的 Degraded heartbeat；同一 agent epoch 重新应用完整能力快照仍不能恢复。旧 runtime 卸载后，epoch 2 restart 必须清除 attach、loss、incident 和 fault，再由新加载对象的完整能力快照恢复 Healthy，并接受一条新 epoch 页错误记录且无新增 loss/rejection。报告仅在两个 runtime 都卸载后原子写入 `build/ebpf_observability_degradation_qualification.json` 并做封闭 schema 校验。该证据只证明一台 hosted 内核上的生产 ringbuf 饱和、loss 投影和 unload/reload 恢复；缺少 BTF/ringbuf/attach、verifier 拒绝与权限不足仅由确定性策略测试覆盖，不代表宿主故障注入，也不证明生产事件压力、目标内核、开销/WCET 或长时稳定性。
-
-`make test-ebpf-scheduler-migration-runtime` 在至少允许两个 CPU 的特权托管 Linux 上验证真实调度迁移链：夹具只要求 `sched_migrate_task`，把一个持续可运行的同步 worker 固定到 CPU A 后启用精确 TID 跟踪，再以 singleton affinity 强制 A→B→A。第一次迁移必须只增加计数，第二次才生成唯一 `KernelScheduler/CpuMigration` 记录、Warning `HostSchedulerStall`/`DegradeHostObservation` incident 和 Degraded heartbeat；完整 CPU 端点、阈值/窗口、ringbuf、统计、cycle、incident 与健康字段原子写入 `build/ebpf_scheduler_migration_qualification.json` 后做严格 schema 校验。该证据只证明 hosted-kernel migration-to-incident 共享链，不证明迁移原因、亲和性配置错误、调度停顿时长、cache/NUMA 影响、生产内核或开销/WCET。
-
-`make test-ebpf-process-exit-runtime` 在特权托管 Linux 上验证真实进程退出链：普通用户完成 BPF/Rust 编译，仅最终夹具以 root 或 passwordless sudo 执行；父夹具只要求 `sched_process_exit`，先把跟踪 PID 切换到同步等待的子进程，再要求一个已 join 的 worker 退出只增加 `thread_exits_ignored` 且 observer 保持 Healthy，随后放行 leader 正常退出并要求唯一 `KernelProcess/ProcessExit` 记录、Critical `UserComponentExit`/`LatchFault` incident 和 Failed heartbeat。完整 attach、统计、证据、incident 与健康字段写入 `build/ebpf_process_exit_qualification.json` 后做严格 schema 校验。该证据不包含 exit code/signal，不证明线程组已完全消失，也不覆盖 OOM、PID namespace/cgroup、组件重启、生产内核、开销/WCET 或长时 HIL。
-
-`make test-ebpf-oom-runtime` 在特权托管 Linux 上验证受控 memcg OOM victim 链：夹具创建独立 cgroup v2 叶子，只把预热的单线程子进程移入其中，设置 32 MiB `memory.max`、关闭可用的 swap 和 group OOM，再只要求 `oom:mark_victim` 并精确跟踪该子进程 PID。子进程对有界 128 MiB 匿名映射逐页写入后必须被 `SIGKILL`；`memory.events.local` 必须独立证明至少一次 OOM、恰好一次 OOM kill 和零 group kill，同时 BPF 只生成一个 `KernelMemory/OomKill`、Critical `HostOom`/`LatchFault` incident、零 loss 和 Failed heartbeat。完整 cgroup、退出、attach、统计、证据、incident、健康与清理字段原子写入 `build/ebpf_oom_qualification.json` 后做严格 schema 校验。该证据只证明 hosted cgroup-v2 单进程 victim-PID 共享链，不证明 victim TGID、namespace/cgroup identity、触发者、全局压力、容器委派、重启策略、生产内核、开销/WCET 或长时 HIL。
-
-`make test-ebpf-raw-port-runtime` 提供独立的特权主机资格入口：普通用户完成 BPF/Rust 编译，仅最终夹具以 root 或 passwordless sudo 执行；夹具关闭无关 tracepoint，要求自身精确 raw-port marker pair，使用 25 ms 延迟释放的 Unix-domain 阻塞 `recv(2)` 触发共享 marker 路径，并把 verifier/load、uprobe、ringbuf、统计和 `HostPortStall` 结果写入 `build/ebpf_raw_port_qualification.json` 后再做严格 schema 校验。该证据只验证 Unix-socket syscall 到 incident 的共享观测链，不代表真实 AF_PACKET、非阻塞 RX/NIC 负载、驱动/NIC/线缆/从站、开销/WCET、长时 HIL 或生产实时资格。
-
-`make test-ebpf-gateway-runtime` 以同样的最小特权模型验证 gateway 共享观测链：夹具要求自身精确 publish/callback 四个 marker 符号，以同一 WKC-risk cycle 分别包围 25 ms 的 Diagnostic/success publish 和 Command/completed callback 延迟，要求两个 ringbuf 记录合并为一个 count/evidence-count 均为 2 的 `GatewayStall` controlled-stop incident，并将完整附着位、request ID、detail、时长、统计和零 mismatch/loss 结果写入 `build/ebpf_gateway_qualification.json` 后做严格 schema 校验。该证据验证 direct-marker 到 incident 的两类共享路径，不代表 live Zenoh Session、router/transport queue、IPC、序列化、permit、reconnect、开销/WCET、长时 HIL 或生产实时资格。
-
-在具备 clang、bpftool 和 `/sys/kernel/btf/vmlinux` 的 Linux 主机上，可执行 `make -C bpf` 生成 BPF ELF，再用 `cargo run -p esop-ebpf-runtime --example observe -- bpf/build/esop_runtime.bpf.o` 启动只读观测进程。生产集成应由 ESOP 监督器提供真实 `boot_id`、`agent_epoch` 和每周期 `CycleContext`。
-
-本地质量门统一由 `make ci` 执行，包含 workspace 测试、Clippy、release 构建、`aarch64-unknown-none` 核心与产品配置运行时检查、确定性产品配置生成/C header 校验/Rust 黄金模块比对与激活测试、产品化 build report、BPF C 语法检查、gateway/raw-port/process-exit/OOM/scheduler-migration/scheduler-runqueue/softirq/page-fault/network-drop/observability-degradation 资格报告合同、R2 资格证据门和 Zenoh feature 编译检查；`make setup-rust` 安装交叉检查目标，`make test-hil` 只运行 Linux 模拟端口 HIL 测试，`make test-zenoh` 启动 loopback `zenohd` 验证真实路由，`make bpf` 执行需要 clang 和内核 BTF 的完整 CO-RE 编译，十个 `make test-ebpf-*-runtime` 资格目标另需 root 或 passwordless sudo，并只提升最终夹具执行。
-
-主站需求文档定义了面向 STM32、HPMicro 和通用 ARM/RISC-V 平台的最小依赖 EtherCAT 主站。当前第一阶段已经开始实现 Rust `no_std` 协议核心，位于 `crates/esop-ethercat-core/`，覆盖调用方固定 arena、帧/数据报编解码、固定帧池、O(1) RX index、有界收发周期、静态 PDO Frame Plan 到 Domain 的接收提交路径、多速率预计算调度、控制请求闭环、在线扫描、ESC 地址和 12-byte 基础信息/Features Supported 精确读取、32/64-bit DC System Time 能力探测、DC 从站精确 `0x0900/16` 四端口接收时间与全从站 `0x0110/2` Data Link Status 读取、固定容量物理树及参考钟相对传播延迟投影、生成产品 DC requirement/reference 策略及 identity/SII/AL 前的事务式参考时钟/拓扑证据选择、拓扑范围驱动的精确 `0x0910/24` 时钟采样与 `0x0920/12` offset/delay 初始化、`0x0141[0]` Device Emulation 识别、AL 单步状态转换、普通 ESC 的有界 AL Error Acknowledge 与首故障诊断保留、Device Emulation 禁止 ACK、ESI 四类 ESM timeout 与版本化 ETG.1020 默认值、ESI CoE 邮箱对校验与产品配置传播、SII 标准邮箱固定头解析、SII/ESI `OpOnly` 输出校验及 OP 前后写入读回门控、SII 身份读取、固定容量 EEPROM 分块读取、从标准 `0x0040` 到 END 的固定容量 SII category stream 自动读取、SII FMMU 用途与 SyncManager/RxPDO/TxPDO category 的有界解析及事务式配置候选投影、SII Strings/DC category 的无分配解析及产品所选 ESI `Dc/OpMode` 的首个 AL 前精确比对、按 PDO 类别分段的多 SyncManager FMMU 逻辑地址分配、启动编排、可选全从站 PREOP 配置屏障、从真实 PDO/Mapping/DC Clock/DC SYNC Complete phase 自动释放并复用已验证拓扑继续 SAFEOP/OP、静态 SM/FMMU 映射校验与写入读回、ESC 报告的完整 FMMU register bank 逐页发现及 position-keyed 原子证据发布、映射前全部已发现槽位清零与精确回读、固定容量 CoE PDO assignment/mapping 计划及逐写精确上传回读、产品顺序的多从站 PDO 配置批次、PDO 配置到统一生产服务调度/邮箱/DC/共享 RX 和生命周期 Configuration/Topology 门的有界接入、PDO 位域访问、固定二进制诊断事件环、SPSC 无锁环、固定容量 DMA TX/RX 描述符所有权环与缓存维护契约、Frame Plan 到 DMA TX descriptor 的零中间帧拷贝构建、DMA TX 提交端口契约、DMA RX descriptor 直接消费会话、Mailbox 轮询与有限预算重试、协议错帧恢复、可配置 Status Bit 轮询、CoE SDO expedited/segmented 事务、异步 CoE Emergency 固定事件环、DC SYNC0/SYNC1 配置 FSM、FRMW reference-clock 周期同步槽、offset/jitter 锁定监测，以及多 Domain 的固定容量 PDO/datagram 注册、SII segment datagram 绑定、按 MTU 拆帧与原子激活编排。`crates/esop-profile-cia402/` 已提供独立的 CiA 402 Statusword FSA 解码、Controlword 使能序列、生命周期拒绝、Fault reset 单脉冲基础实现，以及可选 `ethercat` feature 下的标准 CiA 402 周期 PDO 对象绑定和 CSP/CSV/CST typed raw codec。`crates/esop-ethercat-linux-port/` 提供 Linux AF_PACKET 开发/HIL 端口、固定容量确定性 `SimulatedPort`、显式链路状态刷新和稳定 raw-socket syscall 观测 marker，`crates/esop-lifecycle-guard/` 提供独立的 fail-closed motion permit 守卫。Startup 已集成实时 SII 标准邮箱布局、ordered FMMU usage、schema-v2 SM/PDO 结构签名和 DC 模式描述符的同一次有界读取与事务式交叉验证，并在证据/AL 前检查在线用途条目数不超过 ESC 扫描报告的 FMMU 数量；需要 expected SII 的 profile 还会在 category stream 前读取全部 ESC-reported 16-byte FMMU page，只在 SII/DC 同时成功后原子发布 bank，增强 Mapping 路径再完整清零/回读 bank 后写入主站期望映射。软件侧已完成纯 WKC 失配的精确 Domain 归属、连续失配诊断和 ProcBuf ABI v7 投影。主站继续自行分配逻辑地址；外部应用授时、自动周期漂移补偿、物理响应真实性与传播延迟精度、真实从站全周期 WKC/HIL 资格、真实从站 ESM/PDO 互操作、厂商 quirk、STM32/HPMicro 平台 DMA 端口、raw-port 真实 AF_PACKET/NIC 负载与生产目标内核 uprobe/开销资格、目标 WCET、长时运行以及真实设备 HIL 仍属于后续实现与资格阶段。
-
-2026-09-27 的 SyncManager register 增量补齐了 FMMU bank 之后的 live SM 证据：携带 expected SII 的 profile 会按 ESC 基础信息报告数量依次读取全部 `0x0600 + index * 16` FMMU page 和 `0x0800 + index * 8` SyncManager page，随后才读取 SII category stream。Startup 仅在 FMMU bank、SyncManager bank、SII 结构签名和可选 DC 描述全部成功时按 position 原子发布，并同时限制 SII 描述的 FMMU/SM 数量不超过 ESC 报告值。typed mapping bridge 在任何期望映射写入前先逐页清零并精确回读完整 SM bank，再处理完整 FMMU bank；旧 `start` 与 FMMU-only API 保持兼容。两类 live bank 都只作为证据和 reset bound，不是产品期望配置；物理响应真实性、目标 WCET、真实从站互操作、长时运行与实物 HIL 仍未资格化。
-
-同日的 Mailbox Status Bit 增量把 ESI `MBoxIn` SyncManager index 与 ordered
-`MBoxState` 能力声明编译为规范 `0x0800 + index * 8 + 5`、mask `0x08`、active-high
-直接策略；无声明产品保持 PollTime。Startup 只有在标准邮箱布局、在线 MBoxIn SM
-地址/容量/control/enabled 和 ordered FMMU usage 全部匹配后才发布完整
-`MailboxConfig`。对于声明 `MBoxState` 的产品，cfggen 还会按从站位置把同一物理位
-打包到 Domain 输入尾部，扩展 LRD 长度/WKC，并生成精确的读方向 FMMU 描述；产品运行时
-重新构造 Domain、位偏移、age 和 FMMU 字段并拒绝篡改，现有 Mapping 控制器负责写入与
-读回。Mapping 完成后显式启动的稳态邮箱只消费有效且未过期的 Domain 位，不会回退直接
-状态读取；PDO 配置阶段仍保留直接路径。物理响应真实性、真实设备 HIL、目标 WCET、
-ETG 一致性与互操作仍未资格化。
-
-2026-09-27 的 ESC watchdog 增量把每从站可选 `divider` 与 `process_data_intervals` 原始值纳入严格产品清单、配置 hash、六类生成产物和 `no_std` 运行时计划。核心按产品顺序对标准 `0x0400/2` 与 `0x0420/2` 执行两字节小端写入和独立精确读回，要求 WKC 1、固定 deadline、完整计划成功后才发布证据；未配置字段保持 ESC 默认且不发请求。生产调度优先级为 PDO、Watchdog、Mapping、DC Clock、DC SYNC、legacy DC，显式启用的 PREOP 屏障在 Watchdog `Complete` 前保持 Configuration/Topology fail-closed。该软件证据不计算实际 watchdog 时间，不证明物理响应来源、真实超时动作、设备互操作、目标 WCET、HIL、ETG 一致性或功能安全。
-
-2026-09-27 的自动 Slave-to-Slave 增量把生成产品的不可变复制计划接入稳定生产周期所有者：周期 N 的共享 RX 核验后，固定容量双页过程映像会为 N+1 预检全部到期计划，完整成功才一次发布新页；错误保持旧页不变并把所有者闭锁到 `Faulted`。共享辅助输出必须携带周期、长度和页地址均匹配的 typed 发布快照，缺失、过期、替换或跳过发布会在 TX 前拒绝。模拟产品已覆盖非到期、有效位置复制、WKC 0 fallback、重放和运动 Domain 目标拒绝；真实响应来源、目标 WCET、长时运行、实物 HIL 和功能安全资格仍不在该证据范围内。
-
-`crates/esop-procbuf/` 提供固定布局的 ProcBuf ABI v7：Header/layout hash、携带完整 permit identity/policy version 与 CSP/CSV/CST 目标的 Command 页、State 双页快照、每 Domain 连续 WKC 失配诊断、Quality/Lifecycle/Runtime observation 数据、固定容量生命周期转换历史和固定容量事件环。CiA 402 周期分支会把当前 WKC/Domain 验证后的实际位置、速度、转矩、跟随误差、Statusword、实际模式、PDS 状态和 `0x603F` 错误码按冻结轴策略换算到 State，并只记录端口已接受帧的 Controlword；失效输入保留上次值但清除逐字段质量位。它本身只解决实时域内的固定数据交接，不引入 Protobuf、Zenoh 或 ROS 2；宿主域 `esop-ipc/payloads` 单向读取 State/Event，并在结构验证和策略准入后写入 Command 页。v1-v6 进程不能复用 v7 区域，升级必须重建共享区域。
-
-`crates/esop-command-gateway/` 提供 Linux/监督域与实时域之间的固定命令准入策略：来源 ACL、权限级别、策略版本、TTL、轴掩码、epoch/序号防重放和固定窗口限流。通过的外部命令转换为 `MotionPermit`，拒绝与接受结果写入固定容量审计环；`crates/esop-proto/` 从 `proto/esop/v1/esop.proto` 生成 Rust bindings，并对顶层消息执行 v1 `schema_version` 约束；`crates/esop-ipc/payloads` 统一拥有 State/Event 投影、`MotionCommand` 解码和严格 target 映射，在任何 ingress 状态变化前验证模式、掩码、轴覆盖、有限值和非负限值，再从已准入 permit 构造绑定 robot/boot/layout 的 ProcBuf Command 页。IPC 额外交叉校验 envelope identity，`crates/esop-zenoh-gateway/` 复用同一映射。实时侧现可用调用方冻结的 `Cia402AxisCommandPolicy` 校验完整 permit、机械边界和命令上限，把 SI 制 CSP/CSV/CST 目标确定性换算为 raw PDO，并通过既有活动帧事务执行：握手阶段不写目标，首次 Enable Operation 使用已验证实际值保持，只有确认 Operation Enabled 后才写期望目标。`crates/esop-cfggen/` 已能从严格产品清单和受限 ESI 子集生成同一轴策略、Domain/PDO/Frame Plan、ProcBuf layout、每从站 CoE `MailboxConfig`、固定容量 ordered FMMU usage、显式 DC requirement/reference policy、产品选择的 ESI DC OpMode 描述符与 build input；`crates/esop-product-config/` 进一步在 `no_std` 固件中校验配置 hash、ProcBuf、精确拓扑、Domain/WKC、schedule/frame plan、CiA 402 映射和轴策略后一次性发布冻结运行时配置，校验 RxPDO→Outputs、TxPDO→Inputs 的 FMMU index 兼容性，把 FMMU/schema-v2 SII、DC policy 与模式期望映射为 Startup 要求，并要求所有产品必需 DC 从站都能从所选参考钟获得可测传播延迟；它还可直接按产品从站顺序把生成邮箱与逐站 assignment/mapping 计划事务式组装为固定容量批次，position-keyed 绑定仅保留为显式覆盖路径。`PdoConfigBatch` 复用一个 `PdoConfigController` 和 `MailboxController`，按冻结顺序、独立 generation 自动推进每个从站，精确 upload 回读失败即停留在原 job；`ScheduledPdoConfiguration` 继续复用现有邮箱/DC/共享 RX，保持 Prepared/InFlight 所有权、重试/超时和 Configuration 生命周期门控。可选 Startup 屏障会在所有期望从站确认 PREOP 后运行完整批次及其他冻结必需服务，并只在整批真实 Complete 后自动恢复逐站 SAFEOP/OP；生产报告同时携带 Startup phase 和有界 PDO 批状态。实时 SII 标准邮箱布局、FMMU usage、schema-v2 SM/PDO 结构签名与所选 DC 描述符均已接入 Startup 的首个 AL 前验证；Startup 同时发现完整 FMMU register bank，与 SII/DC 证据原子发布，并通过 typed bridge 让 Mapping 在写入期望配置前清零/回读每个已发现槽位。该 live bank 仅作为证据和 reset bound，不替代主站生成的逻辑地址。物理响应真实性与时序精度、产物签名与部署 ACL、真实驱动/制动/机械适配、生产 IPC 性能、目标 WCET、长时运行和实物 HIL 仍属于后续集成与资格范围。
-
-2026-09-27 的 DC SYNC 增量已完成上述旧状态中尚未实现的“生成式全从站 start time/SYNC 配置”软件边界：cfggen 通过共享 checked resolver 输出并哈希绝对 SYNC0/SYNC1 timing，`esop-product-config` 重算后生成产品顺序固定容量计划，拓扑级控制器按全禁用、全周期、一次参考钟读取、LCM-aligned 共同 epoch、全 start time、全 AssignActivate 的顺序执行，并在完整证据发布前保持 PREOP/lifecycle Configuration gate 关闭。同日的运行时监测增量为现有 cyclic FRMW 增加可选 `0x092c/4` BRD 同步窗口样本：期望 WKC 可由不可变 `DcTopology` 精确推导，参考钟与窗口响应在同一 generation 内完整后才原子发布，阈值与滞回记录失锁/恢复，生命周期 DC 门同时要求本周期完整样本和组合锁定。该广播值只表示聚合最大差值，不能归因到单个从站；外部应用授时、自动周期漂移补偿、物理时序精度、真实从站 HIL、ETG 与功能安全资格仍未完成。
-
-`crates/esop-profile-cia402/` 现已增加 CSP/CSV/CST 模式切换监督、实际模式确认、Operation Enabled 门槛、周期设定值首目标/限幅守卫、固定容量多轴控制与显式停止/恢复约束，以及 `--features ethercat` 下复用核心 `PdoEntry` 的标准对象绑定。`write_control` 与 `write_cyclic` 分离；后者同时要求生命周期许可、模式确认、Operation Enabled 和 setpoint 有效。产品缩放不在 profile 内猜测，而由生命周期适配器接收冻结策略；cfggen 会验证并冻结受支持子集的策略，厂商 quirk 和真实驱动互操作仍需 HIL 验证。
-
-`crates/esop-device/` 提供 EtherCAT 驱动、IO 和非 EtherCAT 外设共享的固定容量生命周期注册表，强制执行 probe、identify、configure、verify、activate、cyclic、degraded/fault、recover 和 deactivate 的显式迁移。
-
-`DomainRegistry` 位于 `esop-ethercat-core` 内，负责在激活前登记多个 Domain、PDO entry 和 datagram，校验过程映像/逻辑地址不重叠，生成多速率 `ScheduleTable`，并在激活后锁定配置。PDO offset 在 Domain 内稳定，datagram 计划使用全局过程映像偏移；输入段可直接转换为现有 `Domain` 的 staging 描述。SII 配置候选可先冻结为 `SiiDomainProjection`，校验 Rx/Tx 分区、FMMU/SyncManager 物理映射和逻辑基址后，再由注册表一次性事务式登记；字节对齐的 SII segment 可自动生成 `LWR`/`LRD` datagram。`FramePlanSet` 在激活期按 datagram 容量和 MTU 固定拆帧，并与注册表一起原子发布，失败时不锁定配置。
-
-当前工作区另有 `crates/esop-lifecycle-guard/`，提供独立的固定门槛、完整运行质量投影、带来源/权限/策略版本校验的 motion permit 生命周期守卫、`LifecycleSnapshot` 发布快照、固定容量状态转换审计和 permit 拒绝审计；`crates/esop-ebpf-agent/` 提供固定证据 ABI、问题相关器、健康心跳和 eBPF 能力预检结果模型。它们只负责普通控制域的 fail-closed 策略和运行时观测，不替代 STO、FSoE、安全 PLC 或认证安全通道。
-
-`capability_manifest.json` 是当前能力声明基线，每项能力都绑定仓库内源码、测试或设计证据，并明确实现状态和限制。`make capability-manifest` 会校验 JSON 结构、状态枚举、重复 ID 和证据路径；该校验已纳入 `make ci`。
-
-运行中的 Linux 监督域可使用只读 `esop` 命令查询同一份版本化状态：
-
-```bash
-cargo run -p esop-cli -- --robot robot_01 status
-cargo run -p esop-cli -- --robot robot_01 domain list
-cargo run -p esop-cli -- --robot robot_01 dc
-cargo run -p esop-cli -- --robot robot_01 lifecycle
-cargo run -p esop-cli -- --robot robot_01 incident list
-cargo run -p esop-cli -- --robot robot_01 doctor
-cargo run -p esop-cli -- --robot robot_01 watch status --interval-ms 1000
+```sh
+rustup target add aarch64-unknown-none
+make core-check             # 仅检查 no_std 核心与产品配置，不构建主机传输
+make core-example           # 编码/解析一个 EtherCAT 帧，不访问网卡
+make host-build             # 构建 esop 与 esop-cfggen 两个主机工具
+target/release/esop --help
+target/release/esop-cfggen --help
+make cfggen-runtime-example # 从示例产品生成六个产物并核对黄金文件
 ```
 
-命令默认以 `boot_id=0` 只读发现当前 provider boot，首次应答后固定该 boot，并在
-`watch` 中按最新 State sequence 推进游标。它只读取 ProcBuf 投影后的 Domain/WKC、DC、
-生命周期和 eBPF 观测摘要/incident，不加载 BPF、不写命令、不执行恢复，也不构成功能安全
-或真实设备 HIL 证据。完整合同见 [运行时诊断命令](docs/esop-runtime-diagnostics-cli.md)。
+`make core-example` 是带宿主标准库的最小 wire 层演示，不代表完整主站或目标固件体积。
+目标部署还需要产品拓扑、平台驱动、运行时集成和相应资格证据。
 
-`make cfggen-example` 会从 `config/examples/sim-dual-axis/` 生成六个确定性产品产物并以严格 GCC 规则校验 C header；`make cfggen-runtime-example` 还会逐字节比较生成 Rust 模块与检入黄金文件并执行 `no_std` 运行时激活测试。完整合同见 [产品配置生成器](docs/esop-product-configuration.md)。`make build-report` 保持原有未配置主机报告，也可通过 `PRODUCT_INPUT=.../robot_build_input.json` 投影严格校验后的产品 hash、拓扑、PDO/frame/wire/WKC/copy、周期与 ProcBuf 资源。`make cfggen-build-report` 执行运行时示例门和产品化报告；报告始终保持 fail-closed，CI 会校验并上传这些构建证据。
+## 诊断命令
 
-`make performance-report` 会生成完整字段的 `build/performance_report.json`，覆盖周期、延迟分位数、错误计数、拷贝和资源测量；未提供目标板测量时报告保持 `passed: false`，CI 会校验并上传它。
+下面的查询需要已有应用通过 `ZenohGateway::serve_typed_queries` 提供状态。
+仓库尚未交付可直接启动的主站/监督 daemon；仅启动 Zenoh router 不会产生设备状态。
 
-`make r2-qualification` 会校验 `qualification/r2_qualification.json`、独立 HIL 拓扑与已知限制，并生成 `build/r2_qualification_report.json`。仓库内基线故意保持未合格；只有产品逐轴原始单位限幅、两厂商驱动与 IO 兼容组合、故障矩阵、目标构建资源、Q1/Q2 HIL 性能和发布审查的路径、SHA-256、commit/config/topology 全部一致时，验证器才接受 `passed: true`。该门验证证据一致性，不产生或替代实物 HIL/WCET 证据。
+```sh
+target/release/esop --robot robot_01 --config /path/to/zenoh.json5 status
+```
+
+| 命令 | 用途 |
+| --- | --- |
+| `status` | 汇总运行状态、质量、Domain、DC、生命周期和观测健康 |
+| `domain list` | 查看每个 Domain 的 WKC、完整性和输入年龄 |
+| `dc` | 查看锁定、偏差和质量门 |
+| `lifecycle` | 查看状态、permit 和阻塞原因 |
+| `incident list` | 查看经过校验的运行时 incident |
+| `doctor` | 执行健康检查；healthy 返回 0，degraded 返回 3 |
+| `watch [上述任一命令]` | 持续查询；支持 `--interval-ms` 和 `--iterations` |
+
+命令保持只读，不启用运动、不恢复从站、不加载 BPF。
+参数、增量语义与错误码见 [CLI 合同](docs/esop-runtime-diagnostics-cli.md)。
+完整 SOEM 维护命令的缺口见 [V1 审计](docs/v1-readiness-audit.md)。
+
+## 验证与体积
+
+```sh
+make ci                     # 格式、测试、Clippy、构建、裸机核心和证据校验
+cargo install zenohd --version 1.10.1 --locked
+make test-zenoh              # 真实 router、typed provider 和 CLI 进程测试
+make footprint              # 生成 build/footprint_report.json
+```
+
+`make footprint` 分别测量主机二进制、wire 示例、依赖数和一次受控 CLI 启动等待的
+RSS/线程采样。它不推算嵌入式 RAM、flash、WCET 或完整发行包大小。
+特权 eBPF 资格入口及限制见 [框架详解](docs/framework-overview.md)。
+
+## 设计与证据
+
+- [EtherCAT 主站需求](docs/ethercat-master-requirements.md)
+- [机器人软件规划](docs/robotics-esop-software-plan.md) · [实时架构决策](docs/esop-performance-architecture-decision.md)
+- [ETG 与 CiA 402 决策](docs/esop-etg-cia402-master-requirements.md)
+- [产品配置生成器](docs/esop-product-configuration.md)
+- [eBPF 观测设计](docs/esop-ebpf-runtime-observability.md)
+- [能力声明](capability_manifest.json) · [资格限制](qualification/KNOWN_LIMITATIONS.md)
+- [开发历史及保留证据](docs/development-history.md)
+
+项目按根目录 [MIT LICENSE](LICENSE) 授权；第三方依赖保留各自许可证。
