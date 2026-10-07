@@ -30,18 +30,24 @@ capability/workflow audit, not a proof of every line or physical conformance.
 | Closed output pipes could panic | Normal downstream pipe closure terminates successfully; other output failures return 8 |
 | Rust 1.85 declaration contradicted code/dependencies | Declared and exercised minimum is 1.88; CI includes an explicit all-targets/all-features and bare-metal MSRV job |
 | MIT license file contradicted Apache package metadata | Root MIT grant is retained; workspace package metadata now agrees. This is metadata consistency, not a new third-party/source-ownership qualification |
-| Trellis repeatedly reopened approval and borrowed another session's task | Session isolation and conditional planning routing fixed; ten regression tests are part of `make ci` |
+| Trellis repeatedly reopened approval and borrowed another session's task | Session isolation plus authorization reuse in planning and scoped commit delivery fixed; ten regression tests are part of `make ci` |
 
 Raising the declared MSRV also enabled existing Clippy style diagnostics.
 Mechanical let-chain and integer-divisibility suggestions were reviewed and
 applied; bounded service ownership, priority and lifecycle policies remain
 covered by the full regression suite.
+GitHub's Rust 1.99 additionally required fixed-size slice iteration and an
+explicit atomic compare/exchange loop replacing deprecated `fetch_update`.
+Both changes retain Rust 1.88 compatibility; terminal session closure still
+cannot be reversed by a racing health refresh.
 
 ## Verification
 
 - `make ci`: 748 initial Rust tests plus 36 repeated product-config tests;
   98 Python tests; six router tests intentionally deferred to the live gate.
 - `make test-zenoh`: all six live router tests pass, including four CLI suites.
+- Rust **1.99.0**: the full `make ci` and six-test `make test-zenoh` gates
+  also pass locally; Rust 1.88 SDO and terminal-health regressions pass.
 - Rust **1.88.0**: `cargo check --locked --workspace --all-targets --all-features`
   and the `aarch64-unknown-none` core/product-config check pass.
 - A detached clean checkout at `433158f` passes `make ci`, all six live router
@@ -173,7 +179,7 @@ not bring Zenoh, Tokio, Aya or host IPC into activated real-time code.
 
 | Host artifact | File bytes | Stripped-copy bytes | ELF text | ELF data | ELF BSS |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `esop` | 24,382,728 | 17,165,976 | 16,576,445 | 582,616 | 5,044 |
+| `esop` | 24,382,672 | 17,165,976 | 16,576,445 | 582,616 | 5,044 |
 | `esop-cfggen` | 1,531,032 | 1,186,280 | 1,157,458 | 25,408 | 2,952 |
 | `wire_round_trip` | 454,600 | 349,256 | 332,883 | 13,008 | 4,266 |
 
@@ -181,8 +187,8 @@ The corrected CLI grows by 0.42% relative to the
 24,279,864-byte baseline; bounded session work and actual error handling account
 for that small increase. No transport or security feature was removed to make
 this number smaller. A controlled startup wait for an unresponsive loopback
-Zenoh handshake sampled **11,244 KiB RSS** and **5 threads** at 5 ms
-intervals (393 samples); the process exited with timeout code 5 after
+Zenoh handshake sampled **11,076 KiB RSS** and **5 threads** at 5 ms
+intervals (367 samples); the process exited with timeout code 5 after
 2.007 seconds. This is a sampled startup scenario, not a peak memory bound,
 steady-state provider/watch benchmark or product memory budget.
 

@@ -30,7 +30,8 @@
     "minimum_rust": {
       "version": "1.88.0",
       "workspace_all_targets_all_features": "passed",
-      "core_product_config_aarch64_unknown_none": "passed"
+      "core_product_config_aarch64_unknown_none": "passed",
+      "sdo_and_terminal_health_regressions": "passed"
     },
     "release_process_smoke_cases": 17,
     "clean_checkout": {
@@ -40,6 +41,11 @@
       "golden_and_shared_tooling_preserved": true,
       "make_test_zenoh": "passed (6 tests)",
       "make_footprint": "passed"
+    },
+    "stable_rust": {
+      "version": "1.99.0",
+      "make_ci": "passed",
+      "make_test_zenoh": "passed (6 tests)"
     }
   },
   "footprint": {
@@ -49,8 +55,8 @@
     "artifacts": [
       {
         "file": "esop",
-        "sha256": "657f19117860476bfd5c4b9803660b8a682aec8b43c6fb03c01440e0514d65f4",
-        "file_bytes": 24382728,
+        "sha256": "40b075e7c60448090249df5db430dceca1ff93b7fcbb12f85c74d0f83e24ae9a",
+        "file_bytes": 24382672,
         "stripped_copy_bytes": 17165976,
         "elf_sections_bytes": {
           "text": 16576445,
@@ -87,9 +93,9 @@
     "cli_startup_wait": {
       "measured": true,
       "scenario": "waiting for a nonresponsive loopback Zenoh handshake",
-      "samples": 393,
+      "samples": 367,
       "sample_interval_ms": 5,
-      "peak_sampled_rss_kib": 11244,
+      "peak_sampled_rss_kib": 11076,
       "peak_sampled_threads": 5,
       "elapsed_seconds": 2.007,
       "exit_code": 5
