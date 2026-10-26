@@ -47,6 +47,11 @@ requires explicit `adopt_mailbox_transport` and returns it terminally.
 - Same-slave requests keep FIFO logical ownership; complete wire actions rotate
   between slaves. Runtime failures terminate that request and release the
   scheduler; required configuration faults keep their existing closed gate.
+- An idle receive that expires between wire actions releases its idle ownership
+  and schedules the next poll. An already queued or subsequently queued
+  same-slave request starts independently under its original absolute deadline;
+  the idle timeout cannot
+  hide that request until expiry or grant lifecycle/motion readiness.
 - Create runtime actions only after selection. Prepared action deadlines are
   immutable. The production scheduler owns the only control pool/transport.
 - Sample mapped mailbox bits after shared Domain RX commits. Pending/stale/bad

@@ -588,7 +588,9 @@ impl<const SLAVES: usize, const REQUESTS: usize, const OBJECT_BYTES: usize> Runt
             }
         }
         // Prefer queued/active work. Idle Emergency polling is lower priority.
-        for idle in [false, true] {
+        // Its expiry can release a station that already has queued work, so
+        // make one bounded work pass afterward before reporting no action.
+        for idle in [false, true, false] {
             for offset in 0..SLAVES {
                 let index = (self.next_slave + offset) % SLAVES;
                 if !self.slaves[index].bound || !self.slaves[index].mailbox.owns_transport() {
@@ -664,6 +666,11 @@ impl<const SLAVES: usize, const REQUESTS: usize, const OBJECT_BYTES: usize> Runt
                     Err(error) => {
                         if let Some(slot) = self.slaves[index].active {
                             self.fail_request(slot, SdoRequestError::Mailbox(error));
+                        } else {
+                            // An idle receive can expire while mandatory work
+                            // owns the scheduler. Release its logical ownership
+                            // so queued requests do not inherit a faulted poll.
+                            self.slaves[index].idle_poll = false;
                         }
                         self.slaves[index].idle_due_ns =
                             now_ns.saturating_add(self.slaves[index].config.poll_interval_ns);
@@ -1069,6 +1076,44 @@ mod tests {
         drive_one(&mut bank, 2, &mut indices, &mut counters, None);
         drive_one(&mut bank, 3, &mut indices, &mut counters, None);
         assert_eq!(counters[0], 1);
+    }
+
+    #[test]
+    fn idle_timeout_releases_poll_ownership_before_a_new_same_slave_request() {
+        let mut bank = SdoRequestBank::<1, 1>::new();
+        let mut config = config();
+        config.timeout_ns = 10;
+        bank.bind_verified_slave(0, 1, config).unwrap();
+        assert!(bank.prepare(0));
+        let mailbox = bank.current_mailbox_mut().unwrap();
+        let status = mailbox.pending().unwrap();
+        mailbox
+            .accept(status, status.generation, &[8], 1, 0)
+            .unwrap();
+        bank.finish_wire(0);
+        assert!(!bank.prepare(11));
+        assert_eq!(bank.mailbox(1).unwrap().phase(), MailboxPhase::Faulted);
+        let handle = bank
+            .submit_upload(
+                1,
+                0x2000,
+                0,
+                SdoAccess::Single,
+                SdoAccessPolicy::new(false),
+                12,
+                100,
+            )
+            .unwrap();
+        assert!(bank.is_due(12));
+        let mut indices = [0];
+        let mut counters = [0];
+        for now in 12..=15 {
+            drive_one(&mut bank, now, &mut indices, &mut counters, None);
+        }
+        assert_eq!(bank.result(handle).unwrap(), &[0, 0x20, 0, 0]);
+        assert_eq!(bank.status(handle).unwrap().deadline_ns, 100);
+        assert_eq!(bank.pop_terminal_status().unwrap().handle, handle);
+        assert_eq!(bank.pop_terminal_status(), None);
     }
 
     #[test]

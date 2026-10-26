@@ -1092,3 +1092,210 @@ fn legacy_mapped_mailbox_participates_in_optional_wire_round_robin() {
 fn legacy_timeout_does_not_starve_optional_work_or_hide_its_configuration_fault() {
     production(Case::LegacyTimeout);
 }
+
+fn idle_receive_after_mandatory_configuration_delay(queue_before_timeout: bool) {
+    let mut port = physical_bus();
+    port.bus.set_object(0, 0x2000, 0, &[1, 3, 5, 7]).unwrap();
+    port.bus.emergency(0, 0x2310, 2, [1, 2, 3, 4, 5]).unwrap();
+    let schedule = ScheduleTable::<1, 1>::build(
+        PERIOD,
+        &[ScheduleDomain {
+            id: 0,
+            period_ticks: 1,
+            phase_ticks: 0,
+        }],
+    )
+    .unwrap();
+    let mut domain = Domain::<2, 1>::new(0x1002);
+    domain
+        .add_segment(DomainSegment {
+            datagram_index: 0,
+            input_offset: 0,
+            len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let mut domains = ScheduledDomainBank::new(
+        &schedule,
+        [ScheduledDomainEntry {
+            id: 0,
+            domain: &mut domain,
+        }],
+    )
+    .unwrap();
+    let mut plans = FramePlanSet::<1, 1>::new();
+    plans
+        .push(DatagramPlan {
+            command: Command::Lrd,
+            index: 0,
+            address: 0x1002,
+            payload_offset: 0,
+            payload_len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+    let image = [0; 2];
+    let inputs = ScheduledProcessInputs::new(
+        &domains,
+        &schedule,
+        [ScheduledProcessInputEntry {
+            id: 0,
+            image: &image,
+            plans: &plans,
+        }],
+    )
+    .unwrap();
+    let mut master = EthercatMaster::<8, MAX_ETHERNET_FRAME_LEN>::new_with_bus_transit_count(
+        MasterConfig::new([0xff; 6], [2, 0, 0, 0, 0, 1]),
+        3,
+    );
+    let mut dc_config = DcCyclicConfig::new(0x1001, 240, 0);
+    dc_config.expected_wkc = 3;
+    let mut dc =
+        DcCyclicSync::new_with_bus_transit_count(dc_config, DcMonitor::new(100, 100, 1, 2), 3);
+    let mut controls =
+        ControlRequestPool::<8>::new_with_datagram_indices_excluding(&LEASES, &CYCLIC).unwrap();
+    let mut scheduler = ScheduledProductionServiceScheduler::new();
+    let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
+    let mut dc_image = [0; 8];
+    let mut runtime = SdoRequestBank::<1, 1>::new();
+    let mut config = mailbox_config(PERIOD);
+    config.timeout_ns = 30 * PERIOD;
+    runtime.bind_verified_slave(0, 0x1001, config).unwrap();
+    let mut configuration = PdoConfigBatch::<1, 8>::new();
+    let mut primed_at = None;
+    let mut handle = None;
+    let mut request_deadline = 0;
+    let mut completed = false;
+    for tick in 1..=250u16 {
+        port.bus.advance_by(PERIOD).unwrap();
+        let now = port.now_ns();
+        domains
+            .submit_due_process_inputs(
+                &inputs,
+                &mut master,
+                &mut port,
+                tick,
+                now + PERIOD - 1,
+                now + PERIOD - 1,
+            )
+            .unwrap();
+        let report = scheduler
+            .run_cycle(
+                &mut domains,
+                &mut master,
+                &mut port,
+                &mut scratch,
+                &mut dc,
+                &mut dc_image,
+                now,
+                &mut controls,
+                &mut ScheduledProductionServices::<0, 0, 0, 8, 1>::new(None, None, None, None)
+                    .with_pdo_configuration(ScheduledPdoConfiguration::batch(&mut configuration))
+                    .with_runtime_sdo(&mut runtime),
+                tick,
+                now + PERIOD - 1,
+                now + PERIOD - 1,
+            )
+            .unwrap();
+        assert!(report.received().qualities[0].valid);
+        assert!(report.received().dc_result.is_ok());
+        assert_eq!(report.runtime_sdo_lost_events(), 0);
+        if primed_at.is_none() && runtime.mailbox(0x1001).unwrap().phase() == MailboxPhase::Polling
+        {
+            // The real idle SM-full read has completed. Mandatory work on a
+            // different station now delays its receive past the fixed timeout.
+            primed_at = Some(now);
+            let mut writes = PdoConfigPlan::new();
+            for index in 0x2000..=0x2007 {
+                writes
+                    .push(PdoSdoWrite::new(index, 0, &[9; 4]).unwrap())
+                    .unwrap();
+            }
+            let mut plan = PdoConfigBatchPlan::new();
+            plan.push(PdoConfigJob::new(0x1003, writes, mailbox_config(PERIOD)))
+                .unwrap();
+            configuration
+                .start(plan, 20, now, 500 * PERIOD, 100 * PERIOD)
+                .unwrap();
+            if queue_before_timeout {
+                request_deadline = now + 250 * PERIOD;
+                handle = Some(
+                    runtime
+                        .submit_upload(
+                            0x1001,
+                            0x2000,
+                            0,
+                            SdoAccess::Single,
+                            SdoAccessPolicy::new(false),
+                            now,
+                            request_deadline,
+                        )
+                        .unwrap(),
+                );
+            }
+        }
+        if handle.is_none() && runtime.mailbox(0x1001).unwrap().phase() == MailboxPhase::Faulted {
+            assert_eq!(configuration.phase(), PdoConfigBatchPhase::Complete);
+            assert!(now >= primed_at.unwrap() + config.timeout_ns);
+            assert_eq!(
+                runtime.mailbox(0x1001).unwrap().last_error(),
+                Some(MailboxError::Timeout)
+            );
+            request_deadline = now + 100 * PERIOD;
+            handle = Some(
+                runtime
+                    .submit_upload(
+                        0x1001,
+                        0x2000,
+                        0,
+                        SdoAccess::Single,
+                        SdoAccessPolicy::new(false),
+                        now,
+                        request_deadline,
+                    )
+                    .unwrap(),
+            );
+            assert!(
+                runtime.is_due(now),
+                "expired idle ownership must not hide a new SDO"
+            );
+        }
+        if let Some(handle) = handle {
+            assert_eq!(
+                runtime.status(handle).unwrap().deadline_ns,
+                request_deadline
+            );
+            if runtime.status(handle).unwrap().phase == SdoRequestPhase::Complete {
+                assert!(now < request_deadline);
+                assert_eq!(runtime.result(handle).unwrap(), &[1, 3, 5, 7]);
+                assert_eq!(
+                    runtime
+                        .mailbox(0x1001)
+                        .unwrap()
+                        .pop_emergency()
+                        .unwrap()
+                        .error_code,
+                    0x2310
+                );
+                assert_eq!(report.runtime_sdo_terminal().unwrap().handle, handle);
+                completed = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        completed,
+        "queued same-station SDO must make bounded progress"
+    );
+}
+
+#[test]
+fn expired_idle_receive_releases_its_station_after_mandatory_configuration_delay() {
+    idle_receive_after_mandatory_configuration_delay(false);
+}
+
+#[test]
+fn queued_sdo_survives_idle_receive_expiry_during_mandatory_configuration() {
+    idle_receive_after_mandatory_configuration_delay(true);
+}
