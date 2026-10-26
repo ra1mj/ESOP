@@ -32,8 +32,9 @@ length, absolute deadline, actual WKC and optional typed error.
 - States progress `Free -> Queued -> Busy -> Success|Error`; only terminal
   handles may be released.
 - Terminal data and error evidence remain caller-owned until `release`.
-- The scheduler selects register requests after startup, PDO configuration,
-  watchdog, mapping, DC and mailbox services.
+- The scheduler selects register requests after mandatory startup,
+  configuration, DC and state services. Optional monitor, mailbox, runtime SDO
+  and register work share bounded round-robin selection.
 - At most one register control datagram is admitted per production cycle.
   Prepared requests may be rebuilt before their absolute deadline; in-flight
   requests retain ownership and are never retransmitted.
@@ -74,8 +75,9 @@ length, absolute deadline, actual WKC and optional typed error.
   timeout arithmetic, terminal release and actual WKC retention.
 - Unit: action mismatch and occupied control pool end only the owning register
   request and do not release another pool occupant.
-- Scheduler: mailbox remains higher priority and control-pool admission failure
-  is returned as `ScheduledProductionServiceFault::RegisterRequest`.
+- Scheduler: continuous optional traffic preserves register progress, and
+  control-pool admission failure is returned as
+  `ScheduledProductionServiceFault::RegisterRequest`.
 - Linux integration: assert `LRW -> FRMW -> FPRD`, hold the register response
   across a cycle boundary, assert no second `FPRD`, then consume the result.
 - Repository: `make test-hil` and `make ci` must pass.

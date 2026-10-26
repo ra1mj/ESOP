@@ -65,6 +65,8 @@ def main() -> int:
     args.output.mkdir(parents=True, exist_ok=True)
     command = [args.cargo, "run", "--quiet", "-p", "esop-ethercat-linux-port",
                "--example", "r0_r2", "--"]
+    expected_commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     cases = [
         dict(name=f"full-{mode}", scenario="full", mode=mode, cycles=3000,
              slave_count=3, axis_count=2, period_ns=1_000_000,
@@ -76,7 +78,7 @@ def main() -> int:
              slave_count=32, axis_count=32, period_ns=1_000_000, max_pdo_bytes=1024),
         dict(name="Q2", scenario="Q2", mode="csp", cycles=1000,
              slave_count=17, axis_count=16, period_ns=500_000, max_pdo_bytes=512),
-        dict(name="Q4-baseline", scenario="Q4-baseline", mode="csp", cycles=1000,
+        dict(name="Q4-baseline", scenario="Q4-baseline", mode="csp", cycles=6000,
              slave_count=17, axis_count=16, period_ns=1_000_000, max_pdo_bytes=768),
         dict(name="Q4", scenario="Q4", mode="csp", cycles=6000,
              slave_count=17, axis_count=16, period_ns=1_000_000,
@@ -96,13 +98,14 @@ def main() -> int:
                            "--output-dir", str(output)], cwd=ROOT, check=True,
                            stdout=subprocess.PIPE, text=True)
             result = validate_case(output, case)
-            commit = read_json(output / "run.json")["binding"]["esop_commit"]
+            if read_json(output / "run.json")["binding"]["esop_commit"] != expected_commit:
+                raise ValueError("run does not identify the checked-out commit")
             baseline = (["--baseline", str(args.output / "Q4-baseline/performance.json")]
                         if case["scenario"] == "Q4" else [])
             subprocess.run([sys.executable, str(ROOT / "scripts/import-performance-measurements.py"),
                             "--input", str(output / "run.json"), "--config", str(output / "config.json"),
                             "--topology", str(output / "topology.json"),
-                            "--expected-commit", commit, "--output", str(output / "performance.json")] + baseline,
+                            "--expected-commit", expected_commit, "--output", str(output / "performance.json")] + baseline,
                            cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
             if read_json(output / "performance.json")["qualification"]["passed"] is not False:
                 raise ValueError("software import granted hardware qualification")
@@ -134,6 +137,13 @@ def main() -> int:
         prefix_measurements = read_json(prefix / "run.json")
         if prefix_measurements["errors"]["capture_lost"] == 0 or prefix_measurements["digests"]["wire_records"] <= 100:
             raise ValueError("capture prefix did not retain full-stream loss/count evidence")
+        complete_measurements = read_json(args.output / "command_expiry/run.json")
+        for field in ("digests", "copies", "workload"):
+            if prefix_measurements[field] != complete_measurements[field]:
+                raise ValueError(f"capture overflow changed full-stream {field}")
+        for field, count in complete_measurements["errors"].items():
+            if field != "capture_lost" and prefix_measurements["errors"][field] != count:
+                raise ValueError(f"capture overflow changed error count {field}")
         rejected = subprocess.run(command + ["--backend", "replay", "--scenario", "command_expiry",
                                   "--cycles", "100", "--pcap", str(prefix / "trace.pcap"),
                                   "--sidecar", str(prefix / "trace.json"), "--output-dir", str(prefix / "replay")],

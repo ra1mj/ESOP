@@ -66,8 +66,10 @@ distinguishes “register absent” from transport failure must carry an explici
 RX index and service completion check. Do not infer the exception from an
 address or phase in the engine.
 
-Only auto-increment end-of-topology probing and DC System Time `0x0910` may use
-`ZeroOrOne` today. For System Time, WKC 1 requires the exact 32/64-bit payload
+Only DC System Time `0x0910` and named mailbox empty/full access may use
+`ZeroOrOne`. Startup first freezes a bounded BRD bus count (returned position
+delta equals WKC); subsequent AP probes require exact one before that count
+and exact zero at its terminal position. A missing response is always a fault. For System Time, WKC 1 requires the exact 32/64-bit payload
 and publishes the sample; WKC 0 publishes no sample and cannot satisfy a DC
 requirement or reference-clock selection. WKC greater than one, short payload,
 stale generation, wrong owner/address/operation, or timeout latches the first

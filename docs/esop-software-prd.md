@@ -4,7 +4,7 @@
 - 文档版本：1.1
 - 日期：2026-09-03
 - 状态：规划基线
-- 最近实现状态更新：2026-09-27
+- 最近实现状态更新：2026-10-26
 - 面向版本：首个机器人控制产品线（R0-R4）
 - 相关决策：[机器人软件规划](robotics-esop-software-plan.md)、[EtherCAT 主站需求](ethercat-master-requirements.md)、[实时与性能架构决策](esop-performance-architecture-decision.md)、[ETG/CiA 402 决策](esop-etg-cia402-master-requirements.md)、[运动生命周期守卫设计](esop-motion-lifecycle-guard.md)、[eBPF 运行时观测设计](esop-ebpf-runtime-observability.md)
 
@@ -509,6 +509,12 @@ ProcBuf 是实时数据 ABI，而不是通用消息总线。它必须是固定�
 5. 为目标配置预留过程映像、帧、邮箱、从站表、请求与追踪资源。
 
 ## 11. 版本路线与发布门槛
+
+2026-10-26 Linux 软件阶段更新：新增独立虚拟 ESC/总线、真实生产调度器驱动的
+`r0_r2` 运行入口、精确 PCAP 回放、八路 1 KiB SDO、运行监测及维护复位闭环。
+适用 P0 的源码、测试和软件证据入口见[Linux 软件主站验收映射](esop-linux-software-master.md)。
+本阶段按已确认范围采用 Linux 与仿真，STM32/HPMicro 板级适配和实物验收延后；
+软件场景通过不替代本节的硬件互操作、物理 DC、实时性能和 HIL 发布门槛。
 
 | 里程碑 | 产品交付物 | 出口条件 |
 | --- | --- | --- |

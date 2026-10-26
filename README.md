@@ -11,6 +11,21 @@ ESOP 是面向嵌入式实时控制的 EtherCAT 简易操作系统；EtherCAT �
 - [ESOP 实时与性能架构决策](docs/esop-performance-architecture-decision.md)
 - [ETG.1500、Beckhoff 与 CiA 402 主站决策](docs/esop-etg-cia402-master-requirements.md)
 - [eBPF 运行时观测与问题归因设计](docs/esop-ebpf-runtime-observability.md)
+- [Linux 软件主站运行与验收](docs/esop-linux-software-master.md)
+
+Linux 软件主站现可通过独立虚拟从站运行完整扫描、配置回读、OP、PDO/DC、
+CSP/CSV/CST、故障停止和显式恢复，并生成可精确回放的抓包及运行证据：
+
+```bash
+cargo run --release -p esop-ethercat-linux-port --example r0_r2 -- \
+  --backend sim --scenario full --mode csp --cycles 10000 \
+  --output-dir build/r0-r2/sim
+make test-master-software
+```
+
+`Q1` 使用 32 轴，`Q2`、`Q4` 使用 16 轴加 IO；Q4 持续执行八个并发
+SDO 请求。软件测试、分配计数和回放结果与真实硬件资格分别记录。
+本阶段按原始 PRD 推进 Linux 软件与仿真，STM32/HPMicro 适配和实物验收延后。
 
 Linux 观测适配器位于 `crates/esop-ebpf-runtime/`：它使用 Rust/Aya 加载预编译 CO-RE BPF ELF，按能力挂载 tracepoint，从 ringbuf 解码固定证据并送入 `RuntimeAgent`。当前 BPF bundle 已包含固定容量的调度唤醒延迟、按受跟踪 TID 聚合的 CPU 迁移窗口、硬 IRQ/softirq entry/exit 时长采集、按 EtherType/可选 ifindex 聚合的 `kfree_skb` 丢包窗口、按 CPU/进程聚合的用户态页错误窗口、按 cpufreq policy CPU 去重的低于产品频率下限 episode、受跟踪进程的主线程退出和 OOM victim PID 硬事实归因，以及可选的 Zenoh gateway publish/callback 与 Linux raw-port syscall begin/end uprobe 对。gateway 使用稳定 v1 C ABI marker 和一套进程内非零 request ID；raw port 使用独立稳定 v1 marker 和固定 1024 项 per-thread LRU 状态，只测量合法 TX 的 `send(2)` 及每次非阻塞 `recv(2)` 调用。两类证据都只在严格超过各自阈值并关联 transport-risk cycle 时生成事件，分别归因为 `GATEWAY_STALL` 和 `HOST_PORT_STALL`。普通工作线程退出只增加诊断计数，不生成 `USER_COMPONENT_EXIT`。其他超阈值软证据只有与 cycle 风险窗口相关时才分别归因为 `HOST_SCHEDULER_STALL`、`HOST_IRQ_STORM`、`HOST_NIC_DROP`、`HOST_PAGE_FAULT` 或 `HOST_CPU_THROTTLE`，OOM 与主线程退出则保持无需 cycle 上下文的 critical 事件。迁移、限频、gateway 和 raw-port syscall 证据都不证明单一根因；raw-port 证据不覆盖驱动队列、NIC DMA、线缆、从站或完整周期。用户探针缺失不会阻止内核观测基线运行，实时主站核心不依赖 Aya，也不等待观测器。
 
@@ -47,7 +62,8 @@ Linux 观测适配器位于 `crates/esop-ebpf-runtime/`：它使用 Rust/Aya 加
 直接策略；无声明产品保持 PollTime。Startup 只有在标准邮箱布局、在线 MBoxIn SM
 地址/容量/control/enabled 和 ordered FMMU usage 全部匹配后才发布完整
 `MailboxConfig`。对于声明 `MBoxState` 的产品，cfggen 还会按从站位置把同一物理位
-打包到 Domain 输入尾部，扩展 LRD 长度/WKC，并生成精确的读方向 FMMU 描述；产品运行时
+打包到 Domain 输入尾部，扩展 LRD 长度，并生成精确的读方向 FMMU 描述；WKC 按每个
+实际访问的从站方向计数，同一从站的多个读 FMMU 不重复累加。产品运行时
 重新构造 Domain、位偏移、age 和 FMMU 字段并拒绝篡改，现有 Mapping 控制器负责写入与
 读回。Mapping 完成后显式启动的稳态邮箱只消费有效且未过期的 Domain 位，不会回退直接
 状态读取；PDO 配置阶段仍保留直接路径。物理响应真实性、真实设备 HIL、目标 WCET、

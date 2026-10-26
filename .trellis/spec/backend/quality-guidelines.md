@@ -39,7 +39,8 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   address inside the generic RX engine.
 - Route application-owned asynchronous ESC register access through the fixed
   `EscRegisterRequestController` and the production service scheduler. Keep it
-  below startup/configuration/DC/mailbox priority, admit at most one prepared
+  below mandatory startup/configuration/DC/state work and share optional-service
+  round-robin selection, admit at most one prepared
   request per cycle, retain in-flight ownership without retransmission, and
   require explicit release before reusing a terminal slot. A register request
   failure is request-local and must not silently become a CoE/lifecycle gate;
@@ -814,10 +815,14 @@ submit_prepared_active_frame(
 
 ### 3. Contracts
 
-- Selection priority is fixed: Startup, Rescan, Reconfigure Slave, PDO
+- Mandatory selection priority is Startup, Rescan, Reconfigure Slave, PDO
   Configuration, Watchdog Configuration, Mapping, DC Clock Configuration,
-  DC Sync Configuration, legacy DC Configuration, State Request, Mailbox,
-  Register Request.
+  DC Sync Configuration, legacy DC Configuration, then State Request.
+  Optional Slave Monitor, legacy Mailbox, Runtime SDO and Register Request
+  share a bounded round-robin cursor. A live control request always pins its
+  owner. Runtime SDO is prepared only after selection, and mapped status is
+  sampled after the shared RX commit. Independent one-cycle yield flags can
+  mutually consume each other and starve diagnostics; do not reintroduce them.
 - `StartupConfig` may freeze a required PDO Configuration/Mapping/DC set. In
   that mode every expected slave must first confirm PREOP, then Startup enters
   `AwaitingConfiguration` and yields only to the required services in the same

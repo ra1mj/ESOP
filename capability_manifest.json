@@ -458,7 +458,7 @@
     {
       "id": "r2_qualification_evidence_gate",
       "status": "partial",
-      "scope": "Fail-closed product, controlled-stop, HIL topology, compatibility, build and Q1/Q2 evidence validation",
+      "scope": "Evidence-bound R2 development validation plus explicit require-qualified release gate covering Q1/Q2/Q4 and a file/hash/metadata-verified unloaded Q4 performance baseline",
       "evidence": [
         "qualification/r2_qualification.json",
         "qualification/hil_topology.json",
@@ -647,6 +647,86 @@
         "docs/esop-software-prd.md"
       ],
       "limitation": "Simulator and unit tests do not establish real-device interoperability"
+    },
+    {
+      "id": "ethercat_wire_compatibility",
+      "status": "implemented",
+      "scope": "Independent literal wire coverage for all 14 supported non-NOP commands, correct M/physical WORD semantics, bounded initial BRD count, command-aware AP/BR transit validation, exact fixed/logical RX and reserved logical-to-wire control index leases",
+      "evidence": [
+        "crates/esop-ethercat-core/tests/wire_qualification.rs",
+        "crates/esop-ethercat-core/tests/control_index_leases.rs",
+        "crates/esop-ethercat-core/src/rx_index.rs"
+      ],
+      "limitation": "Software/model evidence only; physical frame provenance, target timing and interoperability remain unqualified"
+    },
+    {
+      "id": "ethercat_mailbox_resilience_runtime_sdo",
+      "status": "implemented",
+      "scope": "Fixed-capacity full-mailbox SM ownership, repeat/ACK recovery, normal/segmented CoE, independent counters, station-bound transport handoff, eight generated 1 KiB runtime requests, mapped post-RX polling, unsolicited Emergency and bounded terminal events",
+      "evidence": [
+        "crates/esop-ethercat-core/src/mailbox.rs",
+        "crates/esop-ethercat-core/src/coe.rs",
+        "crates/esop-ethercat-core/src/sdo_request.rs",
+        "crates/esop-ethercat-sim/tests/production_sdo.rs"
+      ],
+      "limitation": "Declared static mailbox and object limits apply; optional mailbox protocols, real-device interoperability, physical timing and HIL remain outside this software qualification"
+    },
+    {
+      "id": "ethercat_runtime_slave_monitoring",
+      "status": "implemented",
+      "scope": "Bounded paired AL/DL observations, fresh age-qualified slave snapshots, contextual events, optional-service fairness and persistent fail-closed lifecycle quality",
+      "evidence": [
+        "crates/esop-ethercat-core/src/slave_monitor.rs",
+        "crates/esop-ethercat-core/tests/slave_monitor.rs",
+        "crates/esop-lifecycle-guard/src/ethercat.rs"
+      ],
+      "limitation": "Polling cadence/maximum age are frozen product policy; software checks do not prove a real-slave detection deadline or physical status authenticity"
+    },
+    {
+      "id": "ethercat_maintenance_fault_reset",
+      "status": "implemented",
+      "scope": "Explicit owner-bound maintenance/FaultLatched one-shot CiA 402 FaultReset plus accepted zero, transactional output/feedback preflight and immutable pulse evidence without granting a motion permit",
+      "evidence": [
+        "crates/esop-lifecycle-guard/src/maintenance.rs",
+        "crates/esop-lifecycle-guard/tests/maintenance_reset.rs",
+        "crates/esop-lifecycle-guard/src/stop_cycle.rs"
+      ],
+      "limitation": "Ordinary-control software behavior only; no drive, mechanics, STO, functional safety or real-device reset qualification"
+    },
+    {
+      "id": "ethercat_stateful_simulator",
+      "status": "implemented",
+      "scope": "Independent fixed-capacity no_std wire-only virtual ESC/bus with actual addressing/WKC, SII, SM/FMMU/PDO, mailbox/CoE, DC, drive/IO state and bounded fault injection",
+      "evidence": [
+        "crates/esop-ethercat-sim/src/lib.rs",
+        "crates/esop-ethercat-sim/src/esc.rs",
+        "crates/esop-ethercat-sim/tests/startup.rs"
+      ],
+      "limitation": "A bounded protocol/device model, not vendor firmware, motor dynamics, physical DC accuracy, DMA behavior or hardware interoperability"
+    },
+    {
+      "id": "linux_r0_r2_software_master",
+      "status": "implemented",
+      "scope": "Caller-driven generated-product sim/replay/raw development example, CSP/CSV/CST, actual Q1 32-axis/Q2-Q4 16-axis workloads, sustained eight-SDO load, explicit stop/reset/rearm, zero-heap instrumentation and artifact-bound software reports",
+      "evidence": [
+        "crates/esop-ethercat-linux-port/examples/r0_r2.rs",
+        "crates/esop-ethercat-linux-port/examples/support/scenario.rs",
+        "scripts/test-master-software.py",
+        "qualification/software_master_soak.json",
+        "docs/esop-linux-software-master.md"
+      ],
+      "limitation": "Raw mode remains inhibited development/HIL entry; software scenarios and virtual-time soak cannot qualify real hardware, target jitter/WCET or deferred MCU ports"
+    },
+    {
+      "id": "ethercat_exact_capture_replay",
+      "status": "implemented",
+      "scope": "Bounded classic PCAP and product/time/scenario/direction sidecar, strict byte/time TX matching, timestamped RX delivery and full streaming evidence across capture-prefix overflow",
+      "evidence": [
+        "crates/esop-ethercat-linux-port/examples/support/capture.rs",
+        "crates/esop-ethercat-linux-port/examples/support/evidence.rs",
+        "scripts/import-performance-measurements.py"
+      ],
+      "limitation": "Complete deterministic captures are required for full replay; prefix loss is explicit. Hosted/port-observed timings are not physical NIC timestamps or HIL qualification"
     }
   ]
 }
