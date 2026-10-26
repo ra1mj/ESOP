@@ -75,9 +75,13 @@ def histogram_stats(value, expected_samples, path):
     buckets = [integer(count, f"{path}.buckets[{index}]") for index, count in enumerate(value["buckets"])]
     overflow = integer(value["overflow"], f"{path}.overflow")
     maximum = integer(value["max_ns"], f"{path}.max_ns")
-    samples = integer(value["samples"], f"{path}.samples", 1)
+    samples = integer(value["samples"], f"{path}.samples")
     if samples != expected_samples or sum(buckets) + overflow != samples:
         raise ValueError(f"{path} histogram sample counts do not match the run")
+    if samples == 0:
+        if maximum != 0:
+            raise ValueError(f"{path} empty histogram cannot have a measured maximum")
+        return dict.fromkeys(("p50", "p99", "p999", "max"), 0)
     if any(count and index * width > maximum for index, count in enumerate(buckets)):
         raise ValueError(f"{path} nonempty bucket exceeds its measured max")
     if overflow and maximum < len(buckets) * width:
@@ -122,13 +126,24 @@ def validate_measurements(value, expected_commit, config_sha256, topology_sha256
         integer(topology[key], f"topology.{key}", 1 if key in {"slave_count", "pdo_bytes", "frame_count"} else 0)
     if type(topology["dc_enabled"]) is not bool or topology["axis_count"] > 32:
         raise ValueError("topology requires boolean DC policy and at most 32 axes")
-    run = closed(value["run"], {"elapsed_monotonic_ns", "cycle_samples", "max_accumulator_samples", "heap_allocations_after_activation"}, "run")
+    run = value["run"]
+    if not isinstance(run, dict):
+        raise ValueError("run must be an object")
+    run_keys = {"elapsed_monotonic_ns", "cycle_samples", "max_accumulator_samples", "heap_allocations_after_activation"}
+    if "rx_round_trip_samples" in run:
+        run_keys.add("rx_round_trip_samples")
+    closed(run, run_keys, "run")
     for key, number in run.items():
         integer(number, f"run.{key}", 1 if key == "elapsed_monotonic_ns" else 0)
     if run["cycle_samples"] != cycles or run["max_accumulator_samples"] != cycles:
         raise ValueError("run sample counts must equal binding.cycles")
+    round_trip_samples = run.get("rx_round_trip_samples", cycles)
+    if round_trip_samples > cycles:
+        raise ValueError("RX round-trip sample count cannot exceed cycle count")
     closed(value["latency_ns"], LATENCY_KEYS, "latency_ns")
-    stats = {key: histogram_stats(value["latency_ns"][key], cycles, f"latency_ns.{key}") for key in LATENCY_KEYS}
+    stats = {key: histogram_stats(value["latency_ns"][key],
+        round_trip_samples if key == "rx_round_trip" else cycles,
+        f"latency_ns.{key}") for key in LATENCY_KEYS}
     # Port time is virtual in simulation/replay and can advance faster than
     # wall time; only fast-path samples share the host elapsed clock.
     if stats["fast_path"]["max"] > run["elapsed_monotonic_ns"]:
@@ -184,6 +199,17 @@ def import_measurements(value, *, expected_commit, config_sha256, topology_sha25
     if baseline is not None:
         VALIDATE_REPORT(baseline)
         digest(baseline_sha256, "baseline SHA-256")
+        evidence = baseline.get("software_evidence")
+        if not isinstance(evidence, dict):
+            raise ValueError("baseline requires completed software evidence")
+        scenario = closed(evidence.get("scenario"), {"completed", "failures"}, "baseline software scenario")
+        sdo = closed(evidence.get("sdo"), set(workload), "baseline SDO workload")
+        if (scenario["completed"] is not True or scenario["failures"] != []
+            or baseline["measurement"]["heap_allocations_after_activation"] != 0):
+            raise ValueError("baseline must be a completed, allocation-free software run")
+        for key in ("concurrent_sdo_requests", "sdo_submitted", "sdo_completed", "sdo_failed"):
+            if integer(sdo[key], f"baseline SDO workload.{key}") != 0:
+                raise ValueError("baseline must have no submitted SDO workload")
         if (baseline["software"]["esop_commit"] != expected_commit or baseline["software"]["config_hash"] != config_sha256
             or baseline["topology"]["topology_manifest_hash"] != topology_sha256 or baseline["run"]["period_ns"] != binding["period_ns"]
             or baseline["measurement"]["source"] != binding["source"] or baseline["workload"]["concurrent_sdo_requests"] != 0
@@ -219,6 +245,11 @@ def import_measurements(value, *, expected_commit, config_sha256, topology_sha25
         "resources": value["resources"],
         "measurement": {"source": binding["source"], "cycle_samples": run["cycle_samples"], "max_accumulator_samples": run["max_accumulator_samples"],
             "heap_allocations_after_activation": run["heap_allocations_after_activation"], "trace_sha256": source_sha256,
+            "rx_round_trip_samples": run.get("rx_round_trip_samples"),
+            "rx_round_trip_unavailable_samples": (binding["cycles"] - run["rx_round_trip_samples"]
+                if "rx_round_trip_samples" in run else None),
+            "rx_round_trip_coverage": ("observed samples" if "rx_round_trip_samples" in run
+                else "legacy coverage unrecorded; histogram may include zero fill"),
             "histogram_bucket_width_ns": 1000, "percentiles": "bucket upper bounds clamped to observed max", "time_basis": {"release_jitter_abs": "port_monotonic", "fast_path": "host_monotonic", "rx_round_trip": "observed_port_poll_after_tx"}, "copy_measurement_semantics": "observed byte volume and payload spans; not full memcpy or DMA instrumentation"},
         "workload": {"concurrent_sdo_requests": workload["concurrent_sdo_requests"], "p99_regression_percent": regression,
             "baseline_report_sha256": baseline_sha256, "baseline_fast_path_p99_ns": baseline_p99},

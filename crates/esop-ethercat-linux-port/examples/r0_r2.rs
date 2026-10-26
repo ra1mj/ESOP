@@ -191,6 +191,20 @@ fn main() {
         std::process::exit(1);
     }
 }
+
+const USAGE: &str = "Usage: r0_r2 [OPTIONS]
+  --backend sim|replay|raw       Default: sim (raw requires Linux and --iface)
+  --scenario NAME               full, Q1, Q2, Q4, Q4-baseline, command_expiry,
+                                dc_fault, wkc_fault, link_fault, drive_fault,
+                                supervisor_restart (default: full)
+  --mode csp|csv|cst             Default: csp; Q workloads use their CSP product
+  --cycles N                    Default: 10000; at most one hour of virtual time
+  --output-dir PATH             Default: build/r0-r2/sim
+  --pcap PATH --sidecar PATH     Required for replay
+  --iface NAME                  Required for raw; motion remains inhibited
+  --capture-limit N             Fixed capture capacity (at most 500000 frames)
+  --help, -h                    Show this help";
+
 fn execute() -> Result<(), String> {
     let mut mode = "csp".to_owned();
     let mut backend = "sim".to_owned();
@@ -203,6 +217,10 @@ fn execute() -> Result<(), String> {
     let mut capture_limit = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
+        if matches!(arg.as_str(), "--help" | "-h") {
+            println!("{USAGE}");
+            return Ok(());
+        }
         let value = args
             .next()
             .ok_or_else(|| format!("missing value for {arg}"))?;
@@ -228,6 +246,7 @@ fn execute() -> Result<(), String> {
     if cycles == 0 {
         return Err("cycles must be nonzero".into());
     }
+    let scenario = scenario::canonical_scenario(&scenario)?.to_owned();
     let shape = scenario::shape(&scenario, &mode)?;
     if cycles > 3_600_000_000_000 / shape.metadata.base_period_ns {
         return Err("requested virtual run exceeds one hour".into());

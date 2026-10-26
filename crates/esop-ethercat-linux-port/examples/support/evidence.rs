@@ -54,7 +54,8 @@ pub struct ResourceMeasurements {
 pub struct CycleTiming {
     pub release_jitter_abs_ns: u64,
     pub fast_path_ns: u64,
-    pub rx_round_trip_ns: u64,
+    /// Absent when no unambiguous TX/RX timing pair was observed this cycle.
+    pub rx_round_trip_ns: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -136,6 +137,7 @@ pub struct RunSampleCounts {
     pub elapsed_monotonic_ns: u64,
     pub cycle_samples: u64,
     pub max_accumulator_samples: u64,
+    pub rx_round_trip_samples: u64,
     pub heap_allocations_after_activation: u64,
 }
 #[derive(Serialize)]
@@ -236,7 +238,9 @@ impl RunEvidenceCollector {
             .release_jitter_abs
             .record(timing.release_jitter_abs_ns);
         self.latency.fast_path.record(timing.fast_path_ns);
-        self.latency.rx_round_trip.record(timing.rx_round_trip_ns);
+        if let Some(round_trip_ns) = timing.rx_round_trip_ns {
+            self.latency.rx_round_trip.record(round_trip_ns);
+        }
         self.errors.wkc_mismatch = self
             .errors
             .wkc_mismatch
@@ -328,6 +332,7 @@ impl RunEvidenceCollector {
         software_completed: bool,
         failures: Vec<String>,
     ) -> RunMeasurements {
+        let rx_round_trip_samples = self.latency.rx_round_trip.samples;
         RunMeasurements {
             schema_version: "esop.run-measurements.v1",
             binding: self.binding,
@@ -341,6 +346,7 @@ impl RunEvidenceCollector {
                 elapsed_monotonic_ns,
                 cycle_samples: self.cycle_samples,
                 max_accumulator_samples: self.cycle_samples,
+                rx_round_trip_samples,
                 heap_allocations_after_activation: allocations,
             },
             digests: EvidenceDigests {
@@ -411,5 +417,72 @@ mod tests {
         );
         assert_eq!(histogram.overflow, 2);
         assert_eq!(histogram.max_ns, 1_000_000);
+    }
+
+    #[test]
+    fn round_trip_coverage_excludes_missing_samples_and_preserves_observed_zero() {
+        fn collect(samples: &[Option<u64>]) -> RunMeasurements {
+            let mut collector = RunEvidenceCollector::new(
+                MeasurementBinding {
+                    source: MeasurementSource::Sim,
+                    esop_commit: "0".repeat(40),
+                    config_sha256: "1".repeat(64),
+                    topology_sha256: "2".repeat(64),
+                    scenario: "rtt-coverage".into(),
+                    period_ns: 1000,
+                    cycles: samples.len() as u64,
+                    clock_origin_ns: 0,
+                },
+                ResourceMeasurements::default(),
+            );
+            for (index, sample) in samples.iter().copied().enumerate() {
+                collector.record_cycle(
+                    &CycleReport {
+                        cycle: index as u64 + 1,
+                        received_frames: 0,
+                        received_bytes: 0,
+                        parsed_datagrams: 0,
+                        unmatched_datagrams: 0,
+                        corrupt_frames: 0,
+                        wkc_mismatches: 0,
+                        timed_out_datagrams: 0,
+                        consumer_rejections: 0,
+                        budget_exhausted: false,
+                        link_down: false,
+                    },
+                    CycleTiming {
+                        release_jitter_abs_ns: 0,
+                        fast_path_ns: 100,
+                        rx_round_trip_ns: sample,
+                    },
+                    0,
+                    0,
+                    0,
+                );
+            }
+            collector.finish(samples.len() as u64 * 1000, 0, true, Vec::new())
+        }
+        let partial = collect(&[None, Some(0), Some(2345), None]);
+        assert_eq!(partial.run.cycle_samples, 4);
+        assert_eq!(partial.run.rx_round_trip_samples, 2);
+        assert_eq!(partial.latency_ns.fast_path.samples, 4);
+        assert_eq!(partial.latency_ns.release_jitter_abs.samples, 4);
+        assert_eq!(partial.latency_ns.rx_round_trip.samples, 2);
+        assert_eq!(partial.latency_ns.rx_round_trip.buckets[0], 1);
+        assert_eq!(partial.latency_ns.rx_round_trip.buckets[2], 1);
+        assert_eq!(partial.latency_ns.rx_round_trip.max_ns, 2345);
+        let json = serde_json::to_value(partial).unwrap();
+        assert_eq!(json["run"]["rx_round_trip_samples"], 2);
+
+        let absent = collect(&[None, None]);
+        assert_eq!(absent.run.cycle_samples, 2);
+        assert_eq!(absent.run.rx_round_trip_samples, 0);
+        assert_eq!(absent.latency_ns.rx_round_trip.samples, 0);
+        assert_eq!(
+            absent.latency_ns.rx_round_trip.buckets.iter().sum::<u64>(),
+            0
+        );
+        assert_eq!(absent.latency_ns.rx_round_trip.overflow, 0);
+        assert_eq!(absent.latency_ns.rx_round_trip.max_ns, 0);
     }
 }

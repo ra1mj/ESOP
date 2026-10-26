@@ -47,10 +47,19 @@ accuracy. The activated cycle must allocate nothing to collect evidence.
   Histograms use 512 fixed 1000 ns buckets plus overflow, sample count and exact
   observed maximum. Imported percentiles are documented bucket upper bounds
   clamped to that maximum; no latency is synthesized from the configured period.
-- Every cycle contributes one sample to all three latency histograms and one
-  state record. Retain all maxima, wire/state/event digests, complete error
+- Every cycle contributes release/fast-path samples and one state record. An
+  RX round-trip histogram records one per-cycle maximum only when unambiguous
+  pairs were observed. Export its
+  actual `run.rx_round_trip_samples`, which can be zero; unavailable observations
+  are not zero-latency samples. Legacy v1 files without this additive count remain
+  importable, with their coverage explicitly unknown rather than assumed complete.
+  Retain all maxima, wire/state/event digests, complete error
   counters, copy totals, allocation count, resources and SDO capacity/workload.
   RX budget exhaustion and hardware RX overflow are separate counters.
+- Reusing a wire index with an outstanding TX makes its RTT ambiguous. Keep
+  that index unavailable until a new observer session; cycle reset only clears
+  the current maximum and never invents a matching generation. Deterministic
+  replay must preserve this conservative timing decision as well as frame order.
 - A bounded capture may retain only a prefix. Its loss count is explicit,
   while streaming wire counts/digest and cycle/error/max accumulators still
   cover the full run. Import preserves that loss reason; replay requires a
@@ -65,6 +74,9 @@ accuracy. The activated cycle must allocate nothing to collect evidence.
   existing `esop.performance.v1` format and calls its existing validator.
 - A measured unloaded baseline must match commit, config, topology/counts,
   period, source and histogram precision, with full positive sample coverage.
+  Require its successful software completion, zero activated allocations and
+  zero submitted/completed/failed SDO work; a failed or partly loaded run is
+  not a valid reference even when its latency histogram is complete.
   Compute P99 regression from its actual P99; retain `null` when no baseline
   exists. Completed Q4 software evidence needs at least eight concurrent,
   completed SDO requests with at least 1 KiB object capacity.
@@ -89,6 +101,8 @@ accuracy. The activated cycle must allocate nothing to collect evidence.
 | Missing/extra source field, forged passed/HIL, duplicate JSON | Import exits nonzero |
 | Config/topology hash or explicit commit mismatch | Import exits nonzero |
 | Histogram sum/sample/max mismatch, missing cycle state | Import exits nonzero |
+| Missing/ambiguous RX timing | No timing sample; explicit unavailable coverage |
+| Failed/allocating/partly SDO-loaded baseline | Reject regression reference |
 | Baseline absent | No invented regression; Q4 reason remains unqualified |
 | Valid software run | Existing report format, qualification always false |
 | Valid unqualified R2 baseline in development mode | Validator exits zero |

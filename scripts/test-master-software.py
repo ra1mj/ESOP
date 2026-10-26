@@ -91,6 +91,14 @@ def main() -> int:
                            "drive_fault", "supervisor_restart")]
     evidence = []
     try:
+        # Reject an unsupported workload before opening a physical port or
+        # running a different product under the requested scenario's name.
+        invalid_output = args.output / "unsupported-scenario"
+        rejected = subprocess.run(command + ["--backend", "raw", "--iface", "esop-no-such-interface",
+                                  "--scenario", "Q3", "--output-dir", str(invalid_output)],
+                                  cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if rejected.returncode == 0 or "unsupported scenario Q3" not in rejected.stderr or invalid_output.exists():
+            raise ValueError("unsupported scenario reached port setup or execution")
         for case in cases:
             output = args.output / case["name"]
             subprocess.run(command + ["--backend", "sim", "--scenario", case["scenario"],
@@ -112,6 +120,24 @@ def main() -> int:
             evidence.append({"case": case, "scenario": result,
                              "run_sha256": hashlib.sha256((output / "run.json").read_bytes()).hexdigest()})
             print(f"software master passed: {case['name']}", flush=True)
+        # CLI aliases must identify the same canonical topology in the capture,
+        # run, scenario and offline-import metadata.
+        alias_output = args.output / "lowercase-baseline"
+        subprocess.run(command + ["--backend", "sim", "--scenario", "q4-baseline", "--cycles", "1000",
+                       "--output-dir", str(alias_output)], cwd=ROOT, check=True,
+                       stdout=subprocess.PIPE, text=True)
+        validate_case(alias_output, dict(cycles=1000, slave_count=17, axis_count=16,
+                      period_ns=1_000_000, max_pdo_bytes=768))
+        alias_run = read_json(alias_output / "run.json")
+        if (alias_run["binding"]["scenario"] != "Q4-baseline"
+            or read_json(alias_output / "scenario.json")["scenario"] != "Q4-baseline"
+            or read_json(alias_output / "trace.json")["binding"]["scenario"] != "Q4-baseline"):
+            raise ValueError("scenario alias leaked into artifact identities")
+        subprocess.run([sys.executable, str(ROOT / "scripts/import-performance-measurements.py"),
+                        "--input", str(alias_output / "run.json"), "--config", str(alias_output / "config.json"),
+                        "--topology", str(alias_output / "topology.json"), "--expected-commit", expected_commit,
+                        "--output", str(alias_output / "performance.json")], cwd=ROOT, check=True,
+                       stdout=subprocess.DEVNULL)
         # The same production code must reproduce a complete capture exactly.
         for name in ("full-csp", "link_fault"):
             case = next(case for case in cases if case["name"] == name)

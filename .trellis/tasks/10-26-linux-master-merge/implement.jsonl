@@ -1,0 +1,3 @@
+{"file":".trellis/spec/backend/ethercat-mailbox-runtime.md","reason":"Shared physical mailbox ownership, fixed requests and scheduling"}
+{"file":".trellis/spec/backend/ethercat-slave-monitoring.md","reason":"Age-qualified runtime monitor and lifecycle gate"}
+{"file":".trellis/spec/backend/software-run-evidence.md","reason":"Replay, capture and measurement provenance"}

@@ -8,15 +8,20 @@
 在仓库根目录执行：
 
 ```bash
+cargo run -p esop-ethercat-linux-port --example r0_r2 -- --help
 cargo run --release -p esop-ethercat-linux-port --example r0_r2 -- \
   --backend sim --scenario full --mode csp --cycles 10000 \
   --output-dir build/r0-r2/sim
 ```
 
 默认产品是两个独立 CiA 402 轴加一个 DI/DO 从站，1 ms 虚拟周期。
+未知场景会在打开端口前拒绝；`q1`、`q2`、`q4`、`q4-baseline` 会规范化为表中名称，
+捕获、运行记录和离线导入使用相同场景标识。
 `--mode csv`、`--mode cst` 选择各自冻结的生成配置。程序执行真实 EtherCAT
 字节流、SII/寄存器/PDO 回读、生命周期许可、停止和新 permit 恢复，不向主站
 注入完成状态。虚拟 ESC 独立计算寻址、SM/FMMU 访问和 WKC。
+AL/DL 监测的时间界限会随周期所有者传递，并在运动输出前重新检查；已经接受的
+报文记录保持真实，随后发现过期时按生命周期策略请求停止。
 
 | 场景 | 轴/从站 | 周期 | PDO 字节 | 主要覆盖 |
 | --- | --- | --- | --- | --- |
@@ -67,8 +72,12 @@ python3 scripts/import-performance-measurements.py \
 导入器核验实际文件 SHA、commit、拓扑、样本数、直方图和 SDO 容量，并始终保持
 软件报告 `qualification.passed=false`。Q4 可通过 `--baseline` 导入相同产品/
 拓扑/周期/来源的无负载报告，计算实测 P99 回归；不能提交一个无文件证据的 baseline hash。
+基线必须完成软件场景、激活后零分配，且没有提交过 SDO 负载；失败或部分运行不能充当空载参考。
 release jitter 使用 port 时间，fast path 使用 host 单调时间，RX round trip 使用
 匹配 TX 后实际观察到 RX 的 port 轮询时间；虚拟总线时间不等于宿主执行时长。
+RX timing 只统计可明确匹配的每周期最大值。索引在未收到响应前再次使用时，该索引的
+RTT 在本次捕获中保持不可用；缺失观测不会填成零延迟。`run.rx_round_trip_samples`
+记录实际覆盖周期数；旧版记录没有这个字段时，导入结果明确标为覆盖未知。
 字节量和 payload span 是软件观测量，尚非完整 memcpy/DMA 仪器测量；未知目标
 arena、stack、DMA、CPU 和代码资源保持未测量。
 

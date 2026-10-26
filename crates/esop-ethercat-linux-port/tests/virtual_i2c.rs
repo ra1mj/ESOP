@@ -174,7 +174,7 @@ fn activated_i2c_and_all_measurement_recording_allocate_nothing() {
             CycleTiming {
                 release_jitter_abs_ns: 0,
                 fast_path_ns: 1234,
-                rx_round_trip_ns: 4321,
+                rx_round_trip_ns: if cycle % 2 == 0 { Some(4321) } else { None },
             },
             64,
             64,
@@ -190,11 +190,13 @@ fn activated_i2c_and_all_measurement_recording_allocate_nothing() {
     assert_eq!(ALLOCATIONS.with(Cell::get), 0);
     let result = collector.finish(1000, 0, true, Vec::new());
     assert_eq!(result.run.cycle_samples, 100);
+    assert_eq!(result.run.rx_round_trip_samples, 50);
     assert_eq!(result.digests.state_records, 100);
     assert_eq!(result.digests.wire_records, 100);
     let json = serde_json::to_value(result).unwrap();
     assert_eq!(json["binding"]["source"], "sim");
     assert_eq!(json["latency_ns"]["fast_path"]["samples"], 100);
+    assert_eq!(json["latency_ns"]["rx_round_trip"]["samples"], 50);
 }
 
 #[test]
@@ -267,7 +269,7 @@ fn rust_measurements_import_through_the_existing_performance_contract() {
             CycleTiming {
                 release_jitter_abs_ns: 0,
                 fast_path_ns: 1234,
-                rx_round_trip_ns: 2345,
+                rx_round_trip_ns: Some(2345),
             },
             64,
             64,

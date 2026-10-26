@@ -678,6 +678,7 @@
       "evidence": [
         "crates/esop-ethercat-core/src/slave_monitor.rs",
         "crates/esop-ethercat-core/tests/slave_monitor.rs",
+        "crates/esop-lifecycle-guard/tests/monitor_freshness.rs",
         "crates/esop-lifecycle-guard/src/ethercat.rs"
       ],
       "limitation": "Polling cadence/maximum age are frozen product policy; software checks do not prove a real-slave detection deadline or physical status authenticity"

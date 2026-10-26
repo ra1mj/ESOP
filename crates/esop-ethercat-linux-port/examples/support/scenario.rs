@@ -102,7 +102,27 @@ fn shape_for<const SLAVES: usize, const AXES: usize, const DOMAINS: usize>(
         config_bytes,
     }
 }
+pub fn canonical_scenario(name: &str) -> Result<&'static str, String> {
+    match name {
+        "full" => Ok("full"),
+        "Q1" | "q1" => Ok("Q1"),
+        "Q2" | "q2" => Ok("Q2"),
+        "Q4" | "q4" => Ok("Q4"),
+        "Q4-baseline" | "q4-baseline" => Ok("Q4-baseline"),
+        "command_expiry" => Ok("command_expiry"),
+        "dc_fault" => Ok("dc_fault"),
+        "wkc_fault" => Ok("wkc_fault"),
+        "link_fault" => Ok("link_fault"),
+        "drive_fault" => Ok("drive_fault"),
+        "supervisor_restart" => Ok("supervisor_restart"),
+        _ => Err(format!(
+            "unsupported scenario {name}; use --help for supported scenarios"
+        )),
+    }
+}
+
 pub fn shape(scenario: &str, mode: &str) -> Result<ScenarioShape, String> {
+    let scenario = canonical_scenario(scenario)?;
     let _ = [
         load_q1::PRODUCT_RUNTIME_SDO_REQUESTS,
         load_q1::PRODUCT_MAX_SDO_OBJECT_BYTES,
@@ -736,6 +756,7 @@ pub fn run<P: ScenarioPort>(
 where
     P::Error: core::fmt::Debug,
 {
+    let scenario = canonical_scenario(scenario)?;
     match scenario {
         "Q1" | "q1" => run_product::<P, 32, 32, 1, 1024>(
             port,
@@ -1095,7 +1116,7 @@ where
         if report.received().dc_result.is_ok() {
             result.dc_good_cycles += 1;
         }
-        let rx_elapsed = port.observed_round_trip_ns().unwrap_or(0);
+        let rx_elapsed = port.observed_round_trip_ns();
         let cycle = report.received().report.cycle;
         state.sequence = cycle;
         let other = OtherCycleFacts {

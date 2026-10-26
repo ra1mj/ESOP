@@ -133,6 +133,10 @@ pub struct CaptureTrace {
 
 struct RoundTripObserver {
     transmitted_at: [Option<u64>; 256],
+    // The wire index carries no generation. Once two unanswered TXs share an
+    // index, no later RX can establish which TX it answered. Keep that index
+    // unavailable for the rest of this observer/session, including cycle reset.
+    tainted: [bool; 256],
     max_ns: u64,
     samples: u64,
 }
@@ -140,6 +144,7 @@ impl RoundTripObserver {
     const fn new() -> Self {
         Self {
             transmitted_at: [None; 256],
+            tainted: [false; 256],
             max_ns: 0,
             samples: 0,
         }
@@ -152,9 +157,18 @@ impl RoundTripObserver {
             let Ok(datagram) = datagram else {
                 break;
             };
-            let slot = &mut self.transmitted_at[usize::from(datagram.header.index)];
+            let index = usize::from(datagram.header.index);
+            if self.tainted[index] {
+                continue;
+            }
+            let slot = &mut self.transmitted_at[index];
             if is_tx {
-                *slot = Some(now_ns);
+                if slot.is_some() {
+                    self.tainted[index] = true;
+                    *slot = None;
+                } else {
+                    *slot = Some(now_ns);
+                }
             } else if let Some(sent) = slot.take() {
                 if let Some(elapsed) = now_ns.checked_sub(sent) {
                     self.max_ns = self.max_ns.max(elapsed);
@@ -630,6 +644,94 @@ mod tests {
     }
 
     #[test]
+    fn reused_wire_index_cannot_shorten_an_old_responses_round_trip() {
+        let old = literal_datagram(7);
+        let mut new = literal_datagram(7);
+        new[18..22].copy_from_slice(&0x2000u32.to_le_bytes());
+        let mut trace = CaptureTrace::new(binding(), 8).unwrap();
+        for (time, direction, bytes) in [
+            (0, Direction::Tx, &old),
+            (5, Direction::Tx, &new),
+            (10, Direction::Rx, &old),
+            (15, Direction::Rx, &new),
+        ] {
+            trace.record(time, direction, bytes);
+        }
+        let recorded_round_trip = trace.observed_round_trip_ns();
+        let mut replay = ReplayPort::new(trace);
+        let mut bytes = [0; MAX_ETHERNET_FRAME_LEN];
+        replay.tx_submit(&old).unwrap();
+        replay.advance_to(5).unwrap();
+        replay.tx_submit(&new).unwrap();
+        replay.advance_to(10).unwrap();
+        assert_eq!(replay.rx_poll(&mut bytes), Ok(RxPoll::Frame(64)));
+        assert_eq!(&bytes[..64], &old);
+        replay.advance_to(15).unwrap();
+        assert_eq!(replay.rx_poll(&mut bytes), Ok(RxPoll::Frame(64)));
+        assert_eq!(&bytes[..64], &new);
+        assert_eq!(replay.finish(), Ok(()));
+        assert_eq!(replay.observed_round_trip_ns(), recorded_round_trip);
+        // Each pair takes ten ns, but the bounded index-only observer cannot
+        // establish ownership after overlap. It must not invent a five-ns RTT.
+        assert_eq!(recorded_round_trip, None);
+    }
+
+    #[test]
+    fn overlapping_index_taint_survives_cycle_reset_and_later_rx_drain() {
+        let reused = literal_datagram(7);
+        let other = literal_datagram(9);
+        let mut trace = CaptureTrace::new(binding(), 16).unwrap();
+        trace.record(0, Direction::Tx, &reused);
+        trace.record(5, Direction::Tx, &reused);
+        trace.reset_round_trip();
+        trace.record(10, Direction::Rx, &reused);
+        trace.record(15, Direction::Rx, &reused);
+        trace.record(20, Direction::Tx, &reused);
+        trace.record(25, Direction::Rx, &reused);
+        assert_eq!(trace.observed_round_trip_ns(), None);
+        trace.record(30, Direction::Tx, &other);
+        trace.record(40, Direction::Rx, &other);
+        assert_eq!(trace.observed_round_trip_ns(), Some(10));
+        trace.reset_round_trip();
+        trace.record(50, Direction::Tx, &reused);
+        trace.record(60, Direction::Rx, &reused);
+        assert_eq!(trace.observed_round_trip_ns(), None);
+
+        let mut replay = ReplayPort::new(trace);
+        let mut bytes = [0; MAX_ETHERNET_FRAME_LEN];
+        replay.tx_submit(&reused).unwrap();
+        replay.advance_to(5).unwrap();
+        replay.tx_submit(&reused).unwrap();
+        replay.reset_round_trip();
+        for time in [10, 15] {
+            replay.advance_to(time).unwrap();
+            assert_eq!(replay.rx_poll(&mut bytes), Ok(RxPoll::Frame(64)));
+        }
+        replay.advance_to(20).unwrap();
+        replay.tx_submit(&reused).unwrap();
+        replay.advance_to(25).unwrap();
+        replay.rx_poll(&mut bytes).unwrap();
+        assert_eq!(replay.observed_round_trip_ns(), None);
+        replay.advance_to(30).unwrap();
+        replay.tx_submit(&other).unwrap();
+        replay.advance_to(40).unwrap();
+        replay.rx_poll(&mut bytes).unwrap();
+        assert_eq!(replay.observed_round_trip_ns(), Some(10));
+        replay.reset_round_trip();
+        replay.advance_to(50).unwrap();
+        replay.tx_submit(&reused).unwrap();
+        replay.advance_to(60).unwrap();
+        replay.rx_poll(&mut bytes).unwrap();
+        assert_eq!(replay.observed_round_trip_ns(), None);
+        assert_eq!(replay.finish(), Ok(()));
+
+        let mut fresh = CaptureTrace::new(binding(), 2).unwrap();
+        fresh.record(0, Direction::Tx, &reused);
+        fresh.record(10, Direction::Rx, &reused);
+        assert_eq!(fresh.observed_round_trip_ns(), Some(10));
+    }
+
+    #[test]
     fn recording_port_uses_actual_post_operation_timestamps_and_rejects_oversize_rx_without_panicking()
      {
         struct TimedPort {
@@ -776,6 +878,60 @@ mod tests {
         assert_eq!(replay.now_ns(), 100); // late data is not backdated into a valid deadline
         assert_eq!(&scratch[..64], &rx);
         assert_eq!(replay.observed_round_trip_ns(), Some(100));
+    }
+
+    #[test]
+    fn late_replayed_rx_reaches_master_validation_at_the_actual_poll_time() {
+        use esop_ethercat_core::{
+            DatagramPlan, Domain, DomainSegment, EthercatMaster, FramePlan, MasterConfig,
+            wire::Command,
+        };
+        let rx = literal_datagram(7);
+        let mut tx = rx;
+        tx[26..30].fill(0); // transmitted read payload and WKC are initially zero
+        let mut trace = CaptureTrace::new(binding(), 4).unwrap();
+        trace.record(0, Direction::Tx, &tx);
+        trace.record(100, Direction::Rx, &rx);
+        let mut replay = ReplayPort::new(trace);
+        let mut master = EthercatMaster::<1, MAX_ETHERNET_FRAME_LEN>::new(MasterConfig::new(
+            [0xff; 6],
+            [1, 2, 3, 4, 5, 6],
+        ));
+        let mut domain = Domain::<2, 1>::new(0x1000);
+        domain
+            .add_segment(DomainSegment {
+                datagram_index: 7,
+                input_offset: 0,
+                len: 2,
+                expected_wkc: 1,
+            })
+            .unwrap();
+        domain.begin_receive(1).unwrap();
+        let mut plan = FramePlan::<1>::new();
+        plan.push(DatagramPlan {
+            command: Command::Lrd,
+            index: 7,
+            address: 0x1000,
+            payload_offset: 0,
+            payload_len: 2,
+            expected_wkc: 1,
+        })
+        .unwrap();
+        let frame = master.acquire_frame(1, 50).unwrap();
+        master
+            .build_and_arm_frame_from_plan(frame, &plan, &[0, 0])
+            .unwrap();
+        master.submit_frame(&mut replay, frame).unwrap();
+        replay.advance_to(100).unwrap();
+        let mut bytes = [0; MAX_ETHERNET_FRAME_LEN];
+        let report = master
+            .cycle_receive_with_consumer(&mut replay, &mut bytes, 1, &mut domain)
+            .unwrap();
+        assert_eq!(report.timed_out_datagrams, 1);
+        assert_eq!(report.unmatched_datagrams, 1);
+        assert!(!domain.finish_receive(1, report.cycle).unwrap());
+        assert_eq!(domain.input(), &[0, 0]);
+        assert_eq!(replay.finish(), Ok(()));
     }
 
     #[test]

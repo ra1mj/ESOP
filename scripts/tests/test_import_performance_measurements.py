@@ -44,6 +44,32 @@ def measurements():
 
 
 class ImportTests(unittest.TestCase):
+    def test_missing_round_trip_observations_are_not_reported_as_zero_latency_samples(self):
+        for samples in (0, 4, 10):
+            with self.subTest(samples=samples):
+                value = measurements()
+                value["run"]["rx_round_trip_samples"] = samples
+                value["latency_ns"]["rx_round_trip"] = histogram(samples=samples, value=1234 if samples else 0)
+                result = self.call(value)
+                self.assertEqual(result["measurement"]["rx_round_trip_samples"], samples)
+                self.assertEqual(result["measurement"]["rx_round_trip_unavailable_samples"], 10 - samples)
+                self.assertEqual(result["latency_ns"]["rx_round_trip"]["max"], 1234 if samples else 0)
+                self.assertFalse(result["qualification"]["passed"])
+        legacy = self.call(measurements())
+        self.assertIsNone(legacy["measurement"]["rx_round_trip_samples"])
+        self.assertIsNone(legacy["measurement"]["rx_round_trip_unavailable_samples"])
+        self.assertIn("unrecorded", legacy["measurement"]["rx_round_trip_coverage"])
+
+    def test_round_trip_coverage_must_match_its_histogram_and_run(self):
+        for samples, latency in ((11, histogram(samples=11)), (4, histogram()),
+                                 (0, histogram(samples=0, value=1234)), (True, histogram(samples=1))):
+            with self.subTest(samples=samples):
+                value = measurements()
+                value["run"]["rx_round_trip_samples"] = samples
+                value["latency_ns"]["rx_round_trip"] = latency
+                with self.assertRaises(ValueError):
+                    self.call(value)
+
     def test_virtual_port_rtt_and_host_execution_duration_use_distinct_clocks(self):
         value = measurements()
         value["latency_ns"]["rx_round_trip"] = histogram(value=1_000_000)
@@ -124,6 +150,33 @@ class ImportTests(unittest.TestCase):
         baseline["software"]["config_hash"]="2"*64
         with self.assertRaisesRegex(ValueError,"baseline metadata"):
             self.call(loaded,baseline=baseline,baseline_sha256="1"*64)
+
+    def test_failed_allocating_or_partially_loaded_baseline_cannot_define_regression(self):
+        value = measurements()
+        value["binding"]["scenario"] = "Q4-baseline"
+        value["workload"].update(concurrent_sdo_requests=0, sdo_submitted=0, sdo_completed=0)
+        baseline = self.call(value)
+        for mutate in (
+            lambda report: report["software_evidence"]["scenario"].update(
+                completed=False, failures=["startup did not finish"]),
+            lambda report: report["software_evidence"]["scenario"].update(failures=["failed"]),
+            lambda report: report["measurement"].update(heap_allocations_after_activation=1),
+            lambda report: report["software_evidence"]["sdo"].update(sdo_submitted=8),
+            lambda report: report["software_evidence"]["sdo"].update(sdo_completed=8),
+            lambda report: report["software_evidence"]["sdo"].update(sdo_failed=1),
+            lambda report: report.pop("software_evidence"),
+        ):
+            with self.subTest(mutate=mutate):
+                invalid = copy.deepcopy(baseline)
+                mutate(invalid)
+                with self.assertRaisesRegex(ValueError, "baseline"):
+                    self.call(measurements(), baseline=invalid, baseline_sha256="1"*64)
+
+        # This is an actual imported failed run, rather than only an edited report.
+        value["software_scenario"] = {"completed": False, "failures": ["startup did not finish"]}
+        failed = self.call(value)
+        with self.assertRaisesRegex(ValueError, "baseline must be a completed"):
+            self.call(measurements(), baseline=failed, baseline_sha256="1"*64)
 
     def test_cli_binds_real_artifact_bytes_and_topology_counts(self):
         with tempfile.TemporaryDirectory() as directory:
