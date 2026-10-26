@@ -52,6 +52,7 @@ fn complete<const N: usize, const E: usize>(
 fn publishes_only_complete_same_sample_al_dl_and_ages_the_earlier_read() {
     let mut monitor = SlaveMonitorController::<1, 4>::new(42, &[config(0)], 10, 30, 20, 0).unwrap();
     assert!(!monitor.quality(0).is_good());
+    assert_eq!(monitor.quality(0).fresh_until_ns, None);
     assert_eq!(
         complete(&mut monitor, 0, &[8, 0, 0, 0, 0, 0], 1),
         SlaveMonitorProgress::AlStaged(0)
@@ -70,6 +71,12 @@ fn publishes_only_complete_same_sample_al_dl_and_ages_the_earlier_read() {
     assert_eq!(sample.observed_at_ns, 1);
     assert_eq!(sample.completed_at_ns, 12);
     assert_ne!(sample.al_generation, sample.dl_generation);
+    let held = monitor.quality(12);
+    assert_eq!(held.sampled_at_ns, 12);
+    assert_eq!(held.fresh_until_ns, Some(31));
+    assert!(!held.is_good_at(11));
+    assert!(held.is_good_at(31));
+    assert!(!held.is_good_at(32));
     assert!(monitor.quality(31).is_good());
     assert!(!monitor.quality(32).is_good());
     assert!(!monitor.quality(0).is_good());
@@ -91,6 +98,22 @@ fn publishes_only_complete_same_sample_al_dl_and_ages_the_earlier_read() {
 }
 
 #[test]
+fn quality_carries_the_earliest_expiring_station_bound() {
+    let mut monitor =
+        SlaveMonitorController::<2, 4>::new(42, &[config(0), config(1)], 1, 10, 20, 0).unwrap();
+    complete(&mut monitor, 0, &[8, 0, 0, 0, 0, 0], 1);
+    complete(&mut monitor, 2, &[0x10, 0], 1);
+    complete(&mut monitor, 4, &[8, 0, 0, 0, 0, 0], 1);
+    complete(&mut monitor, 6, &[0x10, 0], 1);
+    let quality = monitor.quality(7);
+    assert_eq!(quality.sampled_at_ns, 7);
+    assert_eq!(quality.fresh_until_ns, Some(11));
+    assert!(quality.is_good_at(11));
+    assert!(!quality.is_good_at(12));
+    assert!(!quality.is_good_at(6));
+}
+
+#[test]
 fn failed_read_invalidates_station_then_advances_without_latching_wire_selection() {
     let mut monitor =
         SlaveMonitorController::<2, 4>::new(42, &[config(0), config(1)], 1, 100, 20, 0).unwrap();
@@ -107,6 +130,7 @@ fn failed_read_invalidates_station_then_advances_without_latching_wire_selection
     complete(&mut monitor, 4, &[0x10, 0], 1);
     assert!(monitor.snapshots()[1].known);
     assert!(!monitor.quality(6).known);
+    assert_eq!(monitor.quality(6).fresh_until_ns, None);
     assert_eq!(monitor.next_action(6).unwrap().position, 0);
 }
 

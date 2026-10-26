@@ -10,7 +10,7 @@ use crate::cia402::{
 use crate::ethercat::{
     ControlledStopFrameReport, OtherCycleFacts, ScheduledControlGate, ScheduledDomainQuality,
     StopFrameError, other_cycle_facts_from_control_cycle, other_cycle_facts_from_mailbox_cycle,
-    other_cycle_facts_from_process_tx, other_cycle_facts_from_production_service_cycle,
+    other_cycle_facts_from_process_tx, other_cycle_facts_from_production_service_cycle_at,
     submit_active_frame, submit_controlled_stopping_frame, submit_inhibited_frame,
     submit_prepared_active_frame, submit_stopping_frame, verified_ethercat_stop_feedback,
 };
@@ -31,7 +31,8 @@ use esop_ethercat_core::{
     ScheduleTable, ScheduledControlCycleReport, ScheduledDomainBank, ScheduledMailboxCycleReport,
     ScheduledProcessInputs, ScheduledProcessTxReport, ScheduledProductionServiceCycleReport,
     ScheduledReceiveReport, ScheduledServiceTxFailure, ScheduledSlaveCopyError, SlaveCopyPlanSet,
-    SlaveCopyProcessImage, SlaveCopyPublication, SlaveCopyPublishedImage, wire::Command,
+    SlaveCopyProcessImage, SlaveCopyPublication, SlaveCopyPublishedImage, SlaveMonitorQuality,
+    wire::Command,
 };
 use esop_procbuf::{CommandPage, HeaderError, ProcBuf, StatePage, StatePublishError};
 use esop_profile_cia402::{
@@ -93,7 +94,8 @@ pub struct StopCycleOutcome<E> {
     /// It cannot retract a previously published optimistic State snapshot.
     pub post_publication_deadline_met: Option<bool>,
     /// Result of the corrective State publication, only attempted when a new
-    /// deadline miss is first observed after State/event publication.
+    /// deadline miss or monitoring expiry is first observed after State/event
+    /// publication. The field name is retained for API compatibility.
     pub deadline_correction_publish: Option<Result<u64, StatePublishError>>,
     /// Corrective events are attempted only after the corrected State succeeds.
     pub deadline_correction_events: Option<Result<usize, LifecycleEventError>>,
@@ -1029,6 +1031,34 @@ struct MotionInputs<'a, const AXES: usize> {
     permit: Option<MotionPermit>,
 }
 
+#[derive(Clone, Copy)]
+struct ServiceCycleFacts {
+    other: OtherCycleFacts,
+    monitor: Option<SlaveMonitorQuality>,
+}
+
+impl From<OtherCycleFacts> for ServiceCycleFacts {
+    fn from(other: OtherCycleFacts) -> Self {
+        Self {
+            other,
+            monitor: None,
+        }
+    }
+}
+
+impl ServiceCycleFacts {
+    fn monitor_good_at(self, now_ns: u64) -> bool {
+        self.monitor
+            .is_none_or(|quality| quality.is_good_at(now_ns))
+    }
+
+    fn age_topology(self, quality: &mut CyclicQuality, now_ns: u64) -> bool {
+        let was_valid = quality.topology_valid;
+        quality.topology_valid &= self.monitor_good_at(now_ns);
+        was_valid && !quality.topology_valid
+    }
+}
+
 type ScheduledInputs<'a, const DOMAINS: usize, const SLOTS: usize> = (
     &'a ScheduleTable<DOMAINS, SLOTS>,
     &'a [ScheduledDomainQuality; DOMAINS],
@@ -1871,9 +1901,9 @@ impl<
         if !domain_bank.confirms_process_tx(process_inputs, process) {
             return Err(StopCycleError::ProcessCycleMismatch);
         }
-        let (domains, other) =
+        let (domains, mut other) =
             self.service_cycle_inputs(domain_bank, cycle, motion_domain_id, outputs)?;
-        let other = other_cycle_facts_from_process_tx(process, other);
+        other.other = other_cycle_facts_from_process_tx(process, other.other);
         self.run_inner_with_outputs(
             Some((outputs.schedule, &domains, motion_domain_id)),
             Some(MotionInputs {
@@ -1913,14 +1943,24 @@ impl<
         cycle: &ScheduledProductionServiceCycleReport<P::Error, DOMAINS>,
         motion_domain_id: u8,
         outputs: &ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
-    ) -> Result<([ScheduledDomainQuality; DOMAINS], OtherCycleFacts), StopCycleError> {
+    ) -> Result<([ScheduledDomainQuality; DOMAINS], ServiceCycleFacts), StopCycleError> {
         if !domain_bank.confirms_production_service_cycle(cycle) {
             return Err(StopCycleError::ServiceCycleMismatch);
         }
         let domains =
             self.received_domains(domain_bank, cycle.received(), motion_domain_id, outputs)?;
-        let other = other_cycle_facts_from_production_service_cycle(cycle, self.other);
-        Ok((domains, other))
+        let other = other_cycle_facts_from_production_service_cycle_at(
+            cycle,
+            self.other,
+            self.port.now_ns().max(self.now_ns),
+        );
+        Ok((
+            domains,
+            ServiceCycleFacts {
+                other,
+                monitor: cycle.slave_monitor_quality(),
+            },
+        ))
     }
 
     fn mailbox_cycle_inputs<const SCHEDULE_SLOTS: usize, const FRAMES: usize>(
@@ -2012,7 +2052,7 @@ impl<
         controlled: Option<&mut ControlledStopCycleState<AXES>>,
         cycle_deadline_ns: Option<u64>,
         outputs: Option<&ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>>,
-        other: OtherCycleFacts,
+        other: impl Into<ServiceCycleFacts>,
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
         self.run_inner_with_outputs_and_maintenance(
             scheduled,
@@ -2033,7 +2073,7 @@ impl<
         mut controlled: Option<&mut ControlledStopCycleState<AXES>>,
         cycle_deadline_ns: Option<u64>,
         outputs: Option<&ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>>,
-        other: OtherCycleFacts,
+        facts: impl Into<ServiceCycleFacts>,
         mut maintenance: Option<&mut FaultResetController>,
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
         if self.report.cycle == 0
@@ -2122,7 +2162,9 @@ impl<
         let mut decision_now_ns = cycle_deadline_ns
             .map(|_| self.port.now_ns().max(self.now_ns))
             .unwrap_or(self.now_ns);
-        let mut other = other;
+        let facts = facts.into();
+        let mut other = facts.other;
+        other.topology_valid &= facts.monitor_good_at(decision_now_ns);
         if cycle_deadline_ns.is_some_and(|deadline| decision_now_ns >= deadline) {
             other.deadline_met = false;
         }
@@ -2216,6 +2258,9 @@ impl<
                 quality.cycle_within_budget = false;
                 cyclic_quality_to_procbuf(self.state, quality);
             }
+        }
+        if facts.age_topology(&mut quality, decision_now_ns) {
+            cyclic_quality_to_procbuf(self.state, quality);
         }
         self.guard.update_cyclic_quality(quality, self.report.cycle);
         if cycle_deadline_ns.is_some() && !quality.cycle_within_budget {
@@ -2358,44 +2403,47 @@ impl<
                     for guard in &mut next_guards {
                         guard.bind_activation(activation.0, activation.1);
                     }
-                    let transmission = if let Some(permit) = motion.permit {
-                        submit_prepared_active_frame(
-                            &decision,
-                            permit,
-                            self.report,
-                            &outputs,
-                            motion.targets,
-                            &mut next_guards,
-                            motion.limits,
-                            self.maps,
-                            self.modes,
-                            self.safe_process_image,
-                            self.domain,
-                            self.plan,
-                            self.master,
-                            self.port,
-                            self.next_generation,
-                            self.deadline_ns,
-                        )
-                    } else {
-                        submit_active_frame(
-                            &decision,
-                            self.report,
-                            &outputs,
-                            motion.targets,
-                            &mut next_guards,
-                            motion.limits,
-                            self.maps,
-                            self.modes,
-                            self.safe_process_image,
-                            self.domain,
-                            self.plan,
-                            self.master,
-                            self.port,
-                            self.next_generation,
-                            self.deadline_ns,
-                        )
-                    };
+                    let transmission =
+                        if !facts.monitor_good_at(self.port.now_ns().max(decision_now_ns)) {
+                            Err(StopFrameError::UnverifiedInput)
+                        } else if let Some(permit) = motion.permit {
+                            submit_prepared_active_frame(
+                                &decision,
+                                permit,
+                                self.report,
+                                &outputs,
+                                motion.targets,
+                                &mut next_guards,
+                                motion.limits,
+                                self.maps,
+                                self.modes,
+                                self.safe_process_image,
+                                self.domain,
+                                self.plan,
+                                self.master,
+                                self.port,
+                                self.next_generation,
+                                self.deadline_ns,
+                            )
+                        } else {
+                            submit_active_frame(
+                                &decision,
+                                self.report,
+                                &outputs,
+                                motion.targets,
+                                &mut next_guards,
+                                motion.limits,
+                                self.maps,
+                                self.modes,
+                                self.safe_process_image,
+                                self.domain,
+                                self.plan,
+                                self.master,
+                                self.port,
+                                self.next_generation,
+                                self.deadline_ns,
+                            )
+                        };
                     if transmission.is_ok() {
                         *motion.guards = next_guards;
                     }
@@ -2516,14 +2564,18 @@ impl<
             .unwrap_or(self.now_ns);
         let post_tx_deadline_met = cycle_deadline_ns
             .map(|deadline| quality.cycle_within_budget && publish_now_ns < deadline);
-        if post_tx_deadline_met == Some(false) {
-            quality.cycle_within_budget = false;
+        let monitor_aged = facts.age_topology(&mut quality, publish_now_ns);
+        if monitor_aged || post_tx_deadline_met == Some(false) {
+            if post_tx_deadline_met == Some(false) {
+                quality.cycle_within_budget = false;
+                self.guard
+                    .update_gate(GateId::Budget, false, self.report.cycle, 0x4255_0001);
+                self.guard.latch_fault(0x4255_0001, self.report.cycle);
+            }
             cyclic_quality_to_procbuf(self.state, quality);
-            self.guard
-                .update_gate(GateId::Budget, false, self.report.cycle, 0x4255_0001);
-            self.guard.latch_fault(0x4255_0001, self.report.cycle);
+            self.guard.update_cyclic_quality(quality, self.report.cycle);
             if matches!(action, LifecycleAction::EnableAllowed) && transmission.is_ok() {
-                active_tx_before_deadline_miss = true;
+                active_tx_before_deadline_miss = post_tx_deadline_met == Some(false);
                 let stop_decision = self.guard.cycle_axes(self.report.cycle, publish_now_ns);
                 action = stop_decision.action();
                 let stop_outputs = step_axis_bank(
@@ -2580,14 +2632,19 @@ impl<
         let mut deadline_correction_events = None;
         let post_publication_deadline_met = if let Some(deadline) = cycle_deadline_ns {
             let final_now_ns = self.port.now_ns().max(publish_now_ns);
-            if final_now_ns >= deadline && quality.cycle_within_budget {
-                quality.cycle_within_budget = false;
+            let monitor_aged = facts.age_topology(&mut quality, final_now_ns);
+            let deadline_missed = final_now_ns >= deadline && quality.cycle_within_budget;
+            if monitor_aged || deadline_missed {
+                if deadline_missed {
+                    quality.cycle_within_budget = false;
+                    self.guard
+                        .update_gate(GateId::Budget, false, self.report.cycle, 0x4255_0001);
+                    self.guard.latch_fault(0x4255_0001, self.report.cycle);
+                }
                 cyclic_quality_to_procbuf(self.state, quality);
-                self.guard
-                    .update_gate(GateId::Budget, false, self.report.cycle, 0x4255_0001);
-                self.guard.latch_fault(0x4255_0001, self.report.cycle);
+                self.guard.update_cyclic_quality(quality, self.report.cycle);
                 if matches!(action, LifecycleAction::EnableAllowed) && transmission.is_ok() {
-                    active_tx_before_deadline_miss = true;
+                    active_tx_before_deadline_miss |= deadline_missed;
                     let stop_decision = self.guard.cycle_axes(self.report.cycle, final_now_ns);
                     action = stop_decision.action();
                     let stop_outputs = step_axis_bank(

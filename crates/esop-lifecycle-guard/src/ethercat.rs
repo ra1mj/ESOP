@@ -1000,6 +1000,8 @@ pub fn other_cycle_facts_from_mailbox_cycle<E, const DOMAINS: usize>(
 /// Project the scheduler-owned service selection into its fixed lifecycle
 /// gate. The selected controller and its readiness are carried by the report,
 /// so callers cannot qualify an unrelated gate or override a controller fault.
+/// This preserves the report-time snapshot. Cycle owners consuming it later
+/// must use `other_cycle_facts_from_production_service_cycle_at`.
 pub fn other_cycle_facts_from_production_service_cycle<E, const DOMAINS: usize>(
     cycle: &ScheduledProductionServiceCycleReport<E, DOMAINS>,
     mut other: OtherCycleFacts,
@@ -1019,6 +1021,19 @@ pub fn other_cycle_facts_from_production_service_cycle<E, const DOMAINS: usize>(
         apply_production_service_readiness(cycle.selected(), cycle.service_ready(), &mut other);
     }
     other.deadline_met &= cycle.post_receive_deadline_met();
+    other
+}
+
+/// Revalidate the report's bounded monitoring evidence at the current port time.
+pub fn other_cycle_facts_from_production_service_cycle_at<E, const DOMAINS: usize>(
+    cycle: &ScheduledProductionServiceCycleReport<E, DOMAINS>,
+    other: OtherCycleFacts,
+    now_ns: u64,
+) -> OtherCycleFacts {
+    let mut other = other_cycle_facts_from_production_service_cycle(cycle, other);
+    if let Some(quality) = cycle.slave_monitor_quality() {
+        other = other_cycle_facts_from_slave_monitor_at(quality, other, now_ns);
+    }
     other
 }
 
@@ -1054,11 +1069,22 @@ fn apply_production_service_readiness(
 
 /// Apply age-qualified AL/DL observations while preserving all caller-owned
 /// platform, drive, supervisor, command and external-safety facts.
+/// This helper preserves the sampling-time snapshot; later decisions must
+/// use `other_cycle_facts_from_slave_monitor_at`.
 pub fn other_cycle_facts_from_slave_monitor(
     quality: esop_ethercat_core::SlaveMonitorQuality,
     mut other: OtherCycleFacts,
 ) -> OtherCycleFacts {
     other.topology_valid &= quality.is_good();
+    other
+}
+
+pub fn other_cycle_facts_from_slave_monitor_at(
+    quality: esop_ethercat_core::SlaveMonitorQuality,
+    mut other: OtherCycleFacts,
+    now_ns: u64,
+) -> OtherCycleFacts {
+    other.topology_valid &= quality.is_good_at(now_ns);
     other
 }
 
@@ -1804,6 +1830,8 @@ mod tests {
     fn monitor_quality_only_clears_topology_and_keeps_other_authorities() {
         let quality = esop_ethercat_core::SlaveMonitorQuality {
             stations: 2,
+            sampled_at_ns: 10,
+            fresh_until_ns: Some(20),
             known: true,
             fresh: true,
             al_good: true,
@@ -1822,6 +1850,21 @@ mod tests {
             deadline_met: false,
         };
         assert_eq!(other_cycle_facts_from_slave_monitor(quality, other), other);
+        assert_eq!(
+            other_cycle_facts_from_slave_monitor_at(quality, other, 20),
+            other
+        );
+        for now_ns in [9, 21] {
+            let projected = other_cycle_facts_from_slave_monitor_at(quality, other, now_ns);
+            assert!(!projected.topology_valid);
+            assert_eq!(
+                OtherCycleFacts {
+                    topology_valid: true,
+                    ..projected
+                },
+                other
+            );
+        }
         for bad in [
             esop_ethercat_core::SlaveMonitorQuality {
                 known: false,

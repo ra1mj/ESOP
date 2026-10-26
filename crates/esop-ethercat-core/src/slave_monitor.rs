@@ -126,6 +126,11 @@ impl SlaveMonitorSnapshot {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SlaveMonitorQuality {
     pub stations: usize,
+    /// Port-monotonic time at which the booleans below were evaluated.
+    pub sampled_at_ns: u64,
+    /// Inclusive freshness bound of the earliest expiring complete AL/DL pair.
+    /// Unknown stations carry no freshness authority.
+    pub fresh_until_ns: Option<u64>,
     pub known: bool,
     pub fresh: bool,
     pub al_good: bool,
@@ -135,8 +140,15 @@ pub struct SlaveMonitorQuality {
 }
 
 impl SlaveMonitorQuality {
+    /// Quality at `sampled_at_ns`; use `is_good_at` when consuming it later.
     pub const fn is_good(self) -> bool {
         self.known && self.fresh && self.al_good && self.data_link_good
+    }
+
+    pub fn is_good_at(self, now_ns: u64) -> bool {
+        self.is_good()
+            && now_ns >= self.sampled_at_ns
+            && self.fresh_until_ns.is_some_and(|until| now_ns <= until)
     }
 }
 
@@ -465,6 +477,8 @@ impl<const SLAVES: usize, const EVENTS: usize> SlaveMonitoringService
     fn quality(&self, now_ns: u64) -> SlaveMonitorQuality {
         let mut quality = SlaveMonitorQuality {
             stations: self.count,
+            sampled_at_ns: now_ns,
+            fresh_until_ns: Some(u64::MAX),
             known: true,
             fresh: true,
             al_good: true,
@@ -473,6 +487,14 @@ impl<const SLAVES: usize, const EVENTS: usize> SlaveMonitoringService
             lost_events: self.lost_events,
         };
         for (snapshot, config) in self.snapshots().iter().zip(&self.configs[..self.count]) {
+            quality.fresh_until_ns = quality
+                .fresh_until_ns
+                .zip(
+                    snapshot
+                        .known
+                        .then_some(snapshot.observed_at_ns.saturating_add(self.max_age_ns)),
+                )
+                .map(|(earliest, station)| earliest.min(station));
             quality.known &= snapshot.known;
             quality.fresh &= snapshot
                 .age_ns(now_ns)

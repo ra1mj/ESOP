@@ -53,6 +53,19 @@ station, AL/DL kind, exact physical address, length and absolute deadline.
   into topology; Idle or lower-priority work cannot bypass stale observations.
   Platform, drive, supervisor, command, deadline and external safety remain
   with their original owners. Monitoring never grants or renews permits.
+- Quality freezes its port-monotonic `sampled_at_ns` and the earliest inclusive
+  `fresh_until_ns` among all complete pairs; unknown stations have no bound.
+  `is_good()` and the legacy lifecycle helpers describe the sampling-time
+  snapshot. Later consumers must use `is_good_at(now_ns)` or the `_at` adapters,
+  rejecting both a clock before sampling and a time after the bound. A false
+  snapshot cannot become good merely by moving the clock.
+- Production output entries carry the immutable monitoring bound through the
+  shared cycle pipeline and recheck it at entry, after auxiliary TX, before
+  active motion, before State publication and after publication. Expiry before
+  output requests stopping; expiry first observed after an accepted active TX
+  preserves that accepted Controlword and records stop requested, not issued.
+  A newly discovered post-publication expiry attempts the existing corrective
+  State/event publication without fabricating a second stop TX.
 - Events retain position/station, timestamp and the read action (generation,
   deadline and kind). AL and DL fault variants retain their raw typed status.
   Startup AL faults preserve the complete original `StartupAlFault`, are
@@ -89,6 +102,9 @@ failure advance, immutable action checks and bounded event overflow.
 `production_service` tests verify in-flight ownership, optional-service
 round-robin fairness, release on TX failure and request-local failure. Lifecycle
 tests verify quality can only clear topology and preserves every other caller fact.
+`crates/esop-lifecycle-guard/tests/monitor_freshness.rs` advances the actual port
+clock between RX/output, during auxiliary TX and during an accepted active TX;
+fresh input must still enable, while expiry stops without altering wire truth.
 
 ## 7. Wrong vs Correct
 
