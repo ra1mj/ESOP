@@ -482,6 +482,29 @@ impl<const SMS: usize, const FMMUS: usize, const RX_ENTRIES: usize, const TX_ENT
         self.fmmu_usages
     }
 
+    /// Remove only the single alignment byte implied by an odd, frozen ESI
+    /// FMMU count. SII category lengths are WORDs, whereas usage entries are
+    /// bytes. Retain explicit unused slots, internal zeros, and every other
+    /// count mismatch so the normal signature comparison still rejects them.
+    pub fn normalize_fmmu_word_padding(&mut self, expected_count: u8) -> bool {
+        let expected = usize::from(expected_count);
+        if expected % 2 != 1
+            || self.fmmu_usages.len() != expected + 1
+            || self.fmmu_usages.get(expected) != Some(SiiFmmuUsage::Unused)
+        {
+            return false;
+        }
+        let mut profile = SiiFmmuUsageProfile::new();
+        for usage in self.fmmu_usages.usages().iter().take(expected).copied() {
+            // The source profile already passed the same fixed-capacity check.
+            if profile.push(usage).is_err() {
+                return false;
+            }
+        }
+        self.fmmu_usages = profile;
+        true
+    }
+
     pub fn rx_layout(&self) -> &PdoLayout<RX_ENTRIES> {
         &self.rx_layout
     }
@@ -1325,6 +1348,64 @@ mod tests {
         ] {
             assert_ne!(changed, baseline);
         }
+    }
+
+    #[test]
+    fn odd_fmmu_count_accepts_only_one_zero_word_alignment_byte() {
+        let mut candidate = SiiConfigurationCandidate::<0, 0, 0, 0>::new();
+        candidate
+            .apply_category(
+                SiiCategoryReader::new(&[0x28, 0, 2, 0, 1, 2, 3, 0])
+                    .next_category()
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+        let raw = candidate;
+        assert_eq!(raw.fmmu_usages().len(), 4);
+        assert!(candidate.normalize_fmmu_word_padding(3));
+        assert_eq!(
+            candidate.fmmu_usages().usages(),
+            &[
+                SiiFmmuUsage::Outputs,
+                SiiFmmuUsage::Inputs,
+                SiiFmmuUsage::SyncManagerStatus,
+            ]
+        );
+        assert_eq!(raw.fmmu_usages().len(), 4);
+        let mut explicit_four = raw;
+        assert!(!explicit_four.normalize_fmmu_word_padding(4));
+        assert_eq!(explicit_four, raw);
+        let mut wrong_count = raw;
+        assert!(!wrong_count.normalize_fmmu_word_padding(1));
+        assert_eq!(wrong_count, raw);
+    }
+
+    #[test]
+    fn fmmu_padding_never_hides_a_nonzero_usage_or_an_internal_unused_slot() {
+        let mut candidate = SiiConfigurationCandidate::<0, 0, 0, 0>::new();
+        candidate
+            .apply_category(
+                SiiCategoryReader::new(&[0x28, 0, 2, 0, 1, 0, 2, 3])
+                    .next_category()
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+        let unchanged = candidate;
+        assert!(!candidate.normalize_fmmu_word_padding(3));
+        assert_eq!(candidate, unchanged);
+        let mut padded = SiiConfigurationCandidate::<0, 0, 0, 0>::new();
+        padded
+            .apply_category(
+                SiiCategoryReader::new(&[0x28, 0, 2, 0, 1, 0, 2, 0])
+                    .next_category()
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(padded.normalize_fmmu_word_padding(3));
+        assert_eq!(padded.fmmu_usages().get(1), Some(SiiFmmuUsage::Unused));
     }
 
     #[test]

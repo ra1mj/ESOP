@@ -472,7 +472,9 @@ impl<const CAPACITY: usize> EscRegisterRequestController<CAPACITY> {
         Ok(match operation {
             RegisterOperation::Read => EscRegisterRequestProgress::ReadComplete(action.handle),
             RegisterOperation::Write => EscRegisterRequestProgress::WriteComplete(action.handle),
-            RegisterOperation::AutoIncrementRead | RegisterOperation::AutoIncrementWrite => {
+            RegisterOperation::AutoIncrementRead
+            | RegisterOperation::AutoIncrementWrite
+            | RegisterOperation::BroadcastRead => {
                 return Err(EscRegisterRequestError::QueueCorrupt);
             }
         })

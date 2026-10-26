@@ -36,12 +36,14 @@ mod scan;
 mod schedule;
 mod scheduled_domains;
 mod sdo_information;
+mod sdo_request;
 mod sii;
 mod sii_config;
 mod sii_discovery;
 mod sii_stream;
 mod slave;
 mod slave_copy;
+mod slave_monitor;
 mod startup;
 mod state_request;
 mod sync_manager_discovery;
@@ -55,9 +57,10 @@ pub use al::{
 };
 pub use arena::{Arena, ArenaError};
 pub use coe::{
-    COE_EMERGENCY_LEN, COE_HEADER_LEN, CoeEmergency, CoeHeader, CoeService, MAX_SDO_DATA,
-    MAX_SDO_SEGMENT_BYTES, SDO_DATA_OFFSET, SdoAccess, SdoAccessPolicy, SdoDirection, SdoError,
-    SdoPhase, SdoProgress, SdoResponse, SdoTransfer,
+    BoundedSdoTransfer, COE_EMERGENCY_LEN, COE_HEADER_LEN, CoeEmergency, CoeHeader, CoeService,
+    MAX_COE_PAYLOAD_BYTES, MAX_SDO_DATA, MAX_SDO_SEGMENT_BYTES, SDO_DATA_OFFSET, SDO_INITIATE_LEN,
+    SdoAccess, SdoAccessPolicy, SdoDirection, SdoError, SdoPhase, SdoProgress, SdoResponse,
+    SdoTransfer,
 };
 pub use control::{
     ControlError, ControlExpiry, ControlExpiryHandles, ControlRequest, ControlRequestPool,
@@ -103,11 +106,11 @@ pub use fmmu_discovery::{
 pub use frame_pool::{FrameHandle, FramePool, FramePoolError, FrameSlot};
 pub use mailbox::{
     MAILBOX_FULL_STATUS_MASK, MAILBOX_HEADER_LEN, MAX_MAILBOX_BYTES, MailboxAction, MailboxConfig,
-    MailboxConfigError, MailboxController, MailboxDirection, MailboxError, MailboxFrame,
-    MailboxHeader, MailboxMappedStatusBit, MailboxMappedStatusError,
+    MailboxConfigError, MailboxController, MailboxDirection, MailboxError, MailboxErrorResponse,
+    MailboxFrame, MailboxHeader, MailboxMappedStatusBit, MailboxMappedStatusError,
     MailboxMappedStatusObservation, MailboxMappedStatusUnavailable, MailboxPhase, MailboxProgress,
     MailboxProtocol, MailboxReceiveSyncManager, MailboxReceiveSyncManagerError, MailboxRetryPolicy,
-    MailboxStatusBit, MailboxStatusSource,
+    MailboxStatusBit, MailboxStatusSource, MailboxTransportState,
 };
 pub use mapping::{
     ESC_FMMU_BASE, ESC_FMMU_STRIDE, ESC_SYNC_MANAGER_BASE, ESC_SYNC_MANAGER_STRIDE, FMMU_IMAGE_LEN,
@@ -173,8 +176,8 @@ pub use rescan::{
 };
 pub use ring::{RingError, SpscConsumer, SpscProducer, SpscRing};
 pub use rx_index::{
-    RxExpectation, RxExpiry, RxExpiryIndices, RxIndexEntry, RxIndexError, RxIndexTable, RxMatch,
-    RxResponse, RxSlotState, RxWorkingCounterPolicy,
+    RxAddressPolicy, RxExpectation, RxExpiry, RxExpiryIndices, RxIndexEntry, RxIndexError,
+    RxIndexTable, RxMatch, RxResponse, RxSlotState, RxWorkingCounterPolicy,
 };
 pub use scan::{
     EscDcRange, ScanAction, ScanController, ScanDcCapabilities, ScanError, ScanPhase, ScanPortLink,
@@ -200,6 +203,10 @@ pub use sdo_information::{
     SdoInformationRequiredAccess, SdoInformationResult, SdoInformationTransfer,
     SdoInformationVerifier, SdoInformationVerifierError, SdoInformationVerifierPhase,
     SdoInformationVerifierProgress,
+};
+pub use sdo_request::{
+    RuntimeSdoService, SdoRequestBank, SdoRequestError, SdoRequestHandle, SdoRequestPhase,
+    SdoRequestStatus,
 };
 pub use sii::{
     EEPROM_BUSY, EEPROM_ERROR_MASK, EEPROM_READ_COMMAND, MAX_SII_FMMU_USAGES, SII_CATEGORY_DC,
@@ -236,6 +243,11 @@ pub use slave_copy::{
     SlaveCopyApplication, SlaveCopyError, SlaveCopyOutcome, SlaveCopyPlan, SlaveCopyPlanSet,
     SlaveCopyPlanSetError, SlaveCopyProcessImage, SlaveCopyPublication, SlaveCopyPublishedImage,
     SlaveCopyStatus,
+};
+pub use slave_monitor::{
+    SlaveMonitorAction, SlaveMonitorActionKind, SlaveMonitorConfig, SlaveMonitorController,
+    SlaveMonitorError, SlaveMonitorEvent, SlaveMonitorEventKind, SlaveMonitorProgress,
+    SlaveMonitorQuality, SlaveMonitorSnapshot, SlaveMonitoringService,
 };
 pub use startup::{
     ExpectedSlave, STARTUP_SII_IMAGE_BYTE_CAPACITY, STARTUP_SII_IMAGE_WORD_CAPACITY,

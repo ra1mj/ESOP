@@ -34,7 +34,7 @@ use crate::reconfigure::{
 use crate::rescan::{
     RescanError, RescanHandle, RescanPhase, RescanProgress, RescanResult, RescanState, RescanStatus,
 };
-use crate::rx_index::RxWorkingCounterPolicy;
+use crate::rx_index::{RxAddressPolicy, RxWorkingCounterPolicy};
 use crate::scan::{
     ScanAction, ScanController, ScanDcCapabilities, ScanError, ScanPhase, ScanProgress,
 };
@@ -442,6 +442,13 @@ impl StartupAction {
             Self::SiiConfiguration(action) => action.expected_wkc,
             Self::Al(action) => action.expected_wkc,
             Self::OpOnly(action) => action.expected_wkc,
+        }
+    }
+
+    pub const fn address_policy(self) -> RxAddressPolicy {
+        match self {
+            Self::Scan(action) => action.address_policy,
+            _ => RxAddressPolicy::Exact,
         }
     }
 
@@ -1690,7 +1697,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         pool: &mut ControlRequestPool<REQUESTS>,
     ) -> Result<RequestHandle, ControlError> {
         let action = self.pending_action().ok_or(ControlError::InvalidState)?;
-        pool.acquire_with_response_len_and_wkc_policy(
+        pool.acquire_with_response_policy(
             action.datagram_index(),
             action.generation(),
             action.address(),
@@ -1698,7 +1705,9 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             action.payload(),
             action.datagram_len(),
             action.deadline_ns(),
+            action.expected_wkc(),
             action.working_counter_policy(),
+            action.address_policy(),
         )
     }
 
@@ -1927,6 +1936,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                     action.datagram_len(),
                     action.deadline_ns(),
                 ) || request.working_counter_policy() != action.working_counter_policy()
+                    || request.address_policy() != action.address_policy()
+                    || request.expected_wkc() != action.expected_wkc()
                     || request.length < action.response_len()
                 {
                     let _ = pool.release(handle);
@@ -1951,6 +1962,8 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                     action.datagram_len(),
                     action.deadline_ns(),
                 ) || request.working_counter_policy() != action.working_counter_policy()
+                    || request.address_policy() != action.address_policy()
+                    || request.expected_wkc() != action.expected_wkc()
                 {
                     let _ = pool.release(handle);
                     return self.fail(StartupError::ActionMismatch);
@@ -2644,10 +2657,13 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             .copied()
             .ok_or(StartupError::ExpectedCountMismatch)?;
         let profile = self.profile_for_position(record.position)?;
-        let candidate = self
+        let mut candidate = *self
             .sii_configuration
             .candidate()
             .ok_or(StartupError::NoPendingAction)?;
+        if let Some(expected) = profile.expected_sii {
+            candidate.normalize_fmmu_word_padding(expected.fmmu_count());
+        }
         let observed_fmmu_registers = if profile.expected_sii.is_some() {
             Some(
                 self.staged_fmmu_registers
@@ -3190,6 +3206,18 @@ mod tests {
         accept_action(startup, read, &[activation], 1, now_ns + 3)
     }
 
+    fn count_fixture_bus<const N: usize>(
+        startup: &mut StartupController<N>,
+        count: u16,
+        now_ns: u64,
+    ) {
+        let action = startup.next_action(now_ns).unwrap().unwrap();
+        assert_eq!(action.operation(), RegisterOperation::BroadcastRead);
+        startup
+            .accept(action, action.generation(), &[0; 2], count, now_ns)
+            .unwrap();
+    }
+
     fn accept_action<const MAX_SLAVES: usize>(
         startup: &mut StartupController<MAX_SLAVES>,
         action: StartupAction,
@@ -3321,7 +3349,7 @@ mod tests {
     ) -> Result<StartupProgress, StartupError> {
         match startup.next_action(now_ns)? {
             Some(end_probe @ StartupAction::Scan(_)) => {
-                startup.accept(end_probe, end_probe.generation(), &[], 0, now_ns + 1)
+                startup.accept(end_probe, end_probe.generation(), &[0; 2], 0, now_ns + 1)
             }
             Some(_) | None => Ok(StartupProgress::Advanced),
         }
@@ -4165,6 +4193,7 @@ mod tests {
                 &profiles[..1],
             )
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
         assert_eq!(startup.verified_dc_modes, [None]);
         assert_eq!(startup.verified_sync_manager_registers, [None]);
     }
@@ -4307,6 +4336,7 @@ mod tests {
                 &profiles[..2],
             )
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
         assert_eq!(startup.phase(), StartupPhase::Scanning);
         assert_eq!(startup.verified_sii(0), None);
         assert_eq!(startup.verified_sii(1), None);
@@ -4361,12 +4391,12 @@ mod tests {
         let disable = startup.next_action(101).unwrap().unwrap();
         assert!(matches!(disable, StartupAction::OpOnly(_)));
         assert_eq!(disable.deadline_ns(), 800);
-        assert_eq!(disable.payload(), &[0x28]);
+        assert_eq!(disable.payload(), &[0]);
         accept_action(&mut startup, disable, &[], 1, 102);
         let verify = startup.next_action(103).unwrap().unwrap();
         assert_eq!(verify.deadline_ns(), 800);
         assert_eq!(
-            accept_action(&mut startup, verify, &[0x28], 1, 104),
+            accept_action(&mut startup, verify, &[0], 1, 104),
             StartupProgress::IdentityVerified(0)
         );
 
@@ -4381,10 +4411,7 @@ mod tests {
         );
         assert_eq!(startup.phase(), StartupPhase::TransitioningAl);
 
-        assert_eq!(
-            accept_op_only(&mut startup, 0x29, 109),
-            StartupProgress::Ready
-        );
+        assert_eq!(accept_op_only(&mut startup, 1, 109), StartupProgress::Ready);
         assert_eq!(startup.phase(), StartupPhase::Ready);
     }
 
@@ -4403,10 +4430,10 @@ mod tests {
         let first = startup.next_action(51).unwrap().unwrap();
         assert!(matches!(first, StartupAction::OpOnly(_)));
         assert_eq!(first.deadline_ns(), 250);
-        assert_eq!(first.payload(), &[0x28]);
+        assert_eq!(first.payload(), &[0]);
         accept_action(&mut startup, first, &[], 1, 52);
         let verify = startup.next_action(53).unwrap().unwrap();
-        accept_action(&mut startup, verify, &[0x28], 1, 54);
+        accept_action(&mut startup, verify, &[0], 1, 54);
         assert!(matches!(
             startup.next_action(55).unwrap().unwrap(),
             StartupAction::Al(_)
@@ -4428,7 +4455,7 @@ mod tests {
         accept_action(&mut startup, write, &[], 1, 2);
         let read = startup.next_action(3).unwrap().unwrap();
         assert_eq!(
-            startup.accept(read, read.generation(), &[0], 1, 4),
+            startup.accept(read, read.generation(), &[1], 1, 4),
             Err(StartupError::OpOnly(
                 OpOnlySyncManagerError::ReadbackMismatch
             ))
@@ -4503,6 +4530,7 @@ mod tests {
                 &profiles,
             )
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
 
         let probe = startup.next_action(1).unwrap().unwrap();
         assert!(matches!(probe, StartupAction::Scan(_)));
@@ -4537,7 +4565,7 @@ mod tests {
         let end_probe = startup.next_action(13).unwrap().unwrap();
         assert_eq!(
             startup
-                .timeout(end_probe, end_probe_deadline(end_probe))
+                .accept(end_probe, end_probe.generation(), &[0; 2], 0, 14)
                 .unwrap(),
             StartupProgress::Advanced
         );
@@ -4618,6 +4646,7 @@ mod tests {
                 &profiles,
             )
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
         let mut now_ns = 1;
         accept_scanned_slave(
             &mut startup,
@@ -4670,6 +4699,7 @@ mod tests {
         startup
             .start(32, 0, StartupConfig::new(EthercatState::PreOp), &expected)
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
         let mut now_ns = 1;
         accept_scanned_slave(
             &mut startup,
@@ -4713,6 +4743,7 @@ mod tests {
                 &profiles,
             )
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
         let mut now_ns = 1;
         accept_scanned_slave(
             &mut startup,
@@ -4762,6 +4793,7 @@ mod tests {
                 &profiles,
             )
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
         let mut now_ns = 1;
         accept_scanned_slave(
             &mut startup,
@@ -4821,6 +4853,7 @@ mod tests {
                 &profiles,
             )
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
         let mut now_ns = 1;
         accept_scanned_slave_with_evidence(&mut startup, 0, None, [0; 4], 0x1100, &mut now_ns);
         accept_scanned_slave_with_evidence(
@@ -4864,6 +4897,7 @@ mod tests {
         startup
             .start(38, 0, StartupConfig::new(EthercatState::PreOp), &expected)
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
         let mut now_ns = 1;
         accept_scanned_slave_with_evidence(&mut startup, 0, None, [0; 4], 0x1500, &mut now_ns);
 
@@ -4890,6 +4924,7 @@ mod tests {
         startup
             .start(35, 0, StartupConfig::new(EthercatState::PreOp), &expected)
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
         let mut now_ns = 1;
         accept_scanned_slave(
             &mut startup,
@@ -4910,6 +4945,7 @@ mod tests {
                 &expected,
             )
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
         assert_eq!(startup.selected_reference_clock(), None);
         assert_eq!(startup.dc_topology(), None);
         assert_eq!(startup.dc_capabilities(0), None);
@@ -5251,6 +5287,7 @@ mod tests {
                 &expected,
             )
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
 
         let probe = startup.next_action(1).unwrap().unwrap();
         accept_action(&mut startup, probe, &[0x88, 0x02], 1, 2);
@@ -5272,7 +5309,7 @@ mod tests {
         );
         let end_probe = startup.next_action(13).unwrap().unwrap();
         startup
-            .timeout(end_probe, end_probe_deadline(end_probe))
+            .accept(end_probe, end_probe.generation(), &[0; 2], 0, 14)
             .unwrap();
 
         for word in [
@@ -5350,6 +5387,7 @@ mod tests {
                 &expected,
             )
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
 
         let mut now_ns = 1;
         for index in 0..expected.len() {
@@ -5386,7 +5424,7 @@ mod tests {
         }
         let end_probe = startup.next_action(now_ns).unwrap().unwrap();
         startup
-            .timeout(end_probe, end_probe_deadline(end_probe))
+            .accept(end_probe, end_probe.generation(), &[0; 2], 0, 14)
             .unwrap();
 
         accept_identity(&mut startup, expected[0].identity, &mut now_ns);
@@ -5532,6 +5570,7 @@ mod tests {
         startup
             .start(2, 10, StartupConfig::new(EthercatState::SafeOp), &expected)
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
         assert_eq!(startup.phase(), StartupPhase::Scanning);
         assert!(startup.records().is_empty());
         assert!(startup.configuration_services().is_empty());
@@ -5644,6 +5683,7 @@ mod tests {
         startup
             .start(8, 0, StartupConfig::new(EthercatState::Op), &expected)
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
 
         let probe = startup.next_action(1).unwrap().unwrap();
         accept_action(&mut startup, probe, &[0x88, 0x02], 1, 2);
@@ -5681,7 +5721,7 @@ mod tests {
         );
         let end_probe = startup.next_action(13).unwrap().unwrap();
         startup
-            .timeout(end_probe, end_probe_deadline(end_probe))
+            .accept(end_probe, end_probe.generation(), &[0; 2], 0, 14)
             .unwrap();
 
         let mut now_ns = 12;
@@ -5723,22 +5763,9 @@ mod tests {
         startup
             .start(9, now_ns, StartupConfig::new(EthercatState::Op), &expected)
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, now_ns);
         assert_eq!(startup.last_al_fault(), None);
         assert_eq!(startup.device_emulation(0), None);
-    }
-
-    fn end_probe_deadline(action: StartupAction) -> u64 {
-        match action {
-            StartupAction::Scan(action) => action.deadline_ns,
-            StartupAction::FmmuRegisters(_)
-            | StartupAction::SyncManagerRegisters(_)
-            | StartupAction::Sii(_)
-            | StartupAction::RequestingId(_)
-            | StartupAction::SiiMailbox(_)
-            | StartupAction::SiiConfiguration(_)
-            | StartupAction::Al(_)
-            | StartupAction::OpOnly(_) => 0,
-        }
     }
 
     #[test]
@@ -5768,6 +5795,7 @@ mod tests {
                 &profiles,
             )
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
 
         let mut now_ns = 1;
         accept_scanned_slave(&mut startup, 0, None, &mut now_ns);
@@ -5897,6 +5925,7 @@ mod tests {
         startup
             .start(1, 0, StartupConfig::new(EthercatState::Op), &expected)
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
         let probe = startup.next_action(1).unwrap().unwrap();
         accept_action(&mut startup, probe, &[0x01, 0x00], 1, 2);
         let basic = startup.next_action(3).unwrap().unwrap();
@@ -5929,7 +5958,7 @@ mod tests {
         );
         let end_probe = startup.next_action(13).unwrap().unwrap();
         startup
-            .timeout(end_probe, end_probe_deadline(end_probe))
+            .accept(end_probe, end_probe.generation(), &[0; 2], 0, 14)
             .unwrap();
         for word in 0..8 {
             let address = startup.next_action(10).unwrap().unwrap();
@@ -5964,6 +5993,7 @@ mod tests {
         startup
             .start(3, 0, StartupConfig::new(EthercatState::PreOp), &expected)
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
         let action = startup.next_action(1).unwrap().unwrap();
         let mut stale_action = action;
         if let StartupAction::Scan(scan_action) = &mut stale_action {
@@ -5989,6 +6019,7 @@ mod tests {
         startup
             .start(3, 0, StartupConfig::new(EthercatState::PreOp), &expected)
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
         let action = startup.next_action(1).unwrap().unwrap();
         assert!(matches!(action, StartupAction::Scan(_)));
 
@@ -6005,7 +6036,7 @@ mod tests {
         pool.complete(
             handle,
             action.generation(),
-            action.address(),
+            (action.address() & 0xFFFF_0000) | (action.address() as u16).wrapping_add(1) as u32,
             &[0x88, 0x02],
             1,
         )
@@ -6099,6 +6130,7 @@ mod tests {
         startup
             .start(3, 0, StartupConfig::new(EthercatState::PreOp), &expected)
             .unwrap();
+        count_fixture_bus(&mut startup, expected.len() as u16, 0);
         let probe = startup.next_action(1).unwrap().unwrap();
         startup
             .accept(probe, probe.generation(), &[0x88, 0x02], 1, 2)
@@ -6126,10 +6158,11 @@ mod tests {
         startup
             .start(1, 0, StartupConfig::new(EthercatState::Op), &[])
             .unwrap();
+        count_fixture_bus(&mut startup, 0, 0);
         let probe = startup.next_action(1).unwrap().unwrap();
         assert!(matches!(probe, StartupAction::Scan(_)));
         assert_eq!(
-            startup.accept(probe, probe.generation(), &[], 0, 2),
+            startup.accept(probe, probe.generation(), &[0; 2], 0, 2),
             Ok(StartupProgress::Advanced)
         );
         assert_eq!(startup.phase(), StartupPhase::Ready);
@@ -6341,9 +6374,10 @@ mod tests {
     fn rescan_completes_at_preop_and_replaces_stale_handles_only_after_validation() {
         let mut startup = ready_empty_startup();
         let first = startup.start_rescan(2, 10, 100).unwrap();
+        count_fixture_bus(&mut startup, 0, 10);
         let probe = startup.next_action(11).unwrap().unwrap();
         assert_eq!(
-            startup.accept(probe, probe.generation(), &[], 0, 12),
+            startup.accept(probe, probe.generation(), &[0; 2], 0, 12),
             Ok(StartupProgress::Advanced)
         );
         assert_eq!(startup.phase(), StartupPhase::Ready);
@@ -6405,10 +6439,11 @@ mod tests {
 
         let second = startup.start_rescan(3, 120, 140).unwrap();
         assert_ne!(first, second);
+        count_fixture_bus(&mut startup, 0, 120);
         let probe = startup.next_action(121).unwrap().unwrap();
         assert_eq!(probe.deadline_ns(), 140);
         startup
-            .accept(probe, probe.generation(), &[], 0, 122)
+            .accept(probe, probe.generation(), &[0; 2], 0, 122)
             .unwrap();
         assert_eq!(startup.phase(), StartupPhase::Ready);
         assert_eq!(startup.rescan_phase(), RescanPhase::Complete);
@@ -6420,6 +6455,7 @@ mod tests {
         let mut startup =
             prepared_runtime_state_request(EthercatState::Op, StartupSlaveProfile::new(0), false);
         startup.start_rescan(9, 0, 1_000).unwrap();
+        count_fixture_bus(&mut startup, 1, 0);
         let first_probe = startup.next_action(1).unwrap().unwrap();
         assert_eq!(first_probe.deadline_ns(), 1_000);
 

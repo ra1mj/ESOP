@@ -117,6 +117,19 @@ pub struct GeneratorCapacities {
     pub max_datagrams_per_domain: usize,
     pub max_frames_per_domain: usize,
     pub max_schedule_slots: usize,
+    /// Frozen logical request slots, independent of physical mailbox capacity.
+    #[serde(default = "default_runtime_sdo_requests")]
+    pub runtime_sdo_requests: usize,
+    /// Bytes per logical object buffer; transport/slot metadata is additional.
+    #[serde(default = "default_max_sdo_object_bytes")]
+    pub max_sdo_object_bytes: usize,
+}
+
+const fn default_runtime_sdo_requests() -> usize {
+    8
+}
+const fn default_max_sdo_object_bytes() -> usize {
+    1024
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

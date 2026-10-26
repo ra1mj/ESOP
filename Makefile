@@ -7,8 +7,22 @@ CFGGEN_EXAMPLE ?= config/examples/sim-dual-axis/product.json
 CFGGEN_OUTPUT ?= build/generated/sim-dual-axis
 CFGGEN_EXPECTED ?= config/examples/sim-dual-axis/expected
 CFGGEN_ARTIFACTS := device_inventory.json esop_product_config.h esop_product_config.rs procbuf_layout.json product_config.json robot_build_input.json
+SOAK_CYCLES ?= 3600000
+SOAK_CAPTURE_LIMIT ?= 100000
 
-.PHONY: test test-hil test-ipc test-zenoh test-ebpf-gateway-runtime test-ebpf-raw-port-runtime test-ebpf-process-exit-runtime test-ebpf-oom-runtime test-ebpf-scheduler-migration-runtime test-ebpf-scheduler-runqueue-runtime test-ebpf-softirq-runtime test-ebpf-page-fault-runtime test-ebpf-network-drop-runtime test-ebpf-observability-degradation-runtime check fmt-check lint release no-std bpf-syntax bpf capability-manifest proto-schema cfggen-example cfggen-runtime-example build-report cfggen-build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-oom-report ebpf-scheduler-migration-report ebpf-scheduler-runqueue-report ebpf-softirq-report ebpf-page-fault-report ebpf-network-drop-report ebpf-observability-degradation-report r2-qualification zenoh-check setup-rust ci
+.PHONY: cfggen-master-examples test-master-software test-master-soak
+
+cfggen-master-examples:
+	python3 scripts/check-master-product-fixtures.py --cargo "$(CARGO)"
+
+test-master-software: cfggen-master-examples
+	python3 scripts/test-master-software.py --cargo "$(CARGO)"
+
+# One hour of virtual bus time at the Q4 1 ms period. This is software evidence.
+test-master-soak:
+	$(CARGO) run --release -p esop-ethercat-linux-port --example r0_r2 -- --backend sim --scenario Q4 --cycles $(SOAK_CYCLES) --capture-limit $(SOAK_CAPTURE_LIMIT) --output-dir build/r0-r2/soak
+
+.PHONY: test test-hil test-ipc test-zenoh test-ebpf-gateway-runtime test-ebpf-raw-port-runtime test-ebpf-process-exit-runtime test-ebpf-oom-runtime test-ebpf-scheduler-migration-runtime test-ebpf-scheduler-runqueue-runtime test-ebpf-softirq-runtime test-ebpf-page-fault-runtime test-ebpf-network-drop-runtime test-ebpf-observability-degradation-runtime check fmt-check lint release no-std bpf-syntax bpf capability-manifest proto-schema cfggen-example cfggen-runtime-example build-report cfggen-build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-oom-report ebpf-scheduler-migration-report ebpf-scheduler-runqueue-report ebpf-softirq-report ebpf-page-fault-report ebpf-network-drop-report ebpf-observability-degradation-report r2-qualification r2-release-gate measurement-import-tests zenoh-check setup-rust ci
 
 test:
 	$(CARGO) test --workspace --all-features
@@ -72,6 +86,7 @@ no-std:
 	fi
 	$(CARGO) check -p esop-ethercat-core --target $(RUST_TARGET)
 	$(CARGO) check -p esop-product-config --target $(RUST_TARGET)
+	$(CARGO) check -p esop-ethercat-sim --target $(RUST_TARGET)
 
 # GCC checks the C syntax and ABI declarations without requiring a BPF target.
 bpf-syntax:
@@ -150,10 +165,19 @@ r2-qualification:
 	python3 scripts/validate-r2-qualification.py --expected-commit $$(git rev-parse HEAD) --output build/r2_qualification_report.json
 	python3 -m unittest discover -s scripts/tests -p 'test_r2_qualification.py'
 
+# Hosted software measurements are useful regression evidence, never HIL qualification.
+measurement-import-tests:
+	python3 -m unittest discover -s scripts/tests -p 'test_import_performance_measurements.py'
+
+# Explicit release gate. The ordinary release target compiles binaries and is
+# also used by development CI, which accepts a valid unqualified baseline.
+r2-release-gate:
+	python3 scripts/validate-r2-qualification.py --require-qualified --expected-commit $$(git rev-parse HEAD) --output build/r2_qualified_release.json
+
 zenoh-check:
 	$(CARGO) check -p esop-zenoh-gateway --features zenoh
 
 setup-rust:
 	$(RUSTUP) target add $(RUST_TARGET)
 
-ci: fmt-check check test lint release no-std bpf-syntax capability-manifest proto-schema cfggen-build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-oom-report ebpf-scheduler-migration-report ebpf-scheduler-runqueue-report ebpf-softirq-report ebpf-page-fault-report ebpf-network-drop-report ebpf-observability-degradation-report r2-qualification zenoh-check
+ci: fmt-check check test lint release no-std bpf-syntax capability-manifest proto-schema cfggen-build-report performance-report ebpf-gateway-report ebpf-raw-port-report ebpf-process-exit-report ebpf-oom-report ebpf-scheduler-migration-report ebpf-scheduler-runqueue-report ebpf-softirq-report ebpf-page-fault-report ebpf-network-drop-report ebpf-observability-degradation-report r2-qualification measurement-import-tests zenoh-check test-master-software

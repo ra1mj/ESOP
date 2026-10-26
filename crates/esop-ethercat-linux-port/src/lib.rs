@@ -211,10 +211,7 @@ impl EthercatPort for LinuxRawPort {
 
     fn tx_submit(&mut self, frame: &[u8]) -> Result<(), Self::Error> {
         if frame.is_empty() || frame.len() > MAX_ETHERNET_FRAME_LEN {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "EtherCAT frame length is outside the port limit",
-            ));
+            return Err(io::Error::from(io::ErrorKind::InvalidInput));
         }
         let mut observation = RawPortObservation::begin(
             self.interface_index as u32,
@@ -235,10 +232,7 @@ impl EthercatPort for LinuxRawPort {
         }
         if written as usize != frame.len() {
             let _ = observation.finish(RawPortTxOutcome::PartialWrite as u32);
-            return Err(io::Error::new(
-                io::ErrorKind::WriteZero,
-                "raw socket accepted only a partial frame",
-            ));
+            return Err(io::Error::from(io::ErrorKind::WriteZero));
         }
         let _ = observation.finish(RawPortTxOutcome::Success as u32);
         Ok(())

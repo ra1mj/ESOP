@@ -374,7 +374,7 @@ impl<const MAX_SLAVES: usize, const SMS: usize, const FMMUS: usize, const PDO_OP
             op_only: OpOnlySyncManagerController::new(),
             state_request: StateRequestController::new(),
             pdo: PdoConfigController::new(),
-            mailbox: MailboxController::new(),
+            mailbox: MailboxController::without_transport(),
             pdo_action: None,
             watchdog: WatchdogController::new(),
             mapping: MappingConfigController::new(),
@@ -464,6 +464,17 @@ impl<const MAX_SLAVES: usize, const SMS: usize, const FMMUS: usize, const PDO_OP
             | ReconfigureSlavePhase::Faulted => {}
         }
         validate_plan(&plan, context)?;
+        if self.mailbox.pending().is_some() {
+            return Err(ReconfigureSlaveError::Busy);
+        }
+        if !plan.pdo.is_empty()
+            && (!self.mailbox.owns_transport()
+                || self.mailbox.station_address() != Some(plan.station_address))
+        {
+            return Err(ReconfigureSlaveError::Mailbox(
+                MailboxError::TransportNotOwned,
+            ));
+        }
 
         let handle = ReconfigureSlaveHandle {
             sequence: self.next_sequence,
@@ -476,6 +487,12 @@ impl<const MAX_SLAVES: usize, const SMS: usize, const FMMUS: usize, const PDO_OP
         staged.context = context;
         staged.observed_status = context.observed_status;
         staged.begin(context.now_ns)?;
+        // Keep physical transport ownership/counters across the staged
+        // operation replacement; constructing a request never mints authority.
+        core::mem::swap(&mut staged.mailbox, &mut self.mailbox);
+        // An explicit restart may abandon a failed operation's idle polling,
+        // but never an outstanding wire owner (rejected before staging).
+        let _ = staged.mailbox.abort_transaction(MailboxError::Timeout);
         *self = staged;
         Ok(handle)
     }
@@ -724,6 +741,35 @@ impl<const MAX_SLAVES: usize, const SMS: usize, const FMMUS: usize, const PDO_OP
         &mut self.mailbox
     }
 
+    pub fn adopt_mailbox_transport(
+        &mut self,
+        station_address: u16,
+        state: crate::MailboxTransportState,
+    ) -> Result<(), MailboxError> {
+        if !matches!(
+            self.phase,
+            ReconfigureSlavePhase::Idle
+                | ReconfigureSlavePhase::Complete
+                | ReconfigureSlavePhase::Faulted
+        ) {
+            return Err(MailboxError::Busy);
+        }
+        self.mailbox
+            .adopt_transport_state_for(station_address, state)
+    }
+
+    pub fn take_mailbox_transport(&mut self) -> Result<crate::MailboxTransportState, MailboxError> {
+        if !matches!(
+            self.phase,
+            ReconfigureSlavePhase::Idle
+                | ReconfigureSlavePhase::Complete
+                | ReconfigureSlavePhase::Faulted
+        ) {
+            return Err(MailboxError::Busy);
+        }
+        self.mailbox.release_transport_state()
+    }
+
     pub fn prepare_mailbox(
         &mut self,
         now_ns: u64,
@@ -912,6 +958,15 @@ impl<const MAX_SLAVES: usize, const SMS: usize, const FMMUS: usize, const PDO_OP
                     if !self.plan.pdo.is_empty() {
                         let timeout_ns = self.remaining(now_ns)?;
                         let request_timeout_ns = self.request_timeout(now_ns)?;
+                        let mailbox = self
+                            .plan
+                            .mailbox
+                            .ok_or(ReconfigureSlaveError::MailboxRequired)?;
+                        self.pdo
+                            .set_mailbox_payload_capacity(
+                                usize::from(mailbox.send_capacity) - crate::MAILBOX_HEADER_LEN,
+                            )
+                            .map_err(ReconfigureSlaveError::Pdo)?;
                         self.pdo
                             .start(
                                 self.plan.pdo,
@@ -1259,6 +1314,26 @@ mod tests {
         now_ns: u64,
     ) -> ReconfigureSlaveProgress {
         assert_eq!(controller.prepare_mailbox(now_ns).unwrap(), None);
+        let outgoing_status = controller
+            .mailbox_mut()
+            .next_action(now_ns + 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(outgoing_status.operation, RegisterOperation::Read);
+        assert_eq!(
+            outgoing_status.address,
+            crate::fixed_address(0x1000, 0x0805)
+        );
+        controller
+            .mailbox_mut()
+            .accept(
+                outgoing_status,
+                outgoing_status.generation,
+                &[0],
+                1,
+                now_ns + 1,
+            )
+            .unwrap();
         let send = controller
             .mailbox_mut()
             .next_action(now_ns + 1)
@@ -1280,6 +1355,25 @@ mod tests {
             Ok(MailboxProgress::Advanced)
         );
 
+        let incoming_status = controller
+            .mailbox_mut()
+            .next_action(now_ns + 3)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            incoming_status.address,
+            crate::fixed_address(0x1000, 0x080D)
+        );
+        controller
+            .mailbox_mut()
+            .accept(
+                incoming_status,
+                incoming_status.generation,
+                &[8],
+                1,
+                now_ns + 3,
+            )
+            .unwrap();
         let poll = controller
             .mailbox_mut()
             .next_action(now_ns + 3)
@@ -1407,28 +1501,16 @@ mod tests {
             panic!("expected OpOnly write before AL transition");
         };
         assert_eq!(first.operation, RegisterOperation::Write);
-        assert_eq!(first.payload(), &[activation & !SYNC_MANAGER_ENABLE_FLAG]);
+        assert_eq!(first.payload(), &[0]);
         let mut pool = ControlRequestPool::<1>::new();
-        complete_control_action(
-            &mut controller,
-            &mut pool,
-            &[activation & !SYNC_MANAGER_ENABLE_FLAG],
-            12,
-        )
-        .unwrap();
+        complete_control_action(&mut controller, &mut pool, &[0], 12).unwrap();
 
         let verify = controller.next_control_action(13).unwrap().unwrap();
         let ReconfigureSlaveControlAction::OpOnly(verify) = verify else {
             panic!("expected OpOnly readback before AL transition");
         };
         assert_eq!(verify.operation, RegisterOperation::Read);
-        complete_control_action(
-            &mut controller,
-            &mut pool,
-            &[activation & !SYNC_MANAGER_ENABLE_FLAG],
-            14,
-        )
-        .unwrap();
+        complete_control_action(&mut controller, &mut pool, &[0], 14).unwrap();
 
         assert_eq!(controller.phase(), ReconfigureSlavePhase::MovingToPreOp);
         assert!(matches!(
@@ -1483,6 +1565,15 @@ mod tests {
             [FmmuRegisterDescriptor::RESET; MAX_ESC_FMMUS],
         );
         let mut controller = ReconfigureSlaveController::new();
+        assert_eq!(
+            controller.start(plan, operation_context),
+            Err(ReconfigureSlaveError::Mailbox(
+                MailboxError::TransportNotOwned
+            ))
+        );
+        let mut startup_mailbox = MailboxController::new();
+        let state = startup_mailbox.release_transport_state().unwrap();
+        controller.adopt_mailbox_transport(0x1000, state).unwrap();
         let handle = controller.start(plan, operation_context).unwrap();
         assert_eq!(controller.phase(), ReconfigureSlavePhase::ConfiguringPdo);
 

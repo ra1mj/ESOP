@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Validate privileged controlled-loopback softirq qualification evidence."""
+from __future__ import annotations
 
 import json
 import pathlib

@@ -913,7 +913,7 @@ mod tests {
 
         let write_sm = controller.next_action(1).unwrap().unwrap();
         assert_eq!(write_sm.item, MappingConfigItem::SyncManager(2));
-        assert_eq!(write_sm.address, 0x1000_0810);
+        assert_eq!(write_sm.address, 0x0810_1000);
         assert_eq!(write_sm.operation, RegisterOperation::Write);
         assert_eq!(write_sm.datagram_len(), SYNC_MANAGER_IMAGE_LEN);
         controller.accept(write_sm, 5, &[], 1, 2).unwrap();
@@ -932,7 +932,7 @@ mod tests {
 
         let write_fmmu = controller.next_action(5).unwrap().unwrap();
         assert_eq!(write_fmmu.item, MappingConfigItem::Fmmu(0));
-        assert_eq!(write_fmmu.address, 0x1000_0600);
+        assert_eq!(write_fmmu.address, 0x0600_1000);
         assert_eq!(write_fmmu.operation, RegisterOperation::Write);
         controller.accept(write_fmmu, 5, &[], 1, 6).unwrap();
 
@@ -970,16 +970,21 @@ mod tests {
     fn op_only_sync_manager_is_configured_disabled_in_preop() {
         let mut table = mapping_table();
         table.mark_op_only_output(2, 0x09).unwrap();
+        assert_eq!(table.op_only_outputs().activation_template(2), Some(0x09));
         let mut controller = MappingConfigController::<1, 1>::new();
         controller.start(0x1000, 5, 0, 1_000, 100, &table).unwrap();
 
         let write = controller.next_action(1).unwrap().unwrap();
-        assert_eq!(write.payload()[6], 0x08);
+        assert_eq!(
+            write.payload(),
+            &[0x00, 0x10, 0x08, 0x00, 0x26, 0x00, 0x00, 0x00]
+        );
+        assert_eq!(write.payload()[6], 0);
         controller.accept(write, 5, &[], 1, 2).unwrap();
         let read = controller.next_action(3).unwrap().unwrap();
         let mut image = [0; SYNC_MANAGER_IMAGE_LEN];
         table.sync_manager(2).unwrap().encode(&mut image).unwrap();
-        image[6] = 0x08;
+        image[6] = 0;
         assert_eq!(
             controller.accept(read, 5, &image, 1, 4),
             Ok(MappingConfigProgress::Advanced)

@@ -53,6 +53,8 @@ fn activate(
 
 #[test]
 fn checked_in_product_activates_exact_generated_evidence() {
+    assert_eq!(generated::PRODUCT_RUNTIME_SDO_REQUESTS, 8);
+    assert_eq!(generated::PRODUCT_MAX_SDO_OBJECT_BYTES, 1024);
     let procbuf =
         ProcBuf::<2, 16, 2, 64>::new(generated::PRODUCT_CONFIG.metadata.robot_id, BOOT_ID);
     let active = activate(&generated::PRODUCT_CONFIG, &observed_slaves(), &procbuf).unwrap();
@@ -60,9 +62,9 @@ fn checked_in_product_activates_exact_generated_evidence() {
     assert_eq!(
         active.metadata().config_sha256,
         [
-            0x82, 0x47, 0x95, 0xdd, 0xcc, 0x1d, 0x22, 0x88, 0x0a, 0x6e, 0x68, 0x1a, 0xb4, 0x34,
-            0x7c, 0xa4, 0x17, 0xed, 0xb9, 0xe9, 0x1f, 0x15, 0x19, 0x10, 0x58, 0x9b, 0x79, 0x93,
-            0x19, 0x3b, 0x7e, 0x80,
+            0x64, 0xe4, 0xa0, 0x25, 0x4d, 0xe1, 0x0c, 0xea, 0xb5, 0xe7, 0x6c, 0xd3, 0xf6, 0x3d,
+            0x4a, 0x48, 0x86, 0x29, 0xab, 0x2d, 0xd2, 0x54, 0xaa, 0xf1, 0xb8, 0x4e, 0x90, 0x4b,
+            0xd1, 0xb3, 0x90, 0x55,
         ]
     );
     assert_eq!(
@@ -174,7 +176,7 @@ fn checked_in_product_activates_exact_generated_evidence() {
 
     assert_eq!(active.registry().domain_count(), 2);
     assert_eq!(active.registry().domain(0).unwrap().pdo_count, 14);
-    assert_eq!(active.registry().domain(0).unwrap().expected_wkc, 6);
+    assert_eq!(active.registry().domain(0).unwrap().expected_wkc, 4);
     assert_eq!(active.registry().domain(1).unwrap().pdo_count, 4);
     assert_eq!(active.registry().domain(1).unwrap().expected_wkc, 2);
     assert_eq!(active.schedule().hyperperiod_ticks(), 4);
@@ -195,6 +197,71 @@ fn checked_in_product_activates_exact_generated_evidence() {
     for map in active.axis_pdo_maps() {
         map.validate_for(OperatingMode::Csp).unwrap();
     }
+}
+
+#[test]
+fn generated_mailbox_transport_indices_cannot_diverge_from_verified_product_metadata() {
+    let procbuf =
+        ProcBuf::<2, 16, 2, 64>::new(generated::PRODUCT_CONFIG.metadata.robot_id, BOOT_ID);
+    for direction in [MailboxDirection::Send, MailboxDirection::Receive] {
+        let mut tampered = generated::PRODUCT_CONFIG;
+        let expected = if direction == MailboxDirection::Send {
+            0
+        } else {
+            1
+        };
+        if direction == MailboxDirection::Send {
+            tampered.slaves[0].mailbox_config.send_sync_manager = 2;
+        } else {
+            tampered.slaves[0].mailbox_config.receive_sync_manager = 2;
+        }
+        let error = ProductMailboxPolicyError::SyncManagerBindingMismatch {
+            direction,
+            expected,
+            actual: 2,
+        };
+        assert_eq!(
+            tampered.startup_profiles(),
+            Err(ProductStartupError::MailboxPolicy { position: 0, error })
+        );
+        assert_eq!(
+            tampered.build_generated_pdo_configuration_batch::<3, 17>(),
+            Err(ProductPdoBatchError::MailboxPolicy { position: 0, error })
+        );
+        let bindings = tampered
+            .slaves
+            .map(|slave| ProductMailboxBinding::new(slave.position, slave.mailbox_config));
+        assert_eq!(
+            generated::PRODUCT_CONFIG.build_pdo_configuration_batch::<3, 17>(&bindings),
+            Err(ProductPdoBatchError::MailboxPolicy { position: 0, error })
+        );
+        assert!(matches!(activate(&tampered, &observed_slaves(), &procbuf),
+            Err(ProductActivationError::MailboxPolicy { position: 0, error: actual }) if actual == error));
+    }
+}
+
+#[test]
+fn generated_runtime_counts_two_input_escs_once_each_including_their_mailbox_fmmus() {
+    let procbuf =
+        ProcBuf::<2, 16, 2, 64>::new(generated::PRODUCT_CONFIG.metadata.robot_id, BOOT_ID);
+    let active = activate(&generated::PRODUCT_CONFIG, &observed_slaves(), &procbuf).unwrap();
+    assert_eq!(active.mapped_mailbox_status_count(), 2);
+    assert_eq!(
+        generated::PRODUCT_CONFIG.datagrams[1].spec.command,
+        Command::Lrd
+    );
+    assert_eq!(generated::PRODUCT_CONFIG.datagrams[1].spec.expected_wkc, 2);
+    assert_eq!(active.registry().domain(0).unwrap().expected_wkc, 4);
+    let mut old_datagrams: [_; 4] =
+        core::array::from_fn(|index| generated::PRODUCT_CONFIG.datagrams[index]);
+    old_datagrams[1].spec.expected_wkc = 4;
+    let mut inflated = generated::PRODUCT_CONFIG;
+    inflated.datagrams = &old_datagrams;
+    inflated.domains[0].expected_wkc = 6;
+    assert!(matches!(
+        activate(&inflated, &observed_slaves(), &procbuf),
+        Err(ProductActivationError::MailboxStatusDomainMismatch { domain_id: 0 })
+    ));
 }
 
 fn receive_motion_position(
@@ -237,12 +304,12 @@ fn generated_slave_copy_runs_from_verified_receive_into_the_due_target_frame() {
             datagram_index: 1,
             input_offset: 14,
             len: 19,
-            expected_wkc: 4,
+            expected_wkc: 2,
         })
         .unwrap();
     let mut target = Domain::<9, 1>::new(0x1100);
 
-    assert!(receive_motion_position(&mut source, 1, 1, 4, 0x1234_5678));
+    assert!(receive_motion_position(&mut source, 1, 1, 2, 0x1234_5678));
     let copied = plan.apply_to_domains(&source, &mut target, 1).unwrap();
     assert_eq!(copied.status, SlaveCopyStatus::Valid);
     assert_eq!(target.output(), &[0, 0, 0x78, 0x56, 0x34, 0x12, 1, 0, 0]);
@@ -262,7 +329,7 @@ fn generated_slave_copy_runs_from_verified_receive_into_the_due_target_frame() {
     assert_eq!(stale.status, SlaveCopyStatus::StaleSource);
     assert_eq!(target.output(), &[0; 9]);
 
-    assert!(receive_motion_position(&mut source, 2, 5, 4, -123));
+    assert!(receive_motion_position(&mut source, 2, 5, 2, -123));
     assert_eq!(
         plan.apply_to_domains(&source, &mut target, 5)
             .unwrap()
@@ -602,7 +669,7 @@ fn checked_in_product_builds_exact_per_slave_pdo_startup_plans() {
     assert_eq!(left_writes[1], PdoSdoWrite::new(0x1600, 0, &[0]).unwrap());
     assert_eq!(
         left_writes[2],
-        PdoSdoWrite::new(0x1600, 1, &0x1000_6040u32.to_le_bytes()).unwrap()
+        PdoSdoWrite::new(0x1600, 1, &0x6040_0010u32.to_le_bytes()).unwrap()
     );
     assert_eq!(left_writes[5], PdoSdoWrite::new(0x1600, 0, &[3]).unwrap());
     assert_eq!(
@@ -620,17 +687,17 @@ fn checked_in_product_builds_exact_per_slave_pdo_startup_plans() {
     assert_eq!(io_writes[1], PdoSdoWrite::new(0x1601, 0, &[0]).unwrap());
     assert_eq!(
         io_writes[2],
-        PdoSdoWrite::new(0x1601, 1, &0x1001_7000u32.to_le_bytes()).unwrap()
+        PdoSdoWrite::new(0x1601, 1, &[0x10, 0x01, 0x00, 0x70]).unwrap()
     );
     assert_eq!(
         io_writes[4],
-        PdoSdoWrite::new(0x1601, 3, &0x0801_7011u32.to_le_bytes()).unwrap()
+        PdoSdoWrite::new(0x1601, 3, &[0x08, 0x01, 0x11, 0x70]).unwrap()
     );
     assert_eq!(io_writes[8], PdoSdoWrite::new(0x1C13, 0, &[0]).unwrap());
     assert_eq!(io_writes[9], PdoSdoWrite::new(0x1A01, 0, &[0]).unwrap());
     assert_eq!(
         io_writes[10],
-        PdoSdoWrite::new(0x1A01, 1, &0x1001_6000u32.to_le_bytes()).unwrap()
+        PdoSdoWrite::new(0x1A01, 1, &[0x10, 0x01, 0x00, 0x60]).unwrap()
     );
     assert_eq!(io_writes[13], PdoSdoWrite::new(0x1C13, 0, &[1]).unwrap());
 }

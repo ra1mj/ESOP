@@ -1,7 +1,7 @@
 {
   "abi_version": 7,
   "command_page_bytes": 272,
-  "config_sha256": "824795ddcc1d22880a6e681ab4347ca417edb9e91f151910589b7993193b7e80",
+  "config_sha256": "64e4a0254de10ceab5e76cd3f63d4a488629ab2dd254aaf1b84e904bd1b39055",
   "dimensions": {
     "axes": 2,
     "domains": 2,

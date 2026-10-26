@@ -1,5 +1,5 @@
 {
-  "config_sha256": "824795ddcc1d22880a6e681ab4347ca417edb9e91f151910589b7993193b7e80",
+  "config_sha256": "64e4a0254de10ceab5e76cd3f63d4a488629ab2dd254aaf1b84e904bd1b39055",
   "cycle_budget": {
     "deadline_ns": 800000,
     "period_ns": 1000000,
@@ -140,7 +140,7 @@
   },
   "process_data": {
     "copy_bytes_per_cycle": 4,
-    "expected_wkc": 8,
+    "expected_wkc": 6,
     "frame_count": 2,
     "pdo_bytes_per_cycle": 42,
     "wire_bytes_per_cycle": 181
@@ -155,8 +155,11 @@
   },
   "resources": {
     "dma_bytes": null,
+    "max_sdo_object_bytes": 1024,
     "procbuf_bytes": 4144,
     "rt_stack_peak_bytes": null,
+    "runtime_sdo_requests": 8,
+    "sdo_object_storage_bytes": 8192,
     "text_rodata_bytes": null
   },
   "schema_version": "esop.product-build-input.v1"

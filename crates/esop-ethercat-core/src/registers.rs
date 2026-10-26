@@ -51,7 +51,7 @@ pub const ESC_PORT_COUNT: usize = 4;
 
 /// Pack a fixed station address (FPRD/FPWR/FPRW) and ESC offset.
 pub const fn fixed_address(station_address: u16, register: u16) -> u32 {
-    ((station_address as u32) << 16) | register as u32
+    ((register as u32) << 16) | station_address as u32
 }
 
 /// Pack an auto-increment position (APRD/APWR/APRW) and ESC offset.
@@ -60,15 +60,15 @@ pub const fn fixed_address(station_address: u16, register: u16) -> u32 {
 /// signed, decrementing auto-increment address: 0, -1, -2, ...
 pub const fn auto_increment_address(position: u16, register: u16) -> u32 {
     let auto_increment = 0u16.wrapping_sub(position);
-    ((auto_increment as u32) << 16) | register as u32
+    ((register as u32) << 16) | auto_increment as u32
 }
 
 pub const fn station_from_address(address: u32) -> u16 {
-    (address >> 16) as u16
+    address as u16
 }
 
 pub const fn register_from_address(address: u32) -> u16 {
-    address as u16
+    (address >> 16) as u16
 }
 
 #[cfg(test)]
@@ -77,11 +77,11 @@ mod tests {
 
     #[test]
     fn address_helpers_pack_fixed_and_auto_increment_words() {
-        assert_eq!(fixed_address(0x1000, ESC_AL_STATUS), 0x1000_0130);
+        assert_eq!(fixed_address(0x1000, ESC_AL_STATUS), 0x0130_1000);
         assert_eq!(auto_increment_address(0, ESC_TYPE), 0x0000_0000);
-        assert_eq!(auto_increment_address(1, ESC_TYPE), 0xFFFF_0000);
-        assert_eq!(auto_increment_address(2, ESC_TYPE), 0xFFFE_0000);
-        assert_eq!(station_from_address(0x1234_0130), 0x1234);
-        assert_eq!(register_from_address(0x1234_0130), ESC_AL_STATUS);
+        assert_eq!(auto_increment_address(1, ESC_TYPE), 0x0000_FFFF);
+        assert_eq!(auto_increment_address(2, ESC_TYPE), 0x0000_FFFE);
+        assert_eq!(station_from_address(0x0130_1234), 0x1234);
+        assert_eq!(register_from_address(0x0130_1234), ESC_AL_STATUS);
     }
 }

@@ -118,9 +118,9 @@ impl<const OPS: usize> PdoConfigPlan<OPS> {
         for (offset, entry) in entries.iter().enumerate() {
             let subindex =
                 u8::try_from(offset + 1).map_err(|_| PdoConfigPlanError::CountOutOfBounds)?;
-            let packed = (entry.index as u32)
-                | ((entry.subindex as u32) << 16)
-                | ((entry.bit_length as u32) << 24);
+            let packed = ((entry.index as u32) << 16)
+                | ((entry.subindex as u32) << 8)
+                | entry.bit_length as u32;
             self.push(PdoSdoWrite::new(
                 mapping_index,
                 subindex,
@@ -383,6 +383,7 @@ pub struct PdoConfigController<const OPS: usize> {
     configuration_deadline_ns: u64,
     request_timeout_ns: u64,
     transfer: SdoTransfer,
+    mailbox_payload_capacity: usize,
     pending: Option<PdoConfigAction>,
     next_token: u8,
     last_error: Option<PdoConfigError>,
@@ -400,6 +401,7 @@ impl<const OPS: usize> PdoConfigController<OPS> {
             configuration_deadline_ns: 0,
             request_timeout_ns: 0,
             transfer: SdoTransfer::new(),
+            mailbox_payload_capacity: crate::coe::MAX_COE_PAYLOAD_BYTES,
             pending: None,
             next_token: 1,
             last_error: None,
@@ -426,6 +428,22 @@ impl<const OPS: usize> PdoConfigController<OPS> {
         self.last_error
     }
 
+    pub fn set_mailbox_payload_capacity(&mut self, capacity: usize) -> Result<(), PdoConfigError> {
+        if !matches!(
+            self.phase,
+            PdoConfigPhase::Idle | PdoConfigPhase::Complete | PdoConfigPhase::Faulted
+        ) {
+            return Err(PdoConfigError::Busy);
+        }
+        SdoTransfer::with_mailbox_payload_capacity(
+            crate::coe::SdoAccessPolicy::new(false),
+            capacity,
+        )
+        .map_err(PdoConfigError::Sdo)?;
+        self.mailbox_payload_capacity = capacity;
+        Ok(())
+    }
+
     pub fn start(
         &mut self,
         plan: PdoConfigPlan<OPS>,
@@ -448,7 +466,11 @@ impl<const OPS: usize> PdoConfigController<OPS> {
         self.generation = generation;
         self.configuration_deadline_ns = now_ns.saturating_add(timeout_ns);
         self.request_timeout_ns = request_timeout_ns;
-        self.transfer = SdoTransfer::new();
+        self.transfer = SdoTransfer::with_mailbox_payload_capacity(
+            crate::coe::SdoAccessPolicy::new(false),
+            self.mailbox_payload_capacity,
+        )
+        .map_err(PdoConfigError::Sdo)?;
         self.pending = None;
         self.next_token = 1;
         self.last_error = None;
@@ -657,6 +679,9 @@ pub struct PdoConfigBatch<const JOBS: usize, const OPS: usize> {
     request_timeout_ns: u64,
     controller: PdoConfigController<OPS>,
     mailbox: MailboxController,
+    transport_states: [Option<crate::mailbox::MailboxTransportState>; JOBS],
+    transport_stations: [u16; JOBS],
+    transport_owner: Option<usize>,
     last_error: Option<PdoConfigBatchError>,
 }
 
@@ -670,7 +695,10 @@ impl<const JOBS: usize, const OPS: usize> PdoConfigBatch<JOBS, OPS> {
             timeout_ns: 0,
             request_timeout_ns: 0,
             controller: PdoConfigController::new(),
-            mailbox: MailboxController::new(),
+            mailbox: MailboxController::without_transport(),
+            transport_states: [const { None }; JOBS],
+            transport_stations: [0; JOBS],
+            transport_owner: None,
             last_error: None,
         }
     }
@@ -703,6 +731,116 @@ impl<const JOBS: usize, const OPS: usize> PdoConfigBatch<JOBS, OPS> {
 
     pub fn mailbox_mut(&mut self) -> &mut MailboxController {
         &mut self.mailbox
+    }
+
+    /// Transfer physical mailbox authority after startup configuration (or
+    /// explicit repair) completes; the old batch cannot use it until returned.
+    pub fn take_transport_state(
+        &mut self,
+        station_address: u16,
+    ) -> Result<crate::mailbox::MailboxTransportState, MailboxError> {
+        if self.phase() == PdoConfigBatchPhase::Configuring {
+            return Err(MailboxError::Busy);
+        }
+        let index = self
+            .transport_stations
+            .iter()
+            .position(|station| *station == station_address)
+            .ok_or(MailboxError::InvalidConfiguration)?;
+        if self.transport_owner == Some(index) {
+            self.mailbox.release_transport_state()
+        } else {
+            self.transport_states[index]
+                .take()
+                .ok_or(MailboxError::TransportNotOwned)
+        }
+    }
+
+    pub fn adopt_transport_state(
+        &mut self,
+        station_address: u16,
+        state: crate::mailbox::MailboxTransportState,
+    ) -> Result<(), MailboxError> {
+        if state
+            .station_address()
+            .is_some_and(|station| station != station_address)
+        {
+            return Err(MailboxError::InvalidConfiguration);
+        }
+        if self.phase() == PdoConfigBatchPhase::Configuring {
+            return Err(MailboxError::Busy);
+        }
+        let index = self
+            .transport_stations
+            .iter()
+            .position(|station| *station == station_address)
+            .ok_or(MailboxError::InvalidConfiguration)?;
+        if self.transport_owner == Some(index) {
+            self.mailbox
+                .adopt_transport_state_for(station_address, state)
+        } else if self.transport_states[index].is_none() {
+            self.transport_states[index] = Some(state);
+            Ok(())
+        } else {
+            Err(MailboxError::Busy)
+        }
+    }
+
+    fn switch_transport(&mut self, station_address: u16) -> Result<(), PdoConfigBatchError> {
+        if self
+            .transport_owner
+            .is_some_and(|index| self.transport_stations[index] == station_address)
+        {
+            return if self.mailbox.owns_transport() {
+                Ok(())
+            } else {
+                Err(PdoConfigBatchError::Configuration(PdoConfigError::Mailbox(
+                    MailboxError::TransportNotOwned,
+                )))
+            };
+        }
+        if let Some(owner) = self.transport_owner {
+            if self.mailbox.owns_transport() {
+                self.transport_states[owner] =
+                    Some(self.mailbox.release_transport_state().map_err(|error| {
+                        PdoConfigBatchError::Configuration(PdoConfigError::Mailbox(error))
+                    })?);
+            }
+        }
+        let index = match self
+            .transport_stations
+            .iter()
+            .position(|station| *station == station_address)
+        {
+            Some(index) => index,
+            None => {
+                let index = self
+                    .transport_stations
+                    .iter()
+                    .position(|station| *station == 0)
+                    .ok_or(PdoConfigBatchError::Configuration(PdoConfigError::Mailbox(
+                        MailboxError::InvalidConfiguration,
+                    )))?;
+                self.transport_stations[index] = station_address;
+                let mut initial = MailboxController::new();
+                self.transport_states[index] =
+                    Some(initial.release_transport_state().map_err(|error| {
+                        PdoConfigBatchError::Configuration(PdoConfigError::Mailbox(error))
+                    })?);
+                index
+            }
+        };
+        let state =
+            self.transport_states[index]
+                .take()
+                .ok_or(PdoConfigBatchError::Configuration(PdoConfigError::Mailbox(
+                    MailboxError::TransportNotOwned,
+                )))?;
+        self.mailbox
+            .adopt_transport_state_for(station_address, state)
+            .map_err(|error| PdoConfigBatchError::Configuration(PdoConfigError::Mailbox(error)))?;
+        self.transport_owner = Some(index);
+        Ok(())
     }
 
     pub const fn current_mailbox_config(&self) -> Option<MailboxConfig> {
@@ -764,7 +902,6 @@ impl<const JOBS: usize, const OPS: usize> PdoConfigBatch<JOBS, OPS> {
         self.timeout_ns = timeout_ns;
         self.request_timeout_ns = request_timeout_ns;
         self.controller = PdoConfigController::new();
-        self.mailbox = MailboxController::new();
         self.last_error = None;
         self.start_current_or_finish(now_ns)
     }
@@ -797,6 +934,19 @@ impl<const JOBS: usize, const OPS: usize> PdoConfigBatch<JOBS, OPS> {
         let mut remaining = JOBS;
         while self.current_index < self.plan.count && remaining != 0 {
             let job = self.plan.jobs[self.current_index];
+            if let Err(error) = self.switch_transport(job.station_address) {
+                self.phase = PdoConfigBatchPhase::Faulted;
+                self.last_error = Some(error);
+                return Err(error);
+            }
+            if let Err(error) = self.controller.set_mailbox_payload_capacity(
+                usize::from(job.mailbox_config.send_capacity) - crate::mailbox::MAILBOX_HEADER_LEN,
+            ) {
+                let error = PdoConfigBatchError::Configuration(error);
+                self.phase = PdoConfigBatchPhase::Faulted;
+                self.last_error = Some(error);
+                return Err(error);
+            }
             let generation = self
                 .base_generation
                 .checked_add(self.current_index as u16)
@@ -883,11 +1033,11 @@ mod tests {
         assert_eq!(plan.writes()[0], PdoSdoWrite::new(0x1600, 0, &[0]).unwrap());
         assert_eq!(
             plan.writes()[1],
-            PdoSdoWrite::new(0x1600, 1, &0x1000_6040u32.to_le_bytes()).unwrap()
+            PdoSdoWrite::new(0x1600, 1, &[0x10, 0x00, 0x40, 0x60]).unwrap()
         );
         assert_eq!(
             plan.writes()[2],
-            PdoSdoWrite::new(0x1600, 2, &0x2000_607Au32.to_le_bytes()).unwrap()
+            PdoSdoWrite::new(0x1600, 2, &[0x20, 0x00, 0x7A, 0x60]).unwrap()
         );
         assert_eq!(plan.writes()[3], PdoSdoWrite::new(0x1600, 0, &[2]).unwrap());
         assert_eq!(plan.writes()[4], PdoSdoWrite::new(0x1C12, 0, &[0]).unwrap());
@@ -896,6 +1046,27 @@ mod tests {
             PdoSdoWrite::new(0x1C12, 1, &0x1600u16.to_le_bytes()).unwrap()
         );
         assert_eq!(plan.writes()[6], PdoSdoWrite::new(0x1C12, 0, &[1]).unwrap());
+    }
+
+    #[test]
+    fn pdo_mapping_descriptor_uses_standard_index_subindex_bit_length_word() {
+        // Nanotec PD4-E EtherCAT Technical Manual V1.0.1, object 1600:
+        // Controlword = 60400010h; Target position = 607A0020h.
+        // The literal little-endian bytes additionally exercise a nonzero
+        // subindex, so index/subindex/length permutations cannot round-trip.
+        let mut plan = PdoConfigPlan::<5>::new();
+        plan.append_mapping(
+            0x1600,
+            &[
+                PdoEntrySpec::new(0x6040, 0, 16),
+                PdoEntrySpec::new(0x607A, 0, 32),
+                PdoEntrySpec::new(0x7010, 2, 8),
+            ],
+        )
+        .unwrap();
+        assert_eq!(&plan.writes()[1].data[..4], &[0x10, 0, 0x40, 0x60]);
+        assert_eq!(&plan.writes()[2].data[..4], &[0x20, 0, 0x7A, 0x60]);
+        assert_eq!(&plan.writes()[3].data[..4], &[0x08, 2, 0x10, 0x70]);
     }
 
     #[test]
@@ -968,7 +1139,7 @@ mod tests {
 
         let segment = controller.next_action(5).unwrap().unwrap();
         assert_eq!(segment.step, PdoConfigStep::VerifyUpload);
-        assert_eq!(segment.payload(), &[0, 0x20, 0x60]);
+        assert_eq!(segment.payload(), &[0, 0x20, 0x60, 0, 0, 0, 0, 0, 0, 0]);
         let mut segment_response = [0; 10];
         response_header(&mut segment_response);
         segment_response[2] = 0x0B;
@@ -1390,5 +1561,28 @@ mod tests {
         assert_eq!(batch.status().station_address, Some(0x1002));
         assert_eq!(batch.status().generation, Some(30));
         assert_eq!(batch.last_error(), None);
+    }
+
+    #[test]
+    fn batch_cannot_restart_a_slave_while_runtime_holds_its_transport_token() {
+        let config = MailboxConfig::new(0x1000, 32, 0x1100, 32);
+        let mut plan = PdoConfigBatchPlan::<1, 0>::new();
+        plan.push(PdoConfigJob::new(0x1001, PdoConfigPlan::new(), config))
+            .unwrap();
+        let mut batch = PdoConfigBatch::new();
+        batch.start(plan, 1, 0, 100, 10).unwrap();
+        let token = batch.take_transport_state(0x1001).unwrap();
+        assert!(!batch.mailbox().owns_transport());
+        assert_eq!(
+            batch.start(plan, 2, 10, 100, 10),
+            Err(PdoConfigBatchError::Configuration(PdoConfigError::Mailbox(
+                MailboxError::TransportNotOwned
+            )))
+        );
+        assert_eq!(batch.phase(), PdoConfigBatchPhase::Faulted);
+        batch.adopt_transport_state(0x1001, token).unwrap();
+        batch.start(plan, 3, 20, 100, 10).unwrap();
+        assert_eq!(batch.phase(), PdoConfigBatchPhase::Complete);
+        assert!(batch.mailbox().owns_transport());
     }
 }

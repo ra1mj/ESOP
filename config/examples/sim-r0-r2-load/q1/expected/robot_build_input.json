@@ -1,0 +1,660 @@
+{
+  "config_sha256": "00c8ed4f28d4385e61fee38ff9118ebc86bc7bc29003278622aceb013f09bcc5",
+  "cycle_budget": {
+    "deadline_ns": 800000,
+    "period_ns": 1000000,
+    "qualification": "generated_not_measured"
+  },
+  "devices": {
+    "coe_complete_access": [
+      {
+        "enabled": false,
+        "name": "drive_00",
+        "position": 0,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_01",
+        "position": 1,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_02",
+        "position": 2,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_03",
+        "position": 3,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_04",
+        "position": 4,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_05",
+        "position": 5,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_06",
+        "position": 6,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_07",
+        "position": 7,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_08",
+        "position": 8,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_09",
+        "position": 9,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_10",
+        "position": 10,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_11",
+        "position": 11,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_12",
+        "position": 12,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_13",
+        "position": 13,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_14",
+        "position": 14,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_15",
+        "position": 15,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_16",
+        "position": 16,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_17",
+        "position": 17,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_18",
+        "position": 18,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_19",
+        "position": 19,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_20",
+        "position": 20,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_21",
+        "position": 21,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_22",
+        "position": 22,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_23",
+        "position": 23,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_24",
+        "position": 24,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_25",
+        "position": 25,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_26",
+        "position": 26,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_27",
+        "position": 27,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_28",
+        "position": 28,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_29",
+        "position": 29,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_30",
+        "position": 30,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_31",
+        "position": 31,
+        "supported": true
+      }
+    ],
+    "coe_sdo_information": [
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_00",
+        "position": 0,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_01",
+        "position": 1,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_02",
+        "position": 2,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_03",
+        "position": 3,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_04",
+        "position": 4,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_05",
+        "position": 5,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_06",
+        "position": 6,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_07",
+        "position": 7,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_08",
+        "position": 8,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_09",
+        "position": 9,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_10",
+        "position": 10,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_11",
+        "position": 11,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_12",
+        "position": 12,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_13",
+        "position": 13,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_14",
+        "position": 14,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_15",
+        "position": 15,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_16",
+        "position": 16,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_17",
+        "position": 17,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_18",
+        "position": 18,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_19",
+        "position": 19,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_20",
+        "position": 20,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_21",
+        "position": 21,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_22",
+        "position": 22,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_23",
+        "position": 23,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_24",
+        "position": 24,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_25",
+        "position": 25,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_26",
+        "position": 26,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_27",
+        "position": 27,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_28",
+        "position": 28,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_29",
+        "position": 29,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_30",
+        "position": 30,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_31",
+        "position": 31,
+        "supported": true
+      }
+    ],
+    "declared_axes": 32,
+    "declared_io_channels": 16,
+    "declared_slaves": 32,
+    "requesting_id": [
+      {
+        "expected": "0x0041",
+        "name": "drive_00",
+        "position": 0,
+        "supported": true
+      },
+      {
+        "expected": "0x0042",
+        "name": "drive_01",
+        "position": 1,
+        "supported": true
+      },
+      {
+        "expected": "0x0043",
+        "name": "drive_02",
+        "position": 2,
+        "supported": true
+      },
+      {
+        "expected": "0x0044",
+        "name": "drive_03",
+        "position": 3,
+        "supported": true
+      },
+      {
+        "expected": "0x0045",
+        "name": "drive_04",
+        "position": 4,
+        "supported": true
+      },
+      {
+        "expected": "0x0046",
+        "name": "drive_05",
+        "position": 5,
+        "supported": true
+      },
+      {
+        "expected": "0x0047",
+        "name": "drive_06",
+        "position": 6,
+        "supported": true
+      },
+      {
+        "expected": "0x0048",
+        "name": "drive_07",
+        "position": 7,
+        "supported": true
+      },
+      {
+        "expected": "0x0049",
+        "name": "drive_08",
+        "position": 8,
+        "supported": true
+      },
+      {
+        "expected": "0x004a",
+        "name": "drive_09",
+        "position": 9,
+        "supported": true
+      },
+      {
+        "expected": "0x004b",
+        "name": "drive_10",
+        "position": 10,
+        "supported": true
+      },
+      {
+        "expected": "0x004c",
+        "name": "drive_11",
+        "position": 11,
+        "supported": true
+      },
+      {
+        "expected": "0x004d",
+        "name": "drive_12",
+        "position": 12,
+        "supported": true
+      },
+      {
+        "expected": "0x004e",
+        "name": "drive_13",
+        "position": 13,
+        "supported": true
+      },
+      {
+        "expected": "0x004f",
+        "name": "drive_14",
+        "position": 14,
+        "supported": true
+      },
+      {
+        "expected": "0x0050",
+        "name": "drive_15",
+        "position": 15,
+        "supported": true
+      },
+      {
+        "expected": "0x0051",
+        "name": "drive_16",
+        "position": 16,
+        "supported": true
+      },
+      {
+        "expected": "0x0052",
+        "name": "drive_17",
+        "position": 17,
+        "supported": true
+      },
+      {
+        "expected": "0x0053",
+        "name": "drive_18",
+        "position": 18,
+        "supported": true
+      },
+      {
+        "expected": "0x0054",
+        "name": "drive_19",
+        "position": 19,
+        "supported": true
+      },
+      {
+        "expected": "0x0055",
+        "name": "drive_20",
+        "position": 20,
+        "supported": true
+      },
+      {
+        "expected": "0x0056",
+        "name": "drive_21",
+        "position": 21,
+        "supported": true
+      },
+      {
+        "expected": "0x0057",
+        "name": "drive_22",
+        "position": 22,
+        "supported": true
+      },
+      {
+        "expected": "0x0058",
+        "name": "drive_23",
+        "position": 23,
+        "supported": true
+      },
+      {
+        "expected": "0x0059",
+        "name": "drive_24",
+        "position": 24,
+        "supported": true
+      },
+      {
+        "expected": "0x005a",
+        "name": "drive_25",
+        "position": 25,
+        "supported": true
+      },
+      {
+        "expected": "0x005b",
+        "name": "drive_26",
+        "position": 26,
+        "supported": true
+      },
+      {
+        "expected": "0x005c",
+        "name": "drive_27",
+        "position": 27,
+        "supported": true
+      },
+      {
+        "expected": "0x005d",
+        "name": "drive_28",
+        "position": 28,
+        "supported": true
+      },
+      {
+        "expected": "0x005e",
+        "name": "drive_29",
+        "position": 29,
+        "supported": true
+      },
+      {
+        "expected": "0x005f",
+        "name": "drive_30",
+        "position": 30,
+        "supported": true
+      },
+      {
+        "expected": "0x0060",
+        "name": "drive_31",
+        "position": 31,
+        "supported": true
+      }
+    ],
+    "source": "esop-cfggen validated product manifest and ESI subset"
+  },
+  "platform": {
+    "board": "host-simulator",
+    "cache_policy": "host managed; target cache qualification pending",
+    "port": "deterministic-linux-simulator",
+    "rtos_or_kernel": "host Linux; not target qualified",
+    "soc": "generic-x86_64"
+  },
+  "process_data": {
+    "copy_bytes_per_cycle": 0,
+    "expected_wkc": 64,
+    "frame_count": 1,
+    "pdo_bytes_per_cycle": 904,
+    "wire_bytes_per_cycle": 968
+  },
+  "qualification": {
+    "failures": [
+      "generated topology is not physical HIL evidence",
+      "cycle deadline and target resource use are not measured"
+    ],
+    "passed": false,
+    "scenario": "generated-simulator-product"
+  },
+  "resources": {
+    "dma_bytes": null,
+    "max_sdo_object_bytes": 1024,
+    "procbuf_bytes": 10816,
+    "rt_stack_peak_bytes": null,
+    "runtime_sdo_requests": 8,
+    "sdo_object_storage_bytes": 8192,
+    "text_rodata_bytes": null
+  },
+  "schema_version": "esop.product-build-input.v1"
+}

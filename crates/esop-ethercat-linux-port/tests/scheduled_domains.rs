@@ -1018,9 +1018,13 @@ fn explicit_rescan_preserves_cyclic_order_and_does_not_retransmit_in_flight_work
     startup
         .start(1, 0, StartupConfig::new(EthercatState::Op), &[])
         .unwrap();
+    let count = startup.next_action(0).unwrap().unwrap();
+    startup
+        .accept(count, count.generation(), &[0; 2], 0, 0)
+        .unwrap();
     let initial_probe = startup.next_action(1).unwrap().unwrap();
     startup
-        .accept(initial_probe, initial_probe.generation(), &[], 0, 2)
+        .accept(initial_probe, initial_probe.generation(), &[0; 2], 0, 2)
         .unwrap();
     let operation = startup.start_rescan(7, 100_000, 600_000).unwrap();
     let mut recovery_diagnostics = ExplicitRecoveryDiagnostics::<4>::new();
@@ -1077,7 +1081,7 @@ fn explicit_rescan_preserves_cyclic_order_and_does_not_retransmit_in_flight_work
     assert_eq!(port.tx_attempts, 3);
     assert_eq!(
         port.tx_commands[..3],
-        [Command::Lrw as u8, Command::Frmw as u8, Command::Aprd as u8]
+        [Command::Lrw as u8, Command::Frmw as u8, Command::Brd as u8]
     );
     assert!(
         !other_cycle_facts_from_production_service_cycle(&first, ready_other_cycle_facts())
@@ -1103,6 +1107,31 @@ fn explicit_rescan_preserves_cyclic_order_and_does_not_retransmit_in_flight_work
             250_000,
         )
         .unwrap();
+    // The validated BRD count arrives here. Final AP p=N is a distinct
+    // request and must receive an actual WKC-zero response next cycle.
+    assert!(!second.service_ready());
+    assert_eq!(startup.rescan_phase(), RescanPhase::Active);
+    assert_eq!(controls.in_use(), 0);
+    assert_eq!(port.tx_attempts, 5);
+    port.set_now_ns(300_000);
+    bank.submit_due_process_inputs(&process_inputs, &mut master, &mut port, 3, 350_000, 350_000)
+        .unwrap();
+    let second = scheduler
+        .run_cycle(
+            &mut bank,
+            &mut master,
+            &mut port,
+            &mut scratch,
+            &mut dc,
+            &mut dc_image,
+            300_000,
+            &mut controls,
+            &mut ScheduledProductionServices::<1, 0, 0>::new(Some(&mut startup), None, None, None),
+            3,
+            350_000,
+            350_000,
+        )
+        .unwrap();
     let result = startup.rescan_result(operation).unwrap();
     assert_eq!(
         second.progress(),
@@ -1114,10 +1143,16 @@ fn explicit_rescan_preserves_cyclic_order_and_does_not_retransmit_in_flight_work
     assert_eq!(startup.rescan_phase(), RescanPhase::Complete);
     assert_eq!(startup.phase(), StartupPhase::Ready);
     assert_eq!(controls.in_use(), 0);
-    assert_eq!(port.tx_attempts, 5);
+    assert_eq!(port.tx_attempts, 8);
     assert_eq!(
-        port.tx_commands[3..5],
-        [Command::Lrw as u8, Command::Frmw as u8]
+        port.tx_commands[3..8],
+        [
+            Command::Lrw as u8,
+            Command::Frmw as u8,
+            Command::Lrw as u8,
+            Command::Frmw as u8,
+            Command::Aprd as u8
+        ]
     );
     assert_eq!(port.al_control_writes, 0);
     assert_eq!(result.expected_count, 0);
@@ -2110,7 +2145,9 @@ fn production_scheduler_runs_pdo_mailbox_readback_before_lower_priority_services
         .start(mailbox_config, 1, 61, 100_000, MailboxProtocol::CoE, &[1])
         .unwrap();
     let mut scheduler = ScheduledProductionServiceScheduler::new();
-    let mut controls = ControlRequestPool::<2>::new();
+    let mut controls =
+        ControlRequestPool::<2>::new_with_datagram_indices_excluding(&[220, 221], &[12, 13])
+            .unwrap();
     let mut port = TwoFrameSimPort::new();
     port.configure_mailbox(1, mailbox_config);
     let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
@@ -2189,7 +2226,7 @@ fn production_scheduler_runs_pdo_mailbox_readback_before_lower_priority_services
         ScheduledProductionServiceKind::PdoConfiguration
     );
     assert_eq!(pdo.pending(), Some(bound_action));
-    assert_eq!(pdo_mailbox.phase(), MailboxPhase::Polling);
+    assert_eq!(pdo_mailbox.phase(), MailboxPhase::Sending);
     assert_eq!(bound_mailbox_action.token, 1);
     assert_eq!(
         first.progress(),
@@ -2205,40 +2242,47 @@ fn production_scheduler_runs_pdo_mailbox_readback_before_lower_priority_services
             .coe_ready
     );
     assert_eq!(controls.in_use(), 0);
-    assert_eq!(normal_mailbox.phase(), MailboxPhase::Sending);
+    assert_eq!(normal_mailbox.phase(), MailboxPhase::CheckingSendStatus);
 
-    port.set_now_ns(110_000);
-    let wrong_counter = port.mailbox_counter.wrapping_add(1);
-    port.set_next_mailbox_response_with_counter(
-        &pdo_download_response(bound_action),
-        wrong_counter,
-    );
-    let retry = scheduler
-        .run_cycle(
-            &mut bank,
-            &mut master,
-            &mut port,
-            &mut scratch,
-            &mut dc,
-            &mut dc_image,
-            110_000,
-            &mut controls,
-            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
-                None,
-                Some(&mut mapping),
-                None,
-                Some(&mut normal_mailbox),
-            )
-            .with_pdo_configuration(ScheduledPdoConfiguration::new(
-                &mut pdo,
-                &mut pdo_mailbox,
-                mailbox_config,
-            )),
-            2,
-            160_000,
-            160_000,
-        )
-        .unwrap();
+    macro_rules! run {
+        ($now:expr,$generation:expr) => {{
+            port.set_now_ns($now);
+            scheduler
+                .run_cycle(
+                    &mut bank,
+                    &mut master,
+                    &mut port,
+                    &mut scratch,
+                    &mut dc,
+                    &mut dc_image,
+                    $now,
+                    &mut controls,
+                    &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
+                        None,
+                        Some(&mut mapping),
+                        None,
+                        Some(&mut normal_mailbox),
+                    )
+                    .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                        &mut pdo,
+                        &mut pdo_mailbox,
+                        mailbox_config,
+                    )),
+                    $generation,
+                    $now + 50_000,
+                    $now + 50_000,
+                )
+                .unwrap()
+        }};
+    }
+    run!(110_000, 2); // complete the full-capacity send after the SM0 ownership read
+    assert_eq!(pdo_mailbox.phase(), MailboxPhase::CheckingStatus);
+    // RX counters are independent of TX. Corrupt the mailbox protocol instead
+    // to retain a genuine negative transport/retry case.
+    port.set_next_mailbox_response_with_counter(&pdo_download_response(bound_action), 4);
+    port.mailbox_response[5] = (4 << 4) | MailboxProtocol::FoE as u8;
+    run!(120_000, 3); // SM1 full
+    let retry = run!(130_000, 4); // consumed wrong protocol
     assert_eq!(
         retry.progress(),
         ScheduledProductionServiceProgress::PdoConfiguration(
@@ -2251,192 +2295,49 @@ fn production_scheduler_runs_pdo_mailbox_readback_before_lower_priority_services
     assert_eq!(pdo_mailbox.retry_count(), 1);
     assert_eq!(
         pdo_mailbox.last_retry_error(),
-        Some(MailboxError::CounterMismatch)
+        Some(MailboxError::ProtocolMismatch)
     );
     assert_eq!(controls.in_use(), 0);
-
-    port.set_now_ns(115_000);
-    let retry_wait = scheduler
-        .run_cycle(
-            &mut bank,
-            &mut master,
-            &mut port,
-            &mut scratch,
-            &mut dc,
-            &mut dc_image,
-            115_000,
-            &mut controls,
-            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
-                None,
-                Some(&mut mapping),
-                None,
-                Some(&mut normal_mailbox),
-            )
-            .with_pdo_configuration(ScheduledPdoConfiguration::new(
-                &mut pdo,
-                &mut pdo_mailbox,
-                mailbox_config,
-            )),
-            3,
-            165_000,
-            165_000,
-        )
-        .unwrap();
+    let wait = run!(135_000, 5);
+    assert_eq!(wait.progress(), ScheduledProductionServiceProgress::Waiting);
+    assert_eq!(wait.request(), None);
+    port.set_next_mailbox_response_with_counter(&pdo_download_response(bound_action), 5);
+    run!(140_000, 6); // read SM1 activation
+    run!(150_000, 7); // toggle Repeat Request, preserving activation bits
+    run!(160_000, 8); // matching PDI Repeat ACK
+    let downloaded = run!(170_000, 9); // repeated response, independent RX counter 5
     assert_eq!(
-        retry_wait.progress(),
-        ScheduledProductionServiceProgress::Waiting
-    );
-    assert_eq!(retry_wait.request(), None);
-    assert_eq!(pdo.pending(), Some(bound_action));
-    assert_eq!(controls.in_use(), 0);
-
-    port.set_now_ns(120_000);
-    port.set_next_mailbox_response(&pdo_download_response(bound_action));
-    let second = scheduler
-        .run_cycle(
-            &mut bank,
-            &mut master,
-            &mut port,
-            &mut scratch,
-            &mut dc,
-            &mut dc_image,
-            120_000,
-            &mut controls,
-            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
-                None,
-                Some(&mut mapping),
-                None,
-                Some(&mut normal_mailbox),
-            )
-            .with_pdo_configuration(ScheduledPdoConfiguration::new(
-                &mut pdo,
-                &mut pdo_mailbox,
-                mailbox_config,
-            )),
-            4,
-            170_000,
-            170_000,
-        )
-        .unwrap();
-    assert_eq!(
-        second.progress(),
+        downloaded.progress(),
         ScheduledProductionServiceProgress::PdoConfiguration(
             ScheduledPdoConfigurationProgress::Configuration(PdoConfigProgress::Advanced)
         )
     );
-    assert_eq!(pdo.phase(), PdoConfigPhase::Sending);
     assert_eq!(pdo.step(), PdoConfigStep::VerifyUpload);
-
-    port.set_now_ns(130_000);
-    let third = scheduler
-        .run_cycle(
-            &mut bank,
-            &mut master,
-            &mut port,
-            &mut scratch,
-            &mut dc,
-            &mut dc_image,
-            130_000,
-            &mut controls,
-            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
-                None,
-                Some(&mut mapping),
-                None,
-                Some(&mut normal_mailbox),
-            )
-            .with_pdo_configuration(ScheduledPdoConfiguration::new(
-                &mut pdo,
-                &mut pdo_mailbox,
-                mailbox_config,
-            )),
-            5,
-            180_000,
-            180_000,
-        )
-        .unwrap();
-    let verify_action = pdo.pending().unwrap();
-    assert_eq!(verify_action.step, PdoConfigStep::VerifyUpload);
+    run!(180_000, 10); // next request's SM0 ownership read
+    let upload = pdo.pending().unwrap();
+    assert_eq!(upload.step, PdoConfigStep::VerifyUpload);
+    run!(190_000, 11); // full-capacity send
+    port.set_next_mailbox_response(&pdo_upload_response(upload, &[0]));
+    run!(200_000, 12); // receive-SM full
+    let configured = run!(210_000, 13);
     assert_eq!(
-        third.selected(),
-        ScheduledProductionServiceKind::PdoConfiguration
-    );
-    assert_eq!(normal_mailbox.phase(), MailboxPhase::Sending);
-
-    port.set_now_ns(140_000);
-    port.set_next_mailbox_response(&pdo_upload_response(verify_action, &[0]));
-    let fourth = scheduler
-        .run_cycle(
-            &mut bank,
-            &mut master,
-            &mut port,
-            &mut scratch,
-            &mut dc,
-            &mut dc_image,
-            140_000,
-            &mut controls,
-            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
-                None,
-                Some(&mut mapping),
-                None,
-                Some(&mut normal_mailbox),
-            )
-            .with_pdo_configuration(ScheduledPdoConfiguration::new(
-                &mut pdo,
-                &mut pdo_mailbox,
-                mailbox_config,
-            )),
-            6,
-            190_000,
-            190_000,
-        )
-        .unwrap();
-    assert_eq!(
-        fourth.progress(),
+        configured.progress(),
         ScheduledProductionServiceProgress::PdoConfiguration(
             ScheduledPdoConfigurationProgress::Configuration(PdoConfigProgress::Complete)
         )
     );
     assert_eq!(pdo.phase(), PdoConfigPhase::Complete);
     assert_eq!(pdo.operation_index(), 1);
-    assert!(fourth.service_ready());
-    assert!(bank.confirms_production_service_cycle(&fourth));
+    assert!(configured.service_ready());
+    assert!(bank.confirms_production_service_cycle(&configured));
     assert!(
-        other_cycle_facts_from_production_service_cycle(&fourth, ready_other_cycle_facts())
+        other_cycle_facts_from_production_service_cycle(&configured, ready_other_cycle_facts())
             .coe_ready
     );
+    assert_eq!(normal_mailbox.phase(), MailboxPhase::CheckingSendStatus);
     assert_eq!(controls.in_use(), 0);
-
-    port.set_now_ns(150_000);
-    let lower_priority = scheduler
-        .run_cycle(
-            &mut bank,
-            &mut master,
-            &mut port,
-            &mut scratch,
-            &mut dc,
-            &mut dc_image,
-            150_000,
-            &mut controls,
-            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
-                None,
-                Some(&mut mapping),
-                None,
-                Some(&mut normal_mailbox),
-            )
-            .with_pdo_configuration(ScheduledPdoConfiguration::new(
-                &mut pdo,
-                &mut pdo_mailbox,
-                mailbox_config,
-            )),
-            7,
-            200_000,
-            200_000,
-        )
-        .unwrap();
-    assert_eq!(
-        lower_priority.selected(),
-        ScheduledProductionServiceKind::Mapping
-    );
+    let lower = run!(220_000, 14);
+    assert_eq!(lower.selected(), ScheduledProductionServiceKind::Mapping);
 }
 
 #[test]
@@ -2527,13 +2428,21 @@ fn generated_mailbox_status_policy_suppresses_input_reads_until_active() {
             ScheduledPdoConfigurationProgress::Mailbox(MailboxProgress::Advanced)
         )
     );
+    assert_eq!(pdo_batch.mailbox().phase(), MailboxPhase::Sending);
+    let write = run_cycle!(100_500, 2);
+    assert_eq!(
+        write.progress(),
+        ScheduledProductionServiceProgress::PdoConfiguration(
+            ScheduledPdoConfigurationProgress::Mailbox(MailboxProgress::Advanced)
+        )
+    );
     assert_eq!(pdo_batch.mailbox().phase(), MailboxPhase::CheckingStatus);
     assert_eq!(port.mailbox_status_reads, 0);
     assert_eq!(port.mailbox_receive_reads, 0);
 
     let status_address = fixed_address(first_job.station_address(), status_bit.address);
     port.set_next_control_response(status_address, &[0]);
-    let inactive = run_cycle!(101_000, 2);
+    let inactive = run_cycle!(101_000, 3);
     assert_eq!(
         inactive.progress(),
         ScheduledProductionServiceProgress::PdoConfiguration(
@@ -2545,7 +2454,7 @@ fn generated_mailbox_status_policy_suppresses_input_reads_until_active() {
     assert_eq!(port.mailbox_receive_reads, 0);
 
     port.set_next_control_response(status_address, &[status_bit.mask]);
-    let active = run_cycle!(102_000, 3);
+    let active = run_cycle!(102_000, 4);
     assert_eq!(
         active.progress(),
         ScheduledProductionServiceProgress::PdoConfiguration(
@@ -2556,7 +2465,7 @@ fn generated_mailbox_status_policy_suppresses_input_reads_until_active() {
     assert_eq!(port.mailbox_status_reads, 2);
     assert_eq!(port.mailbox_receive_reads, 0);
 
-    let polled = run_cycle!(103_000, 4);
+    let polled = run_cycle!(103_000, 5);
     assert_eq!(
         polled.progress(),
         ScheduledProductionServiceProgress::PdoConfiguration(
@@ -2715,149 +2624,72 @@ fn pdo_transport_fault_blocks_lower_priority_until_explicit_restart() {
     );
     assert!(blocked.fault().is_some());
 
+    macro_rules! run {
+        ($now:expr,$generation:expr) => {{
+            port.set_now_ns($now);
+            scheduler
+                .run_cycle(
+                    &mut bank,
+                    &mut master,
+                    &mut port,
+                    &mut scratch,
+                    &mut dc,
+                    &mut dc_image,
+                    $now,
+                    &mut controls,
+                    &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
+                        None,
+                        Some(&mut mapping),
+                        None,
+                        None,
+                    )
+                    .with_pdo_configuration(ScheduledPdoConfiguration::new(
+                        &mut pdo,
+                        &mut pdo_mailbox,
+                        mailbox_config,
+                    )),
+                    $generation,
+                    $now + 50_000,
+                    $now + 50_000,
+                )
+                .unwrap()
+        }};
+    }
     let mut mismatch_plan = PdoConfigPlan::<1>::new();
     mismatch_plan
-        .push(PdoSdoWrite::new(0x1C12, 0, &[0]).unwrap())
+        .push(PdoSdoWrite::new(0x1c12, 0, &[0]).unwrap())
         .unwrap();
     pdo.start(mismatch_plan, 1, 42, 120_000, 1_000_000, 100_000)
         .unwrap();
-    port.set_now_ns(120_000);
-    let download_sent = scheduler
-        .run_cycle(
-            &mut bank,
-            &mut master,
-            &mut port,
-            &mut scratch,
-            &mut dc,
-            &mut dc_image,
-            120_000,
-            &mut controls,
-            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
-                None,
-                Some(&mut mapping),
-                None,
-                None,
-            )
-            .with_pdo_configuration(ScheduledPdoConfiguration::new(
-                &mut pdo,
-                &mut pdo_mailbox,
-                mailbox_config,
-            )),
-            3,
-            170_000,
-            170_000,
-        )
-        .unwrap();
     assert_eq!(
-        download_sent.selected(),
+        run!(120_000, 3).selected(),
         ScheduledProductionServiceKind::PdoConfiguration
     );
-    let download_action = pdo.pending().unwrap();
-
-    port.set_now_ns(130_000);
-    port.set_next_mailbox_response(&pdo_download_response(download_action));
-    let download_complete = scheduler
-        .run_cycle(
-            &mut bank,
-            &mut master,
-            &mut port,
-            &mut scratch,
-            &mut dc,
-            &mut dc_image,
-            130_000,
-            &mut controls,
-            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
-                None,
-                Some(&mut mapping),
-                None,
-                None,
-            )
-            .with_pdo_configuration(ScheduledPdoConfiguration::new(
-                &mut pdo,
-                &mut pdo_mailbox,
-                mailbox_config,
-            )),
-            4,
-            180_000,
-            180_000,
-        )
-        .unwrap();
+    let download = pdo.pending().unwrap();
+    run!(130_000, 4); // full send after ownership check
+    port.set_next_mailbox_response(&pdo_download_response(download));
+    run!(140_000, 5); // receive status
+    let downloaded = run!(150_000, 6);
     assert_eq!(
-        download_complete.progress(),
+        downloaded.progress(),
         ScheduledProductionServiceProgress::PdoConfiguration(
             ScheduledPdoConfigurationProgress::Configuration(PdoConfigProgress::Advanced)
         )
     );
-
-    port.set_now_ns(140_000);
-    let upload_sent = scheduler
-        .run_cycle(
-            &mut bank,
-            &mut master,
-            &mut port,
-            &mut scratch,
-            &mut dc,
-            &mut dc_image,
-            140_000,
-            &mut controls,
-            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
-                None,
-                Some(&mut mapping),
-                None,
-                None,
-            )
-            .with_pdo_configuration(ScheduledPdoConfiguration::new(
-                &mut pdo,
-                &mut pdo_mailbox,
-                mailbox_config,
-            )),
-            5,
-            190_000,
-            190_000,
-        )
-        .unwrap();
-    assert_eq!(
-        upload_sent.selected(),
-        ScheduledProductionServiceKind::PdoConfiguration
-    );
-    let upload_action = pdo.pending().unwrap();
-    assert_eq!(upload_action.step, PdoConfigStep::VerifyUpload);
-
-    port.set_now_ns(150_000);
-    port.set_next_mailbox_response(&pdo_upload_response(upload_action, &[1]));
-    let mismatch = scheduler
-        .run_cycle(
-            &mut bank,
-            &mut master,
-            &mut port,
-            &mut scratch,
-            &mut dc,
-            &mut dc_image,
-            150_000,
-            &mut controls,
-            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
-                None,
-                Some(&mut mapping),
-                None,
-                None,
-            )
-            .with_pdo_configuration(ScheduledPdoConfiguration::new(
-                &mut pdo,
-                &mut pdo_mailbox,
-                mailbox_config,
-            )),
-            6,
-            200_000,
-            200_000,
-        )
-        .unwrap();
+    run!(160_000, 7); // verify request ownership
+    let upload = pdo.pending().unwrap();
+    assert_eq!(upload.step, PdoConfigStep::VerifyUpload);
+    run!(170_000, 8); // full send
+    port.set_next_mailbox_response(&pdo_upload_response(upload, &[1]));
+    run!(180_000, 9); // receive status
+    let mismatch = run!(190_000, 10);
     assert_eq!(
         mismatch.fault(),
         Some(ScheduledProductionServiceFault::PdoConfiguration(
             PdoConfigError::ReadbackValueMismatch {
                 byte_index: 0,
                 expected: 0,
-                actual: 1,
+                actual: 1
             }
         ))
     );
@@ -2868,69 +2700,16 @@ fn pdo_transport_fault_blocks_lower_priority_until_explicit_restart() {
         !other_cycle_facts_from_production_service_cycle(&mismatch, ready_other_cycle_facts())
             .coe_ready
     );
-
-    port.set_now_ns(160_000);
-    let mismatch_blocked = scheduler
-        .run_cycle(
-            &mut bank,
-            &mut master,
-            &mut port,
-            &mut scratch,
-            &mut dc,
-            &mut dc_image,
-            160_000,
-            &mut controls,
-            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
-                None,
-                Some(&mut mapping),
-                None,
-                None,
-            )
-            .with_pdo_configuration(ScheduledPdoConfiguration::new(
-                &mut pdo,
-                &mut pdo_mailbox,
-                mailbox_config,
-            )),
-            7,
-            210_000,
-            210_000,
-        )
-        .unwrap();
     assert_eq!(
-        mismatch_blocked.selected(),
+        run!(200_000, 11).selected(),
         ScheduledProductionServiceKind::PdoConfiguration
     );
-
-    pdo.start(PdoConfigPlan::new(), 1, 43, 170_000, 1_000_000, 100_000)
+    pdo.start(PdoConfigPlan::new(), 1, 43, 210_000, 1_000_000, 100_000)
         .unwrap();
-    port.set_now_ns(170_000);
-    let resumed = scheduler
-        .run_cycle(
-            &mut bank,
-            &mut master,
-            &mut port,
-            &mut scratch,
-            &mut dc,
-            &mut dc_image,
-            170_000,
-            &mut controls,
-            &mut ScheduledProductionServices::<0, 1, 0, 1>::new(
-                None,
-                Some(&mut mapping),
-                None,
-                None,
-            )
-            .with_pdo_configuration(ScheduledPdoConfiguration::new(
-                &mut pdo,
-                &mut pdo_mailbox,
-                mailbox_config,
-            )),
-            8,
-            220_000,
-            220_000,
-        )
-        .unwrap();
-    assert_eq!(resumed.selected(), ScheduledProductionServiceKind::Mapping);
+    assert_eq!(
+        run!(210_000, 12).selected(),
+        ScheduledProductionServiceKind::Mapping
+    );
 }
 
 #[test]
@@ -3145,6 +2924,10 @@ fn drive_startup_through_identity(
             profiles,
         )
         .unwrap();
+    let count = startup.next_action(0).unwrap().unwrap();
+    startup
+        .accept(count, count.generation(), &[0; 2], 1, 0)
+        .unwrap();
     let probe = startup.next_action(1).unwrap().unwrap();
     accept_startup_action(startup, probe, &[0x88, 0x02], 2);
     let basic = startup.next_action(3).unwrap().unwrap();
@@ -3168,7 +2951,9 @@ fn drive_startup_through_identity(
     accept_startup_action(startup, status, &startup_status(EthercatState::Init), 12);
     let end_probe = startup.next_action(13).unwrap().unwrap();
     assert!(matches!(end_probe, StartupAction::Scan(_)));
-    startup.timeout(end_probe, end_probe.deadline_ns()).unwrap();
+    startup
+        .accept(end_probe, end_probe.generation(), &[0; 2], 0, 14)
+        .unwrap();
     assert_eq!(startup.phase(), StartupPhase::ReadingIdentity);
 
     let mut now_ns = 12;
@@ -3234,6 +3019,10 @@ fn ready_two_slave_reconfigure_startup() -> (StartupController<2>, [SlaveIdentit
         )
         .unwrap();
 
+    let count = startup.next_action(0).unwrap().unwrap();
+    startup
+        .accept(count, count.generation(), &[0; 2], 2, 0)
+        .unwrap();
     let mut now_ns = 1;
     drive_reconfigure_fixture_scan_slave(&mut startup, 0x1500, &mut now_ns);
     drive_reconfigure_fixture_scan_slave(&mut startup, 0x5500, &mut now_ns);
@@ -3241,7 +3030,7 @@ fn ready_two_slave_reconfigure_startup() -> (StartupController<2>, [SlaveIdentit
         let next = startup.next_action(now_ns).unwrap().unwrap();
         if matches!(next, StartupAction::Scan(_)) {
             startup
-                .accept(next, next.generation(), &[], 0, now_ns + 1)
+                .accept(next, next.generation(), &[0; 2], 0, now_ns + 1)
                 .unwrap();
             now_ns += 2;
         } else {
@@ -3934,15 +3723,17 @@ fn production_scheduler_runs_pdo_batch_then_releases_startup_through_safeop_to_o
     assert!(!first_facts.topology_valid);
     let download = pdo_batch.controller().pending().unwrap();
 
+    run_cycle!(110_000, 2); // full send after SM0 ownership
     port.set_next_mailbox_response(&pdo_download_response(download));
-    let second = run_cycle!(110_000, 2);
+    run_cycle!(120_000, 3); // receive-SM status
+    let second = run_cycle!(130_000, 4);
     assert_eq!(
         second.progress(),
         ScheduledProductionServiceProgress::PdoConfiguration(
             ScheduledPdoConfigurationProgress::Configuration(PdoConfigProgress::Advanced)
         )
     );
-    let third = run_cycle!(120_000, 3);
+    let third = run_cycle!(140_000, 5);
     assert_eq!(
         third.selected(),
         ScheduledProductionServiceKind::PdoConfiguration
@@ -3950,8 +3741,10 @@ fn production_scheduler_runs_pdo_batch_then_releases_startup_through_safeop_to_o
     let upload = pdo_batch.controller().pending().unwrap();
     assert_eq!(upload.step, PdoConfigStep::VerifyUpload);
 
+    run_cycle!(150_000, 6);
     port.set_next_mailbox_response(&pdo_upload_response(upload, &[0]));
-    let first_configured = run_cycle!(130_000, 4);
+    run_cycle!(160_000, 7);
+    let first_configured = run_cycle!(170_000, 8);
     assert_eq!(pdo_batch.controller().phase(), PdoConfigPhase::Sending);
     assert!(!first_configured.service_ready());
     assert_eq!(
@@ -3972,7 +3765,7 @@ fn production_scheduler_runs_pdo_batch_then_releases_startup_through_safeop_to_o
     assert!(!first_configured_facts.topology_valid);
 
     port.configure_mailbox(0x1001, mailbox_config);
-    let second_download_send = run_cycle!(140_000, 5);
+    let second_download_send = run_cycle!(180_000, 9);
     assert_eq!(
         second_download_send.selected(),
         ScheduledProductionServiceKind::PdoConfiguration
@@ -3982,15 +3775,17 @@ fn production_scheduler_runs_pdo_batch_then_releases_startup_through_safeop_to_o
     assert_eq!(second_download.generation, 42);
     assert_eq!(second_download.station_address, 0x1001);
 
+    run_cycle!(190_000, 10);
     port.set_next_mailbox_response(&pdo_download_response(second_download));
-    let second_download_complete = run_cycle!(150_000, 6);
+    run_cycle!(200_000, 11);
+    let second_download_complete = run_cycle!(210_000, 12);
     assert_eq!(
         second_download_complete.progress(),
         ScheduledProductionServiceProgress::PdoConfiguration(
             ScheduledPdoConfigurationProgress::Configuration(PdoConfigProgress::Advanced)
         )
     );
-    let second_upload_send = run_cycle!(160_000, 7);
+    let second_upload_send = run_cycle!(220_000, 13);
     assert_eq!(
         second_upload_send.selected(),
         ScheduledProductionServiceKind::PdoConfiguration
@@ -3999,8 +3794,10 @@ fn production_scheduler_runs_pdo_batch_then_releases_startup_through_safeop_to_o
     assert_eq!(second_upload.step, PdoConfigStep::VerifyUpload);
     assert_eq!(second_upload.generation, 42);
 
+    run_cycle!(230_000, 14);
     port.set_next_mailbox_response(&pdo_upload_response(second_upload, &[1]));
-    let configured = run_cycle!(170_000, 8);
+    run_cycle!(240_000, 15);
+    let configured = run_cycle!(250_000, 16);
     assert_eq!(pdo_batch.phase(), PdoConfigBatchPhase::Complete);
     assert!(configured.service_ready());
     let complete_status = configured.pdo_batch_status().unwrap();
@@ -4018,7 +3815,7 @@ fn production_scheduler_runs_pdo_batch_then_releases_startup_through_safeop_to_o
     assert!(configured_facts.coe_ready);
     assert!(!configured_facts.topology_valid);
 
-    let safeop_write = run_cycle!(180_000, 9);
+    let safeop_write = run_cycle!(260_000, 17);
     assert_eq!(
         safeop_write.selected(),
         ScheduledProductionServiceKind::Startup
@@ -4034,20 +3831,20 @@ fn production_scheduler_runs_pdo_batch_then_releases_startup_through_safeop_to_o
         fixed_address(0x1000, ESC_AL_STATUS),
         &startup_status(EthercatState::SafeOp),
     );
-    let safeop_read = run_cycle!(190_000, 10);
+    let safeop_read = run_cycle!(270_000, 18);
     assert_eq!(
         safeop_read.startup_phase(),
         Some(StartupPhase::TransitioningAl)
     );
     assert_eq!(startup.records()[0].al_status.state, EthercatState::SafeOp);
 
-    let op_write = run_cycle!(200_000, 11);
+    let op_write = run_cycle!(280_000, 19);
     assert_eq!(op_write.selected(), ScheduledProductionServiceKind::Startup);
     port.set_next_control_response(
         fixed_address(0x1000, ESC_AL_STATUS),
         &startup_status(EthercatState::Op),
     );
-    let ready = run_cycle!(210_000, 12);
+    let ready = run_cycle!(290_000, 20);
     assert_eq!(
         ready.progress(),
         ScheduledProductionServiceProgress::Startup(StartupProgress::Ready)
@@ -4734,6 +4531,7 @@ fn mailbox_service_uses_shared_rx_expiry_to_retry_after_a_missing_poll() {
         .unwrap();
     let mut controls = ControlRequestPool::<1>::new();
     let mut port = TwoFrameSimPort::new();
+    port.configure_mailbox(0x1000, config);
     let mut scratch = [0; MAX_ETHERNET_FRAME_LEN];
     let mut domain_image = [0x40, 0];
     let mut dc_image = [0u8; 10];
@@ -4748,10 +4546,13 @@ fn mailbox_service_uses_shared_rx_expiry_to_retry_after_a_missing_poll() {
     })
     .unwrap();
     let mut mailbox_request = None;
-    for tick in 1..=3u64 {
+    for tick in 1..=5u64 {
         let now_ns = tick * 100_000;
         port.set_now_ns(now_ns);
-        if tick == 2 {
+        if tick == 3 {
+            port.set_next_mailbox_response(&[0, 0x30, 0x60, 0, 0, 0]);
+        }
+        if tick == 4 {
             port.drop_nth_next_response(2);
         }
         let submitted = bank
@@ -4770,7 +4571,7 @@ fn mailbox_service_uses_shared_rx_expiry_to_retry_after_a_missing_poll() {
             )
             .unwrap();
         assert!(submitted.service.dc_sent);
-        assert_eq!(submitted.service.control_sent, tick <= 2);
+        assert_eq!(submitted.service.control_sent, tick <= 4);
         mailbox_request = submitted.request;
         let frame = master.acquire_frame(7, now_ns + 50_000).unwrap();
         master
@@ -4816,7 +4617,7 @@ fn mailbox_service_uses_shared_rx_expiry_to_retry_after_a_missing_poll() {
             controls.get_mut(request).unwrap().payload_mut()[0] ^= 1;
         } else if tick == 2 {
             let request = mailbox_request.unwrap();
-            controls.get_mut(request).unwrap().payload_mut()[0] = 1;
+            controls.get_mut(request).unwrap().payload_mut()[0] ^= 1;
             assert!(matches!(
                 bank.receive_with_dc_and_mailbox(
                     &mut master,
@@ -4832,7 +4633,7 @@ fn mailbox_service_uses_shared_rx_expiry_to_retry_after_a_missing_poll() {
             ));
             assert_eq!(master.cycle_number(), 1);
             assert_eq!(dc.pending_generation(), Some(7));
-            controls.get_mut(request).unwrap().payload_mut()[0] = 0;
+            controls.get_mut(request).unwrap().payload_mut()[0] ^= 1;
         }
         let mailbox_received = bank
             .receive_with_dc_and_mailbox(
@@ -4851,16 +4652,23 @@ fn mailbox_service_uses_shared_rx_expiry_to_retry_after_a_missing_poll() {
         assert!(received.qualities[0].valid);
         assert_eq!(received.dc_result, Ok(()));
         assert!(received.transport_error.is_none());
-        if tick == 1 {
+        if tick <= 3 {
             assert_eq!(
                 mailbox_received.mailbox_progress,
                 Some(Ok(MailboxProgress::Advanced))
             );
             assert_eq!(controls.in_use(), 0);
-            assert_eq!(mailbox.phase(), MailboxPhase::Polling);
+            assert_eq!(
+                mailbox.phase(),
+                match tick {
+                    1 => MailboxPhase::Sending,
+                    2 => MailboxPhase::CheckingStatus,
+                    _ => MailboxPhase::Polling,
+                }
+            );
             assert!(received.control_expiry.is_empty());
             mailbox_request = None;
-        } else if tick == 2 {
+        } else if tick == 4 {
             assert_eq!(mailbox_received.mailbox_progress, None);
             assert!(received.control_expiry.is_empty());
             assert_eq!(
@@ -5494,6 +5302,8 @@ struct TwoFrameSimPort {
     mailbox_send_address: Option<u32>,
     mailbox_receive_address: Option<u32>,
     mailbox_status_address: Option<u32>,
+    mailbox_repeat_address: Option<u32>,
+    mailbox_repeat_activation: u8,
     mailbox_receive_reads: usize,
     mailbox_status_reads: usize,
     mailbox_counter: u8,
@@ -5525,6 +5335,8 @@ impl TwoFrameSimPort {
             mailbox_send_address: None,
             mailbox_receive_address: None,
             mailbox_status_address: None,
+            mailbox_repeat_address: None,
+            mailbox_repeat_activation: 0,
             mailbox_receive_reads: 0,
             mailbox_status_reads: 0,
             mailbox_counter: 0,
@@ -5543,9 +5355,15 @@ impl TwoFrameSimPort {
     fn configure_mailbox(&mut self, station_address: u16, config: MailboxConfig) {
         self.mailbox_send_address = Some(fixed_address(station_address, config.send_address));
         self.mailbox_receive_address = Some(fixed_address(station_address, config.receive_address));
-        self.mailbox_status_address = config
-            .status_bit
-            .map(|status_bit| fixed_address(station_address, status_bit.address));
+        self.mailbox_status_address = Some(fixed_address(
+            station_address,
+            config.receive_status_bit().address,
+        ));
+        self.mailbox_repeat_address = Some(fixed_address(
+            station_address,
+            0x0800 + u16::from(config.receive_sync_manager) * 8 + 6,
+        ));
+        self.mailbox_repeat_activation = 0;
         self.mailbox_receive_reads = 0;
         self.mailbox_status_reads = 0;
     }
@@ -5661,8 +5479,34 @@ impl EthercatPort for TwoFrameSimPort {
                     && header.command == Command::Fprd
                 {
                     self.mailbox_status_reads += 1;
+                    // Explicit receive-SM ownership: only a queued device
+                    // response makes the mailbox full. A scripted override
+                    // below can still force a faulty or inactive observation.
+                    self.frames[self.count][header_end] = if self.mailbox_response_len != 0 {
+                        0x08
+                    } else {
+                        0
+                    };
                 }
-                if header.address & 0xFFFF == u32::from(ESC_AL_CONTROL)
+                if Some(header.address) == self.mailbox_repeat_address {
+                    match header.command {
+                        Command::Fprd => {
+                            self.frames[self.count][header_end] = self.mailbox_repeat_activation
+                        }
+                        Command::Fpwr => {
+                            self.mailbox_repeat_activation = self.frames[self.count][header_end]
+                        }
+                        _ => {}
+                    }
+                }
+                if self
+                    .mailbox_repeat_address
+                    .is_some_and(|address| header.address == address + 0x0001_0000)
+                    && header.command == Command::Fprd
+                {
+                    self.frames[self.count][header_end] = self.mailbox_repeat_activation & 0x02;
+                }
+                if register_from_address(header.address) == ESC_AL_CONTROL
                     && header.command == Command::Fpwr
                     && header.length == 2
                 {
@@ -5701,14 +5545,14 @@ impl EthercatPort for TwoFrameSimPort {
                     self.control_response_address = None;
                     self.control_response_len = 0;
                 } else if header.command == Command::Brd
-                    && header.address == ESC_DC_SYSTEM_DIFF as u32
+                    && header.address == fixed_address(0, ESC_DC_SYSTEM_DIFF)
                     && header.length == 4
                     && let Some(difference_ns) = self.sync_window_difference
                 {
                     self.frames[self.count][header_end..payload_end]
                         .copy_from_slice(&difference_ns.to_le_bytes());
                 }
-                if self.aprd_wkc_zero && header.command == Command::Aprd {
+                if self.aprd_wkc_zero && matches!(header.command, Command::Aprd | Command::Brd) {
                     self.frames[self.count][payload_end..payload_end + WORKING_COUNTER_LEN]
                         .copy_from_slice(&0u16.to_le_bytes());
                 }

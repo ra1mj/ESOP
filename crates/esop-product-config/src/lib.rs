@@ -36,7 +36,7 @@ pub use esop_profile_cia402::{Cia402PdoError, Cia402PdoMap, OperatingMode};
 pub const PRODUCT_RUNTIME_SCHEMA: &str = "esop.product-runtime.v1";
 pub const CONFIG_SHA256_BYTES: usize = 32;
 pub const MAX_PRODUCT_AXIS_PDOS: usize = 32;
-pub const MAX_PRODUCT_PDO_ENTRIES_PER_DOMAIN: usize = 256;
+pub const MAX_PRODUCT_PDO_ENTRIES_PER_DOMAIN: usize = 512;
 pub const MAX_PRODUCT_SLAVE_COPIES: usize = 32;
 pub const MAX_PRODUCT_MAILBOX_STATUS_MAPPINGS: usize = 32;
 pub const MAX_PRODUCT_SDO_INFORMATION_ENTRIES: usize = 256;
@@ -283,6 +283,11 @@ pub enum ProductMailboxPolicyError {
         count: u8,
     },
     ReceiveSyncManagerDisabled(u8),
+    SyncManagerBindingMismatch {
+        direction: MailboxDirection,
+        expected: u8,
+        actual: u8,
+    },
     StatusBitMismatch {
         expected: Option<MailboxStatusBit>,
         actual: Option<MailboxStatusBit>,
@@ -581,6 +586,7 @@ fn validate_generated_mailbox_policy(
             receive_index,
         ));
     }
+    validate_mailbox_transport_binding(slave)?;
 
     let status_declared =
         slave.sii_fmmu_usages[..fmmu_count].contains(&SiiFmmuUsage::SyncManagerStatus);
@@ -588,6 +594,32 @@ fn validate_generated_mailbox_policy(
     let actual = slave.mailbox_config.status_bit;
     if actual != expected {
         return Err(ProductMailboxPolicyError::StatusBitMismatch { expected, actual });
+    }
+    Ok(())
+}
+
+fn validate_mailbox_transport_binding(
+    slave: ProductSlaveConfig,
+) -> Result<(), ProductMailboxPolicyError> {
+    for (direction, expected, actual) in [
+        (
+            MailboxDirection::Send,
+            slave.mailbox_send_sync_manager,
+            slave.mailbox_config.send_sync_manager,
+        ),
+        (
+            MailboxDirection::Receive,
+            slave.mailbox_receive_sync_manager.index,
+            slave.mailbox_config.receive_sync_manager,
+        ),
+    ] {
+        if expected != actual {
+            return Err(ProductMailboxPolicyError::SyncManagerBindingMismatch {
+                direction,
+                expected,
+                actual,
+            });
+        }
     }
     Ok(())
 }
@@ -670,6 +702,10 @@ pub enum ProductActivationError {
     MailboxStatusMapping {
         position: u16,
         error: ProductMailboxStatusMappingError,
+    },
+    MailboxPolicy {
+        position: u16,
+        error: ProductMailboxPolicyError,
     },
     MailboxStatusDomainMismatch {
         domain_id: u8,
@@ -1294,6 +1330,14 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                     error,
                 }
             })?;
+            let mut bound_slave = slave;
+            bound_slave.mailbox_config = mailbox_config;
+            validate_mailbox_transport_binding(bound_slave).map_err(|error| {
+                ProductPdoBatchError::MailboxPolicy {
+                    position: slave.position,
+                    error,
+                }
+            })?;
             let startup = self
                 .build_pdo_startup_plan::<OPS>(slave.position)
                 .map_err(|error| ProductPdoBatchError::SlavePlan {
@@ -1499,6 +1543,12 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                     error,
                 }
             })?;
+            validate_generated_mailbox_policy(slave).map_err(|error| {
+                ProductReconfigurePlanError::Startup(ProductStartupError::MailboxPolicy {
+                    position: slave_position,
+                    error,
+                })
+            })?;
             plan = plan.with_pdo(slave.mailbox_config, pdo);
         }
         if let Some(watchdog) = slave.watchdog {
@@ -1574,11 +1624,7 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
             let mut pdo_end_bits = 0usize;
             let mut output_end_bits = 0usize;
             let mut output_wkc = 0u16;
-            let mut input_wkc = u16::try_from(status_count).map_err(|_| {
-                ProductActivationError::MailboxStatusDomainMismatch {
-                    domain_id: domain.config.id,
-                }
-            })?;
+            let mut input_wkc = 0u16;
             for (pdo_index, pdo) in self.pdos.iter().copied().enumerate() {
                 if pdo.domain_id != domain.config.id {
                     continue;
@@ -1615,6 +1661,26 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                             )?
                         }
                     }
+                }
+            }
+            // A status FMMU does not add another read contribution when this
+            // same slave already supplies a TxPDO in the input datagram.
+            for slave in self
+                .slaves
+                .iter()
+                .filter(|slave| slave.domain_id == domain.config.id)
+            {
+                let has_input_pdo = self.pdos.iter().any(|pdo| {
+                    pdo.domain_id == domain.config.id
+                        && pdo.request.slave_position == slave.position
+                        && pdo.request.direction == PdoDirection::Tx
+                });
+                if !has_input_pdo && matches!(sync_manager_status_fmmu_index(*slave), Ok(Some(_))) {
+                    input_wkc = input_wkc.checked_add(1).ok_or(
+                        ProductActivationError::MailboxStatusDomainMismatch {
+                            domain_id: domain.config.id,
+                        },
+                    )?;
                 }
             }
             let output_bytes = output_end_bits.div_ceil(8);
@@ -1817,6 +1883,14 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
         self.validate_requesting_ids()?;
         self.validate_sdo_access_policies()?;
         self.validate_sdo_information_plans()?;
+        for slave in self.slaves.iter().copied() {
+            validate_mailbox_transport_binding(slave).map_err(|error| {
+                ProductActivationError::MailboxPolicy {
+                    position: slave.position,
+                    error,
+                }
+            })?;
+        }
         self.validate_procbuf::<IO, EVENTS>(procbuf, boot_id)?;
         self.validate_topology(observed_slaves)?;
         let (mapped_mailbox_status, mapped_mailbox_status_count) =
@@ -2995,7 +3069,7 @@ mod tests {
         assert_eq!(writes[1], PdoSdoWrite::new(0x1600, 0, &[0]).unwrap());
         assert_eq!(
             writes[2],
-            PdoSdoWrite::new(0x1600, 1, &0x1000_6040u32.to_le_bytes()).unwrap()
+            PdoSdoWrite::new(0x1600, 1, &0x6040_0010u32.to_le_bytes()).unwrap()
         );
         assert_eq!(writes[5], PdoSdoWrite::new(0x1600, 0, &[3]).unwrap());
         assert_eq!(
@@ -3008,7 +3082,7 @@ mod tests {
         assert_eq!(writes[9], PdoSdoWrite::new(0x1A00, 0, &[0]).unwrap());
         assert_eq!(
             writes[10],
-            PdoSdoWrite::new(0x1A00, 1, &0x1000_6041u32.to_le_bytes()).unwrap()
+            PdoSdoWrite::new(0x1A00, 1, &0x6041_0010u32.to_le_bytes()).unwrap()
         );
         assert_eq!(writes[15], PdoSdoWrite::new(0x1A00, 0, &[5]).unwrap());
         assert_eq!(

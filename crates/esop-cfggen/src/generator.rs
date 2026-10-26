@@ -39,6 +39,8 @@ const MAX_FRAMES_PER_DOMAIN: usize = 8;
 const MAX_DATAGRAMS_PER_FRAME: usize = 16;
 const MAX_SCHEDULE_SLOTS: usize = 1024;
 const MAX_GENERATED_TEXT_BYTES: usize = 128;
+const MAX_RUNTIME_SDO_REQUESTS: usize = 64;
+const MAX_SDO_OBJECT_BYTES: usize = 65_536;
 const ETHERNET_FCS_BYTES: usize = 4;
 const ETHERNET_PREAMBLE_SFD_BYTES: usize = 8;
 const ETHERNET_INTER_PACKET_GAP_BYTES: usize = 12;
@@ -604,6 +606,14 @@ fn normalize_and_validate_manifest(manifest: &mut ProductManifest) -> Result<()>
         ));
     }
     let capacities = manifest.capacities;
+    if !(1..=MAX_RUNTIME_SDO_REQUESTS).contains(&capacities.runtime_sdo_requests)
+        || !(1..=MAX_SDO_OBJECT_BYTES).contains(&capacities.max_sdo_object_bytes)
+    {
+        return Err(GeneratorError::Invalid(
+            "runtime_sdo_requests must be 1..=64 and max_sdo_object_bytes must be 1..=65536"
+                .to_owned(),
+        ));
+    }
     if capacities.max_process_image_bytes == 0
         || capacities.max_pdo_entries_per_domain == 0
         || capacities.max_datagrams_per_domain == 0
@@ -1154,6 +1164,9 @@ fn build_domain_plan(
         }
         status_slaves.sort_by_key(|(slave, _)| slave.manifest.position);
         for (slave, fmmu_index) in &status_slaves {
+            // One successful read direction contributes once per physical
+            // slave/datagram, even when PDO and mailbox-status use two FMMUs.
+            input_slaves.insert(slave.manifest.position);
             let domain_bit_offset = u32::try_from(bit_offset).map_err(|_| {
                 GeneratorError::Invalid("mailbox status bit offset exceeds u32".to_owned())
             })?;
@@ -1214,12 +1227,9 @@ fn build_domain_plan(
             output_wkc: u16::try_from(output_slaves.len()).map_err(|_| {
                 GeneratorError::Invalid("output working counter exceeds u16".to_owned())
             })?,
-            input_wkc: u16::try_from(input_slaves.len())
-                .ok()
-                .and_then(|value| value.checked_add(u16::try_from(status_slaves.len()).ok()?))
-                .ok_or_else(|| {
-                    GeneratorError::Invalid("input working counter exceeds u16".to_owned())
-                })?,
+            input_wkc: u16::try_from(input_slaves.len()).map_err(|_| {
+                GeneratorError::Invalid("input working counter exceeds u16".to_owned())
+            })?,
         });
     }
 
@@ -1904,6 +1914,10 @@ fn robot_build_input(
             "dma_bytes": manifest.platform.dma_bytes,
             "rt_stack_peak_bytes": null,
             "text_rodata_bytes": null,
+            "runtime_sdo_requests": manifest.capacities.runtime_sdo_requests,
+            "max_sdo_object_bytes": manifest.capacities.max_sdo_object_bytes,
+            "sdo_object_storage_bytes": manifest.capacities.runtime_sdo_requests
+                * manifest.capacities.max_sdo_object_bytes,
         },
         "qualification": {
             "scenario": "generated-simulator-product",
@@ -1932,6 +1946,10 @@ fn render_header(
         "#ifndef ESOP_PRODUCT_CONFIG_H\n#define ESOP_PRODUCT_CONFIG_H\n\n#include <stdint.h>\n\n",
     );
     header.push_str("#define ESOP_SII_FMMU_CAPACITY 16u\n\n");
+    header.push_str(&format!(
+        "#define ESOP_RUNTIME_SDO_REQUESTS {}u\n#define ESOP_MAX_SDO_OBJECT_BYTES {}u\n\n",
+        manifest.capacities.runtime_sdo_requests, manifest.capacities.max_sdo_object_bytes,
+    ));
     header.push_str("typedef struct { const char *name; uint16_t position; uint16_t station_address; uint8_t domain_id; uint8_t kind; uint32_t vendor_id; uint32_t product_code; uint32_t revision; uint32_t serial; uint8_t has_serial; uint8_t dc_required; uint8_t dc_reference_clock; const char *dc_op_mode; uint8_t has_dc_op_mode; uint32_t dc_cycle_time0_ns; int32_t dc_shift_time0_ns; int32_t dc_shift_time1_ns; int16_t dc_sync1_cycle_factor; uint16_t dc_assign_activate; int16_t dc_sync0_cycle_factor; uint8_t has_dc_sync_timing; uint32_t dc_sync_cycle_time0_ns; uint32_t dc_sync_cycle_time1_ns; int32_t dc_sync_shift_time0_ns; uint16_t dc_sync_assign_activate; uint16_t mailbox_send_address; uint16_t mailbox_send_capacity; uint16_t mailbox_receive_address; uint16_t mailbox_receive_capacity; uint8_t mailbox_send_sync_manager; uint8_t mailbox_send_control_byte; uint8_t mailbox_receive_sync_manager; uint8_t mailbox_receive_control_byte; uint8_t has_mailbox_status_bit; uint16_t mailbox_status_bit_address; uint8_t mailbox_status_bit_mask; uint8_t mailbox_status_bit_active_high; uint8_t sii_sync_manager_count; uint16_t sii_enabled_sync_managers; uint8_t sii_fmmu_count; uint8_t sii_fmmu_usages[ESOP_SII_FMMU_CAPACITY]; uint8_t has_watchdog; uint8_t has_watchdog_divider; uint16_t watchdog_divider; uint8_t has_process_data_watchdog; uint16_t process_data_watchdog_intervals; uint8_t requesting_id_supported; uint8_t has_requesting_id; uint16_t requesting_id; uint8_t coe_complete_access_supported; uint8_t coe_complete_access_enabled; uint8_t coe_sdo_information_supported; uint8_t coe_sdo_information_enabled; uint32_t sdo_information_offset; uint32_t sdo_information_count; } esop_slave_config_t;\n");
     header.push_str("typedef struct { uint16_t slave_position; uint16_t index; uint8_t subindex; uint16_t data_type; uint16_t bit_length; uint8_t required_access; } esop_sdo_information_expectation_t;\n");
     header.push_str("typedef struct { const char *name; uint8_t id; uint32_t logical_address; uint32_t image_offset; uint32_t image_bytes; uint32_t output_bytes; uint32_t input_bytes; uint32_t period_ticks; uint32_t phase_ticks; uint16_t expected_wkc; } esop_domain_config_t;\n");
@@ -2196,18 +2214,31 @@ fn render_rust_module(
     let mut output = String::from(
         "// @generated by esop-cfggen; do not edit.\n\
 use esop_product_config::{\n\
-    AlTransitionTimeouts, CanopenDataType, Cia402AxisCommandPolicy, Command, DcSyncTiming, DomainConfig,\n\
+    AlTransitionTimeouts, Cia402AxisCommandPolicy, Command, DcSyncTiming, DomainConfig,\n\
     DomainDatagramSpec, FmmuConfig, MailboxConfig, MailboxMappedStatusBit,\n\
     MailboxReceiveSyncManager, MailboxStatusBit,\n\
     OpOnlySyncManagerProfile, OperatingMode, PdoDirection,\n\
     PdoRegistrationRequest,\n\
     ProcBufDimensions, ProcBufLayoutDescriptor, ProductAxisConfig, ProductDatagramConfig,\n\
     ProductDomainConfig, ProductMetadata, ProductPdoConfig, ProductSlaveConfig, ProductSlaveCopyConfig,\n\
-    ProductSlaveKind, EscWatchdogConfig, SdoInformationExpectation, SdoInformationRequiredAccess,\n\
+    ProductSlaveKind, EscWatchdogConfig, SdoInformationExpectation,\n\
     SiiDcMode, SiiDcModeExpectation, SlaveIdentity, StaticProductConfig,\n\
 };\n\n",
     );
 
+    if slaves
+        .iter()
+        .any(|slave| !slave.sdo_information_expectations.is_empty())
+    {
+        output.push_str(
+            "use esop_product_config::{CanopenDataType, SdoInformationRequiredAccess};\n\n",
+        );
+    }
+
+    output.push_str(&format!(
+        "#[allow(dead_code)]\npub const PRODUCT_RUNTIME_SDO_REQUESTS: usize = {};\n#[allow(dead_code)]\npub const PRODUCT_MAX_SDO_OBJECT_BYTES: usize = {};\n\n",
+        manifest.capacities.runtime_sdo_requests, manifest.capacities.max_sdo_object_bytes,
+    ));
     output.push_str(&format!(
         "static PRODUCT_PDOS: [ProductPdoConfig; {}] = [\n",
         pdos.len()
@@ -2388,24 +2419,25 @@ use esop_product_config::{\n\
                 )
             },
         );
-        let mailbox_config = if slave.mailbox.status_bit.is_some() {
-            format!(
-                "MailboxConfig::new(0x{:04x}, {}, 0x{:04x}, {}).with_status_bit(MailboxStatusBit::sync_manager_mailbox_full({}))",
-                slave.mailbox.send_address,
-                slave.mailbox.send_capacity,
-                slave.mailbox.receive_address,
-                slave.mailbox.receive_capacity,
+        let mut mailbox_config = format!(
+            "MailboxConfig::new(0x{:04x}, {}, 0x{:04x}, {})",
+            slave.mailbox.send_address,
+            slave.mailbox.send_capacity,
+            slave.mailbox.receive_address,
+            slave.mailbox.receive_capacity,
+        );
+        if slave.mailbox.send_sync_manager != 0 || slave.mailbox.receive_sync_manager != 1 {
+            mailbox_config.push_str(&format!(
+                ".with_sync_managers({}, {})",
+                slave.mailbox.send_sync_manager, slave.mailbox.receive_sync_manager,
+            ));
+        }
+        if slave.mailbox.status_bit.is_some() {
+            mailbox_config.push_str(&format!(
+                ".with_status_bit(MailboxStatusBit::sync_manager_mailbox_full({}))",
                 slave.mailbox.receive_sync_manager,
-            )
-        } else {
-            format!(
-                "MailboxConfig::new(0x{:04x}, {}, 0x{:04x}, {})",
-                slave.mailbox.send_address,
-                slave.mailbox.send_capacity,
-                slave.mailbox.receive_address,
-                slave.mailbox.receive_capacity,
-            )
-        };
+            ));
+        }
         let mapped_mailbox_status = slave.mapped_mailbox_status.map_or_else(
             || "None".to_owned(),
             |mapping| {

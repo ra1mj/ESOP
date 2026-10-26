@@ -36,6 +36,8 @@ use crate::scheduled_domains::{
     ScheduledControlCycleError, ScheduledControlCycleReport, ScheduledDomainBank,
     ScheduledMailboxCycleError, ScheduledMailboxCycleReport, ScheduledReceiveReport,
 };
+use crate::sdo_request::{RuntimeSdoService, SdoRequestStatus};
+use crate::slave_monitor::{SlaveMonitorError, SlaveMonitorProgress, SlaveMonitoringService};
 use crate::startup::{StartupController, StartupError, StartupPhase, StartupProgress};
 use crate::state_request::{
     StateRequestController, StateRequestError, StateRequestPhase, StateRequestProgress,
@@ -56,6 +58,8 @@ pub enum ScheduledProductionServiceKind {
     DcSyncConfiguration,
     DcConfiguration,
     StateRequest,
+    SlaveMonitor,
+    RuntimeSdo,
     Mailbox,
     RegisterRequest,
 }
@@ -80,6 +84,8 @@ pub enum ScheduledProductionServiceProgress {
     DcSyncConfiguration(DcSyncProgress),
     DcConfiguration(DcProgress),
     StateRequest(StateRequestProgress),
+    SlaveMonitor(SlaveMonitorProgress),
+    RuntimeSdo(Option<SdoRequestStatus>),
     Mailbox(MailboxProgress),
     RegisterRequest(EscRegisterRequestProgress),
 }
@@ -97,6 +103,8 @@ pub enum ScheduledProductionServiceFault {
     DcSyncConfiguration(DcSyncError),
     DcConfiguration(DcError),
     StateRequest(StateRequestError),
+    SlaveMonitor(SlaveMonitorError),
+    RuntimeSdo(MailboxError),
     Mailbox(MailboxError),
     RegisterRequest(EscRegisterRequestError),
 }
@@ -239,6 +247,8 @@ pub struct ScheduledProductionServices<
     pub dc_sync_configuration: Option<&'a mut DcSyncController<MAX_SLAVES>>,
     pub dc_configuration: Option<&'a mut DcController>,
     state_request: Option<&'a mut StateRequestController>,
+    slave_monitor: Option<&'a mut dyn SlaveMonitoringService>,
+    runtime_sdo: Option<&'a mut dyn RuntimeSdoService>,
     pub mailbox: Option<&'a mut MailboxController>,
     register_requests: Option<&'a mut EscRegisterRequestController<REGISTER_REQUESTS>>,
     mapped_mailbox_status: Option<MailboxMappedStatusBit>,
@@ -269,6 +279,8 @@ impl<
             dc_sync_configuration: None,
             dc_configuration,
             state_request: None,
+            slave_monitor: None,
+            runtime_sdo: None,
             mailbox,
             register_requests: None,
             mapped_mailbox_status: None,
@@ -290,6 +302,8 @@ impl<
             dc_sync_configuration: self.dc_sync_configuration,
             dc_configuration: self.dc_configuration,
             state_request: self.state_request,
+            slave_monitor: self.slave_monitor,
+            runtime_sdo: self.runtime_sdo,
             mailbox: self.mailbox,
             register_requests: Some(register_requests),
             mapped_mailbox_status: self.mapped_mailbox_status,
@@ -352,6 +366,16 @@ impl<
         self
     }
 
+    pub fn with_runtime_sdo(mut self, service: &'a mut dyn RuntimeSdoService) -> Self {
+        self.runtime_sdo = Some(service);
+        self
+    }
+
+    pub fn with_slave_monitor(mut self, monitor: &'a mut dyn SlaveMonitoringService) -> Self {
+        self.slave_monitor = Some(monitor);
+        self
+    }
+
     pub const fn with_mapped_mailbox_status(
         mut self,
         mapped_mailbox_status: MailboxMappedStatusBit,
@@ -375,8 +399,12 @@ pub struct ScheduledProductionServiceCycleReport<E, const DOMAINS: usize> {
     recovery: ScheduledProductionServiceRecovery,
     request: Option<RequestHandle>,
     service_ready: bool,
+    legacy_mailbox_ready: Option<bool>,
     startup_phase: Option<StartupPhase>,
     pdo_batch_status: Option<PdoConfigBatchStatus>,
+    slave_monitor_quality: Option<crate::SlaveMonitorQuality>,
+    runtime_sdo_terminal: Option<SdoRequestStatus>,
+    runtime_sdo_lost_events: u64,
     transport: ScheduledProductionServiceTransport<E, DOMAINS>,
 }
 
@@ -405,8 +433,26 @@ impl<E, const DOMAINS: usize> ScheduledProductionServiceCycleReport<E, DOMAINS> 
         self.service_ready
     }
 
+    /// Persistent readiness of the separately bound required legacy mailbox.
+    /// Optional service rotation must not hide its terminal configuration fault.
+    pub const fn legacy_mailbox_ready(&self) -> Option<bool> {
+        self.legacy_mailbox_ready
+    }
+
     pub const fn startup_phase(&self) -> Option<StartupPhase> {
         self.startup_phase
+    }
+
+    pub const fn runtime_sdo_terminal(&self) -> Option<SdoRequestStatus> {
+        self.runtime_sdo_terminal
+    }
+
+    pub const fn runtime_sdo_lost_events(&self) -> u64 {
+        self.runtime_sdo_lost_events
+    }
+
+    pub const fn slave_monitor_quality(&self) -> Option<crate::SlaveMonitorQuality> {
+        self.slave_monitor_quality
     }
 
     pub const fn pdo_batch_status(&self) -> Option<PdoConfigBatchStatus> {
@@ -480,6 +526,8 @@ pub struct ScheduledProductionServiceScheduler {
     active: ScheduledProductionServiceKind,
     request: Option<RequestHandle>,
     pdo_action: Option<PdoConfigAction>,
+    selection_now_ns: u64,
+    runtime_cursor: usize,
 }
 
 struct ScheduledProductionEnqueueOutcome {
@@ -516,6 +564,8 @@ impl ScheduledProductionServiceScheduler {
             active: ScheduledProductionServiceKind::Idle,
             request: None,
             pdo_action: None,
+            selection_now_ns: 0,
+            runtime_cursor: 0,
         }
     }
 
@@ -579,7 +629,29 @@ impl ScheduledProductionServiceScheduler {
                     ScheduledProductionServiceCycleError::PdoBatch(error)
                 }
             })?;
+        self.selection_now_ns = port.now_ns();
+        if let (Some(fault), Some(monitor)) = (
+            services
+                .startup
+                .as_deref()
+                .and_then(StartupController::last_al_fault),
+            services.slave_monitor.as_deref_mut(),
+        ) {
+            monitor.observe_startup_fault(fault, self.selection_now_ns);
+        }
         self.refresh_selection(services);
+        if self.active == ScheduledProductionServiceKind::RuntimeSdo
+            && self.request.is_none()
+            && !services
+                .runtime_sdo
+                .as_deref_mut()
+                .is_some_and(|runtime| runtime.prepare(port.now_ns()))
+        {
+            // Lazy preparation prevents lower-priority work from acquiring a
+            // wire deadline while a configuration/monitor service owns TX.
+            self.active = ScheduledProductionServiceKind::Idle;
+            self.refresh_selection(services);
+        }
         let selected = self.active;
         if selected == ScheduledProductionServiceKind::PdoConfiguration
             && services.pdo_configuration.is_none()
@@ -597,8 +669,9 @@ impl ScheduledProductionServiceScheduler {
         }
         self.ensure_request_matches(controls, services)
             .map_err(ScheduledProductionServiceCycleError::RequestMismatch)?;
-        let (mut pre_progress, mut pre_fault) =
-            self.observe_mapped_mailbox_status(bank, port.now_ns(), services);
+        // Mapped mailbox status belongs to the current completed Domain and
+        // is observed after the shared RX finalizer, for both mailbox roles.
+        let (mut pre_progress, mut pre_fault) = (None, None);
         if self.request.is_none() {
             let outcome = self
                 .enqueue_due(port.now_ns(), controls, services)
@@ -609,6 +682,7 @@ impl ScheduledProductionServiceScheduler {
         }
 
         if selected == ScheduledProductionServiceKind::Mailbox
+            || selected == ScheduledProductionServiceKind::RuntimeSdo
             || (selected == ScheduledProductionServiceKind::PdoConfiguration
                 && self.pdo_action.is_some())
             || (selected == ScheduledProductionServiceKind::ReconfigureSlave
@@ -625,6 +699,10 @@ impl ScheduledProductionServiceScheduler {
                     .as_mut()
                     .map(ScheduledPdoConfiguration::mailbox_mut),
                 ScheduledProductionServiceKind::Mailbox => services.mailbox.as_deref_mut(),
+                ScheduledProductionServiceKind::RuntimeSdo => services
+                    .runtime_sdo
+                    .as_deref_mut()
+                    .and_then(|runtime| runtime.current_mailbox_mut()),
                 ScheduledProductionServiceKind::ReconfigureSlave => services
                     .reconfigure_slave
                     .as_deref_mut()
@@ -656,6 +734,10 @@ impl ScheduledProductionServiceScheduler {
                 }
             };
             self.request = cycle.request;
+            let (mapped_progress, mapped_fault) =
+                self.observe_mapped_mailbox_status(bank, port.now_ns(), services);
+            pre_progress = mapped_progress.or(pre_progress);
+            pre_fault = pre_fault.or(mapped_fault);
             if selected == ScheduledProductionServiceKind::PdoConfiguration {
                 let binding = services.pdo_configuration.as_mut().ok_or(
                     ScheduledProductionServiceCycleError::MissingController(selected),
@@ -769,6 +851,22 @@ impl ScheduledProductionServiceScheduler {
                     service_ready,
                     startup_phase,
                     pdo_batch_status,
+                    slave_monitor_quality: services
+                        .slave_monitor
+                        .as_deref()
+                        .map(|monitor| monitor.quality(port.now_ns())),
+                    legacy_mailbox_ready: services
+                        .mailbox
+                        .as_deref()
+                        .map(|mailbox| mailbox.phase() != MailboxPhase::Faulted),
+                    runtime_sdo_lost_events: services
+                        .runtime_sdo
+                        .as_deref()
+                        .map_or(0, |runtime| runtime.lost_terminal_statuses()),
+                    runtime_sdo_terminal: services
+                        .runtime_sdo
+                        .as_deref_mut()
+                        .and_then(|runtime| runtime.pop_terminal_status()),
                     transport: ScheduledProductionServiceTransport::Mailbox(cycle),
                 });
             }
@@ -829,6 +927,73 @@ impl ScheduledProductionServiceScheduler {
                     service_ready,
                     startup_phase,
                     pdo_batch_status,
+                    slave_monitor_quality: services
+                        .slave_monitor
+                        .as_deref()
+                        .map(|monitor| monitor.quality(port.now_ns())),
+                    legacy_mailbox_ready: services
+                        .mailbox
+                        .as_deref()
+                        .map(|mailbox| mailbox.phase() != MailboxPhase::Faulted),
+                    runtime_sdo_lost_events: services
+                        .runtime_sdo
+                        .as_deref()
+                        .map_or(0, |runtime| runtime.lost_terminal_statuses()),
+                    runtime_sdo_terminal: services
+                        .runtime_sdo
+                        .as_deref_mut()
+                        .and_then(|runtime| runtime.pop_terminal_status()),
+                    transport: ScheduledProductionServiceTransport::Mailbox(cycle),
+                });
+            }
+            if selected == ScheduledProductionServiceKind::RuntimeSdo {
+                let wire_fault = pre_fault.or_else(|| {
+                    cycle
+                        .receive
+                        .mailbox_progress
+                        .and_then(Result::err)
+                        .map(ScheduledProductionServiceFault::RuntimeSdo)
+                });
+                let runtime = services.runtime_sdo.as_deref_mut().ok_or(
+                    ScheduledProductionServiceCycleError::MissingController(selected),
+                )?;
+                let previous = runtime.last_terminal_status();
+                if self.request.is_none() {
+                    runtime.finish_wire(port.now_ns());
+                }
+                let terminal = runtime
+                    .last_terminal_status()
+                    .filter(|value| Some(*value) != previous);
+                let progress = ScheduledProductionServiceProgress::RuntimeSdo(terminal);
+                let recovery = self.recovery(controls, progress, wire_fault);
+                return Ok(ScheduledProductionServiceCycleReport {
+                    selected,
+                    progress,
+                    fault: wire_fault,
+                    recovery,
+                    request: self.request,
+                    service_ready: true,
+                    startup_phase: services.startup.as_deref().map(StartupController::phase),
+                    pdo_batch_status: services
+                        .pdo_configuration
+                        .as_ref()
+                        .and_then(ScheduledPdoConfiguration::batch_status),
+                    slave_monitor_quality: services
+                        .slave_monitor
+                        .as_deref()
+                        .map(|monitor| monitor.quality(port.now_ns())),
+                    legacy_mailbox_ready: services
+                        .mailbox
+                        .as_deref()
+                        .map(|mailbox| mailbox.phase() != MailboxPhase::Faulted),
+                    runtime_sdo_lost_events: services
+                        .runtime_sdo
+                        .as_deref()
+                        .map_or(0, |runtime| runtime.lost_terminal_statuses()),
+                    runtime_sdo_terminal: services
+                        .runtime_sdo
+                        .as_deref_mut()
+                        .and_then(|runtime| runtime.pop_terminal_status()),
                     transport: ScheduledProductionServiceTransport::Mailbox(cycle),
                 });
             }
@@ -846,8 +1011,10 @@ impl ScheduledProductionServiceScheduler {
                     .and_then(Result::err)
                     .map(ScheduledProductionServiceFault::Mailbox)
                     .or_else(|| {
-                        mailbox
-                            .last_error()
+                        services
+                            .mailbox
+                            .as_deref()
+                            .and_then(MailboxController::last_error)
                             .map(ScheduledProductionServiceFault::Mailbox)
                     })
             });
@@ -874,6 +1041,22 @@ impl ScheduledProductionServiceScheduler {
                 service_ready,
                 startup_phase,
                 pdo_batch_status,
+                slave_monitor_quality: services
+                    .slave_monitor
+                    .as_deref()
+                    .map(|monitor| monitor.quality(port.now_ns())),
+                legacy_mailbox_ready: services
+                    .mailbox
+                    .as_deref()
+                    .map(|mailbox| mailbox.phase() != MailboxPhase::Faulted),
+                runtime_sdo_lost_events: services
+                    .runtime_sdo
+                    .as_deref()
+                    .map_or(0, |runtime| runtime.lost_terminal_statuses()),
+                runtime_sdo_terminal: services
+                    .runtime_sdo
+                    .as_deref_mut()
+                    .and_then(|runtime| runtime.pop_terminal_status()),
                 transport: ScheduledProductionServiceTransport::Mailbox(cycle),
             });
         }
@@ -941,6 +1124,16 @@ impl ScheduledProductionServiceScheduler {
         {
             fault = Some(error);
         }
+        self.selection_now_ns = port.now_ns();
+        if let (Some(startup_fault), Some(monitor)) = (
+            services
+                .startup
+                .as_deref()
+                .and_then(StartupController::last_al_fault),
+            services.slave_monitor.as_deref_mut(),
+        ) {
+            monitor.observe_startup_fault(startup_fault, self.selection_now_ns);
+        }
         fault = fault.or_else(|| self.controller_fault(services));
         let recovery = self.recovery(controls, progress, fault);
         let service_ready =
@@ -959,6 +1152,22 @@ impl ScheduledProductionServiceScheduler {
             service_ready,
             startup_phase,
             pdo_batch_status,
+            slave_monitor_quality: services
+                .slave_monitor
+                .as_deref()
+                .map(|monitor| monitor.quality(port.now_ns())),
+            legacy_mailbox_ready: services
+                .mailbox
+                .as_deref()
+                .map(|mailbox| mailbox.phase() != MailboxPhase::Faulted),
+            runtime_sdo_lost_events: services
+                .runtime_sdo
+                .as_deref()
+                .map_or(0, |runtime| runtime.lost_terminal_statuses()),
+            runtime_sdo_terminal: services
+                .runtime_sdo
+                .as_deref_mut()
+                .and_then(|runtime| runtime.pop_terminal_status()),
             transport: ScheduledProductionServiceTransport::Control(cycle),
         })
     }
@@ -1111,7 +1320,13 @@ impl ScheduledProductionServiceScheduler {
     ) {
         if self.request.is_some()
             || self.pdo_action.is_some()
-            || self.service_active(services, self.active)
+            || (!matches!(
+                self.active,
+                ScheduledProductionServiceKind::SlaveMonitor
+                    | ScheduledProductionServiceKind::Mailbox
+                    | ScheduledProductionServiceKind::RuntimeSdo
+                    | ScheduledProductionServiceKind::RegisterRequest
+            ) && self.service_active(services, self.active))
         {
             return;
         }
@@ -1168,7 +1383,11 @@ impl ScheduledProductionServiceScheduler {
             };
             return;
         }
-        self.active = [
+        // Mandatory configuration/recovery retains its existing priority.
+        // Optional monitoring/mailbox/diagnostics share one bounded round-robin
+        // selector. Independent one-cycle yield flags can mutually consume
+        // each other forever and starve register requests under mixed load.
+        if let Some(kind) = [
             ScheduledProductionServiceKind::Startup,
             ScheduledProductionServiceKind::Rescan,
             ScheduledProductionServiceKind::ReconfigureSlave,
@@ -1179,12 +1398,29 @@ impl ScheduledProductionServiceScheduler {
             ScheduledProductionServiceKind::DcSyncConfiguration,
             ScheduledProductionServiceKind::DcConfiguration,
             ScheduledProductionServiceKind::StateRequest,
-            ScheduledProductionServiceKind::Mailbox,
-            ScheduledProductionServiceKind::RegisterRequest,
         ]
         .into_iter()
         .find(|kind| self.service_active(services, *kind))
-        .unwrap_or(ScheduledProductionServiceKind::Idle);
+        {
+            self.active = kind;
+            return;
+        }
+        const OPTIONAL: [ScheduledProductionServiceKind; 4] = [
+            ScheduledProductionServiceKind::SlaveMonitor,
+            ScheduledProductionServiceKind::Mailbox,
+            ScheduledProductionServiceKind::RuntimeSdo,
+            ScheduledProductionServiceKind::RegisterRequest,
+        ];
+        for offset in 0..OPTIONAL.len() {
+            let index = (self.runtime_cursor + offset) % OPTIONAL.len();
+            let kind = OPTIONAL[index];
+            if self.service_active(services, kind) {
+                self.active = kind;
+                self.runtime_cursor = (index + 1) % OPTIONAL.len();
+                return;
+            }
+        }
+        self.active = ScheduledProductionServiceKind::Idle;
     }
 
     fn service_active<
@@ -1295,11 +1531,19 @@ impl ScheduledProductionServiceScheduler {
                     )
                 })
             }
+            ScheduledProductionServiceKind::SlaveMonitor => services
+                .slave_monitor
+                .as_deref()
+                .is_some_and(|monitor| monitor.is_due(self.selection_now_ns)),
+            ScheduledProductionServiceKind::RuntimeSdo => services
+                .runtime_sdo
+                .as_deref()
+                .is_some_and(|runtime| runtime.is_due(self.selection_now_ns)),
             ScheduledProductionServiceKind::Mailbox => {
                 services.mailbox.as_deref().is_some_and(|controller| {
                     !matches!(
                         controller.phase(),
-                        MailboxPhase::Idle | MailboxPhase::Complete
+                        MailboxPhase::Idle | MailboxPhase::Complete | MailboxPhase::Faulted
                     )
                 })
             }
@@ -1507,6 +1751,27 @@ impl ScheduledProductionServiceScheduler {
                         action.datagram_len(),
                         action.deadline_ns,
                     )
+                }),
+            ScheduledProductionServiceKind::SlaveMonitor => services
+                .slave_monitor
+                .as_deref()
+                .and_then(SlaveMonitoringService::pending)
+                .is_some_and(|action| action.matches_request(request)),
+            ScheduledProductionServiceKind::RuntimeSdo => services
+                .runtime_sdo
+                .as_deref()
+                .and_then(|runtime| runtime.current_mailbox())
+                .and_then(MailboxController::pending)
+                .is_some_and(|action| {
+                    request.matches_action(
+                        action.datagram_index,
+                        action.generation,
+                        action.address,
+                        action.operation,
+                        action.payload(),
+                        action.datagram_len(),
+                        action.deadline_ns,
+                    ) && request.working_counter_policy() == action.working_counter_policy
                 }),
             ScheduledProductionServiceKind::Mailbox => services
                 .mailbox
@@ -2188,6 +2453,44 @@ impl ScheduledProductionServiceScheduler {
                     }),
                 }
             }
+            ScheduledProductionServiceKind::SlaveMonitor => {
+                let monitor = services
+                    .slave_monitor
+                    .as_deref_mut()
+                    .ok_or(ControlError::InvalidState)?;
+                let Some(action) = monitor.next_action(now_ns) else {
+                    return Ok(ScheduledProductionEnqueueOutcome::EMPTY);
+                };
+                Ok(ScheduledProductionEnqueueOutcome {
+                    request: Some(controls.acquire_with_response_len(
+                        action.datagram_index,
+                        action.generation,
+                        action.address,
+                        crate::RegisterOperation::Read,
+                        &[],
+                        action.length,
+                        action.deadline_ns,
+                    )?),
+                    ..ScheduledProductionEnqueueOutcome::EMPTY
+                })
+            }
+            ScheduledProductionServiceKind::RuntimeSdo => {
+                let controller = services
+                    .runtime_sdo
+                    .as_deref_mut()
+                    .and_then(|runtime| runtime.current_mailbox_mut())
+                    .ok_or(ControlError::InvalidState)?;
+                let outcome = enqueue_mailbox(now_ns, controls, controller)?;
+                Ok(ScheduledProductionEnqueueOutcome {
+                    request: outcome.request,
+                    progress: outcome
+                        .progress
+                        .map(|_| ScheduledProductionServiceProgress::RuntimeSdo(None)),
+                    fault: outcome
+                        .fault
+                        .map(ScheduledProductionServiceFault::RuntimeSdo),
+                })
+            }
             ScheduledProductionServiceKind::Mailbox => {
                 let controller = services
                     .mailbox
@@ -2284,39 +2587,54 @@ impl ScheduledProductionServiceScheduler {
         Option<ScheduledProductionServiceProgress>,
         Option<ScheduledProductionServiceFault>,
     ) {
-        if self.request.is_some() || self.active != ScheduledProductionServiceKind::Mailbox {
+        let runtime = self.active == ScheduledProductionServiceKind::RuntimeSdo;
+        if self.request.is_some()
+            || (!runtime && self.active != ScheduledProductionServiceKind::Mailbox)
+        {
             return (None, None);
         }
-        let mapped_status_due = services
-            .mailbox
-            .as_deref()
-            .is_some_and(|mailbox| mailbox.mapped_status_due(now_ns));
-        if !mapped_status_due {
+        let binding = if runtime {
+            services
+                .runtime_sdo
+                .as_deref()
+                .and_then(|service| service.current_mapped_status())
+        } else {
+            services.mapped_mailbox_status
+        };
+        let mailbox = if runtime {
+            services
+                .runtime_sdo
+                .as_deref_mut()
+                .and_then(|service| service.current_mailbox_mut())
+        } else {
+            services.mailbox.as_deref_mut()
+        };
+        let Some(mailbox) = mailbox else {
+            return (None, None);
+        };
+        if !mailbox.mapped_status_due(now_ns) {
             return (None, None);
         }
-        let Some(binding) = services.mapped_mailbox_status else {
-            return (
-                None,
-                Some(ScheduledProductionServiceFault::Mailbox(
-                    MailboxError::MissingMappedStatusBinding,
-                )),
-            );
+        let fault = |error| {
+            if runtime {
+                ScheduledProductionServiceFault::RuntimeSdo(error)
+            } else {
+                ScheduledProductionServiceFault::Mailbox(error)
+            }
         };
-        let observation = bank.mailbox_status(binding);
-        let Some(mailbox) = services.mailbox.as_deref_mut() else {
-            return (
-                None,
-                Some(ScheduledProductionServiceFault::Control(
-                    ControlError::InvalidState,
-                )),
-            );
+        let Some(binding) = binding else {
+            return (None, Some(fault(MailboxError::MissingMappedStatusBinding)));
         };
-        match mailbox.observe_mapped_status(observation, now_ns) {
+        match mailbox.observe_mapped_status(bank.mailbox_status(binding), now_ns) {
             Ok(progress) => (
-                Some(ScheduledProductionServiceProgress::Mailbox(progress)),
+                Some(if runtime {
+                    ScheduledProductionServiceProgress::RuntimeSdo(None)
+                } else {
+                    ScheduledProductionServiceProgress::Mailbox(progress)
+                }),
                 None,
             ),
-            Err(error) => (None, Some(ScheduledProductionServiceFault::Mailbox(error))),
+            Err(error) => (None, Some(fault(error))),
         }
     }
 
@@ -2456,6 +2774,29 @@ impl ScheduledProductionServiceScheduler {
                     .map(ScheduledProductionServiceProgress::StateRequest)
                     .map_err(ScheduledProductionServiceFault::StateRequest)
             }
+            ScheduledProductionServiceKind::SlaveMonitor => {
+                let result = services
+                    .slave_monitor
+                    .as_deref_mut()
+                    .ok_or(ScheduledProductionServiceFault::Control(
+                        ControlError::InvalidState,
+                    ))?
+                    .accept_completed(
+                        controls
+                            .get(handle)
+                            .ok_or(ScheduledProductionServiceFault::Control(
+                                ControlError::InvalidHandle,
+                            ))?,
+                        now_ns,
+                    );
+                controls
+                    .release(handle)
+                    .map_err(ScheduledProductionServiceFault::Control)?;
+
+                result
+                    .map(ScheduledProductionServiceProgress::SlaveMonitor)
+                    .map_err(ScheduledProductionServiceFault::SlaveMonitor)
+            }
             ScheduledProductionServiceKind::RegisterRequest => services
                 .register_requests
                 .as_deref_mut()
@@ -2467,7 +2808,8 @@ impl ScheduledProductionServiceScheduler {
                 .map_err(ScheduledProductionServiceFault::RegisterRequest),
             ScheduledProductionServiceKind::Idle
             | ScheduledProductionServiceKind::PdoConfiguration
-            | ScheduledProductionServiceKind::Mailbox => Err(
+            | ScheduledProductionServiceKind::Mailbox
+            | ScheduledProductionServiceKind::RuntimeSdo => Err(
                 ScheduledProductionServiceFault::Control(ControlError::InvalidState),
             ),
         }
@@ -2549,7 +2891,9 @@ impl ScheduledProductionServiceScheduler {
                 .as_deref()
                 .and_then(MailboxController::last_error)
                 .map(ScheduledProductionServiceFault::Mailbox),
-            ScheduledProductionServiceKind::RegisterRequest => None,
+            ScheduledProductionServiceKind::RuntimeSdo
+            | ScheduledProductionServiceKind::SlaveMonitor
+            | ScheduledProductionServiceKind::RegisterRequest => None,
         }
     }
 
@@ -2618,6 +2962,11 @@ impl ScheduledProductionServiceScheduler {
                 .mailbox
                 .as_deref()
                 .is_some_and(|controller| controller.phase() != MailboxPhase::Faulted),
+            ScheduledProductionServiceKind::SlaveMonitor => services
+                .slave_monitor
+                .as_deref()
+                .is_some_and(|monitor| monitor.quality(self.selection_now_ns).is_good()),
+            ScheduledProductionServiceKind::RuntimeSdo => services.runtime_sdo.is_some(),
             ScheduledProductionServiceKind::RegisterRequest => services.register_requests.is_some(),
         }
     }
@@ -3077,9 +3426,13 @@ mod tests {
         startup
             .start(1, 0, StartupConfig::new(EthercatState::Op), &[])
             .unwrap();
+        let count = startup.next_action(0).unwrap().unwrap();
+        startup
+            .accept(count, count.generation(), &[0; 2], 0, 0)
+            .unwrap();
         let probe = startup.next_action(1).unwrap().unwrap();
         startup
-            .accept(probe, probe.generation(), &[], 0, 2)
+            .accept(probe, probe.generation(), &[0; 2], 0, 2)
             .unwrap();
         assert_eq!(startup.phase(), StartupPhase::Ready);
         startup
@@ -3247,6 +3600,30 @@ mod tests {
                 .consume_terminal(&mut controls, &mut services, request, 12, 1)
                 .unwrap()
         };
+        assert!(matches!(
+            progress,
+            ScheduledProductionServiceProgress::Rescan(RescanProgress::Advanced)
+        ));
+        scheduler.request = None;
+        // The count has completed; the explicit final AP still needs a response.
+        startup.next_action(13).unwrap().unwrap();
+        let request = startup.enqueue_pending(&mut controls).unwrap();
+        let action = startup.pending_action().unwrap();
+        controls
+            .get_mut(request)
+            .unwrap()
+            .build_frame(&mut frame, [0xff; 6], [0; 6])
+            .unwrap();
+        controls
+            .complete(request, action.generation(), action.address(), &[0; 2], 0)
+            .unwrap();
+        let progress = {
+            let mut services =
+                ScheduledProductionServices::<1, 0, 0>::new(Some(&mut startup), None, None, None);
+            scheduler
+                .consume_terminal(&mut controls, &mut services, request, 14, 2)
+                .unwrap()
+        };
         assert_eq!(
             progress,
             ScheduledProductionServiceProgress::Rescan(RescanProgress::Complete(
@@ -3340,8 +3717,10 @@ mod tests {
         mailbox
             .start_with_mapped_status(config, 0x1000, 7, 0, MailboxProtocol::CoE, &[1])
             .unwrap();
-        let send = mailbox.next_action(1).unwrap().unwrap();
-        mailbox.accept(send, 7, &[0; 7], 1, 2).unwrap();
+        let writable = mailbox.next_action(1).unwrap().unwrap();
+        mailbox.accept(writable, 7, &[0], 1, 2).unwrap();
+        let send = mailbox.next_action(3).unwrap().unwrap();
+        mailbox.accept(send, 7, &[0; 32], 1, 4).unwrap();
 
         bank.begin_due(1, 1).unwrap();
         assert!(bank.accept(
@@ -3382,7 +3761,7 @@ mod tests {
                 Some(&mut mailbox),
             )
             .with_mapped_mailbox_status(binding);
-            scheduler.observe_mapped_mailbox_status(&bank, 3, &mut services)
+            scheduler.observe_mapped_mailbox_status(&bank, 5, &mut services)
         };
         assert_eq!(
             progress,
@@ -3421,7 +3800,7 @@ mod tests {
             )
             .with_mapped_mailbox_status(binding);
             assert_eq!(
-                scheduler.observe_mapped_mailbox_status(&bank, 4, &mut services),
+                scheduler.observe_mapped_mailbox_status(&bank, 6, &mut services),
                 (
                     Some(ScheduledProductionServiceProgress::Mailbox(
                         MailboxProgress::Advanced
@@ -3440,7 +3819,7 @@ mod tests {
             )
             .with_mapped_mailbox_status(binding);
             let outcome = scheduler
-                .enqueue_due(4, &mut controls, &mut services)
+                .enqueue_due(6, &mut controls, &mut services)
                 .unwrap();
             assert!(outcome.request.is_some());
         }
@@ -3452,8 +3831,10 @@ mod tests {
         unavailable
             .start_with_mapped_status(config, 0x1000, 8, 0, MailboxProtocol::CoE, &[1])
             .unwrap();
-        let send = unavailable.next_action(1).unwrap().unwrap();
-        unavailable.accept(send, 8, &[0; 7], 1, 2).unwrap();
+        let writable = unavailable.next_action(1).unwrap().unwrap();
+        unavailable.accept(writable, 8, &[0], 1, 2).unwrap();
+        let send = unavailable.next_action(3).unwrap().unwrap();
+        unavailable.accept(send, 8, &[0; 32], 1, 4).unwrap();
         bank.begin_due(3, 3).unwrap();
         bank.finish_due(3, 3).unwrap();
         let mut unavailable_scheduler = ScheduledProductionServiceScheduler::new();
@@ -3475,7 +3856,7 @@ mod tests {
                 Some(&mut unavailable),
             )
             .with_mapped_mailbox_status(binding);
-            unavailable_scheduler.observe_mapped_mailbox_status(&bank, 3, &mut services)
+            unavailable_scheduler.observe_mapped_mailbox_status(&bank, 5, &mut services)
         };
         assert_eq!(
             progress,
@@ -3573,6 +3954,7 @@ mod tests {
             active: ScheduledProductionServiceKind::PdoConfiguration,
             request: None,
             pdo_action: Some(action),
+            ..ScheduledProductionServiceScheduler::new()
         };
         {
             let services = ScheduledProductionServices::<0, 0, 0, 1>::new(None, None, None, None)
@@ -4380,5 +4762,134 @@ mod tests {
             ))
         );
         assert_eq!(startup.phase(), StartupPhase::AwaitingConfiguration);
+    }
+    #[test]
+    fn monitoring_preserves_inflight_owner_then_yields_to_runtime_requests() {
+        use crate::{SlaveMonitorConfig, SlaveMonitorController, SlaveMonitoringService};
+        let config = SlaveMonitorConfig {
+            position: 0,
+            station_address: 0x1000,
+            required_al_state: EthercatState::Op,
+            required_dl_mask: 0x10,
+        };
+        let mut monitor = SlaveMonitorController::<1>::new(42, &[config], 1, 100, 20, 0).unwrap();
+        let mut registers = EscRegisterRequestController::<1>::new(43);
+        registers.submit_read(0x1000, 0x100, 1, 0, 100).unwrap();
+        let mut controls = ControlRequestPool::<1>::new();
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+        let handle = {
+            let mut services = ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+                .with_register_requests(&mut registers)
+                .with_slave_monitor(&mut monitor);
+            scheduler.refresh_selection(&services);
+            assert_eq!(
+                scheduler.active(),
+                ScheduledProductionServiceKind::SlaveMonitor
+            );
+            scheduler
+                .enqueue_due(0, &mut controls, &mut services)
+                .unwrap()
+                .request
+                .unwrap()
+        };
+        scheduler.request = Some(handle);
+        let mut bytes = [0; 64];
+        controls
+            .get_mut(handle)
+            .unwrap()
+            .build_frame(&mut bytes, [0xff; 6], [0; 6])
+            .unwrap();
+        {
+            let services = ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+                .with_register_requests(&mut registers)
+                .with_slave_monitor(&mut monitor);
+            scheduler.refresh_selection(&services);
+            assert_eq!(scheduler.request(), Some(handle));
+            scheduler
+                .ensure_request_matches(&controls, &services)
+                .unwrap();
+        }
+        let action = monitor.pending().unwrap();
+        controls
+            .complete(
+                handle,
+                action.generation,
+                action.address,
+                &[8, 0, 0, 0, 0, 0],
+                1,
+            )
+            .unwrap();
+        {
+            let mut services = ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+                .with_register_requests(&mut registers)
+                .with_slave_monitor(&mut monitor);
+            assert_eq!(
+                scheduler.consume_terminal(&mut controls, &mut services, handle, 1, 1),
+                Ok(ScheduledProductionServiceProgress::SlaveMonitor(
+                    SlaveMonitorProgress::AlStaged(0)
+                ))
+            );
+        }
+        scheduler.request = None;
+        scheduler.selection_now_ns = 2;
+        assert_eq!(controls.in_use(), 0);
+        let mut services = ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+            .with_register_requests(&mut registers)
+            .with_slave_monitor(&mut monitor);
+        scheduler.refresh_selection(&services);
+        assert_eq!(
+            scheduler.active(),
+            ScheduledProductionServiceKind::RegisterRequest
+        );
+        assert_eq!(scheduler.controller_fault(&services), None);
+        // A register request may own the slot; no second monitor request is allocated.
+        assert!(
+            scheduler
+                .enqueue_due(2, &mut controls, &mut services)
+                .unwrap()
+                .request
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn monitoring_read_fault_releases_transport_without_poisoning_other_services() {
+        use crate::{SlaveMonitorConfig, SlaveMonitorController};
+        let config = SlaveMonitorConfig {
+            position: 0,
+            station_address: 0x1000,
+            required_al_state: EthercatState::Op,
+            required_dl_mask: 0,
+        };
+        let mut monitor = SlaveMonitorController::<1>::new(42, &[config], 1, 100, 20, 0).unwrap();
+        let mut controls = ControlRequestPool::<1>::new();
+        let mut scheduler = ScheduledProductionServiceScheduler::new();
+        let handle = {
+            let mut services = ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+                .with_slave_monitor(&mut monitor);
+            scheduler.refresh_selection(&services);
+            scheduler
+                .enqueue_due(0, &mut controls, &mut services)
+                .unwrap()
+                .request
+                .unwrap()
+        };
+        scheduler.request = Some(handle);
+        controls.fail_transmit(handle).unwrap();
+        {
+            let mut services = ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+                .with_slave_monitor(&mut monitor);
+            assert!(matches!(
+                scheduler.consume_terminal(&mut controls, &mut services, handle, 1, 1),
+                Ok(ScheduledProductionServiceProgress::SlaveMonitor(
+                    SlaveMonitorProgress::StationFailed(0, _)
+                ))
+            ));
+            scheduler.request = None;
+            scheduler.refresh_selection(&services);
+            assert_eq!(scheduler.active(), ScheduledProductionServiceKind::Idle);
+        }
+        assert_eq!(controls.in_use(), 0);
+        assert_eq!(monitor.fault_count(), 1);
     }
 }

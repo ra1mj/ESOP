@@ -1,0 +1,396 @@
+{
+  "config_sha256": "4a5c39a38972acd776366b057a625aa8ec57c31111bdbe95953e4ca540e2f0d8",
+  "devices": [
+    {
+      "coe_complete_access_enabled": true,
+      "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": true,
+      "coe_sdo_information_supported": true,
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": true,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP simulated CiA 402 drive",
+      "esi_label": "esop-sim-drive-v1",
+      "esi_semantic_sha256": "1e79b13cfc2effacdd16c8ed18a9051a31c096374056d001f0dd65af4af5f1d7",
+      "esi_type_name": "ESOP-SIM-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 448,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 0,
+        "logical_start": "0x00001038",
+        "logical_start_bit": 0,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
+      },
+      "name": "drive_left",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 0,
+      "product_code": "0x00004020",
+      "requesting_id": "0x0041",
+      "requesting_id_supported": true,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "sdo_information_expectations": [
+        {
+          "bit_length": 16,
+          "data_type": "0x0006",
+          "index": "0x603f",
+          "required_access": 9,
+          "slave_position": 0,
+          "subindex": 0
+        },
+        {
+          "bit_length": 16,
+          "data_type": "0x0006",
+          "index": "0x6040",
+          "required_access": 6,
+          "slave_position": 0,
+          "subindex": 0
+        },
+        {
+          "bit_length": 16,
+          "data_type": "0x0006",
+          "index": "0x6041",
+          "required_access": 9,
+          "slave_position": 0,
+          "subindex": 0
+        },
+        {
+          "bit_length": 8,
+          "data_type": "0x0002",
+          "index": "0x6060",
+          "required_access": 6,
+          "slave_position": 0,
+          "subindex": 0
+        },
+        {
+          "bit_length": 8,
+          "data_type": "0x0002",
+          "index": "0x6061",
+          "required_access": 9,
+          "slave_position": 0,
+          "subindex": 0
+        },
+        {
+          "bit_length": 32,
+          "data_type": "0x0004",
+          "index": "0x6064",
+          "required_access": 9,
+          "slave_position": 0,
+          "subindex": 0
+        },
+        {
+          "bit_length": 32,
+          "data_type": "0x0004",
+          "index": "0x606c",
+          "required_access": 9,
+          "slave_position": 0,
+          "subindex": 0
+        },
+        {
+          "bit_length": 16,
+          "data_type": "0x0003",
+          "index": "0x6071",
+          "required_access": 6,
+          "slave_position": 0,
+          "subindex": 0
+        },
+        {
+          "bit_length": 16,
+          "data_type": "0x0003",
+          "index": "0x6077",
+          "required_access": 9,
+          "slave_position": 0,
+          "subindex": 0
+        },
+        {
+          "bit_length": 32,
+          "data_type": "0x0004",
+          "index": "0x607a",
+          "required_access": 6,
+          "slave_position": 0,
+          "subindex": 0
+        },
+        {
+          "bit_length": 32,
+          "data_type": "0x0004",
+          "index": "0x60ff",
+          "required_access": 6,
+          "slave_position": 0,
+          "subindex": 0
+        }
+      ],
+      "serial": "0x00000001",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "description": "One millisecond distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 3,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "sync_manager_status",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1001",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": true,
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": false,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP simulated CiA 402 drive",
+      "esi_label": "esop-sim-drive-v1",
+      "esi_semantic_sha256": "1e79b13cfc2effacdd16c8ed18a9051a31c096374056d001f0dd65af4af5f1d7",
+      "esi_type_name": "ESOP-SIM-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 449,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 1,
+        "logical_start": "0x00001038",
+        "logical_start_bit": 1,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
+      },
+      "name": "drive_right",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 1,
+      "product_code": "0x00004020",
+      "requesting_id": "0x0042",
+      "requesting_id_supported": true,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "sdo_information_expectations": [],
+      "serial": "0x00000002",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "description": "One millisecond distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 3,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "sync_manager_status",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1002",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": false,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": false,
+      "dc": {
+        "op_mode": null,
+        "reference_clock": false,
+        "required": false
+      },
+      "dc_sync_timing": null,
+      "domain_id": 1,
+      "esi_device_name": "ESOP simulated digital IO",
+      "esi_label": "esop-sim-io-v1",
+      "esi_semantic_sha256": "50bb59dbbe0da72c0158449b6840eb5ff4ef62a7aa21a345d91126f6eccb4ccf",
+      "esi_type_name": "ESOP-SIM-IO",
+      "kind": "ethercat_io",
+      "mailbox": {
+        "receive_address": 4864,
+        "receive_capacity": 32,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4608,
+        "send_capacity": 32,
+        "send_control_byte": 38,
+        "send_sync_manager": 0
+      },
+      "name": "io_block",
+      "op_only_outputs": [],
+      "position": 2,
+      "product_code": "0x00007010",
+      "requesting_id": null,
+      "requesting_id_supported": false,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1601"
+      ],
+      "sdo_information_expectations": [],
+      "serial": null,
+      "sii_dc_mode": null,
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 2,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1003",
+      "transition_timeouts": {
+        "back_to_init_ns": 5000000000,
+        "back_to_safeop_ns": 200000000,
+        "preop_ns": 3000000000,
+        "safeop_to_op_ns": 10000000000
+      },
+      "tx_pdos": [
+        "0x1a01"
+      ],
+      "vendor_id": "0x0000e500"
+    }
+  ],
+  "schema_version": "esop.device-inventory.v1"
+}

@@ -1926,7 +1926,7 @@ mod tests {
             (
                 14,
                 Command::Brd,
-                ESC_DC_SYSTEM_DIFF as u32,
+                fixed_address(0, ESC_DC_SYSTEM_DIFF),
                 101u64.to_le_bytes(),
             ),
         ] {

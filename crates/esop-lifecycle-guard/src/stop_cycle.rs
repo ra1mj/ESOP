@@ -14,6 +14,7 @@ use crate::ethercat::{
     submit_active_frame, submit_controlled_stopping_frame, submit_inhibited_frame,
     submit_prepared_active_frame, submit_stopping_frame, verified_ethercat_stop_feedback,
 };
+use crate::maintenance::{FaultResetController, FaultResetError, FaultResetStatus};
 use crate::procbuf::{
     AxisEvidenceError, Cia402AxisCommandPolicy, Cia402FeedbackError, LifecycleEventCursor,
     LifecycleEventError, ProcBufCia402CommandError, axis_stops_to_procbuf,
@@ -56,6 +57,7 @@ pub enum StopCycleError {
     Feedback(Cia402FeedbackError),
     Command(ProcBufCia402CommandError),
     Abort(LifecycleError),
+    Maintenance(FaultResetError),
 }
 
 /// Submission errors do not suppress the State page: stop `issued_action`
@@ -67,6 +69,8 @@ pub enum StopCycleError {
 #[derive(Debug)]
 pub struct StopCycleOutcome<E> {
     pub action: LifecycleAction,
+    /// Explicit maintenance reset evidence; never motion or stop authority.
+    pub maintenance_reset: Option<FaultResetStatus>,
     /// Original active TX failure if a stop was attempted in its place.
     pub active_failure: Option<StopFrameError<E>>,
     /// The product-controlled path accepted the motion Domain frame. This is
@@ -1601,6 +1605,52 @@ impl<
         )
     }
 
+    /// Explicit maintenance-only Fault Reset, bound to the production owner
+    /// and its completed shared receive. The same pipeline publishes accepted
+    /// Controlwords, then the caller settles the returned output handoff.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_service_cycle_with_fault_reset_until<
+        const SCHEDULE_SLOTS: usize,
+        const FRAMES: usize,
+        const COPY_PLANS: usize,
+    >(
+        &mut self,
+        owner: &ScheduledProductionCycleOwner<'_, DOMAINS, SCHEDULE_SLOTS, COPY_PLANS>,
+        domain_bank: &ScheduledDomainBank<'_, DOMAINS, SCHEDULE_SLOTS>,
+        cycle: &ScheduledProductionServiceCycleReport<P::Error, DOMAINS>,
+        motion_domain_id: u8,
+        outputs: &ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>,
+        reset: &mut FaultResetController,
+        cycle_deadline_ns: u64,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        let ScheduledProductionState::OutputPending {
+            cycle: owned_cycle,
+            generation,
+            ..
+        } = owner.state
+        else {
+            return Err(StopCycleError::ServiceCycleMismatch);
+        };
+        if owned_cycle != self.report.cycle
+            || self.next_generation != generation.wrapping_add(1)
+            || !core::ptr::eq(owner.schedule, outputs.schedule)
+            || owner.motion_domain_id != motion_domain_id
+        {
+            return Err(StopCycleError::ServiceCycleMismatch);
+        }
+        let (domains, other) =
+            self.service_cycle_inputs(domain_bank, cycle, motion_domain_id, outputs)?;
+        self.run_inner_with_outputs_and_maintenance(
+            Some((outputs.schedule, &domains, motion_domain_id)),
+            None,
+            None,
+            Some(cycle_deadline_ns),
+            Some(outputs),
+            other,
+            Some(reset),
+        )
+    }
+
     /// Unified production-service entry with product-configured controlled
     /// stopping. The returned outcome and `ScheduledProductionRelease` expose
     /// whether the controlled frame was used or the transition is latched to
@@ -1959,10 +2009,32 @@ impl<
         &mut self,
         scheduled: Option<ScheduledInputs<'_, DOMAINS, SCHEDULE_SLOTS>>,
         motion: Option<MotionInputs<'_, AXES>>,
+        controlled: Option<&mut ControlledStopCycleState<AXES>>,
+        cycle_deadline_ns: Option<u64>,
+        outputs: Option<&ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>>,
+        other: OtherCycleFacts,
+    ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
+        self.run_inner_with_outputs_and_maintenance(
+            scheduled,
+            motion,
+            controlled,
+            cycle_deadline_ns,
+            outputs,
+            other,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_inner_with_outputs_and_maintenance<const SCHEDULE_SLOTS: usize, const FRAMES: usize>(
+        &mut self,
+        scheduled: Option<ScheduledInputs<'_, DOMAINS, SCHEDULE_SLOTS>>,
+        motion: Option<MotionInputs<'_, AXES>>,
         mut controlled: Option<&mut ControlledStopCycleState<AXES>>,
         cycle_deadline_ns: Option<u64>,
         outputs: Option<&ScheduledAuxiliaryOutputs<'_, DOMAINS, SCHEDULE_SLOTS, FRAMES, DATAGRAMS>>,
         other: OtherCycleFacts,
+        mut maintenance: Option<&mut FaultResetController>,
     ) -> Result<StopCycleOutcome<P::Error>, StopCycleError> {
         if self.report.cycle == 0
             || self.state.sequence != self.report.cycle
@@ -2072,6 +2144,43 @@ impl<
                 self.dc,
                 other,
             )
+        };
+        // Validate every maintenance request and its complete writable mapping
+        // before any auxiliary or motion TX. Repeated same-cycle quality does
+        // not advance gate qualification windows.
+        let maintenance_preview = if let Some(reset) = maintenance.as_deref_mut() {
+            self.guard.update_cyclic_quality(quality, self.report.cycle);
+            // Validate the complete later State projection before a reset can
+            // be accepted. A valid PDO map can still produce non-finite SI
+            // feedback with a product-frozen small scale; publication must
+            // never discover that only after sending the pulse.
+            let mut staged_feedback = *self.state;
+            cia402_feedback_to_procbuf(
+                &mut staged_feedback,
+                self.domain.input(),
+                self.maps,
+                self.modes,
+                self.axis_policies,
+                quality.domain_valid && quality.wkc_valid,
+                None,
+            )
+            .map_err(StopCycleError::Feedback)?;
+            Some(
+                reset
+                    .prepare(
+                        self.guard,
+                        self.report,
+                        self.domain,
+                        self.maps,
+                        self.modes,
+                        self.safe_process_image,
+                        self.plan,
+                        decision_now_ns,
+                    )
+                    .map_err(StopCycleError::Maintenance)?,
+            )
+        } else {
+            None
         };
         let mut auxiliary_frames_sent = 0;
         let mut auxiliary_failure = None;
@@ -2293,19 +2402,39 @@ impl<
                     transmission
                 }
                 (LifecycleAction::Hold | LifecycleAction::FaultLatched, _) => {
-                    submit_inhibited_frame(
-                        &decision,
-                        &outputs,
-                        self.maps,
-                        self.modes,
-                        self.safe_process_image,
-                        self.domain,
-                        self.plan,
-                        self.master,
-                        self.port,
-                        self.next_generation,
-                        self.deadline_ns,
-                    )
+                    if let Some(preview) = maintenance_preview {
+                        if !quality.cycle_within_budget || auxiliary_failure.is_some() {
+                            Err(StopFrameError::UnverifiedInput)
+                        } else {
+                            crate::ethercat::submit_maintenance_reset_frame(
+                                &decision,
+                                preview,
+                                self.maps,
+                                self.modes,
+                                self.safe_process_image,
+                                self.domain,
+                                self.plan,
+                                self.master,
+                                self.port,
+                                self.next_generation,
+                                self.deadline_ns,
+                            )
+                        }
+                    } else {
+                        submit_inhibited_frame(
+                            &decision,
+                            &outputs,
+                            self.maps,
+                            self.modes,
+                            self.safe_process_image,
+                            self.domain,
+                            self.plan,
+                            self.master,
+                            self.port,
+                            self.next_generation,
+                            self.deadline_ns,
+                        )
+                    }
                 }
                 (LifecycleAction::EnableAllowed, None) => {
                     return Err(StopCycleError::NotStopping(LifecycleAction::EnableAllowed));
@@ -2321,6 +2450,9 @@ impl<
                 }
             }
             let accepted_outputs = transmission.as_ref().ok().map(|_| {
+                if let Some(preview) = maintenance_preview {
+                    return preview.outputs;
+                }
                 controlled_report
                     .as_ref()
                     .map_or(outputs, |report| report.outputs)
@@ -2336,6 +2468,10 @@ impl<
                 accepted_outputs,
             )
         };
+        if let (Some(reset), Some(preview)) = (maintenance.as_deref_mut(), maintenance_preview) {
+            reset.attempted(preview, transmission.is_ok());
+        }
+        let maintenance_reset = maintenance.as_deref().map(FaultResetController::status);
         let mut active_failure = None;
         if matches!(action, LifecycleAction::EnableAllowed) && transmission.is_err() {
             active_failure = transmission.err();
@@ -2503,6 +2639,7 @@ impl<
         });
         Ok(StopCycleOutcome {
             action,
+            maintenance_reset,
             active_failure,
             controlled_stop_used,
             controlled_stop_fallback,

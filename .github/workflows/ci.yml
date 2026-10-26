@@ -29,6 +29,7 @@ jobs:
           path: |
             build/*_report.json
             build/generated/sim-dual-axis/*
+            build/r0-r2/qualification/**
             qualification/*.json
             qualification/KNOWN_LIMITATIONS.md
           if-no-files-found: error

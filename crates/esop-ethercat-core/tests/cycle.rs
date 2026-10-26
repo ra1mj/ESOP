@@ -7,13 +7,13 @@ use esop_ethercat_core::{
     DcClockController, DcClockProgress, DcTopology, DmaDescriptorRing, DmaOwner, DmaTxHandle,
     Domain, DomainSegment, ESC_FEATURE_DC_SUPPORTED, EscDcRange, EthercatDmaTxPort, EthercatMaster,
     EthercatPort, EthercatState, EventCode, ExpectedSlave, FrameHandle, FramePlan, LinkState,
-    MAX_MAILBOX_BYTES, MailboxConfig, MailboxController, MailboxHeader, MailboxProtocol,
-    MasterConfig, NoopDmaCache, PortError, RegisterOperation, RxDatagramConsumer, RxExpectation,
-    RxMatch, RxPoll, RxSlotState, RxWorkingCounterMismatch, RxWorkingCounterPolicy,
-    ScanDcCapabilities, ScanPortLink, ScanRecord, SdoAccess, SdoAccessPolicy,
-    SdoInformationExpectation, SdoInformationPolicy, SdoInformationRequiredAccess,
-    SdoInformationVerifier, SdoInformationVerifierProgress, SdoProgress, SdoTransfer,
-    SlaveIdentity, StartupConfig, StartupController, StartupProgress,
+    MAX_MAILBOX_BYTES, MailboxConfig, MailboxController, MailboxProtocol, MasterConfig,
+    NoopDmaCache, PortError, RegisterOperation, RxDatagramConsumer, RxExpectation, RxMatch, RxPoll,
+    RxSlotState, RxWorkingCounterMismatch, RxWorkingCounterPolicy, ScanDcCapabilities,
+    ScanPortLink, ScanRecord, SdoAccess, SdoAccessPolicy, SdoInformationExpectation,
+    SdoInformationPolicy, SdoInformationRequiredAccess, SdoInformationVerifier,
+    SdoInformationVerifierProgress, SdoProgress, SdoTransfer, SlaveIdentity, StartupConfig,
+    StartupController, StartupProgress,
 };
 
 const MTU: usize = MAX_ETHERNET_FRAME_LEN;
@@ -28,6 +28,7 @@ struct MockPort {
     response_payload_len: usize,
     tx_len: usize,
     fail_tx: bool,
+    transit_count: u16,
 }
 
 impl MockPort {
@@ -42,6 +43,7 @@ impl MockPort {
             response_payload_len: 0,
             tx_len: 0,
             fail_tx: false,
+            transit_count: 0,
         }
     }
 
@@ -100,6 +102,20 @@ impl EthercatPort for MockPort {
                 ETHERNET_HEADER_LEN + ETHERCAT_FRAME_HEADER_LEN + DATAGRAM_HEADER_LEN;
             self.rx[payload_offset..payload_offset + datagram.payload.len()]
                 .copy_from_slice(&self.response_payload[..self.response_payload_len]);
+        }
+        if matches!(
+            datagram.header.command,
+            Command::Aprd
+                | Command::Apwr
+                | Command::Aprw
+                | Command::Armw
+                | Command::Brd
+                | Command::Bwr
+                | Command::Brw
+        ) {
+            let returned_position =
+                (datagram.header.address as u16).wrapping_add(self.transit_count);
+            self.rx[18..20].copy_from_slice(&returned_position.to_le_bytes());
         }
         self.rx[wkc_offset..wkc_offset + 2].copy_from_slice(&self.response_wkc.to_le_bytes());
         self.rx_len = frame.len();
@@ -285,6 +301,7 @@ fn mailbox_coe_round_trip(
     request_payload: &[u8],
     response_payload: &[u8],
 ) -> ([u8; MAX_MAILBOX_BYTES], usize) {
+    use esop_ethercat_core::{MailboxPhase, MailboxProgress};
     let mut mailbox = MailboxController::new();
     mailbox
         .start(
@@ -296,70 +313,94 @@ fn mailbox_coe_round_trip(
             request_payload,
         )
         .unwrap();
-
-    mailbox.next_action(1).unwrap().unwrap();
-    let send_request = mailbox.enqueue_pending(pool).unwrap();
-    let send_frame = master.acquire_frame(generation, 100_000).unwrap();
-    master
-        .build_control_request(pool, send_request, send_frame)
-        .unwrap();
-    {
-        let slot = master.frame_slot_mut(send_frame).unwrap();
-        let sent = FrameView::parse(&slot.bytes[..slot.len]).unwrap();
-        let datagram = sent.datagrams().next().unwrap().unwrap();
-        assert_eq!(
-            &datagram.payload[6..6 + request_payload.len()],
-            request_payload
-        );
-    }
-
-    let send_wire_len = 6 + request_payload.len();
-    let send_response = [0; MAX_MAILBOX_BYTES];
-    let mut port = MockPort::with_response(1, &send_response[..send_wire_len]);
-    master.submit_frame(&mut port, send_frame).unwrap();
+    // Independent mailbox header: length WORD, address WORD, priority BYTE,
+    // then counter 1 in bits 4..6 and CoE protocol 3 in bits 0..3.
+    let mut response = [0u8; 32];
+    response[..6].copy_from_slice(&[response_payload.len() as u8, 0, 0, 0, 0, 0x13]);
+    response[6..6 + response_payload.len()].copy_from_slice(response_payload);
     let mut scratch = [0; MTU];
+    let mut port = MockPort::new(1);
+    for (step, (phase, command, address, length)) in [
+        (
+            MailboxPhase::CheckingSendStatus,
+            Command::Fprd,
+            0x0805_0001,
+            1,
+        ),
+        (MailboxPhase::Sending, Command::Fpwr, 0x1000_0001, 32),
+        (MailboxPhase::CheckingStatus, Command::Fprd, 0x080d_0001, 1),
+        (MailboxPhase::Polling, Command::Fprd, 0x1100_0001, 32),
+    ]
+    .into_iter()
+    .enumerate()
     {
-        let mut consumer = ControlRxConsumer::new(pool);
-        master
-            .cycle_receive_with_consumer(&mut port, &mut scratch, generation, &mut consumer)
+        assert_eq!(mailbox.phase(), phase);
+        let now_ns = step as u64 * 2 + 1;
+        let action = mailbox.next_action(now_ns).unwrap().unwrap();
+        assert_eq!(action.address, address);
+        assert_eq!(action.datagram_len(), length);
+        let request = mailbox.enqueue_pending(pool).unwrap();
+        let wire_index = pool.get(request).unwrap().datagram_index;
+        assert_eq!(
+            pool.get(request).unwrap().action_datagram_index(),
+            action.datagram_index
+        );
+        let frame = master
+            .acquire_frame(generation, action.deadline_ns)
             .unwrap();
+        master.build_control_request(pool, request, frame).unwrap();
+        {
+            let slot = master.frame_slot_mut(frame).unwrap();
+            let sent = FrameView::parse(&slot.bytes[..slot.len]).unwrap();
+            let datagram = sent.datagrams().next().unwrap().unwrap();
+            assert_eq!(datagram.header.index, wire_index);
+            assert_eq!(datagram.header.command, command);
+            assert_eq!(datagram.header.address, address);
+            assert_eq!(datagram.payload.len(), length);
+            if phase == MailboxPhase::Sending {
+                assert_eq!(
+                    &datagram.payload[..6],
+                    &[request_payload.len() as u8, 0, 0, 0, 0, 0x13]
+                );
+                assert_eq!(
+                    &datagram.payload[6..6 + request_payload.len()],
+                    request_payload
+                );
+                assert!(
+                    datagram.payload[6 + request_payload.len()..]
+                        .iter()
+                        .all(|byte| *byte == 0)
+                );
+            }
+        }
+        match phase {
+            MailboxPhase::CheckingSendStatus => port.set_response(&[0]),
+            MailboxPhase::Sending => port.set_response(&[0; 32]),
+            MailboxPhase::CheckingStatus => port.set_response(&[0x08]),
+            MailboxPhase::Polling => port.set_response(&response),
+            _ => unreachable!(),
+        }
+        master.submit_frame(&mut port, frame).unwrap();
+        {
+            let mut consumer = ControlRxConsumer::new(pool);
+            let report = master
+                .cycle_receive_with_consumer(&mut port, &mut scratch, generation, &mut consumer)
+                .unwrap();
+            assert_eq!(report.parsed_datagrams, 1);
+            assert_eq!(report.unmatched_datagrams, 0);
+            assert_eq!(report.consumer_rejections, 0);
+            assert_eq!(consumer.rejected(), 0);
+        }
+        assert_eq!(
+            mailbox.accept_completed(pool, request, now_ns + 1),
+            Ok(if phase == MailboxPhase::Polling {
+                MailboxProgress::Complete
+            } else {
+                MailboxProgress::Advanced
+            })
+        );
+        assert_eq!(pool.in_use(), 0);
     }
-    assert_eq!(
-        mailbox.accept_completed(pool, send_request, 2),
-        Ok(esop_ethercat_core::MailboxProgress::Advanced)
-    );
-
-    let mut wire_response = [0; 32];
-    MailboxHeader {
-        length: response_payload.len() as u16,
-        address: 0,
-        priority: 0,
-        protocol: MailboxProtocol::CoE,
-        counter: 1,
-    }
-    .encode(&mut wire_response)
-    .unwrap();
-    wire_response[6..6 + response_payload.len()].copy_from_slice(response_payload);
-    port.set_response(&wire_response);
-
-    mailbox.next_action(3).unwrap().unwrap();
-    let poll_request = mailbox.enqueue_pending(pool).unwrap();
-    let poll_frame = master.acquire_frame(generation, 100_000).unwrap();
-    master
-        .build_control_request(pool, poll_request, poll_frame)
-        .unwrap();
-    master.submit_frame(&mut port, poll_frame).unwrap();
-    {
-        let mut consumer = ControlRxConsumer::new(pool);
-        master
-            .cycle_receive_with_consumer(&mut port, &mut scratch, generation, &mut consumer)
-            .unwrap();
-    }
-    assert_eq!(
-        mailbox.accept_completed(pool, poll_request, 4),
-        Ok(esop_ethercat_core::MailboxProgress::Complete)
-    );
-
     let payload = mailbox.response().unwrap().1;
     let mut copied = [0; MAX_MAILBOX_BYTES];
     copied[..payload.len()].copy_from_slice(payload);
@@ -1060,7 +1101,7 @@ fn control_request_is_built_armed_and_completed_by_the_master() {
     let mut master = EthercatMaster::<2, MTU>::new(config);
     let mut requests = ControlRequestPool::<2>::new();
     let request = requests
-        .acquire(19, 51, 0x1000_0130, RegisterOperation::Read, &[], 100_000)
+        .acquire(19, 51, 0x0130_1000, RegisterOperation::Read, &[], 100_000)
         .unwrap();
     let frame = master.acquire_frame(51, 100_000).unwrap();
     let length = master
@@ -1094,7 +1135,7 @@ fn zero_or_one_control_request_accepts_zero_wkc_through_master_receive() {
         .acquire_with_response_len_and_wkc_policy(
             20,
             52,
-            0x1000_0910,
+            0x0910_1000,
             RegisterOperation::Read,
             &[],
             4,
@@ -1141,7 +1182,7 @@ fn startup_control_request_round_trips_through_master_and_rx_consumer() {
         .unwrap();
     let action = startup.next_action(1).unwrap().unwrap();
 
-    let mut requests = ControlRequestPool::<1>::new();
+    let mut requests = ControlRequestPool::<1>::new_with_datagram_indices(&[220, 221]).unwrap();
     let request = startup.enqueue_pending(&mut requests).unwrap();
     let frame = master
         .acquire_frame(action.generation(), action.deadline_ns())
@@ -1150,8 +1191,12 @@ fn startup_control_request_round_trips_through_master_and_rx_consumer() {
         .build_control_request(&mut requests, request, frame)
         .unwrap();
 
+    assert_eq!(action.operation(), RegisterOperation::BroadcastRead);
     let mut port = MockPort::with_response(1, &[0x88, 0x02]);
+    port.transit_count = 1;
     master.submit_frame(&mut port, frame).unwrap();
+    // BRD returns ADP=1 and unchanged ADO=0, independently from its data.
+    assert_eq!(&port.rx[18..22], &[1, 0, 0, 0]);
     let mut scratch = [0; MTU];
     let report = {
         let mut consumer = ControlRxConsumer::new(&mut requests);
@@ -1290,6 +1335,11 @@ fn startup_dc_receive_times_round_trip_through_master_and_rx_consumer() {
         .start(53, 0, StartupConfig::new(EthercatState::PreOp), &expected)
         .unwrap();
 
+    let count = startup.next_action(0).unwrap().unwrap();
+    assert_eq!(count.operation(), RegisterOperation::BroadcastRead);
+    startup
+        .accept(count, count.generation(), &[0x88, 0x02], 1, 0)
+        .unwrap();
     let probe = startup.next_action(1).unwrap().unwrap();
     startup
         .accept(probe, probe.generation(), &[0x88, 0x02], 1, 2)
@@ -1334,7 +1384,7 @@ fn startup_dc_receive_times_round_trip_through_master_and_rx_consumer() {
     for (port, value) in [10u32, 20, 30, 40].iter().copied().enumerate() {
         response[port * 4..port * 4 + 4].copy_from_slice(&value.to_le_bytes());
     }
-    let mut requests = ControlRequestPool::<1>::new();
+    let mut requests = ControlRequestPool::<1>::new_with_datagram_indices(&[220, 221]).unwrap();
     let request = startup.enqueue_pending(&mut requests).unwrap();
     let frame = master
         .acquire_frame(receive_times.generation(), receive_times.deadline_ns())
@@ -1395,7 +1445,7 @@ fn startup_dc_receive_times_round_trip_through_master_and_rx_consumer() {
         .unwrap();
     let end_probe = startup.next_action(17).unwrap().unwrap();
     startup
-        .accept(end_probe, end_probe.generation(), &[], 0, 18)
+        .accept(end_probe, end_probe.generation(), &[0; 2], 0, 18)
         .unwrap();
 
     assert_eq!(
@@ -1410,80 +1460,26 @@ fn startup_dc_receive_times_round_trip_through_master_and_rx_consumer() {
 
 #[test]
 fn complete_access_sdo_round_trips_through_mailbox_control_and_master() {
-    let config = MasterConfig::new([0xFF; 6], [1, 2, 3, 4, 5, 6]);
+    let config = MasterConfig::new([0xff; 6], [1, 2, 3, 4, 5, 6]);
     let mut master = EthercatMaster::<2, MTU>::new(config);
-    let mut pool = ControlRequestPool::<2>::new();
+    let mut pool = ControlRequestPool::<2>::new_with_datagram_indices(&[220, 221]).unwrap();
     let mut sdo = SdoTransfer::with_policy(SdoAccessPolicy::new(true));
     sdo.start_download(0x6040, 0, &[0x06, 0x00], SdoAccess::Complete)
         .unwrap();
-
-    let mut mailbox = MailboxController::new();
-    mailbox
-        .start(
-            MailboxConfig::new(0x1000, 32, 0x1100, 32),
-            1,
-            7,
-            0,
-            MailboxProtocol::CoE,
-            sdo.request().unwrap(),
-        )
-        .unwrap();
-
-    let _send = mailbox.next_action(1).unwrap().unwrap();
-    let send_request = mailbox.enqueue_pending(&mut pool).unwrap();
-    let send_frame = master.acquire_frame(7, 100_000).unwrap();
-    master
-        .build_control_request(&mut pool, send_request, send_frame)
-        .unwrap();
-    {
-        let slot = master.frame_slot_mut(send_frame).unwrap();
-        let sent = FrameView::parse(&slot.bytes[..slot.len]).unwrap();
-        let datagram = sent.datagrams().next().unwrap().unwrap();
-        assert_eq!(&datagram.payload[6..12], &[0, 0x20, 0x3B, 0x40, 0x60, 0]);
-    }
-    let mut port = MockPort::with_response(1, &[0; 16]);
-    master.submit_frame(&mut port, send_frame).unwrap();
-    let mut scratch = [0; MTU];
-    let mut consumer = ControlRxConsumer::new(&mut pool);
-    master
-        .cycle_receive_with_consumer(&mut port, &mut scratch, 7, &mut consumer)
-        .unwrap();
+    // CoE SDO request + expedited CA download command is a literal standard fixture.
     assert_eq!(
-        mailbox.accept_completed(&mut pool, send_request, 2),
-        Ok(esop_ethercat_core::MailboxProgress::Advanced)
+        &sdo.request().unwrap()[..6],
+        &[0, 0x20, 0x3b, 0x40, 0x60, 0]
     );
-    assert_eq!(mailbox.phase(), esop_ethercat_core::MailboxPhase::Polling);
-
-    let mut response = [0; 32];
-    esop_ethercat_core::MailboxHeader {
-        length: 6,
-        address: 0,
-        priority: 0,
-        protocol: MailboxProtocol::CoE,
-        counter: 1,
-    }
-    .encode(&mut response)
-    .unwrap();
-    response[6..12].copy_from_slice(&[0, 0x30, 0x60, 0x40, 0x60, 0]);
-    port.set_response(&response);
-
-    let _poll = mailbox.next_action(3).unwrap().unwrap();
-    let poll_request = mailbox.enqueue_pending(&mut pool).unwrap();
-    let poll_frame = master.acquire_frame(7, 100_000).unwrap();
-    master
-        .build_control_request(&mut pool, poll_request, poll_frame)
-        .unwrap();
-    master.submit_frame(&mut port, poll_frame).unwrap();
-    let mut consumer = ControlRxConsumer::new(&mut pool);
-    master
-        .cycle_receive_with_consumer(&mut port, &mut scratch, 7, &mut consumer)
-        .unwrap();
-    assert_eq!(
-        mailbox.accept_completed(&mut pool, poll_request, 4),
-        Ok(esop_ethercat_core::MailboxProgress::Complete)
+    let (response, length) = mailbox_coe_round_trip(
+        &mut master,
+        &mut pool,
+        7,
+        sdo.request().unwrap(),
+        &[0, 0x30, 0x60, 0x40, 0x60, 0],
     );
     assert_eq!(
-        sdo.accept_response(mailbox.response().unwrap().1),
+        sdo.accept_response(&response[..length]),
         Ok(SdoProgress::Complete)
     );
     assert_eq!(sdo.phase(), esop_ethercat_core::SdoPhase::Complete);
@@ -1508,7 +1504,7 @@ fn sdo_information_verification_round_trips_through_mailbox_and_master() {
 
     let config = MasterConfig::new([0xFF; 6], [1, 2, 3, 4, 5, 6]);
     let mut master = EthercatMaster::<2, MTU>::new(config);
-    let mut pool = ControlRequestPool::<2>::new();
+    let mut pool = ControlRequestPool::<2>::new_with_datagram_indices(&[220, 221]).unwrap();
     let object_response = [0, 0x80, 0x04, 0, 0, 0, 0x40, 0x60, 0, 0, 0, 0x07];
     let request = verifier.pending_payload();
     let (response, response_len) =
@@ -1542,7 +1538,7 @@ fn control_request_index_conflict_does_not_mutate_request_or_frame() {
     let mut master = EthercatMaster::<2, MTU>::new(config);
     let mut requests = ControlRequestPool::<1>::new();
     let request = requests
-        .acquire(21, 61, 0x1000_0130, RegisterOperation::Read, &[], 100_000)
+        .acquire(21, 61, 0x0130_1000, RegisterOperation::Read, &[], 100_000)
         .unwrap();
     let frame = master.acquire_frame(61, 100_000).unwrap();
     master
@@ -1552,7 +1548,7 @@ fn control_request_index_conflict_does_not_mutate_request_or_frame() {
             RxExpectation {
                 generation: 61,
                 deadline_ns: 100_000,
-                expected_address: 0x1000_0130,
+                expected_address: 0x0130_1000,
                 expected_size: 0,
                 expected_type: Command::Fprd as u8,
                 expected_wkc: 1,

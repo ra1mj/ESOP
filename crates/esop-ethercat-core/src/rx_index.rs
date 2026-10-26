@@ -11,6 +11,8 @@ pub enum RxSlotState {
 pub enum RxWorkingCounterPolicy {
     Exact,
     ZeroOrOne,
+    /// Initial bounded bus-count request only.
+    UpToExpected,
 }
 
 impl RxWorkingCounterPolicy {
@@ -18,6 +20,43 @@ impl RxWorkingCounterPolicy {
         match self {
             Self::Exact => actual == expected,
             Self::ZeroOrOne => expected == 1 && actual <= 1,
+            Self::UpToExpected => actual <= expected,
+        }
+    }
+}
+
+/// Explicit response-address semantics. No policy relaxes ADO validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RxAddressPolicy {
+    Exact,
+    /// AP and broadcast commands increment ADP once at every traversed slave.
+    TransitCount {
+        count: u16,
+    },
+    /// The first BRD counts slaves independently through ADP and WKC.
+    BroadcastCount {
+        max_slaves: u16,
+    },
+}
+
+impl RxAddressPolicy {
+    pub const fn accepts(self, command: u8, expected: u32, actual: u32, wkc: u16) -> bool {
+        match self {
+            Self::Exact => expected == actual,
+            Self::TransitCount { count } => {
+                if matches!(command, 0x01..=0x03 | 0x07..=0x09 | 0x0D) {
+                    expected >> 16 == actual >> 16
+                        && (actual as u16).wrapping_sub(expected as u16) == count
+                } else {
+                    expected == actual
+                }
+            }
+            Self::BroadcastCount { max_slaves } => {
+                command == 0x07
+                    && expected >> 16 == actual >> 16
+                    && wkc <= max_slaves
+                    && (actual as u16).wrapping_sub(expected as u16) == wkc
+            }
         }
     }
 }
@@ -32,6 +71,7 @@ pub struct RxIndexEntry {
     pub expected_type: u8,
     pub expected_wkc: u16,
     pub working_counter_policy: RxWorkingCounterPolicy,
+    pub address_policy: RxAddressPolicy,
     pub state: RxSlotState,
 }
 
@@ -65,6 +105,7 @@ impl RxIndexEntry {
         expected_type: 0,
         expected_wkc: 0,
         working_counter_policy: RxWorkingCounterPolicy::Exact,
+        address_policy: RxAddressPolicy::Exact,
         state: RxSlotState::Empty,
     };
 }
@@ -183,6 +224,23 @@ impl RxIndexTable {
         expectation: RxExpectation,
         working_counter_policy: RxWorkingCounterPolicy,
     ) -> Result<(), RxIndexError> {
+        self.arm_with_policies(
+            index,
+            slot_id,
+            expectation,
+            working_counter_policy,
+            RxAddressPolicy::Exact,
+        )
+    }
+
+    pub fn arm_with_policies(
+        &mut self,
+        index: u8,
+        slot_id: u16,
+        expectation: RxExpectation,
+        working_counter_policy: RxWorkingCounterPolicy,
+        address_policy: RxAddressPolicy,
+    ) -> Result<(), RxIndexError> {
         let entry = &mut self.entries[index as usize];
         if entry.state == RxSlotState::Armed {
             return Err(RxIndexError::AlreadyArmed);
@@ -199,6 +257,7 @@ impl RxIndexTable {
             expected_type: expectation.expected_type,
             expected_wkc: expectation.expected_wkc,
             working_counter_policy,
+            address_policy,
             state: RxSlotState::Armed,
         };
         Ok(())
@@ -224,7 +283,12 @@ impl RxIndexTable {
             entry.state = RxSlotState::Rejected;
             return Err(RxIndexError::GenerationMismatch);
         }
-        if entry.expected_address != response.address {
+        if !entry.address_policy.accepts(
+            response.command,
+            entry.expected_address,
+            response.address,
+            response.working_counter,
+        ) {
             entry.state = RxSlotState::Rejected;
             return Err(RxIndexError::AddressMismatch);
         }

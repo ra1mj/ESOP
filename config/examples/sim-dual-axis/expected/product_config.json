@@ -44,16 +44,18 @@
     "max_frames_per_domain": 2,
     "max_pdo_entries_per_domain": 64,
     "max_process_image_bytes": 128,
-    "max_schedule_slots": 16
+    "max_schedule_slots": 16,
+    "max_sdo_object_bytes": 1024,
+    "runtime_sdo_requests": 8
   },
-  "config_sha256": "824795ddcc1d22880a6e681ab4347ca417edb9e91f151910589b7993193b7e80",
+  "config_sha256": "64e4a0254de10ceab5e76cd3f63d4a488629ab2dd254aaf1b84e904bd1b39055",
   "cycle": {
     "base_period_ns": 1000000,
     "deadline_ns": 800000
   },
   "cycle_metrics": {
     "copy_bytes_per_cycle": 4,
-    "expected_wkc": 8,
+    "expected_wkc": 6,
     "frame_count": 2,
     "pdo_bytes_per_cycle": 42,
     "wire_bytes_per_cycle": 181
@@ -76,7 +78,7 @@
       "command_code": 10,
       "domain_id": 0,
       "domain_offset": 14,
-      "expected_wkc": 4,
+      "expected_wkc": 2,
       "index": 1,
       "input": true,
       "logical_address": "0x0000100e",
@@ -111,7 +113,7 @@
   "domains": [
     {
       "datagram_count": 2,
-      "expected_wkc": 6,
+      "expected_wkc": 4,
       "frames": [
         {
           "datagram_indices": [
@@ -124,7 +126,7 @@
       ],
       "id": 0,
       "input_bytes": 19,
-      "input_expected_wkc": 4,
+      "input_expected_wkc": 2,
       "logical_address": "0x00001000",
       "name": "motion",
       "output_bytes": 14,

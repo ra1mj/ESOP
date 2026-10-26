@@ -1,0 +1,1903 @@
+{
+  "config_sha256": "d7d90eb51c4d8014d79284ef6e053df3f22a9223eae21f827cedd27940e83320",
+  "devices": [
+    {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": true,
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": true,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP benchmark CiA 402 drive",
+      "esi_label": "esop-load-drive-v1",
+      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_type_name": "ESOP-SIM-LOAD-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 3584,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 0,
+        "logical_start": "0x000011c0",
+        "logical_start_bit": 0,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
+      },
+      "name": "drive_00",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 0,
+      "product_code": "0x00004022",
+      "requesting_id": "0x0041",
+      "requesting_id_supported": true,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "sdo_information_expectations": [],
+      "serial": "0x00000001",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 0,
+        "description": "Product-period distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 3,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "sync_manager_status",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1001",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": true,
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": false,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP benchmark CiA 402 drive",
+      "esi_label": "esop-load-drive-v1",
+      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_type_name": "ESOP-SIM-LOAD-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 3585,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 1,
+        "logical_start": "0x000011c0",
+        "logical_start_bit": 1,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
+      },
+      "name": "drive_01",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 1,
+      "product_code": "0x00004022",
+      "requesting_id": "0x0042",
+      "requesting_id_supported": true,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "sdo_information_expectations": [],
+      "serial": "0x00000002",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 0,
+        "description": "Product-period distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 3,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "sync_manager_status",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1002",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": true,
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": false,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP benchmark CiA 402 drive",
+      "esi_label": "esop-load-drive-v1",
+      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_type_name": "ESOP-SIM-LOAD-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 3586,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 2,
+        "logical_start": "0x000011c0",
+        "logical_start_bit": 2,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
+      },
+      "name": "drive_02",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 2,
+      "product_code": "0x00004022",
+      "requesting_id": "0x0043",
+      "requesting_id_supported": true,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "sdo_information_expectations": [],
+      "serial": "0x00000003",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 0,
+        "description": "Product-period distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 3,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "sync_manager_status",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1003",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": true,
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": false,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP benchmark CiA 402 drive",
+      "esi_label": "esop-load-drive-v1",
+      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_type_name": "ESOP-SIM-LOAD-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 3587,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 3,
+        "logical_start": "0x000011c0",
+        "logical_start_bit": 3,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
+      },
+      "name": "drive_03",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 3,
+      "product_code": "0x00004022",
+      "requesting_id": "0x0044",
+      "requesting_id_supported": true,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "sdo_information_expectations": [],
+      "serial": "0x00000004",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 0,
+        "description": "Product-period distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 3,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "sync_manager_status",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1004",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": true,
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": false,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP benchmark CiA 402 drive",
+      "esi_label": "esop-load-drive-v1",
+      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_type_name": "ESOP-SIM-LOAD-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 3588,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 4,
+        "logical_start": "0x000011c0",
+        "logical_start_bit": 4,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
+      },
+      "name": "drive_04",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 4,
+      "product_code": "0x00004022",
+      "requesting_id": "0x0045",
+      "requesting_id_supported": true,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "sdo_information_expectations": [],
+      "serial": "0x00000005",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 0,
+        "description": "Product-period distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 3,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "sync_manager_status",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1005",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": true,
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": false,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP benchmark CiA 402 drive",
+      "esi_label": "esop-load-drive-v1",
+      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_type_name": "ESOP-SIM-LOAD-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 3589,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 5,
+        "logical_start": "0x000011c0",
+        "logical_start_bit": 5,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
+      },
+      "name": "drive_05",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 5,
+      "product_code": "0x00004022",
+      "requesting_id": "0x0046",
+      "requesting_id_supported": true,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "sdo_information_expectations": [],
+      "serial": "0x00000006",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 0,
+        "description": "Product-period distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 3,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "sync_manager_status",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1006",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": true,
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": false,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP benchmark CiA 402 drive",
+      "esi_label": "esop-load-drive-v1",
+      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_type_name": "ESOP-SIM-LOAD-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 3590,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 6,
+        "logical_start": "0x000011c0",
+        "logical_start_bit": 6,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
+      },
+      "name": "drive_06",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 6,
+      "product_code": "0x00004022",
+      "requesting_id": "0x0047",
+      "requesting_id_supported": true,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "sdo_information_expectations": [],
+      "serial": "0x00000007",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 0,
+        "description": "Product-period distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 3,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "sync_manager_status",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1007",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": true,
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": false,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP benchmark CiA 402 drive",
+      "esi_label": "esop-load-drive-v1",
+      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_type_name": "ESOP-SIM-LOAD-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 3591,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 7,
+        "logical_start": "0x000011c0",
+        "logical_start_bit": 7,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
+      },
+      "name": "drive_07",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 7,
+      "product_code": "0x00004022",
+      "requesting_id": "0x0048",
+      "requesting_id_supported": true,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "sdo_information_expectations": [],
+      "serial": "0x00000008",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 0,
+        "description": "Product-period distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 3,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "sync_manager_status",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1008",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": true,
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": false,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP benchmark CiA 402 drive",
+      "esi_label": "esop-load-drive-v1",
+      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_type_name": "ESOP-SIM-LOAD-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 3592,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 0,
+        "logical_start": "0x000011c1",
+        "logical_start_bit": 0,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
+      },
+      "name": "drive_08",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 8,
+      "product_code": "0x00004022",
+      "requesting_id": "0x0049",
+      "requesting_id_supported": true,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "sdo_information_expectations": [],
+      "serial": "0x00000009",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 0,
+        "description": "Product-period distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 3,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "sync_manager_status",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1009",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": true,
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": false,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP benchmark CiA 402 drive",
+      "esi_label": "esop-load-drive-v1",
+      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_type_name": "ESOP-SIM-LOAD-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 3593,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 1,
+        "logical_start": "0x000011c1",
+        "logical_start_bit": 1,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
+      },
+      "name": "drive_09",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 9,
+      "product_code": "0x00004022",
+      "requesting_id": "0x004a",
+      "requesting_id_supported": true,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "sdo_information_expectations": [],
+      "serial": "0x0000000a",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 0,
+        "description": "Product-period distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 3,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "sync_manager_status",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x100a",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": true,
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": false,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP benchmark CiA 402 drive",
+      "esi_label": "esop-load-drive-v1",
+      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_type_name": "ESOP-SIM-LOAD-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 3594,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 2,
+        "logical_start": "0x000011c1",
+        "logical_start_bit": 2,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
+      },
+      "name": "drive_10",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 10,
+      "product_code": "0x00004022",
+      "requesting_id": "0x004b",
+      "requesting_id_supported": true,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "sdo_information_expectations": [],
+      "serial": "0x0000000b",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 0,
+        "description": "Product-period distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 3,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "sync_manager_status",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x100b",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": true,
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": false,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP benchmark CiA 402 drive",
+      "esi_label": "esop-load-drive-v1",
+      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_type_name": "ESOP-SIM-LOAD-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 3595,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 3,
+        "logical_start": "0x000011c1",
+        "logical_start_bit": 3,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
+      },
+      "name": "drive_11",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 11,
+      "product_code": "0x00004022",
+      "requesting_id": "0x004c",
+      "requesting_id_supported": true,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "sdo_information_expectations": [],
+      "serial": "0x0000000c",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 0,
+        "description": "Product-period distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 3,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "sync_manager_status",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x100c",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": true,
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": false,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP benchmark CiA 402 drive",
+      "esi_label": "esop-load-drive-v1",
+      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_type_name": "ESOP-SIM-LOAD-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 3596,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 4,
+        "logical_start": "0x000011c1",
+        "logical_start_bit": 4,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
+      },
+      "name": "drive_12",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 12,
+      "product_code": "0x00004022",
+      "requesting_id": "0x004d",
+      "requesting_id_supported": true,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "sdo_information_expectations": [],
+      "serial": "0x0000000d",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 0,
+        "description": "Product-period distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 3,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "sync_manager_status",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x100d",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": true,
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": false,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP benchmark CiA 402 drive",
+      "esi_label": "esop-load-drive-v1",
+      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_type_name": "ESOP-SIM-LOAD-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 3597,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 5,
+        "logical_start": "0x000011c1",
+        "logical_start_bit": 5,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
+      },
+      "name": "drive_13",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 13,
+      "product_code": "0x00004022",
+      "requesting_id": "0x004e",
+      "requesting_id_supported": true,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "sdo_information_expectations": [],
+      "serial": "0x0000000e",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 0,
+        "description": "Product-period distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 3,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "sync_manager_status",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x100e",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": true,
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": false,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP benchmark CiA 402 drive",
+      "esi_label": "esop-load-drive-v1",
+      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_type_name": "ESOP-SIM-LOAD-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 3598,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 6,
+        "logical_start": "0x000011c1",
+        "logical_start_bit": 6,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
+      },
+      "name": "drive_14",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 14,
+      "product_code": "0x00004022",
+      "requesting_id": "0x004f",
+      "requesting_id_supported": true,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "sdo_information_expectations": [],
+      "serial": "0x0000000f",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 0,
+        "description": "Product-period distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 3,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "sync_manager_status",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x100f",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": true,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": true,
+      "dc": {
+        "op_mode": "DcSync",
+        "reference_clock": false,
+        "required": true
+      },
+      "dc_sync_timing": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 1000000,
+        "cycle_time1_ns": 0,
+        "shift_time0_ns": 0
+      },
+      "domain_id": 0,
+      "esi_device_name": "ESOP benchmark CiA 402 drive",
+      "esi_label": "esop-load-drive-v1",
+      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_type_name": "ESOP-SIM-LOAD-402",
+      "kind": "cia402_drive",
+      "mailbox": {
+        "receive_address": 4352,
+        "receive_capacity": 64,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4096,
+        "send_capacity": 64,
+        "send_control_byte": 38,
+        "send_sync_manager": 0,
+        "status_bit": {
+          "active_high": true,
+          "address": "0x080d",
+          "mask": 8
+        }
+      },
+      "mapped_mailbox_status": {
+        "domain_bit_offset": 3599,
+        "domain_id": 0,
+        "enable": true,
+        "fmmu_index": 2,
+        "fmmu_type": 1,
+        "logical_end_bit": 7,
+        "logical_start": "0x000011c1",
+        "logical_start_bit": 7,
+        "max_age_cycles": 1,
+        "physical_start": "0x080d",
+        "physical_start_bit": 3
+      },
+      "name": "drive_15",
+      "op_only_outputs": [
+        {
+          "activation": 9,
+          "index": 2
+        }
+      ],
+      "position": 15,
+      "product_code": "0x00004022",
+      "requesting_id": "0x0050",
+      "requesting_id_supported": true,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1600"
+      ],
+      "sdo_information_expectations": [],
+      "serial": "0x00000010",
+      "sii_dc_mode": {
+        "assign_activate": 768,
+        "cycle_time0_ns": 0,
+        "description": "Product-period distributed-clock synchronization",
+        "name": "DcSync",
+        "shift_time0_ns": 0,
+        "shift_time1_ns": 0,
+        "sync0_cycle_factor": 1,
+        "sync1_cycle_factor": 0
+      },
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 3,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "sync_manager_status",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1010",
+      "transition_timeouts": {
+        "back_to_init_ns": 5500000000,
+        "back_to_safeop_ns": 250000000,
+        "preop_ns": 3500000000,
+        "safeop_to_op_ns": 12000000000
+      },
+      "tx_pdos": [
+        "0x1a00"
+      ],
+      "vendor_id": "0x0000e500",
+      "watchdog": {
+        "divider": 2500,
+        "process_data_intervals": 100
+      }
+    },
+    {
+      "coe_complete_access_enabled": false,
+      "coe_complete_access_supported": false,
+      "coe_sdo_information_enabled": false,
+      "coe_sdo_information_supported": false,
+      "dc": {
+        "op_mode": null,
+        "reference_clock": false,
+        "required": false
+      },
+      "dc_sync_timing": null,
+      "domain_id": 1,
+      "esi_device_name": "ESOP simulated digital IO",
+      "esi_label": "esop-sim-io-v1",
+      "esi_semantic_sha256": "71cabc4139757aa7cd6ee983f03dadcfc6b01e575dcb42dbf018760a88cd08f7",
+      "esi_type_name": "ESOP-SIM-IO",
+      "kind": "ethercat_io",
+      "mailbox": {
+        "receive_address": 4864,
+        "receive_capacity": 32,
+        "receive_control_byte": 34,
+        "receive_sync_manager": 1,
+        "send_address": 4608,
+        "send_capacity": 32,
+        "send_control_byte": 38,
+        "send_sync_manager": 0
+      },
+      "name": "io_block",
+      "op_only_outputs": [],
+      "position": 16,
+      "product_code": "0x00007010",
+      "requesting_id": "0x0051",
+      "requesting_id_supported": true,
+      "revision": "0x00000001",
+      "rx_pdos": [
+        "0x1601"
+      ],
+      "sdo_information_expectations": [],
+      "serial": "0x00000011",
+      "sii_dc_mode": null,
+      "sii_enabled_sync_managers": 15,
+      "sii_fmmu_count": 2,
+      "sii_fmmu_usages": [
+        "outputs",
+        "inputs",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused",
+        "unused"
+      ],
+      "sii_sync_manager_count": 4,
+      "station_address": "0x1011",
+      "transition_timeouts": {
+        "back_to_init_ns": 5000000000,
+        "back_to_safeop_ns": 200000000,
+        "preop_ns": 3000000000,
+        "safeop_to_op_ns": 10000000000
+      },
+      "tx_pdos": [
+        "0x1a01"
+      ],
+      "vendor_id": "0x0000e500"
+    }
+  ],
+  "schema_version": "esop.device-inventory.v1"
+}

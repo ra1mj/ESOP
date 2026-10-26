@@ -1,0 +1,181 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<EtherCATInfo>
+  <Vendor>
+    <Id>#x0000E500</Id>
+    <Name>ESOP Simulator</Name>
+  </Vendor>
+  <Descriptions>
+    <Devices>
+      <Device>
+        <Type ProductCode="#x00004020" RevisionNo="#x00000001">ESOP-SIM-402</Type>
+        <Name>ESOP simulated CiA 402 drive</Name>
+        <Info>
+          <IdentificationReg134>true</IdentificationReg134>
+        </Info>
+        <Fmmu>Outputs</Fmmu>
+        <Fmmu>Inputs</Fmmu>
+        <Fmmu>MBoxState</Fmmu>
+        <Sm Enable="1" StartAddress="#x1000" DefaultSize="64" ControlByte="#x26">MBoxOut</Sm>
+        <Sm Enable="1" StartAddress="#x1100" DefaultSize="64" ControlByte="#x22">MBoxIn</Sm>
+        <Sm Enable="1" OpOnly="true">Outputs</Sm>
+        <Sm Enable="1">Inputs</Sm>
+        <Mailbox>
+          <CoE CompleteAccess="true" SdoInfo="true" />
+        </Mailbox>
+        <Dc>
+          <OpMode>
+            <Name>DcSync</Name>
+            <Desc>One millisecond distributed-clock synchronization</Desc>
+            <AssignActivate>#x0300</AssignActivate>
+            <CycleTimeSync0 Factor="1">1000000</CycleTimeSync0>
+            <ShiftTimeSync0>0</ShiftTimeSync0>
+            <CycleTimeSync1 Factor="0">0</CycleTimeSync1>
+            <ShiftTimeSync1>0</ShiftTimeSync1>
+          </OpMode>
+        </Dc>
+        <StateMachine>
+          <Timeout>
+            <PreopTimeout>3500</PreopTimeout>
+            <SafeopOpTimeout>12000</SafeopOpTimeout>
+            <BackToInitTimeout>5500</BackToInitTimeout>
+            <BackToSafeopTimeout>250</BackToSafeopTimeout>
+          </Timeout>
+        </StateMachine>
+        <RxPdo Sm="2">
+          <Index>#x1600</Index>
+          <Name>CSP CSV CST outputs</Name>
+          <Entry>
+            <Index>#x6040</Index>
+            <SubIndex>0</SubIndex>
+            <BitLen>16</BitLen>
+            <Name>Controlword</Name>
+            <DataType>UINT</DataType>
+          </Entry>
+          <Entry>
+            <Index>#x6060</Index>
+            <SubIndex>0</SubIndex>
+            <BitLen>8</BitLen>
+            <Name>Mode of operation</Name>
+            <DataType>SINT</DataType>
+          </Entry>
+          <Entry>
+            <Index>#x607A</Index>
+            <SubIndex>0</SubIndex>
+            <BitLen>32</BitLen>
+            <Name>Target position</Name>
+            <DataType>DINT</DataType>
+          </Entry>
+          <Entry>
+            <Index>#x60FF</Index>
+            <SubIndex>0</SubIndex>
+            <BitLen>32</BitLen>
+            <Name>Target velocity</Name>
+            <DataType>DINT</DataType>
+          </Entry>
+          <Entry>
+            <Index>#x6071</Index>
+            <SubIndex>0</SubIndex>
+            <BitLen>16</BitLen>
+            <Name>Target torque</Name>
+            <DataType>INT</DataType>
+          </Entry>
+        </RxPdo>
+        <TxPdo Sm="3">
+          <Index>#x1A00</Index>
+          <Name>CSP CSV CST inputs</Name>
+          <Entry>
+            <Index>#x6041</Index>
+            <SubIndex>0</SubIndex>
+            <BitLen>16</BitLen>
+            <Name>Statusword</Name>
+            <DataType>UINT</DataType>
+          </Entry>
+          <Entry>
+            <Index>#x6061</Index>
+            <SubIndex>0</SubIndex>
+            <BitLen>8</BitLen>
+            <Name>Mode display</Name>
+            <DataType>SINT</DataType>
+          </Entry>
+          <Entry>
+            <Index>#x603F</Index>
+            <SubIndex>0</SubIndex>
+            <BitLen>16</BitLen>
+            <Name>Error code</Name>
+            <DataType>UINT</DataType>
+          </Entry>
+          <Entry>
+            <Index>#x6064</Index>
+            <SubIndex>0</SubIndex>
+            <BitLen>32</BitLen>
+            <Name>Actual position</Name>
+            <DataType>DINT</DataType>
+          </Entry>
+          <Entry>
+            <Index>#x606C</Index>
+            <SubIndex>0</SubIndex>
+            <BitLen>32</BitLen>
+            <Name>Actual velocity</Name>
+            <DataType>DINT</DataType>
+          </Entry>
+          <Entry>
+            <Index>#x6077</Index>
+            <SubIndex>0</SubIndex>
+            <BitLen>16</BitLen>
+            <Name>Actual torque</Name>
+            <DataType>INT</DataType>
+          </Entry>
+        </TxPdo>
+      </Device>
+      <Device>
+        <Type ProductCode="#x00007010" RevisionNo="#x00000001">ESOP-SIM-IO</Type>
+        <Name>ESOP simulated digital IO</Name>
+        <Fmmu>Outputs</Fmmu>
+        <Fmmu>Inputs</Fmmu>
+        <Sm Enable="1" StartAddress="#x1200" DefaultSize="32" ControlByte="#x26">MBoxOut</Sm>
+        <Sm Enable="1" StartAddress="#x1300" DefaultSize="32" ControlByte="#x22">MBoxIn</Sm>
+        <Sm Enable="1">Outputs</Sm>
+        <Sm Enable="1">Inputs</Sm>
+        <Mailbox>
+          <CoE />
+        </Mailbox>
+        <RxPdo Sm="2">
+          <Index>#x1601</Index>
+          <Name>Digital outputs</Name>
+          <Entry>
+            <Index>#x7000</Index>
+            <SubIndex>1</SubIndex>
+            <BitLen>16</BitLen>
+            <Name>Outputs</Name>
+            <DataType>UINT</DataType>
+          </Entry>
+          <Entry>
+            <Index>#x7010</Index>
+            <SubIndex>1</SubIndex>
+            <BitLen>32</BitLen>
+            <Name>Drive position mirror</Name>
+            <DataType>DINT</DataType>
+          </Entry>
+          <Entry>
+            <Index>#x7011</Index>
+            <SubIndex>1</SubIndex>
+            <BitLen>8</BitLen>
+            <Name>Drive position mirror quality</Name>
+            <DataType>USINT</DataType>
+          </Entry>
+        </RxPdo>
+        <TxPdo Sm="3">
+          <Index>#x1A01</Index>
+          <Name>Digital inputs</Name>
+          <Entry>
+            <Index>#x6000</Index>
+            <SubIndex>1</SubIndex>
+            <BitLen>16</BitLen>
+            <Name>Inputs</Name>
+            <DataType>UINT</DataType>
+          </Entry>
+        </TxPdo>
+      </Device>
+    </Devices>
+  </Descriptions>
+</EtherCATInfo>

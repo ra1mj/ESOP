@@ -12,7 +12,7 @@ use crate::registers::{
     ESC_FEATURE_FMMU_BIT_OPERATION, ESC_PORT_COUNT, ESC_STATION_ADDRESS, ESC_TYPE,
     auto_increment_address, fixed_address,
 };
-use crate::rx_index::RxWorkingCounterPolicy;
+use crate::rx_index::{RxAddressPolicy, RxWorkingCounterPolicy};
 use crate::slave::{AlStatus, EthercatState};
 
 const ACTION_PAYLOAD_LEN: usize = 2;
@@ -20,6 +20,7 @@ const ACTION_PAYLOAD_LEN: usize = 2;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScanPhase {
     Idle,
+    CountingBus,
     Probing,
     ReadingBasicInfo,
     AssigningStationAddress,
@@ -68,6 +69,7 @@ pub struct ScanAction {
     pub deadline_ns: u64,
     pub expected_wkc: u16,
     pub working_counter_policy: RxWorkingCounterPolicy,
+    pub address_policy: RxAddressPolicy,
 }
 
 impl ScanAction {
@@ -216,6 +218,7 @@ pub struct ScanController<const MAX_SLAVES: usize> {
     station_address_base: u16,
     next_position: u16,
     record_count: usize,
+    transit_count: u16,
     current: ScanRecord,
     records: [ScanRecord; MAX_SLAVES],
     pending: Option<ScanAction>,
@@ -234,6 +237,7 @@ impl<const MAX_SLAVES: usize> ScanController<MAX_SLAVES> {
             station_address_base,
             next_position: 0,
             record_count: 0,
+            transit_count: 0,
             current: ScanRecord::EMPTY,
             records: [ScanRecord::EMPTY; MAX_SLAVES],
             pending: None,
@@ -280,10 +284,11 @@ impl<const MAX_SLAVES: usize> ScanController<MAX_SLAVES> {
         ) {
             return Err(ScanError::Busy);
         }
-        if MAX_SLAVES == 0 {
+        if MAX_SLAVES == 0 || MAX_SLAVES > u16::MAX as usize {
             return Err(ScanError::CapacityExceeded);
         }
-        self.phase = ScanPhase::Probing;
+        self.phase = ScanPhase::CountingBus;
+        self.transit_count = 0;
         self.generation = generation;
         self.scan_deadline_ns = now_ns.saturating_add(timeout_ns);
         self.request_timeout_ns = request_timeout_ns;
@@ -315,21 +320,24 @@ impl<const MAX_SLAVES: usize> ScanController<MAX_SLAVES> {
 
         let (operation, address, read_len, payload, write_len, position, station_address) =
             match self.phase {
-                ScanPhase::Probing => {
-                    if self.next_position as usize >= MAX_SLAVES {
-                        self.phase = ScanPhase::Complete;
-                        return Ok(None);
-                    }
-                    (
-                        RegisterOperation::AutoIncrementRead,
-                        auto_increment_address(self.next_position, ESC_TYPE),
-                        2,
-                        [0; ACTION_PAYLOAD_LEN],
-                        0,
-                        self.next_position,
-                        self.station_address_base.wrapping_add(self.next_position),
-                    )
-                }
+                ScanPhase::CountingBus => (
+                    RegisterOperation::BroadcastRead,
+                    fixed_address(0, ESC_TYPE),
+                    2,
+                    [0; ACTION_PAYLOAD_LEN],
+                    0,
+                    0,
+                    0,
+                ),
+                ScanPhase::Probing => (
+                    RegisterOperation::AutoIncrementRead,
+                    auto_increment_address(self.next_position, ESC_TYPE),
+                    2,
+                    [0; ACTION_PAYLOAD_LEN],
+                    0,
+                    self.next_position,
+                    self.station_address_base.wrapping_add(self.next_position),
+                ),
                 ScanPhase::ReadingBasicInfo => (
                     RegisterOperation::AutoIncrementRead,
                     auto_increment_address(self.current.position, ESC_TYPE),
@@ -396,14 +404,30 @@ impl<const MAX_SLAVES: usize> ScanController<MAX_SLAVES> {
                 ScanPhase::Idle | ScanPhase::Complete | ScanPhase::Faulted => return Ok(None),
             };
 
-        let working_counter_policy = if matches!(
-            self.phase,
-            ScanPhase::Probing | ScanPhase::ReadingDcSystemTime
-        ) {
-            RxWorkingCounterPolicy::ZeroOrOne
-        } else {
-            RxWorkingCounterPolicy::Exact
-        };
+        let (expected_wkc, working_counter_policy, address_policy) =
+            if self.phase == ScanPhase::CountingBus {
+                (
+                    MAX_SLAVES as u16,
+                    RxWorkingCounterPolicy::UpToExpected,
+                    RxAddressPolicy::BroadcastCount {
+                        max_slaves: MAX_SLAVES as u16,
+                    },
+                )
+            } else {
+                let final_probe =
+                    self.phase == ScanPhase::Probing && self.next_position == self.transit_count;
+                (
+                    if final_probe { 0 } else { 1 },
+                    if self.phase == ScanPhase::ReadingDcSystemTime {
+                        RxWorkingCounterPolicy::ZeroOrOne
+                    } else {
+                        RxWorkingCounterPolicy::Exact
+                    },
+                    RxAddressPolicy::TransitCount {
+                        count: self.transit_count,
+                    },
+                )
+            };
 
         let deadline_ns = now_ns
             .saturating_add(self.request_timeout_ns)
@@ -420,8 +444,9 @@ impl<const MAX_SLAVES: usize> ScanController<MAX_SLAVES> {
             write_payload: payload,
             write_len,
             deadline_ns,
-            expected_wkc: 1,
+            expected_wkc,
             working_counter_policy,
+            address_policy,
         };
         self.next_token = self.next_token.wrapping_add(1).max(1);
         self.next_datagram_index = self.next_datagram_index.wrapping_add(1).max(1);
@@ -434,7 +459,7 @@ impl<const MAX_SLAVES: usize> ScanController<MAX_SLAVES> {
         pool: &mut ControlRequestPool<REQUESTS>,
     ) -> Result<RequestHandle, ControlError> {
         let action = self.pending.ok_or(ControlError::InvalidState)?;
-        pool.acquire_with_response_len_and_wkc_policy(
+        pool.acquire_with_response_policy(
             action.datagram_index,
             action.generation,
             action.address,
@@ -442,7 +467,9 @@ impl<const MAX_SLAVES: usize> ScanController<MAX_SLAVES> {
             action.payload(),
             action.datagram_len(),
             action.deadline_ns,
+            action.expected_wkc,
             action.working_counter_policy,
+            action.address_policy,
         )
     }
 
@@ -471,7 +498,21 @@ impl<const MAX_SLAVES: usize> ScanController<MAX_SLAVES> {
             self.fail(ScanError::UnexpectedWorkingCounter);
             return Err(ScanError::UnexpectedWorkingCounter);
         }
+        if self.phase == ScanPhase::CountingBus {
+            if payload.len() != action.read_len as usize {
+                self.fail(ScanError::PayloadLengthMismatch);
+                return Err(ScanError::PayloadLengthMismatch);
+            }
+            self.transit_count = working_counter;
+            self.pending = None;
+            self.phase = ScanPhase::Probing;
+            return Ok(ScanProgress::Advanced);
+        }
         if self.phase == ScanPhase::Probing && working_counter == 0 {
+            if payload.len() != action.read_len as usize {
+                self.fail(ScanError::PayloadLengthMismatch);
+                return Err(ScanError::PayloadLengthMismatch);
+            }
             self.pending = None;
             self.phase = ScanPhase::Complete;
             return Ok(ScanProgress::Complete);
@@ -576,7 +617,7 @@ impl<const MAX_SLAVES: usize> ScanController<MAX_SLAVES> {
                 self.phase = ScanPhase::Probing;
                 ScanProgress::DeviceDiscovered(index)
             }
-            ScanPhase::Idle | ScanPhase::Complete | ScanPhase::Faulted => {
+            ScanPhase::CountingBus | ScanPhase::Idle | ScanPhase::Complete | ScanPhase::Faulted => {
                 return Err(ScanError::NotStarted);
             }
         };
@@ -593,13 +634,8 @@ impl<const MAX_SLAVES: usize> ScanController<MAX_SLAVES> {
             return Err(ScanError::Timeout);
         }
         self.pending = None;
-        if self.phase == ScanPhase::Probing {
-            self.phase = ScanPhase::Complete;
-            Ok(ScanProgress::Complete)
-        } else {
-            self.fail(ScanError::Timeout);
-            Err(ScanError::Timeout)
-        }
+        self.fail(ScanError::Timeout);
+        Err(ScanError::Timeout)
     }
 
     fn fail(&mut self, error: ScanError) {
@@ -622,6 +658,24 @@ mod tests {
         ESC_AL_STATUS, ESC_CONFIGURATION, ESC_DC_TIME0, ESC_DL_STATUS, ESC_TYPE,
         auto_increment_address, fixed_address,
     };
+
+    fn count_bus<const N: usize>(
+        scan: &mut ScanController<N>,
+        generation: u16,
+        count: u16,
+        now_ns: u64,
+    ) {
+        let count_action = scan.next_action(now_ns).unwrap().unwrap();
+        assert_eq!(count_action.operation, RegisterOperation::BroadcastRead);
+        assert_eq!(
+            count_action.address_policy,
+            RxAddressPolicy::BroadcastCount {
+                max_slaves: N as u16
+            }
+        );
+        scan.accept(count_action.token, generation, &[0; 2], count, now_ns)
+            .unwrap();
+    }
 
     const CLOSED_DL_STATUS: [u8; ESC_DL_STATUS_LEN as usize] = 0x5500u16.to_le_bytes();
 
@@ -721,6 +775,7 @@ mod tests {
     fn scan_progresses_through_probe_basic_address_and_al_status() {
         let mut scan = ScanController::<2>::new(0x1000);
         scan.start(7, 0, 1_000, 100).unwrap();
+        count_bus(&mut scan, 7, 1, 0);
 
         let probe = scan.next_action(1).unwrap().unwrap();
         assert_eq!(probe.operation, RegisterOperation::AutoIncrementRead);
@@ -754,8 +809,7 @@ mod tests {
 
         let next_probe = scan.next_action(13).unwrap().unwrap();
         assert_eq!(next_probe.position, 1);
-        scan.timeout(next_probe.token, next_probe.deadline_ns)
-            .unwrap();
+        scan.accept(next_probe.token, 7, &[0; 2], 0, 14).unwrap();
         assert_eq!(scan.phase(), ScanPhase::Complete);
         assert_eq!(scan.len(), 1);
         assert!(scan.records()[0].device_emulation);
@@ -783,6 +837,7 @@ mod tests {
     fn esc_configuration_requires_an_exact_response() {
         let mut scan = ScanController::<1>::new(0x1000);
         scan.start(3, 0, 1_000, 100).unwrap();
+        count_bus(&mut scan, 3, 1, 0);
         let probe = scan.next_action(1).unwrap().unwrap();
         scan.accept(probe.token, 3, &[1, 0], 1, 2).unwrap();
         let basic = scan.next_action(3).unwrap().unwrap();
@@ -803,6 +858,7 @@ mod tests {
     fn esc_configuration_timeout_faults_instead_of_assuming_a_policy() {
         let mut scan = ScanController::<1>::new(0x1000);
         scan.start(4, 0, 1_000, 10).unwrap();
+        count_bus(&mut scan, 4, 1, 0);
         let probe = scan.next_action(1).unwrap().unwrap();
         scan.accept(probe.token, 4, &[1, 0], 1, 2).unwrap();
         let basic = scan.next_action(3).unwrap().unwrap();
@@ -824,9 +880,10 @@ mod tests {
     fn zero_wkc_probe_finishes_without_creating_a_record() {
         let mut scan = ScanController::<4>::new(0x1000);
         scan.start(2, 0, 1_000, 100).unwrap();
+        count_bus(&mut scan, 2, 0, 0);
         let action = scan.next_action(1).unwrap().unwrap();
         assert_eq!(
-            scan.accept(action.token, 2, &[], 0, 2).unwrap(),
+            scan.accept(action.token, 2, &[0; 2], 0, 2).unwrap(),
             ScanProgress::Complete
         );
         assert!(scan.is_empty());
@@ -837,6 +894,7 @@ mod tests {
     fn non_probe_timeout_faults_and_cannot_auto_complete() {
         let mut scan = ScanController::<1>::new(0x1000);
         scan.start(1, 0, 1_000, 10).unwrap();
+        count_bus(&mut scan, 1, 1, 0);
         let probe = scan.next_action(1).unwrap().unwrap();
         scan.accept(probe.token, 1, &[1, 0], 1, 2).unwrap();
         let basic = scan.next_action(3).unwrap().unwrap();
@@ -852,6 +910,7 @@ mod tests {
     fn dc_system_time_probe_decodes_32_bit_reference_capability() {
         let mut scan = ScanController::<1>::new(0x1000);
         scan.start(5, 0, 1_000, 100).unwrap();
+        count_bus(&mut scan, 5, 1, 0);
         let dc = advance_to_dc_probe(&mut scan, 5, ESC_FEATURE_DC_SUPPORTED);
         assert_eq!(scan.phase(), ScanPhase::ReadingDcSystemTime);
         assert_eq!(dc.address, fixed_address(0x1000, ESC_DC_SYSTEM_TIME));
@@ -879,6 +938,7 @@ mod tests {
     fn dc_system_time_probe_decodes_64_bit_range() {
         let mut scan = ScanController::<1>::new(0x1000);
         scan.start(6, 0, 1_000, 100).unwrap();
+        count_bus(&mut scan, 6, 1, 0);
         let features = ESC_FEATURE_DC_SUPPORTED | ESC_FEATURE_DC_64_BIT;
         let dc = advance_to_dc_probe(&mut scan, 6, features);
         assert_eq!(dc.read_len, 8);
@@ -893,6 +953,7 @@ mod tests {
     fn zero_wkc_dc_probe_is_delay_only_and_continues() {
         let mut scan = ScanController::<1>::new(0x1000);
         scan.start(7, 0, 1_000, 100).unwrap();
+        count_bus(&mut scan, 7, 1, 0);
         let dc = advance_to_dc_probe(&mut scan, 7, ESC_FEATURE_DC_SUPPORTED);
         assert_eq!(
             scan.accept(dc.token, 7, &[], 0, 8),
@@ -912,6 +973,7 @@ mod tests {
     fn dc_probe_rejects_invalid_wkc_short_payload_and_timeout() {
         let mut invalid_wkc = ScanController::<1>::new(0x1000);
         invalid_wkc.start(8, 0, 1_000, 100).unwrap();
+        count_bus(&mut invalid_wkc, 8, 1, 0);
         let action = advance_to_dc_probe(&mut invalid_wkc, 8, ESC_FEATURE_DC_SUPPORTED);
         assert_eq!(
             invalid_wkc.accept(action.token, 8, &[0; 4], 2, 8),
@@ -920,6 +982,7 @@ mod tests {
 
         let mut short = ScanController::<1>::new(0x1000);
         short.start(9, 0, 1_000, 100).unwrap();
+        count_bus(&mut short, 9, 1, 0);
         let action = advance_to_dc_probe(&mut short, 9, ESC_FEATURE_DC_SUPPORTED);
         assert_eq!(
             short.accept(action.token, 9, &[0; 3], 1, 8),
@@ -928,6 +991,7 @@ mod tests {
 
         let mut timeout = ScanController::<1>::new(0x1000);
         timeout.start(10, 0, 1_000, 100).unwrap();
+        count_bus(&mut timeout, 10, 1, 0);
         let action = advance_to_dc_probe(&mut timeout, 10, ESC_FEATURE_DC_SUPPORTED);
         assert_eq!(
             timeout.timeout(action.token, action.deadline_ns),
@@ -940,6 +1004,7 @@ mod tests {
     fn restart_clears_published_dc_evidence() {
         let mut scan = ScanController::<1>::new(0x1000);
         scan.start(11, 0, 1_000, 100).unwrap();
+        count_bus(&mut scan, 11, 1, 0);
         let dc = advance_to_dc_probe(&mut scan, 11, ESC_FEATURE_DC_SUPPORTED);
         scan.accept(dc.token, 11, &[1, 0, 0, 0], 1, 8).unwrap();
         accept_receive_times(&mut scan, 11, [1, 2, 3, 4], 9);
@@ -950,10 +1015,13 @@ mod tests {
         scan.accept(status.token, 11, &[1, 0, 0, 0, 0, 0], 1, 16)
             .unwrap();
         assert!(scan.records()[0].dc.can_be_reference_clock());
-        assert_eq!(scan.next_action(17).unwrap(), None);
+        let end = scan.next_action(17).unwrap().unwrap();
+        assert_eq!(end.position, 1);
+        scan.accept(end.token, 11, &[0; 2], 0, 18).unwrap();
         assert_eq!(scan.phase(), ScanPhase::Complete);
 
         scan.start(12, 20, 1_000, 100).unwrap();
+        count_bus(&mut scan, 12, 1, 20);
         assert!(scan.records().is_empty());
         assert_eq!(scan.current.dc, ScanDcCapabilities::NONE);
     }
@@ -962,6 +1030,7 @@ mod tests {
     fn dl_status_decodes_all_port_flags() {
         let mut scan = ScanController::<1>::new(0x1000);
         scan.start(12, 0, 1_000, 100).unwrap();
+        count_bus(&mut scan, 12, 1, 0);
         let probe = scan.next_action(1).unwrap().unwrap();
         scan.accept(probe.token, 12, &[1, 0], 1, 2).unwrap();
         let basic = scan.next_action(3).unwrap().unwrap();
@@ -1003,6 +1072,7 @@ mod tests {
     fn receive_time_and_dl_reads_fail_closed() {
         let mut short = ScanController::<1>::new(0x1000);
         short.start(13, 0, 1_000, 100).unwrap();
+        count_bus(&mut short, 13, 1, 0);
         let dc = advance_to_dc_probe(&mut short, 13, ESC_FEATURE_DC_SUPPORTED);
         short.accept(dc.token, 13, &[0; 4], 1, 8).unwrap();
         let times = short.next_action(9).unwrap().unwrap();
@@ -1014,6 +1084,7 @@ mod tests {
 
         let mut invalid_wkc = ScanController::<1>::new(0x1000);
         invalid_wkc.start(14, 0, 1_000, 100).unwrap();
+        count_bus(&mut invalid_wkc, 14, 1, 0);
         let dc = advance_to_dc_probe(&mut invalid_wkc, 14, ESC_FEATURE_DC_SUPPORTED);
         invalid_wkc.accept(dc.token, 14, &[0; 4], 1, 8).unwrap();
         let times = invalid_wkc.next_action(9).unwrap().unwrap();
@@ -1024,6 +1095,7 @@ mod tests {
 
         let mut times_timeout = ScanController::<1>::new(0x1000);
         times_timeout.start(15, 0, 1_000, 10).unwrap();
+        count_bus(&mut times_timeout, 15, 1, 0);
         let dc = advance_to_dc_probe(&mut times_timeout, 15, ESC_FEATURE_DC_SUPPORTED);
         times_timeout.accept(dc.token, 15, &[0; 4], 1, 8).unwrap();
         let times = times_timeout.next_action(9).unwrap().unwrap();
@@ -1034,6 +1106,7 @@ mod tests {
 
         let mut dl_short = ScanController::<1>::new(0x1000);
         dl_short.start(16, 0, 1_000, 100).unwrap();
+        count_bus(&mut dl_short, 16, 1, 0);
         let dl = advance_to_dl_status(&mut dl_short, 16);
         assert_eq!(
             dl_short.accept(dl.token, 16, &[0], 1, 8),
@@ -1042,6 +1115,7 @@ mod tests {
 
         let mut dl_wkc = ScanController::<1>::new(0x1000);
         dl_wkc.start(17, 0, 1_000, 100).unwrap();
+        count_bus(&mut dl_wkc, 17, 1, 0);
         let dl = advance_to_dl_status(&mut dl_wkc, 17);
         assert_eq!(
             dl_wkc.accept(dl.token, 17, &[0; 2], 0, 8),
@@ -1050,6 +1124,7 @@ mod tests {
 
         let mut dl_timeout = ScanController::<1>::new(0x1000);
         dl_timeout.start(18, 0, 1_000, 10).unwrap();
+        count_bus(&mut dl_timeout, 18, 1, 0);
         let dl = advance_to_dl_status(&mut dl_timeout, 18);
         assert_eq!(
             dl_timeout.timeout(dl.token, dl.deadline_ns),

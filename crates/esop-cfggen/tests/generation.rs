@@ -68,6 +68,195 @@ fn artifact_bytes(output: &Path) -> Vec<Vec<u8>> {
 }
 
 #[test]
+fn runtime_sdo_capacities_are_defaulted_hashed_and_reported_independently_of_mailboxes() {
+    let fixture = Fixture::new();
+    let first = fixture.output("defaults");
+    let summary = generate(&fixture.product, &first).unwrap();
+    let product: Value =
+        serde_json::from_slice(&fs::read(first.join("product_config.json")).unwrap()).unwrap();
+    assert_eq!(product["capacities"]["runtime_sdo_requests"], 8);
+    assert_eq!(product["capacities"]["max_sdo_object_bytes"], 1024);
+    let resources: Value =
+        serde_json::from_slice(&fs::read(first.join("robot_build_input.json")).unwrap()).unwrap();
+    assert_eq!(resources["resources"]["runtime_sdo_requests"], 8);
+    assert_eq!(resources["resources"]["max_sdo_object_bytes"], 1024);
+    assert_eq!(resources["resources"]["sdo_object_storage_bytes"], 8192);
+    assert!(
+        fs::read_to_string(first.join("esop_product_config.rs"))
+            .unwrap()
+            .contains("pub const PRODUCT_RUNTIME_SDO_REQUESTS: usize = 8;")
+    );
+    assert!(
+        fs::read_to_string(first.join("esop_product_config.rs"))
+            .unwrap()
+            .contains("pub const PRODUCT_MAX_SDO_OBJECT_BYTES: usize = 1024;")
+    );
+    assert!(
+        fs::read_to_string(first.join("esop_product_config.h"))
+            .unwrap()
+            .contains("#define ESOP_RUNTIME_SDO_REQUESTS 8u")
+    );
+    assert!(
+        fs::read_to_string(first.join("esop_product_config.h"))
+            .unwrap()
+            .contains("#define ESOP_MAX_SDO_OBJECT_BYTES 1024u")
+    );
+
+    fixture.edit_product(|product| {
+        product["capacities"]["runtime_sdo_requests"] = 8.into();
+        product["capacities"]["max_sdo_object_bytes"] = 1024.into();
+    });
+    let explicit = fixture.output("explicit-defaults");
+    assert_eq!(
+        generate(&fixture.product, &explicit).unwrap().config_sha256,
+        summary.config_sha256
+    );
+    assert_eq!(artifact_bytes(&explicit), artifact_bytes(&first));
+
+    fixture.edit_product(|product| {
+        product["capacities"]["runtime_sdo_requests"] = 16.into();
+        product["capacities"]["max_sdo_object_bytes"] = 2048.into();
+    });
+    let expanded = fixture.output("expanded");
+    assert_ne!(
+        generate(&fixture.product, &expanded).unwrap().config_sha256,
+        summary.config_sha256
+    );
+    let expanded_product: Value =
+        serde_json::from_slice(&fs::read(expanded.join("product_config.json")).unwrap()).unwrap();
+    let expanded: Value =
+        serde_json::from_slice(&fs::read(expanded.join("robot_build_input.json")).unwrap())
+            .unwrap();
+    assert_eq!(expanded["resources"]["sdo_object_storage_bytes"], 32768);
+    // Declaring a larger object buffer never inflates the physical mailbox.
+    assert_eq!(
+        expanded_product["slaves"][0]["mailbox"]["send_capacity"],
+        64
+    );
+}
+
+#[test]
+fn runtime_sdo_capacities_reject_zero_excess_and_unknown_fields_before_publication() {
+    for (field, value) in [
+        ("runtime_sdo_requests", 0),
+        ("runtime_sdo_requests", 65),
+        ("max_sdo_object_bytes", 0),
+        ("max_sdo_object_bytes", 65537),
+    ] {
+        let fixture = Fixture::new();
+        fixture.edit_product(|product| product["capacities"][field] = value.into());
+        let output = fixture.output("invalid");
+        assert!(
+            generate(&fixture.product, &output)
+                .unwrap_err()
+                .to_string()
+                .contains("runtime_sdo_requests must be")
+        );
+        assert!(!output.exists());
+    }
+    let fixture = Fixture::new();
+    fixture.edit_product(|product| product["capacities"]["runtime_sdo_request"] = 8.into());
+    assert!(
+        generate(&fixture.product, &fixture.output("unknown"))
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field")
+    );
+
+    for (requests, bytes) in [(1, 1), (64, 65536)] {
+        let fixture = Fixture::new();
+        fixture.edit_product(|product| {
+            product["capacities"]["runtime_sdo_requests"] = requests.into();
+            product["capacities"]["max_sdo_object_bytes"] = bytes.into();
+        });
+        generate(&fixture.product, &fixture.output("bounded")).unwrap();
+    }
+}
+
+#[test]
+fn generated_nonstandard_mailbox_sm_indices_bind_the_transport_and_repeat_registers() {
+    let fixture = Fixture::new();
+    fixture.edit_esi(|xml| {
+        let outgoing = "<Sm Enable=\"1\" StartAddress=\"#x1000\" DefaultSize=\"64\" ControlByte=\"#x26\">MBoxOut</Sm>";
+        let incoming = "<Sm Enable=\"1\" StartAddress=\"#x1100\" DefaultSize=\"64\" ControlByte=\"#x22\">MBoxIn</Sm>";
+        xml.replace(&format!("{outgoing}\n        {incoming}"), &format!("{incoming}\n        {outgoing}"))
+    });
+    let output = fixture.output("nonstandard");
+    generate(&fixture.product, &output).unwrap();
+    let rust = fs::read_to_string(output.join("esop_product_config.rs")).unwrap();
+    assert!(rust.contains("MailboxConfig::new(0x1000, 64, 0x1100, 64).with_sync_managers(1, 0).with_status_bit(MailboxStatusBit::sync_manager_mailbox_full(0))"));
+    let product: Value =
+        serde_json::from_slice(&fs::read(output.join("product_config.json")).unwrap()).unwrap();
+    assert_eq!(product["slaves"][0]["mailbox"]["send_sync_manager"], 1);
+    assert_eq!(product["slaves"][0]["mailbox"]["receive_sync_manager"], 0);
+    assert_eq!(
+        product["slaves"][0]["mailbox"]["status_bit"]["address"],
+        "0x0805"
+    );
+}
+
+#[test]
+fn checked_in_load_products_cover_the_actual_prd_q1_q2_q4_topologies() {
+    let fixture = Fixture::new();
+    for (name, axes, slaves, domains, period, payload_limit, payload_bytes) in [
+        ("q1", 32, 32, 1, 1_000_000, 1024, 904),
+        ("q2", 16, 17, 2, 500_000, 512, 459),
+        ("q4", 16, 17, 2, 1_000_000, 768, 459),
+    ] {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/examples/sim-r0-r2-load")
+            .join(name);
+        let output = fixture.output(name);
+        generate(&root.join("product.json"), &output).unwrap();
+        assert!(
+            artifact_bytes(&output) == artifact_bytes(&root.join("expected")),
+            "{name} generated artifacts drifted"
+        );
+        let product: Value =
+            serde_json::from_slice(&fs::read(output.join("product_config.json")).unwrap()).unwrap();
+        let input: Value =
+            serde_json::from_slice(&fs::read(output.join("robot_build_input.json")).unwrap())
+                .unwrap();
+        assert_eq!(product["axes"].as_array().unwrap().len(), axes);
+        assert_eq!(product["slaves"].as_array().unwrap().len(), slaves);
+        assert_eq!(product["domains"].as_array().unwrap().len(), domains);
+        assert_eq!(product["cycle"]["base_period_ns"], period);
+        assert_eq!(input["process_data"]["pdo_bytes_per_cycle"], payload_bytes);
+        assert!(
+            input["process_data"]["pdo_bytes_per_cycle"]
+                .as_u64()
+                .unwrap()
+                <= payload_limit
+        );
+        assert_eq!(input["resources"]["runtime_sdo_requests"], 8);
+        assert_eq!(input["resources"]["max_sdo_object_bytes"], 1024);
+        assert_eq!(input["resources"]["sdo_object_storage_bytes"], 8192);
+        assert_eq!(input["qualification"]["passed"], false);
+        assert!(product["slave_copies"].as_array().unwrap().is_empty());
+        assert_eq!(
+            product["slaves"][0]["dc_sync_timing"]["cycle_time0_ns"],
+            period
+        );
+        assert_eq!(product["slaves"][0]["sii_dc_mode"]["cycle_time0_ns"], 0);
+        assert_eq!(product["slaves"][0]["sii_dc_mode"]["sync0_cycle_factor"], 1);
+        if name == "q1" {
+            assert_eq!(product["slaves"][0]["product_code"], "0x00004023");
+            assert!(product["pdo_entries"].as_array().unwrap().iter().any(
+                |entry| entry["slave_position"] == 0
+                    && entry["object_index"] == "0x7000"
+                    && entry["subindex"] == 1
+                    && entry["bit_length"] == 16
+            ));
+        } else {
+            assert_eq!(product["slaves"][16]["product_code"], "0x00007010");
+            assert_eq!(product["slaves"][16]["serial"], "0x00000011");
+            assert_eq!(product["slaves"][16]["requesting_id"], "0x0051");
+            assert_eq!(product["domains"][1]["process_image_offset"], 1024);
+        }
+    }
+}
+
+#[test]
 fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     let fixture = Fixture::new();
     let first = fixture.output("first");
@@ -79,7 +268,7 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
         serde_json::from_slice(&fs::read(first.join("robot_build_input.json")).unwrap()).unwrap();
     assert_eq!(build_input["process_data"]["pdo_bytes_per_cycle"], 42);
     assert_eq!(build_input["process_data"]["frame_count"], 2);
-    assert_eq!(build_input["process_data"]["expected_wkc"], 8);
+    assert_eq!(build_input["process_data"]["expected_wkc"], 6);
     assert_eq!(build_input["process_data"]["copy_bytes_per_cycle"], 4);
     assert_eq!(build_input["process_data"]["wire_bytes_per_cycle"], 181);
     assert_eq!(
@@ -262,10 +451,10 @@ fn example_generation_is_deterministic_across_json_and_xml_formatting() {
     assert_eq!(product["slaves"][2]["sii_fmmu_count"], 2);
     assert_eq!(product["domains"][0]["process_image_bytes"], 33);
     assert_eq!(product["domains"][0]["input_bytes"], 19);
-    assert_eq!(product["domains"][0]["expected_wkc"], 6);
-    assert_eq!(product["domains"][0]["input_expected_wkc"], 4);
+    assert_eq!(product["domains"][0]["expected_wkc"], 4);
+    assert_eq!(product["domains"][0]["input_expected_wkc"], 2);
     assert_eq!(product["datagrams"][1]["payload_len"], 19);
-    assert_eq!(product["datagrams"][1]["expected_wkc"], 4);
+    assert_eq!(product["datagrams"][1]["expected_wkc"], 2);
     assert_eq!(
         product["slaves"][0]["mapped_mailbox_status"]["domain_bit_offset"],
         256

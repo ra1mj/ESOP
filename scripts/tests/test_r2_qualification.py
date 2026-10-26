@@ -112,6 +112,12 @@ class R2QualificationTests(unittest.TestCase):
                     "devices": self.devices(8),
                     "qualification": {"passed": True, "failures": []},
                 },
+                {
+                    "scenario": "Q4", "period_ns": 1_000_000, "slave_count": 3,
+                    "axis_count": 16, "io_channels": 8, "pdo_bytes": 768,
+                    "frame_count": 2, "dc_enabled": True, "devices": self.devices(8),
+                    "qualification": {"passed": True, "failures": []},
+                },
             ],
             "qualification": {"passed": True, "failures": []},
         }
@@ -246,7 +252,7 @@ class R2QualificationTests(unittest.TestCase):
         period_ns = profile["period_ns"]
         cycles = 1_800 * 1_000_000_000 // period_ns
         stats = {"p50": 100, "p99": 200, "p999": 300, "max": 400}
-        return {
+        report = {
             "schema_version": "esop.performance.v1",
             "software": {
                 "esop_commit": self.commit,
@@ -321,6 +327,12 @@ class R2QualificationTests(unittest.TestCase):
             "qualification": {"scenario": scenario, "passed": True, "failures": []},
         }
 
+        if scenario == "Q4":
+            report["workload"].update({"concurrent_sdo_requests":8,
+                "p99_regression_percent":0,"baseline_report_sha256":"d"*64,
+                "baseline_fast_path_p99_ns":200})
+        return report
+
     @staticmethod
     def axis_policy(index: int) -> dict:
         variants = (
@@ -355,6 +367,16 @@ class R2QualificationTests(unittest.TestCase):
         build = self.write_json("build_report.json", self.build_report())
         q1 = self.write_json("q1.json", self.performance_report("Q1", topology_hash))
         q2 = self.write_json("q2.json", self.performance_report("Q2", topology_hash))
+        baseline_report = self.performance_report("Q4", topology_hash)
+        baseline_report["workload"].update({"concurrent_sdo_requests":0,
+            "p99_regression_percent":None,"baseline_report_sha256":None,
+            "baseline_fast_path_p99_ns":None})
+        baseline_report["qualification"] = {"scenario":"Q4-unloaded","passed":False,
+            "failures":["unloaded comparison measurement; no loaded Q4 claim"]}
+        q4_baseline = self.write_json("q4-baseline.json",baseline_report)
+        q4_report = self.performance_report("Q4",topology_hash)
+        q4_report["workload"]["baseline_report_sha256"] = q4_baseline["sha256"]
+        q4 = self.write_json("q4.json",q4_report)
         drive_a = self.write_text("drive-a.trace", "drive-a HIL")
         drive_b = self.write_text("drive-b.trace", "drive-b HIL")
         io = self.write_text("io.trace", "io HIL")
@@ -382,6 +404,7 @@ class R2QualificationTests(unittest.TestCase):
                 "performance_reports": [
                     {"scenario": "Q1", "artifact": q1},
                     {"scenario": "Q2", "artifact": q2},
+                    {"scenario": "Q4", "artifact": q4, "baseline_artifact":q4_baseline},
                 ],
                 "hil_fault_matrix": {"passed": True, "artifact": fault},
             },
@@ -581,6 +604,41 @@ class R2QualificationTests(unittest.TestCase):
             "failures": ["release qualification is incomplete"],
         }
         self.assert_rejected(manifest, "immutable non-placeholder identity")
+
+    def test_qualified_claim_requires_q4_in_both_topology_and_performance(self):
+        manifest = self.qualified_manifest()
+        manifest["artifacts"]["performance_reports"] = manifest["artifacts"]["performance_reports"][:2]
+        self.assert_rejected(manifest, "Q1, Q2 and Q4 performance")
+        manifest = self.qualified_manifest()
+        reference = manifest["artifacts"]["hil_topology"]
+        topology = self.topology()
+        topology["profiles"] = topology["profiles"][:2]
+        self.replace_json_artifact(reference,"topology-without-q4.json",topology)
+        self.assert_rejected(manifest,"Q1, Q2 and Q4 profiles")
+
+    def test_q4_cannot_forge_or_omit_unloaded_baseline_artifact(self):
+        manifest = self.qualified_manifest()
+        manifest["artifacts"]["performance_reports"][2].pop("baseline_artifact")
+        self.assert_rejected(manifest,"baseline_artifact")
+        manifest = self.qualified_manifest()
+        entry = manifest["artifacts"]["performance_reports"][2]
+        baseline = json.loads((self.root/entry["baseline_artifact"]["path"]).read_text())
+        baseline["measurement"]["source"] = "sim"
+        self.replace_json_artifact(entry["baseline_artifact"],"sim-baseline.json",baseline)
+        self.assert_rejected(manifest,"Q4 unloaded baseline")
+
+    def test_require_qualified_cli_rejects_valid_development_baseline(self):
+        command = [sys.executable,str(VALIDATOR),str(ROOT/"qualification/r2_qualification.json"),
+            "--root",str(ROOT),"--require-qualified"]
+        result = subprocess.run(command,capture_output=True,text=True,check=False)
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn("--require-qualified",result.stderr)
+        manifest = self.qualified_manifest()
+        manifest_path = self.root/"release.json"
+        manifest_path.write_text(json.dumps(manifest),encoding="utf-8")
+        result = subprocess.run([sys.executable,str(VALIDATOR),str(manifest_path),"--root",str(self.root),
+            "--require-qualified","--expected-commit",self.commit],capture_output=True,text=True,check=False)
+        self.assertEqual(result.returncode,0,result.stderr)
 
     def test_cli_writes_normalized_result_and_rejects_forged_pass(self):
         output = self.root / "result.json"

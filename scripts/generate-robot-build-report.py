@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Generate the evidence envelope for one ESOP workspace build."""
+from __future__ import annotations
 
 import argparse
 import hashlib
@@ -13,6 +14,8 @@ from datetime import datetime, timezone
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from resource_contracts import SDO_RESOURCE_FIELDS, validate_sdo_resources
 PRODUCT_INPUT_SCHEMA = "esop.product-build-input.v1"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX_U16 = re.compile(r"^0x[0-9a-f]{4}$")
@@ -365,9 +368,14 @@ def validate_product_input(value: object) -> dict:
             "product input cycle_budget.qualification must be generated_not_measured"
         )
 
+    resource_value = product["resources"]
+    if not isinstance(resource_value, dict):
+        raise ValueError("product input resources must be an object")
+    validate_sdo_resources(resource_value, "product input resources")
     resources = require_exact_object(
-        product["resources"],
-        {"procbuf_bytes", "dma_bytes", "rt_stack_peak_bytes", "text_rodata_bytes"},
+        resource_value,
+        {"procbuf_bytes", "dma_bytes", "rt_stack_peak_bytes", "text_rodata_bytes"}
+        | SDO_RESOURCE_FIELDS.intersection(resource_value),
         "product input resources",
     )
     if require_nonnegative_int(

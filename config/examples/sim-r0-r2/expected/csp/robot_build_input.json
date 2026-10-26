@@ -1,0 +1,198 @@
+{
+  "config_sha256": "4a5c39a38972acd776366b057a625aa8ec57c31111bdbe95953e4ca540e2f0d8",
+  "cycle_budget": {
+    "deadline_ns": 800000,
+    "period_ns": 1000000,
+    "qualification": "generated_not_measured"
+  },
+  "devices": {
+    "coe_complete_access": [
+      {
+        "enabled": true,
+        "name": "drive_left",
+        "position": 0,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "drive_right",
+        "position": 1,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "name": "io_block",
+        "position": 2,
+        "supported": false
+      }
+    ],
+    "coe_sdo_information": [
+      {
+        "enabled": true,
+        "expectations": [
+          {
+            "bit_length": 16,
+            "data_type": "0x0006",
+            "index": "0x603f",
+            "required_access": 9,
+            "slave_position": 0,
+            "subindex": 0
+          },
+          {
+            "bit_length": 16,
+            "data_type": "0x0006",
+            "index": "0x6040",
+            "required_access": 6,
+            "slave_position": 0,
+            "subindex": 0
+          },
+          {
+            "bit_length": 16,
+            "data_type": "0x0006",
+            "index": "0x6041",
+            "required_access": 9,
+            "slave_position": 0,
+            "subindex": 0
+          },
+          {
+            "bit_length": 8,
+            "data_type": "0x0002",
+            "index": "0x6060",
+            "required_access": 6,
+            "slave_position": 0,
+            "subindex": 0
+          },
+          {
+            "bit_length": 8,
+            "data_type": "0x0002",
+            "index": "0x6061",
+            "required_access": 9,
+            "slave_position": 0,
+            "subindex": 0
+          },
+          {
+            "bit_length": 32,
+            "data_type": "0x0004",
+            "index": "0x6064",
+            "required_access": 9,
+            "slave_position": 0,
+            "subindex": 0
+          },
+          {
+            "bit_length": 32,
+            "data_type": "0x0004",
+            "index": "0x606c",
+            "required_access": 9,
+            "slave_position": 0,
+            "subindex": 0
+          },
+          {
+            "bit_length": 16,
+            "data_type": "0x0003",
+            "index": "0x6071",
+            "required_access": 6,
+            "slave_position": 0,
+            "subindex": 0
+          },
+          {
+            "bit_length": 16,
+            "data_type": "0x0003",
+            "index": "0x6077",
+            "required_access": 9,
+            "slave_position": 0,
+            "subindex": 0
+          },
+          {
+            "bit_length": 32,
+            "data_type": "0x0004",
+            "index": "0x607a",
+            "required_access": 6,
+            "slave_position": 0,
+            "subindex": 0
+          },
+          {
+            "bit_length": 32,
+            "data_type": "0x0004",
+            "index": "0x60ff",
+            "required_access": 6,
+            "slave_position": 0,
+            "subindex": 0
+          }
+        ],
+        "name": "drive_left",
+        "position": 0,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "drive_right",
+        "position": 1,
+        "supported": true
+      },
+      {
+        "enabled": false,
+        "expectations": [],
+        "name": "io_block",
+        "position": 2,
+        "supported": false
+      }
+    ],
+    "declared_axes": 2,
+    "declared_io_channels": 16,
+    "declared_slaves": 3,
+    "requesting_id": [
+      {
+        "expected": "0x0041",
+        "name": "drive_left",
+        "position": 0,
+        "supported": true
+      },
+      {
+        "expected": "0x0042",
+        "name": "drive_right",
+        "position": 1,
+        "supported": true
+      },
+      {
+        "expected": null,
+        "name": "io_block",
+        "position": 2,
+        "supported": false
+      }
+    ],
+    "source": "esop-cfggen validated product manifest and ESI subset"
+  },
+  "platform": {
+    "board": "host-simulator",
+    "cache_policy": "host managed; target cache qualification pending",
+    "port": "deterministic-linux-simulator",
+    "rtos_or_kernel": "host Linux; not target qualified",
+    "soc": "generic-x86_64"
+  },
+  "process_data": {
+    "copy_bytes_per_cycle": 4,
+    "expected_wkc": 6,
+    "frame_count": 2,
+    "pdo_bytes_per_cycle": 66,
+    "wire_bytes_per_cycle": 205
+  },
+  "qualification": {
+    "failures": [
+      "generated topology is not physical HIL evidence",
+      "cycle deadline and target resource use are not measured"
+    ],
+    "passed": false,
+    "scenario": "generated-simulator-product"
+  },
+  "resources": {
+    "dma_bytes": null,
+    "max_sdo_object_bytes": 1024,
+    "procbuf_bytes": 4144,
+    "rt_stack_peak_bytes": null,
+    "runtime_sdo_requests": 8,
+    "sdo_object_storage_bytes": 8192,
+    "text_rodata_bytes": null
+  },
+  "schema_version": "esop.product-build-input.v1"
+}

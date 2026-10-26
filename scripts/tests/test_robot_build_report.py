@@ -148,6 +148,36 @@ def product_input() -> dict:
 
 
 class RobotBuildReportTests(unittest.TestCase):
+    def test_sdo_capacity_evidence_is_bounded_and_projected_without_qualification(self):
+        product = product_input()
+        expected = {
+            "runtime_sdo_requests": 8,
+            "max_sdo_object_bytes": 1024,
+            "sdo_object_storage_bytes": 8192,
+        }
+        product["resources"].update(expected)
+        report = build_report(product)
+        validate_report(report)
+        self.assertFalse(report["qualification"]["passed"])
+        for key, value in expected.items():
+            self.assertEqual(report["resources"][key], value)
+        for key, value in [
+            ("runtime_sdo_requests", 0), ("runtime_sdo_requests", 65),
+            ("runtime_sdo_requests", True), ("max_sdo_object_bytes", 0),
+            ("max_sdo_object_bytes", 65537), ("sdo_object_storage_bytes", 8193),
+        ]:
+            broken = copy.deepcopy(product)
+            broken["resources"][key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                validate_product_input(broken)
+        partial = product_input()
+        partial["resources"]["runtime_sdo_requests"] = 8
+        with self.assertRaises(ValueError):
+            validate_product_input(partial)
+        report["resources"]["sdo_object_storage_bytes"] = 1
+        with self.assertRaises(ValueError):
+            validate_report(report)
+
     def assert_product_rejected(self, value, reason):
         with self.assertRaisesRegex(ValueError, reason):
             validate_product_input(value)

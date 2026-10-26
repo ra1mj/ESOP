@@ -1,0 +1,18 @@
+[package]
+name = "esop-ethercat-sim"
+version = "0.1.0"
+description = "Independent allocation-free EtherCAT ESC and virtual bus model"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+esop-ethercat-core = { path = "../esop-ethercat-core" }
+
+[features]
+default = []
+std = []
+
+[dev-dependencies]
+esop-product-config = { path = "../esop-product-config" }
+esop-lifecycle-guard = { path = "../esop-lifecycle-guard", features = ["ethercat"] }

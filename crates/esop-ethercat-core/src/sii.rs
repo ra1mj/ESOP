@@ -1414,7 +1414,10 @@ mod tests {
     fn read_word(reader: &mut SiiIdentityReader, value: u16, now_ns: u64) {
         let address = reader.next_action(now_ns).unwrap().unwrap();
         assert_eq!(address.operation, RegisterOperation::Write);
-        assert_eq!(address.address as u16, ESC_EEPROM_ADDRESS);
+        assert_eq!(
+            crate::register_from_address(address.address),
+            ESC_EEPROM_ADDRESS
+        );
         accept_write(reader, address, now_ns + 1);
 
         let issue = reader.next_action(now_ns + 2).unwrap().unwrap();

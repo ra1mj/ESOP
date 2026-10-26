@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Validate the fail-closed ESOP R2 product qualification evidence set."""
+from __future__ import annotations
 
 import argparse
 import hashlib
@@ -42,6 +43,13 @@ SCENARIOS = {
         "axis_count": 16,
         "max_slaves": 24,
         "max_pdo_bytes": 512,
+        "max_frames": None,
+    },
+    "Q4": {
+        "period_ns": 1_000_000,
+        "axis_count": 16,
+        "max_slaves": 32,
+        "max_pdo_bytes": 768,
         "max_frames": None,
     },
 }
@@ -257,7 +265,7 @@ def validate_topology(topology: dict, strict: bool) -> dict[str, dict]:
         if is_placeholder(topology_id) or is_placeholder(product_profile):
             fail("a qualified topology requires non-placeholder identity")
         if set(profiles_by_scenario) != set(SCENARIOS):
-            fail("a qualified topology requires exactly Q1 and Q2 profiles")
+            fail("a qualified topology requires exactly Q1, Q2 and Q4 profiles")
     for scenario, profile in profiles_by_scenario.items():
         if not (strict or profile["passed"]):
             continue
@@ -539,6 +547,24 @@ def validate_manifest(
         assert report_path is not None
         report = load_json(report_path, f"{scenario} performance report")
         PERFORMANCE_VALIDATE(report)
+        if scenario == "Q4" and (passed or report["qualification"]["passed"]):
+            baseline_path = resolver.resolve(require(entry, "baseline_artifact", path),
+                f"{path}.baseline_artifact", True)
+            assert baseline_path is not None
+            baseline = load_json(baseline_path, "Q4 unloaded baseline")
+            PERFORMANCE_VALIDATE(baseline)
+            if (file_sha256(baseline_path) != report["workload"]["baseline_report_sha256"]
+                or baseline["latency_ns"]["fast_path"]["p99"] != report["workload"]["baseline_fast_path_p99_ns"]
+                or baseline["workload"]["concurrent_sdo_requests"] != 0
+                or baseline["measurement"]["source"] != "hil"
+                or baseline["run"]["period_ns"] != report["run"]["period_ns"]
+                or baseline["run"]["cycles"] == 0
+                or baseline["measurement"]["cycle_samples"] != baseline["run"]["cycles"]
+                or baseline["measurement"]["max_accumulator_samples"] != baseline["run"]["cycles"]
+                or baseline["software"]["esop_commit"] != report["software"]["esop_commit"]
+                or baseline["software"]["config_hash"] != report["software"]["config_hash"]
+                or baseline["topology"] != report["topology"]):
+                fail("Q4 unloaded baseline hash, measurement or metadata is inconsistent")
         performance_reports[scenario] = report
 
     if not passed:
@@ -573,7 +599,7 @@ def validate_manifest(
     if build_report is None or build_report["qualification"]["passed"] is not True:
         fail("a qualified R2 claim requires a qualified build report")
     if set(performance_reports) != set(SCENARIOS):
-        fail("a qualified R2 claim requires exactly Q1 and Q2 performance reports")
+        fail("a qualified R2 claim requires exactly Q1, Q2 and Q4 performance reports")
 
     topology_hash = file_sha256(topology_path)
     for label, report in (("build", build_report), *performance_reports.items()):
@@ -595,7 +621,7 @@ def validate_manifest(
         or build_report["process_data"]["frame_count"] < max_frames
         or build_report["cycle_budget"]["period_ns"] > fastest_period
     ):
-        fail("build report does not cover the qualified Q1/Q2 topology envelope")
+        fail("build report does not cover the qualified Q1/Q2/Q4 topology envelope")
     for scenario, report in performance_reports.items():
         if report["qualification"]["passed"] is not True:
             fail(f"{scenario} performance report is not qualified")
@@ -663,6 +689,8 @@ def main() -> int:
     parser.add_argument("--root", type=pathlib.Path, default=ROOT)
     parser.add_argument("--output", type=pathlib.Path)
     parser.add_argument("--expected-commit")
+    parser.add_argument("--require-qualified", action="store_true",
+        help="release gate: reject valid development baselines without qualified Q1/Q2/Q4 evidence")
     args = parser.parse_args()
     root = args.root.resolve()
     manifest_path = args.manifest if args.manifest.is_absolute() else root / args.manifest
@@ -677,6 +705,8 @@ def main() -> int:
                 fail("--expected-commit must be a lowercase 40-character git SHA")
             if result["qualified"] and result["tested_commit"] != args.expected_commit:
                 fail("qualified R2 evidence does not match --expected-commit")
+        if args.require_qualified and not result["qualified"]:
+            fail("--require-qualified requires qualified R2 hardware evidence; an unqualified development baseline cannot release")
         if args.output is not None:
             output = args.output if args.output.is_absolute() else root / args.output
             output.parent.mkdir(parents=True, exist_ok=True)

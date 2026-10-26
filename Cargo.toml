@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/esop-ethercat-core",
     "crates/esop-ethercat-linux-port",
+    "crates/esop-ethercat-sim",
     "crates/esop-lifecycle-guard",
     "crates/esop-profile-cia402",
     "crates/esop-procbuf",

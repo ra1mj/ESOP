@@ -5,6 +5,9 @@
 
 #define ESOP_SII_FMMU_CAPACITY 16u
 
+#define ESOP_RUNTIME_SDO_REQUESTS 8u
+#define ESOP_MAX_SDO_OBJECT_BYTES 1024u
+
 typedef struct { const char *name; uint16_t position; uint16_t station_address; uint8_t domain_id; uint8_t kind; uint32_t vendor_id; uint32_t product_code; uint32_t revision; uint32_t serial; uint8_t has_serial; uint8_t dc_required; uint8_t dc_reference_clock; const char *dc_op_mode; uint8_t has_dc_op_mode; uint32_t dc_cycle_time0_ns; int32_t dc_shift_time0_ns; int32_t dc_shift_time1_ns; int16_t dc_sync1_cycle_factor; uint16_t dc_assign_activate; int16_t dc_sync0_cycle_factor; uint8_t has_dc_sync_timing; uint32_t dc_sync_cycle_time0_ns; uint32_t dc_sync_cycle_time1_ns; int32_t dc_sync_shift_time0_ns; uint16_t dc_sync_assign_activate; uint16_t mailbox_send_address; uint16_t mailbox_send_capacity; uint16_t mailbox_receive_address; uint16_t mailbox_receive_capacity; uint8_t mailbox_send_sync_manager; uint8_t mailbox_send_control_byte; uint8_t mailbox_receive_sync_manager; uint8_t mailbox_receive_control_byte; uint8_t has_mailbox_status_bit; uint16_t mailbox_status_bit_address; uint8_t mailbox_status_bit_mask; uint8_t mailbox_status_bit_active_high; uint8_t sii_sync_manager_count; uint16_t sii_enabled_sync_managers; uint8_t sii_fmmu_count; uint8_t sii_fmmu_usages[ESOP_SII_FMMU_CAPACITY]; uint8_t has_watchdog; uint8_t has_watchdog_divider; uint16_t watchdog_divider; uint8_t has_process_data_watchdog; uint16_t process_data_watchdog_intervals; uint8_t requesting_id_supported; uint8_t has_requesting_id; uint16_t requesting_id; uint8_t coe_complete_access_supported; uint8_t coe_complete_access_enabled; uint8_t coe_sdo_information_supported; uint8_t coe_sdo_information_enabled; uint32_t sdo_information_offset; uint32_t sdo_information_count; } esop_slave_config_t;
 typedef struct { uint16_t slave_position; uint16_t index; uint8_t subindex; uint16_t data_type; uint16_t bit_length; uint8_t required_access; } esop_sdo_information_expectation_t;
 typedef struct { const char *name; uint8_t id; uint32_t logical_address; uint32_t image_offset; uint32_t image_bytes; uint32_t output_bytes; uint32_t input_bytes; uint32_t period_ticks; uint32_t phase_ticks; uint16_t expected_wkc; } esop_domain_config_t;
@@ -15,7 +18,7 @@ typedef struct { const char *name; uint32_t source_pdo_index; uint32_t target_pd
 typedef struct { const char *name; uint8_t index; uint16_t slave_position; int8_t mode; double position_scale; double velocity_scale; double torque_scale; int32_t position_offset; double min_position; double max_position; double max_velocity; double max_torque; double max_position_step; } esop_axis_config_t;
 
 #define ESOP_PRODUCT_NAME "ESOP dual-axis simulator"
-#define ESOP_CONFIG_SHA256 "824795ddcc1d22880a6e681ab4347ca417edb9e91f151910589b7993193b7e80"
+#define ESOP_CONFIG_SHA256 "64e4a0254de10ceab5e76cd3f63d4a488629ab2dd254aaf1b84e904bd1b39055"
 #define ESOP_ROBOT_ID UINT64_C(0x000000000000e502)
 #define ESOP_POLICY_VERSION UINT32_C(1)
 #define ESOP_SLAVE_COUNT 3u
@@ -60,7 +63,7 @@ static const esop_mailbox_status_mapping_t esop_mailbox_status_mappings[ESOP_SLA
 };
 
 static const esop_domain_config_t esop_domains[ESOP_DOMAIN_STORAGE_COUNT] = {
-  {"motion", 0u, UINT32_C(0x00001000), 0u, 33u, 14u, 19u, 1u, 0u, 6u},
+  {"motion", 0u, UINT32_C(0x00001000), 0u, 33u, 14u, 19u, 1u, 0u, 4u},
   {"io", 1u, UINT32_C(0x00001100), 64u, 9u, 7u, 2u, 4u, 0u, 2u},
 };
 
@@ -87,7 +90,7 @@ static const esop_pdo_config_t esop_pdos[ESOP_PDO_STORAGE_COUNT] = {
 
 static const esop_datagram_config_t esop_datagrams[ESOP_DATAGRAM_STORAGE_COUNT] = {
   {0u, UINT8_C(0x0b), 0u, UINT32_C(0x00001000), 0u, 14u, 2u, 0u},
-  {0u, UINT8_C(0x0a), 1u, UINT32_C(0x0000100e), 14u, 19u, 4u, 1u},
+  {0u, UINT8_C(0x0a), 1u, UINT32_C(0x0000100e), 14u, 19u, 2u, 1u},
   {1u, UINT8_C(0x0b), 2u, UINT32_C(0x00001100), 64u, 7u, 1u, 0u},
   {1u, UINT8_C(0x0a), 3u, UINT32_C(0x00001107), 71u, 2u, 1u, 1u},
 };

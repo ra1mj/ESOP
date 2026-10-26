@@ -333,6 +333,7 @@ pub struct EthercatMaster<const SLOTS: usize, const MTU: usize> {
     frames: FramePool<SLOTS, MTU>,
     rx_index: RxIndexTable,
     diagnostics: Diagnostics,
+    bus_transit_count: Option<u16>,
 }
 
 impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
@@ -349,7 +350,16 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
             frames: FramePool::new(),
             rx_index: RxIndexTable::new(),
             diagnostics: Diagnostics::new(),
+            bus_transit_count: None,
         }
+    }
+
+    /// Freeze a validated topology's traversed-slave count for AP/broadcast
+    /// response addresses. WKC remains an independent access expectation.
+    pub const fn new_with_bus_transit_count(config: MasterConfig, count: u16) -> Self {
+        let mut master = Self::new(config);
+        master.bus_transit_count = Some(count);
+        master
     }
 
     pub const fn config(&self) -> MasterConfig {
@@ -481,7 +491,7 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
             .map(|slot| (slot.generation, slot.deadline_ns))
             .ok_or(CycleError::FramePool(FramePoolError::InvalidHandle))?;
         for datagram in plan.datagrams() {
-            if let Err(error) = self.rx_index.arm(
+            if let Err(error) = self.rx_index.arm_with_policies(
                 datagram.index,
                 handle.index() as u16,
                 RxExpectation {
@@ -491,6 +501,11 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
                     expected_size: datagram.payload_len as u16,
                     expected_type: datagram.command as u8,
                     expected_wkc: datagram.expected_wkc,
+                },
+                crate::RxWorkingCounterPolicy::Exact,
+                match self.bus_transit_count {
+                    Some(count) => crate::RxAddressPolicy::TransitCount { count },
+                    None => crate::RxAddressPolicy::Exact,
                 },
             ) {
                 self.cancel_frame_expectations(handle);
@@ -555,7 +570,7 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
         };
 
         for datagram in plan.datagrams() {
-            if let Err(error) = self.rx_index.arm(
+            if let Err(error) = self.rx_index.arm_with_policies(
                 datagram.index,
                 handle.index() as u16,
                 RxExpectation {
@@ -565,6 +580,11 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
                     expected_size: datagram.payload_len as u16,
                     expected_type: datagram.command as u8,
                     expected_wkc: datagram.expected_wkc,
+                },
+                crate::RxWorkingCounterPolicy::Exact,
+                match self.bus_transit_count {
+                    Some(count) => crate::RxAddressPolicy::TransitCount { count },
+                    None => crate::RxAddressPolicy::Exact,
                 },
             ) {
                 let _ = self.cancel_dma_frame(ring, handle);
@@ -676,7 +696,7 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
 
         let destination = self.config.destination_mac;
         let source = self.config.source_mac;
-        let (length, datagram_index, expectation, working_counter_policy) = {
+        let (length, datagram_index, expectation, working_counter_policy, address_policy) = {
             let slot = self
                 .frames
                 .slot_mut(frame)
@@ -692,6 +712,7 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
                 control_request.datagram_index,
                 control_request.expectation(),
                 control_request.working_counter_policy(),
+                control_request.address_policy(),
             )
         };
         self.frames
@@ -699,11 +720,12 @@ impl<const SLOTS: usize, const MTU: usize> EthercatMaster<SLOTS, MTU> {
             .ok_or(CycleError::FramePool(FramePoolError::InvalidHandle))?
             .len = length;
         self.rx_index
-            .arm_with_working_counter_policy(
+            .arm_with_policies(
                 datagram_index,
                 request.index() as u16,
                 expectation,
                 working_counter_policy,
+                address_policy,
             )
             .map_err(CycleError::RxIndex)?;
         self.frames

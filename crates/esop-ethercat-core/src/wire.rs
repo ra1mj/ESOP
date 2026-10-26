@@ -11,7 +11,7 @@ pub const WORKING_COUNTER_LEN: usize = 2;
 pub const MIN_ETHERNET_FRAME_LEN: usize = 64;
 pub const MAX_ETHERNET_FRAME_LEN: usize = 1518;
 const DATAGRAM_LENGTH_MASK: u16 = 0x07FF;
-const DATAGRAM_LAST_BIT: u16 = 0x8000;
+const DATAGRAM_MORE_BIT: u16 = 0x8000;
 const FRAME_TYPE_MASK: u16 = 0xF000;
 const FRAME_LENGTH_MASK: u16 = 0x07FF;
 
@@ -100,8 +100,8 @@ impl DatagramHeader {
         dst[1] = self.index;
         dst[2..6].copy_from_slice(&self.address.to_le_bytes());
         let mut length = self.length & DATAGRAM_LENGTH_MASK;
-        if self.last {
-            length |= DATAGRAM_LAST_BIT;
+        if !self.last {
+            length |= DATAGRAM_MORE_BIT;
         }
         dst[6..8].copy_from_slice(&length.to_le_bytes());
         dst[8] = 0;
@@ -120,7 +120,7 @@ impl DatagramHeader {
             index: src[1],
             address: u32::from_le_bytes([src[2], src[3], src[4], src[5]]),
             length: length_word & DATAGRAM_LENGTH_MASK,
-            last: length_word & DATAGRAM_LAST_BIT != 0,
+            last: length_word & DATAGRAM_MORE_BIT == 0,
         })
     }
 }
@@ -325,7 +325,7 @@ impl<'a> FrameBuilder<'a> {
             let previous_word = u16::from_le_bytes([
                 self.buffer[previous_header_offset + 6],
                 self.buffer[previous_header_offset + 7],
-            ]) & !DATAGRAM_LAST_BIT;
+            ]) | DATAGRAM_MORE_BIT;
             self.buffer[previous_header_offset + 6..previous_header_offset + 8]
                 .copy_from_slice(&previous_word.to_le_bytes());
         }

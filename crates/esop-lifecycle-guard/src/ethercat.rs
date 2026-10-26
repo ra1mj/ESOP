@@ -417,6 +417,7 @@ pub fn submit_stopping_frame<
         port,
         generation,
         deadline_ns,
+        0,
     )?;
     decision
         .mark_stop_transmitted()
@@ -673,6 +674,57 @@ pub fn submit_inhibited_frame<
         port,
         generation,
         deadline_ns,
+        0,
+    )
+}
+
+#[cfg(all(feature = "cia402", feature = "procbuf"))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn submit_maintenance_reset_frame<
+    P: EthercatPort,
+    const AXES: usize,
+    const BYTES: usize,
+    const SEGMENTS: usize,
+    const DATAGRAMS: usize,
+    const SLOTS: usize,
+    const MTU: usize,
+>(
+    decision: &AxisCycleDecision<'_>,
+    preview: crate::maintenance::FaultResetPreview<AXES>,
+    maps: &[Cia402PdoMap; AXES],
+    modes: &[OperatingMode; AXES],
+    safe: &[u8; BYTES],
+    domain: &Domain<BYTES, SEGMENTS>,
+    plan: &FramePlan<DATAGRAMS>,
+    master: &mut EthercatMaster<SLOTS, MTU>,
+    port: &mut P,
+    generation: u16,
+    deadline_ns: u64,
+) -> Result<usize, StopFrameError<P::Error>> {
+    if !matches!(
+        decision.action(),
+        LifecycleAction::Hold | LifecycleAction::FaultLatched
+    ) || decision.stopping_axis_mask() != 0
+        || decision.permitted_axis_mask() != 0
+    {
+        return Err(StopFrameError::InvalidDecision);
+    }
+    if port.now_ns() >= preview.deadline_ns {
+        return Err(StopFrameError::InvalidDeadline);
+    }
+    submit_safe_frame(
+        decision,
+        &preview.outputs,
+        maps,
+        modes,
+        safe,
+        domain,
+        plan,
+        master,
+        port,
+        generation,
+        deadline_ns,
+        preview.pulse_mask,
     )
 }
 
@@ -698,6 +750,7 @@ fn submit_safe_frame<
     port: &mut P,
     generation: u16,
     deadline_ns: u64,
+    reset_axis_mask: u32,
 ) -> Result<usize, StopFrameError<P::Error>> {
     let stopping = decision.stopping_axis_mask();
     if AXES > MAX_MOTION_AXES || (AXES < MAX_MOTION_AXES && stopping >> AXES != 0) {
@@ -709,13 +762,24 @@ fn submit_safe_frame<
 
     let mut image = *safe_process_image;
     for axis in 0..AXES {
-        let expected = match decision.axis(axis) {
-            AxisDirective::Stop(StopAction::QuickStop) => CONTROLWORD_QUICK_STOP,
-            AxisDirective::Stop(_) | AxisDirective::Inhibit => CONTROLWORD_DISABLE_VOLTAGE,
-            AxisDirective::EnableAllowed => return Err(StopFrameError::InvalidDecision),
+        let resetting = reset_axis_mask & (1u32 << axis) != 0;
+        let expected = if resetting {
+            if decision.axis(axis) != AxisDirective::Inhibit {
+                return Err(StopFrameError::InvalidDecision);
+            }
+            esop_profile_cia402::CONTROLWORD_FAULT_RESET
+        } else {
+            match decision.axis(axis) {
+                AxisDirective::Stop(StopAction::QuickStop) => CONTROLWORD_QUICK_STOP,
+                AxisDirective::Stop(_) | AxisDirective::Inhibit => CONTROLWORD_DISABLE_VOLTAGE,
+                AxisDirective::EnableAllowed => return Err(StopFrameError::InvalidDecision),
+            }
         };
         let output = outputs[axis];
-        if output.controlword != expected || output.motion_allowed || output.fault_reset_pulse {
+        if output.controlword != expected
+            || output.motion_allowed
+            || output.fault_reset_pulse != resetting
+        {
             return Err(StopFrameError::UnsafeOutput(axis));
         }
         for field in [Cia402PdoField::Controlword, Cia402PdoField::ModeOfOperation] {
@@ -789,7 +853,11 @@ fn transmit_image<
 }
 
 #[cfg(feature = "cia402")]
-fn writable_domain_field<const BYTES: usize, const SEGMENTS: usize, const DATAGRAMS: usize>(
+pub(crate) fn writable_domain_field<
+    const BYTES: usize,
+    const SEGMENTS: usize,
+    const DATAGRAMS: usize,
+>(
     map: &Cia402PdoMap,
     field: Cia402PdoField,
     domain: &Domain<BYTES, SEGMENTS>,
@@ -936,8 +1004,14 @@ pub fn other_cycle_facts_from_production_service_cycle<E, const DOMAINS: usize>(
     cycle: &ScheduledProductionServiceCycleReport<E, DOMAINS>,
     mut other: OtherCycleFacts,
 ) -> OtherCycleFacts {
+    if let Some(quality) = cycle.slave_monitor_quality() {
+        other = other_cycle_facts_from_slave_monitor(quality, other);
+    }
     if let Some(startup_phase) = cycle.startup_phase() {
         other.topology_valid &= startup_phase == esop_ethercat_core::StartupPhase::Ready;
+    }
+    if let Some(ready) = cycle.legacy_mailbox_ready() {
+        other.coe_ready &= ready;
     }
     if cycle.selected() != ScheduledProductionServiceKind::Startup
         || cycle.startup_phase().is_none()
@@ -960,7 +1034,8 @@ fn apply_production_service_readiness(
         }
         ScheduledProductionServiceKind::Rescan
         | ScheduledProductionServiceKind::ReconfigureSlave
-        | ScheduledProductionServiceKind::StateRequest => {
+        | ScheduledProductionServiceKind::StateRequest
+        | ScheduledProductionServiceKind::SlaveMonitor => {
             other.topology_valid &= service_ready;
         }
         ScheduledProductionServiceKind::PdoConfiguration
@@ -972,8 +1047,19 @@ fn apply_production_service_readiness(
         | ScheduledProductionServiceKind::Mailbox => {
             other.coe_ready &= service_ready;
         }
-        ScheduledProductionServiceKind::RegisterRequest => {}
+        ScheduledProductionServiceKind::RuntimeSdo
+        | ScheduledProductionServiceKind::RegisterRequest => {}
     }
+}
+
+/// Apply age-qualified AL/DL observations while preserving all caller-owned
+/// platform, drive, supervisor, command and external-safety facts.
+pub fn other_cycle_facts_from_slave_monitor(
+    quality: esop_ethercat_core::SlaveMonitorQuality,
+    mut other: OtherCycleFacts,
+) -> OtherCycleFacts {
+    other.topology_valid &= quality.is_good();
+    other
 }
 
 /// Bind process-Domain submission evidence to the cycle budget gate. Any
@@ -1016,7 +1102,7 @@ pub(crate) fn cyclic_quality_from_domains<'a>(
     quality_from_domain_health(report, domain_valid, dc, other)
 }
 
-fn domain_current(report: CycleReport, domain: DomainQuality) -> bool {
+pub(crate) fn domain_current(report: CycleReport, domain: DomainQuality) -> bool {
     domain.valid
         && domain.complete
         && domain.expected_wkc != 0
@@ -1025,7 +1111,7 @@ fn domain_current(report: CycleReport, domain: DomainQuality) -> bool {
         && domain.input_age_cycles == 0
 }
 
-fn rx_current(report: CycleReport) -> bool {
+pub(crate) fn rx_current(report: CycleReport) -> bool {
     !report.link_down
         && report.received_frames != 0
         && report.parsed_datagrams != 0
@@ -1345,7 +1431,7 @@ mod tests {
             DatagramHeader {
                 command: Command::Brd,
                 index: 14,
-                address: ESC_DC_SYSTEM_DIFF as u32,
+                address: fixed_address(0, ESC_DC_SYSTEM_DIFF),
                 length: 4,
                 last: true,
             },
@@ -1713,5 +1799,56 @@ mod tests {
         assert!(
             !cyclic_quality_from_schedule(rx_failure, &schedule, &samples, &dc, other()).wkc_valid
         );
+    }
+    #[test]
+    fn monitor_quality_only_clears_topology_and_keeps_other_authorities() {
+        let quality = esop_ethercat_core::SlaveMonitorQuality {
+            stations: 2,
+            known: true,
+            fresh: true,
+            al_good: true,
+            data_link_good: true,
+            fault_count: 0,
+            lost_events: 0,
+        };
+        let other = OtherCycleFacts {
+            platform_ready: false,
+            coe_ready: true,
+            topology_valid: true,
+            drive_ready: false,
+            command_current: false,
+            supervisor_healthy: false,
+            external_safety_clear: false,
+            deadline_met: false,
+        };
+        assert_eq!(other_cycle_facts_from_slave_monitor(quality, other), other);
+        for bad in [
+            esop_ethercat_core::SlaveMonitorQuality {
+                known: false,
+                ..quality
+            },
+            esop_ethercat_core::SlaveMonitorQuality {
+                fresh: false,
+                ..quality
+            },
+            esop_ethercat_core::SlaveMonitorQuality {
+                al_good: false,
+                ..quality
+            },
+            esop_ethercat_core::SlaveMonitorQuality {
+                data_link_good: false,
+                ..quality
+            },
+        ] {
+            let projected = other_cycle_facts_from_slave_monitor(bad, other);
+            assert!(!projected.topology_valid);
+            assert_eq!(
+                OtherCycleFacts {
+                    topology_valid: true,
+                    ..projected
+                },
+                other
+            );
+        }
     }
 }

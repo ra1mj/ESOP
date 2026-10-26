@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Validate the required fields and fail-closed qualification semantics."""
+from __future__ import annotations
 
 import json
 import pathlib
 import re
 import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from resource_contracts import validate_sdo_resources
 
 
 SCHEMA = "esop.build.v1"
@@ -307,6 +311,7 @@ def validate_report(report: dict) -> None:
         fail("cycle_budget.qualification must be a string")
 
     resources = require(report, "resources", "report")
+    validate_sdo_resources(resources, "resources")
     for key in (
         "workspace_release_artifact_bytes",
         "procbuf_bytes",

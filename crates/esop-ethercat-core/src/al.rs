@@ -599,12 +599,12 @@ mod tests {
 
         let write = controller.next_action(1).unwrap().unwrap();
         assert_eq!(write.operation, RegisterOperation::Write);
-        assert_eq!(write.address as u16, ESC_AL_CONTROL);
+        assert_eq!(crate::register_from_address(write.address), ESC_AL_CONTROL);
         assert_eq!(write.payload(), &[0x02, 0x00]);
         controller.accept(write.token, 9, &[], 1, 2).unwrap();
 
         let read = controller.next_action(3).unwrap().unwrap();
-        assert_eq!(read.address as u16, ESC_AL_STATUS);
+        assert_eq!(crate::register_from_address(read.address), ESC_AL_STATUS);
         assert_eq!(
             controller.accept(read.token, 9, &status(EthercatState::Init, 0), 1, 4),
             Ok(AlProgress::Polling)

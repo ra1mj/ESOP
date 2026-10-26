@@ -11,6 +11,9 @@ pub const MAX_ESC_SYNC_MANAGERS: usize = 16;
 pub const SYNC_MANAGER_ACTIVATION_OFFSET: u16 = 6;
 pub const SYNC_MANAGER_ENABLE_FLAG: u8 = 1 << 0;
 pub const SYNC_MANAGER_OP_ONLY_FLAG: u8 = 1 << 3;
+// ESC register 0x0806+y*8: bit0 enable, bit1 repeat, bits6/7 latch.
+// Bits5:2 are reserved. The retained SII/ESI OpOnly bit3 is policy metadata.
+const ESC_ACTIVATION_WRITABLE_MASK: u8 = 0xC3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OpOnlyProfileError {
@@ -92,7 +95,7 @@ impl OpOnlySyncManagerProfile {
 
     pub const fn activation_for(self, index: u8, enabled: bool) -> Option<u8> {
         let template = match self.activation_template(index) {
-            Some(template) => template,
+            Some(template) => template & ESC_ACTIVATION_WRITABLE_MASK,
             None => return None,
         };
         Some(if enabled {
@@ -516,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_preserves_activation_flags_and_rejects_invalid_entries() {
+    fn profile_keeps_metadata_separate_from_physical_activation_and_rejects_invalid_entries() {
         let mut value = OpOnlySyncManagerProfile::new();
         assert_eq!(
             value.add(16, SYNC_MANAGER_OP_ONLY_FLAG),
@@ -532,8 +535,13 @@ mod tests {
                 SYNC_MANAGER_OP_ONLY_FLAG | SYNC_MANAGER_ENABLE_FLAG | 0x20,
             )
             .unwrap();
-        assert_eq!(value.activation_for(2, false), Some(0x28));
-        assert_eq!(value.activation_for(2, true), Some(0x29));
+        assert_eq!(value.activation_template(2), Some(0x29));
+        assert_eq!(value.activation_for(2, false), Some(0));
+        assert_eq!(value.activation_for(2, true), Some(1));
+        value.add(4, 0xCB).unwrap();
+        assert_eq!(value.activation_template(4), Some(0xCB));
+        assert_eq!(value.activation_for(4, false), Some(0xC2));
+        assert_eq!(value.activation_for(4, true), Some(0xC3));
         assert_eq!(
             value.add(2, SYNC_MANAGER_OP_ONLY_FLAG),
             Err(OpOnlyProfileError::DuplicateSyncManager)
@@ -549,22 +557,20 @@ mod tests {
 
         let write = controller.next_action(1).unwrap().unwrap();
         assert_eq!(write.sync_manager, 2);
-        assert_eq!(write.address, 0x1000_0816);
-        assert_eq!(write.payload(), &[SYNC_MANAGER_OP_ONLY_FLAG]);
+        assert_eq!(write.address, 0x0816_1000);
+        assert_eq!(write.payload(), &[0]);
         controller.accept(write, 7, &[], 1, 2).unwrap();
         let read = controller.next_action(3).unwrap().unwrap();
         assert_eq!(read.operation, RegisterOperation::Read);
-        controller
-            .accept(read, 7, &[SYNC_MANAGER_OP_ONLY_FLAG], 1, 4)
-            .unwrap();
+        controller.accept(read, 7, &[0], 1, 4).unwrap();
 
         let write = controller.next_action(5).unwrap().unwrap();
         assert_eq!(write.sync_manager, 5);
-        assert_eq!(write.payload(), &[0x28]);
+        assert_eq!(write.payload(), &[0]);
         controller.accept(write, 7, &[], 1, 6).unwrap();
         let read = controller.next_action(7).unwrap().unwrap();
         assert_eq!(
-            controller.accept(read, 7, &[0x28], 1, 8),
+            controller.accept(read, 7, &[0], 1, 8),
             Ok(OpOnlySyncManagerProgress::Complete)
         );
         assert_eq!(controller.phase(), OpOnlySyncManagerPhase::Complete);
@@ -650,7 +656,7 @@ mod tests {
         let request = pool.get_mut(read).unwrap();
         request.state = RequestState::Complete;
         request.actual_wkc = 1;
-        request.payload_mut()[0] = SYNC_MANAGER_OP_ONLY_FLAG;
+        request.payload_mut()[0] = 0;
         assert_eq!(
             controller.accept_completed(&mut pool, read, 4),
             Ok(OpOnlySyncManagerProgress::Complete)

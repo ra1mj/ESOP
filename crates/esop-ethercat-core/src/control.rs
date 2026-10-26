@@ -1,4 +1,4 @@
-use crate::rx_index::{RxExpectation, RxIndexError, RxWorkingCounterPolicy};
+use crate::rx_index::{RxAddressPolicy, RxExpectation, RxIndexError, RxWorkingCounterPolicy};
 use crate::wire::{Command, FrameBuilder, WireError};
 
 pub const MAX_CONTROL_PAYLOAD: usize = 128;
@@ -36,6 +36,7 @@ pub enum RegisterOperation {
     Write,
     AutoIncrementRead,
     AutoIncrementWrite,
+    BroadcastRead,
 }
 
 impl RegisterOperation {
@@ -45,13 +46,17 @@ impl RegisterOperation {
             Self::Write => Command::Fpwr,
             Self::AutoIncrementRead => Command::Aprd,
             Self::AutoIncrementWrite => Command::Apwr,
+            Self::BroadcastRead => Command::Brd,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ControlRequest {
+    /// Actual leased wire index. The service action retains its own index.
     pub datagram_index: u8,
+    action_datagram_index: u8,
+    leased_datagram_index: u8,
     pub generation: u16,
     pub address: u32,
     pub operation: RegisterOperation,
@@ -61,6 +66,8 @@ pub struct ControlRequest {
     pub state: RequestState,
     pub actual_wkc: u16,
     working_counter_policy: RxWorkingCounterPolicy,
+    address_policy: RxAddressPolicy,
+    expected_wkc: u16,
     last_error: Option<ControlError>,
     payload: [u8; MAX_CONTROL_PAYLOAD],
 }
@@ -68,6 +75,8 @@ pub struct ControlRequest {
 impl ControlRequest {
     const EMPTY: Self = Self {
         datagram_index: 0,
+        action_datagram_index: 0,
+        leased_datagram_index: 0,
         generation: 0,
         address: 0,
         operation: RegisterOperation::Read,
@@ -77,9 +86,16 @@ impl ControlRequest {
         state: RequestState::Free,
         actual_wkc: 0,
         working_counter_policy: RxWorkingCounterPolicy::Exact,
+        address_policy: RxAddressPolicy::Exact,
+        expected_wkc: 1,
         last_error: None,
         payload: [0; MAX_CONTROL_PAYLOAD],
     };
+
+    /// Original immutable FSM index, independent of its reserved wire lease.
+    pub const fn action_datagram_index(&self) -> u8 {
+        self.action_datagram_index
+    }
 
     pub fn payload(&self) -> &[u8] {
         &self.payload[..self.length]
@@ -97,6 +113,14 @@ impl ControlRequest {
         self.working_counter_policy
     }
 
+    pub const fn address_policy(&self) -> RxAddressPolicy {
+        self.address_policy
+    }
+
+    pub const fn expected_wkc(&self) -> u16 {
+        self.expected_wkc
+    }
+
     /// Match this pool entry to the immutable action still owned by a service
     /// FSM. Read/write datagrams share one EtherCAT data area, so the request
     /// may contain a zero-padded suffix beyond the action's write payload.
@@ -111,7 +135,8 @@ impl ControlRequest {
         datagram_len: usize,
         deadline_ns: u64,
     ) -> bool {
-        self.datagram_index == datagram_index
+        self.action_datagram_index == datagram_index
+            && self.datagram_index == self.leased_datagram_index
             && self.generation == generation
             && self.address == address
             && self.operation == operation
@@ -133,7 +158,7 @@ impl ControlRequest {
             expected_address: self.address,
             expected_size: self.response_length as u16,
             expected_type: self.operation.command() as u8,
-            expected_wkc: 1,
+            expected_wkc: self.expected_wkc,
         }
     }
 
@@ -145,6 +170,9 @@ impl ControlRequest {
     ) -> Result<usize, ControlError> {
         if self.state != RequestState::Prepared {
             return Err(ControlError::InvalidState);
+        }
+        if self.datagram_index != self.leased_datagram_index {
+            return Err(ControlError::DatagramIndexMismatch);
         }
         let mut builder =
             FrameBuilder::new(buffer, destination, source).map_err(ControlError::Wire)?;
@@ -174,21 +202,32 @@ impl ControlRequest {
             }
             return self.fail(ControlError::InvalidState);
         }
+        if self.datagram_index != self.leased_datagram_index {
+            return self.fail(ControlError::DatagramIndexMismatch);
+        }
         if self.generation != generation {
             return self.fail(ControlError::GenerationMismatch);
         }
-        if self.address != address {
+        if !self.address_policy.accepts(
+            self.operation.command() as u8,
+            self.address,
+            address,
+            working_counter,
+        ) {
             return self.fail(ControlError::AddressMismatch);
         }
         if self.response_length != payload.len() {
             return self.fail(ControlError::LengthMismatch);
         }
-        self.payload[..payload.len()].copy_from_slice(payload);
-        self.length = self.response_length;
         self.actual_wkc = working_counter;
-        if !self.working_counter_policy.accepts(1, working_counter) {
+        if !self
+            .working_counter_policy
+            .accepts(self.expected_wkc, working_counter)
+        {
             return self.fail(ControlError::WorkingCounterMismatch);
         }
+        self.payload[..payload.len()].copy_from_slice(payload);
+        self.length = self.response_length;
         self.state = RequestState::Complete;
         self.last_error = None;
         Ok(())
@@ -204,6 +243,10 @@ impl ControlRequest {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControlError {
     TooManyRequests,
+    InvalidDatagramIndices,
+    DuplicateDatagramIndex,
+    ReservedDatagramIndex,
+    DatagramIndicesExhausted,
     SlotBusy,
     InvalidHandle,
     InvalidState,
@@ -264,6 +307,10 @@ impl Iterator for ControlExpiryHandles {
 pub struct ControlRequestPool<const REQUESTS: usize> {
     requests: [ControlRequest; REQUESTS],
     used: u64,
+    wire_indices: [u8; 64],
+    wire_index_count: usize,
+    next_wire_index: usize,
+    leased_wire_indices: [u64; 4],
 }
 
 impl<const REQUESTS: usize> ControlRequestPool<REQUESTS> {
@@ -271,7 +318,47 @@ impl<const REQUESTS: usize> ControlRequestPool<REQUESTS> {
         Self {
             requests: [ControlRequest::EMPTY; REQUESTS],
             used: 0,
+            wire_indices: [0; 64],
+            wire_index_count: 0,
+            next_wire_index: 0,
+            leased_wire_indices: [0; 4],
         }
+    }
+
+    /// Freeze an explicit wire namespace before activation. Terminal requests
+    /// retain their lease until release; FSM indices never reach this namespace.
+    pub fn new_with_datagram_indices(indices: &[u8]) -> Result<Self, ControlError> {
+        Self::new_with_datagram_indices_excluding(indices, &[])
+    }
+
+    /// Validate the reserved service namespace against all frozen Domain/DC
+    /// indices before activation. The scheduler still preflights each actual TX.
+    pub fn new_with_datagram_indices_excluding(
+        indices: &[u8],
+        cyclic_indices: &[u8],
+    ) -> Result<Self, ControlError> {
+        if REQUESTS == 0 || REQUESTS > 64 {
+            return Err(ControlError::TooManyRequests);
+        }
+        if indices.is_empty() || indices.len() > 64 {
+            return Err(ControlError::InvalidDatagramIndices);
+        }
+        let mut seen = [0u64; 4];
+        for &index in indices {
+            let word = (index / 64) as usize;
+            let bit = 1u64 << (index % 64);
+            if seen[word] & bit != 0 {
+                return Err(ControlError::DuplicateDatagramIndex);
+            }
+            if cyclic_indices.contains(&index) {
+                return Err(ControlError::ReservedDatagramIndex);
+            }
+            seen[word] |= bit;
+        }
+        let mut pool = Self::new();
+        pool.wire_indices[..indices.len()].copy_from_slice(indices);
+        pool.wire_index_count = indices.len();
+        Ok(pool)
     }
 
     pub fn acquire(
@@ -331,6 +418,34 @@ impl<const REQUESTS: usize> ControlRequestPool<REQUESTS> {
         deadline_ns: u64,
         working_counter_policy: RxWorkingCounterPolicy,
     ) -> Result<RequestHandle, ControlError> {
+        self.acquire_with_response_policy(
+            datagram_index,
+            generation,
+            address,
+            operation,
+            payload,
+            response_length,
+            deadline_ns,
+            1,
+            working_counter_policy,
+            RxAddressPolicy::Exact,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn acquire_with_response_policy(
+        &mut self,
+        datagram_index: u8,
+        generation: u16,
+        address: u32,
+        operation: RegisterOperation,
+        payload: &[u8],
+        response_length: usize,
+        deadline_ns: u64,
+        expected_wkc: u16,
+        working_counter_policy: RxWorkingCounterPolicy,
+        address_policy: RxAddressPolicy,
+    ) -> Result<RequestHandle, ControlError> {
         if REQUESTS == 0 || REQUESTS > 64 {
             return Err(ControlError::TooManyRequests);
         }
@@ -351,11 +466,34 @@ impl<const REQUESTS: usize> ControlRequestPool<REQUESTS> {
             return Err(ControlError::SlotBusy);
         }
         let index = available.trailing_zeros() as usize;
+        let wire_index = if self.wire_index_count == 0 {
+            datagram_index
+        } else {
+            let mut selected = None;
+            for offset in 0..self.wire_index_count {
+                let lease_position = (self.next_wire_index + offset) % self.wire_index_count;
+                let wire_index = self.wire_indices[lease_position];
+                if self.leased_wire_indices[(wire_index / 64) as usize]
+                    & (1u64 << (wire_index % 64))
+                    == 0
+                {
+                    selected = Some((lease_position, wire_index));
+                    break;
+                }
+            }
+            let (lease_position, wire_index) =
+                selected.ok_or(ControlError::DatagramIndicesExhausted)?;
+            self.next_wire_index = (lease_position + 1) % self.wire_index_count;
+            self.leased_wire_indices[(wire_index / 64) as usize] |= 1u64 << (wire_index % 64);
+            wire_index
+        };
         let handle = RequestHandle(index as u8);
         self.used |= 1u64 << index;
         let request = &mut self.requests[index];
         request.state = RequestState::Prepared;
-        request.datagram_index = datagram_index;
+        request.datagram_index = wire_index;
+        request.action_datagram_index = datagram_index;
+        request.leased_datagram_index = wire_index;
         request.generation = generation;
         request.address = address;
         request.operation = operation;
@@ -364,6 +502,8 @@ impl<const REQUESTS: usize> ControlRequestPool<REQUESTS> {
         request.deadline_ns = deadline_ns;
         request.actual_wkc = 0;
         request.working_counter_policy = working_counter_policy;
+        request.address_policy = address_policy;
+        request.expected_wkc = expected_wkc;
         request.last_error = None;
         request.payload.fill(0);
         request.payload[..payload.len()].copy_from_slice(payload);
@@ -452,6 +592,10 @@ impl<const REQUESTS: usize> ControlRequestPool<REQUESTS> {
             return Err(ControlError::InvalidHandle);
         }
         self.used &= !(1u64 << index);
+        if self.wire_index_count != 0 {
+            let wire_index = self.requests[index].leased_datagram_index;
+            self.leased_wire_indices[(wire_index / 64) as usize] &= !(1u64 << (wire_index % 64));
+        }
         self.requests[index] = ControlRequest::EMPTY;
         Ok(())
     }

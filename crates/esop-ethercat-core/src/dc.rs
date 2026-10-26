@@ -2647,7 +2647,7 @@ impl DcSyncWindowConfig {
         DatagramPlan {
             command: Command::Brd,
             index: self.datagram_index,
-            address: ESC_DC_SYSTEM_DIFF as u32,
+            address: fixed_address(0, ESC_DC_SYSTEM_DIFF),
             payload_offset: self.payload_offset,
             payload_len: DC_SYSTEM_DIFF_LEN,
             expected_wkc: self.expected_wkc,
@@ -2721,6 +2721,7 @@ struct DcSyncWindowState {
 
 pub struct DcCyclicSync {
     config: DcCyclicConfig,
+    bus_transit_count: Option<u16>,
     monitor: DcMonitor,
     sync_window: Option<DcSyncWindowState>,
     pending: Option<DcCyclicPending>,
@@ -2737,6 +2738,7 @@ impl DcCyclicSync {
     pub const fn new(config: DcCyclicConfig, monitor: DcMonitor) -> Self {
         Self {
             config,
+            bus_transit_count: None,
             monitor,
             sync_window: None,
             pending: None,
@@ -2748,6 +2750,17 @@ impl DcCyclicSync {
             unlock_count: 0,
             last_error: None,
         }
+    }
+
+    /// Construct with the same frozen physical transit count as the master.
+    pub const fn new_with_bus_transit_count(
+        config: DcCyclicConfig,
+        monitor: DcMonitor,
+        count: u16,
+    ) -> Self {
+        let mut sync = Self::new(config, monitor);
+        sync.bus_transit_count = Some(count);
+        sync
     }
 
     pub fn with_sync_window(mut self, config: DcSyncWindowConfig) -> Result<Self, DcCyclicError> {
@@ -3004,7 +3017,18 @@ impl DcCyclicSync {
             None => return self.fail(DcCyclicError::UnexpectedDatagram),
         };
         let expected = config.datagram_plan();
-        if header.command != expected.command || header.address != expected.address {
+        if header.command != expected.command
+            || !match self.bus_transit_count {
+                Some(count) => crate::RxAddressPolicy::TransitCount { count },
+                None => crate::RxAddressPolicy::Exact,
+            }
+            .accepts(
+                header.command as u8,
+                expected.address,
+                header.address,
+                completion.working_counter,
+            )
+        {
             return self.fail(DcCyclicError::UnexpectedDatagram);
         }
         if completion.working_counter != config.expected_wkc {
@@ -4740,7 +4764,7 @@ mod tests {
             DatagramPlan {
                 command: Command::Brd,
                 index: 14,
-                address: ESC_DC_SYSTEM_DIFF as u32,
+                address: fixed_address(0, ESC_DC_SYSTEM_DIFF),
                 payload_offset: 8,
                 payload_len: 4,
                 expected_wkc: 2,
@@ -4822,7 +4846,7 @@ mod tests {
             DatagramHeader {
                 command: Command::Brd,
                 index: 14,
-                address: ESC_DC_SYSTEM_DIFF as u32,
+                address: fixed_address(0, ESC_DC_SYSTEM_DIFF),
                 length: 4,
                 last: false,
             },
@@ -4888,7 +4912,7 @@ mod tests {
             DatagramHeader {
                 command: Command::Brd,
                 index: 14,
-                address: ESC_DC_SYSTEM_DIFF as u32,
+                address: fixed_address(0, ESC_DC_SYSTEM_DIFF),
                 length: 4,
                 last: true,
             },
@@ -4908,7 +4932,7 @@ mod tests {
                 DatagramHeader {
                     command: Command::Brd,
                     index: 14,
-                    address: ESC_DC_SYSTEM_DIFF as u32,
+                    address: fixed_address(0, ESC_DC_SYSTEM_DIFF),
                     length: 4,
                     last: false,
                 },
@@ -5009,7 +5033,7 @@ mod tests {
                 DatagramHeader {
                     command: Command::Brd,
                     index: 14,
-                    address: ESC_DC_SYSTEM_DIFF as u32,
+                    address: fixed_address(0, ESC_DC_SYSTEM_DIFF),
                     length: 4,
                     last: true,
                 },
@@ -5033,7 +5057,7 @@ mod tests {
                 DatagramHeader {
                     command: Command::Brd,
                     index: 14,
-                    address: ESC_DC_SYSTEM_DIFF as u32,
+                    address: fixed_address(0, ESC_DC_SYSTEM_DIFF),
                     length: 4,
                     last: true,
                 },
@@ -5055,7 +5079,7 @@ mod tests {
                 DatagramHeader {
                     command: Command::Brd,
                     index: 15,
-                    address: ESC_DC_SYSTEM_DIFF as u32,
+                    address: fixed_address(0, ESC_DC_SYSTEM_DIFF),
                     length: 4,
                     last: true,
                 },
@@ -5077,7 +5101,7 @@ mod tests {
                 DatagramHeader {
                     command: Command::Fprd,
                     index: 14,
-                    address: ESC_DC_SYSTEM_DIFF as u32,
+                    address: fixed_address(0, ESC_DC_SYSTEM_DIFF),
                     length: 4,
                     last: true,
                 },
@@ -5099,7 +5123,7 @@ mod tests {
                 DatagramHeader {
                     command: Command::Brd,
                     index: 14,
-                    address: ESC_DC_SYSTEM_DIFF as u32,
+                    address: fixed_address(0, ESC_DC_SYSTEM_DIFF),
                     length: 3,
                     last: true,
                 },
@@ -5112,7 +5136,7 @@ mod tests {
         let window_header = DatagramHeader {
             command: Command::Brd,
             index: 14,
-            address: ESC_DC_SYSTEM_DIFF as u32,
+            address: fixed_address(0, ESC_DC_SYSTEM_DIFF),
             length: 4,
             last: true,
         };

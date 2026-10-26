@@ -737,12 +737,26 @@ dependencies = [
 name = "esop-ethercat-linux-port"
 version = "0.1.0"
 dependencies = [
+ "esop-device",
  "esop-ethercat-core",
+ "esop-ethercat-sim",
  "esop-lifecycle-guard",
  "esop-procbuf",
  "esop-product-config",
  "esop-profile-cia402",
  "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "esop-ethercat-sim"
+version = "0.1.0"
+dependencies = [
+ "esop-ethercat-core",
+ "esop-lifecycle-guard",
+ "esop-product-config",
 ]
 
 [[package]]
