@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 64
-- **Last Active**: 2026-09-28
+- **Total Sessions**: 65
+- **Last Active**: 2026-10-26
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~205 | Active |
+| `journal-2.md` | ~291 | Active |
 | `journal-1.md` | ~1969 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 65 | 2026-10-26 | Linux R0-R2 software master closure | `6efc82c`, `235a5b5`, `585de61` | `feat/linux-r0-r2-master` |
 | 64 | 2026-09-28 | Runtime diagnostics CLI and eBPF status | `4159e0a` | `main` |
 | 63 | 2026-09-28 | EtherCAT explicit recovery integration and closeout | `bcb9c9e` | `main` |
 | 62 | 2026-09-28 | EtherCAT single-slave reconfiguration | `13d1b01` | `main` |
