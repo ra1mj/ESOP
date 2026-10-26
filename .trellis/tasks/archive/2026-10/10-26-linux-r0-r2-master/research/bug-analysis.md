@@ -24,7 +24,7 @@ One optional service plus one yield flag did not exercise mixed-class starvation
 | P0 | Lazy runtime action creation and bounded optional-class round robin | Implemented |
 | P0 | Mapped mailbox evidence sampled after shared RX commit | Implemented |
 | P0 | Per-request terminal event queue, observable overflow and exact handles | Implemented |
-| P0 | Full generated-product startup, motion, stop/reset/rearm and replay | Implemented; qualification work ongoing |
+| P0 | Full generated-product startup, motion, stop/reset/rearm and replay | Software scenarios and Linux make ci pass; physical qualification deferred |
 
 ## 4. Systematic Expansion
 

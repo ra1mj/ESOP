@@ -44,7 +44,7 @@ or target WCET.
   replay matches and modified TX/late/corrupt RX fail precisely.
 - [x] Q1/Q2/Q4 software scenarios, eight-request Q4, allocator checks and a
   one-hour soak entry exist. Sim/replay cannot qualify HIL or WCET.
-- [ ] Focused tests, Linux integration and available full quality gates pass;
+- [x] Focused tests, Linux integration and available full quality gates pass;
   original software-applicable P0 requirements have evidence mappings.
 
 ## Scope and Defaults

@@ -62,10 +62,19 @@ digests and complete counters survive the explicit prefix loss. The importer
 accepts it as unqualified software evidence. Compact evidence is versioned at
 qualification/software_master_soak.json, bound to work commit 6efc82c.
 
-Work commit 6efc82c created; initial push was rejected because GitHub OAuth
-lacked workflow scope. User refreshed authorization and approved retry.
-Pending: inspect actual Linux CI after push, fix any failures, final commit of
-documentation/review fixes, journal/archive and push all final commits.
+Work commits 6efc82c (master), 235a5b5 (MSRV-compatible gateway CAS), and 585de61
+(review, evidence and docs) are pushed to origin/feat/linux-r0-r2-master.
+The initial OAuth workflow scope rejection was resolved by the user refreshing
+authorization. Actual Linux run 40278257137 on head 585de61 passed all 12 jobs:
+full make ci, BPF build, all ten privileged runtime qualifications, live Zenoh
+router integration and evidence uploads. Linux workspace tests: 852 passed,
+0 failed, 3 initially ignored router tests all passed in the dedicated step.
+The previously filtered macOS IPC case passed unfiltered on Linux. Additional
+product tests passed 38/38; Python validators 100/100. Thirteen software cases,
+two exact replays and negative capture checks passed. Evidence artifact
+12631082275 contains 153 files. All approved software acceptance criteria pass.
+Run: https://github.com/ra1mj/ESOP/actions/runs/40278257137
+Only task/journal bookkeeping remains after the verified code commits.
 macOS Apple Clang cannot run the Linux BPF syntax gate; verify it on Linux CI.
 Do not claim hardware qualification; current release gate must reject baseline.
 

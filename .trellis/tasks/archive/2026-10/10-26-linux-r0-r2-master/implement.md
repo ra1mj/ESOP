@@ -8,7 +8,7 @@ User approved the plan and requested implementation on 2026-10-26.
 4. [x] Add bounded AL/DL monitoring, contextual evidence and virtual I2C.
 5. [x] Compose r0_r2 examples, fault scenarios, capture/measurement/report import.
 6. [x] Exercise Q1/Q2/Q4 and long-soak entry; map every applicable P0.
-7. [ ] Review, full quality gates, update specifications/capabilities/journal.
+7. [x] Review, full Linux quality gates, specifications/capabilities and session closeout.
 
 ## Validation
 
