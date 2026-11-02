@@ -289,3 +289,90 @@ was intentionally not granted; all applicable software acceptance criteria pass.
 ### Next Steps
 
 - None - task complete
+
+
+## Session 66: Linux master hardening and main integration
+
+**Date**: 2026-11-03
+**Task**: Linux master hardening and main integration
+**Branch**: `main`
+
+### Summary
+
+Hardened mailbox scheduling, monitor freshness and capture/evidence boundaries; final-code soak and all Linux CI jobs passed; fast-forwarded and pushed the completed work to main.
+
+### Main Changes
+
+## Delivered
+
+Continued the approved Linux software master hardening and integrated the
+feature history into main with a normal fast-forward, without force pushing.
+
+- Idle mailbox expiration now releases ownership for both already-queued and
+  later same-station SDO requests. The real scheduler/VirtualBus regression
+  preserves the original deadline and queued Emergency evidence.
+- AL/DL monitoring carries immutable observation/expiry bounds through the
+  motion owner and is rechecked around auxiliary TX, motion TX and publication.
+  Accepted Controlword and stop evidence remain truthful when time expires.
+- Unresolved wire-index reuse suppresses ambiguous RTT for the observer session.
+  Histograms record actual optional observations and expose coverage; legacy
+  reports retain explicit unknown coverage.
+- Failed, allocating or SDO-loaded baselines cannot define performance regression.
+  Unsupported scenarios are rejected before port setup; aliases use one canonical
+  name across capture, run and offline topology metadata. Added CLI help.
+
+## Verification
+
+Focused final review passed 545 core/sim/guard tests, 16 example tests, 8 virtual
+I2C tests, 103 Python tests, Clippy/type checks, no_std checks and 55 portable
+legacy Linux fixtures. The full software gate passed 13 cases, alias/invalid
+input checks, two exact replays and capture rejection tests.
+
+All 12 Linux CI jobs passed for final code deaf254:
+https://github.com/ra1mj/ESOP/actions/runs/40283639418
+
+The final-code Q4 soak passed 3,600,000 virtual 1 ms cycles and measured RTT in
+all 3,600,000 cycles. It completed 35,520 SDO requests with zero request failures
+and retained eight outstanding at shutdown. Activated allocations, frees and
+reallocations were zero. Cyclic/DC/mailbox errors were zero. The bounded prefix
+contains 100,000 of 22,084,638 wire records; all omitted records are counted and
+full-stream/state/event digests are retained. Wire/state/event digests match the
+previous soak. Offline report and versioned evidence were regenerated and
+validated against deaf254, then committed in3751559.
+
+## Boundaries
+
+Hardware qualification remains false. Physical interoperability, DC precision,
+target timing and MCU ports remain deferred. User-owned paseo.json was preserved.
+
+## Main integration
+
+On 2026-11-02 the refreshed origin/main at c7d43e5 was fast-forwarded to
+37515598f2abb85761443fad11d4ef17264d37a6 and pushed without force. All 12 main CI
+jobs passed, including the Rust quality gate and Zenoh integration:
+https://github.com/ra1mj/ESOP/actions/runs/41467142313
+
+All applicable software acceptance criteria and requested main integration are
+complete. Archive and journal commits contain only task/session bookkeeping.
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `acae720` | (see git log) |
+| `2beca02` | (see git log) |
+| `deaf254` | (see git log) |
+| `3751559` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
