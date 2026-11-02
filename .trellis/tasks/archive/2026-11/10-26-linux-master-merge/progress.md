@@ -49,6 +49,12 @@ Wire/state/event digests match the previous soak. On 2026-11-02 the offline repo
 was regenerated against deaf254 and the versioned evidence/hash inventory updated.
 Hardware qualification remains false.
 
-Origin main was refreshed on 2026-11-02 and remains c7d43e5, unprotected and an
-ancestor of the feature branch. Next: commit evidence, fast-forward/push main,
-verify main CI, then archive/journal and push final bookkeeping.
+On 2026-11-02 origin main was refreshed at c7d43e5 and verified as an ancestor.
+Evidence was committed in 3751559 and the complete feature history was
+fast-forwarded into main and pushed without force. Remote main was verified at
+37515598f2abb85761443fad11d4ef17264d37a6. Main CI passed all 12 jobs:
+https://github.com/ra1mj/ESOP/actions/runs/41467142313
+
+All software acceptance criteria and main integration requirements are complete.
+Task archive and journal follow these verified work commits. The only unrelated
+working-tree path remains the user's untracked paseo.json.
