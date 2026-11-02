@@ -33,5 +33,22 @@ Origin main was c7d43e5 and unprotected when inspected; fetch again before merge
 - All55 legacy portable Linux fixtures pass; actual Linux gate remains needed.
 - Prior head18933fa CI is fully green. New code requires its own final CI.
 
-Next: commit/push, verify final Linux CI and virtual-hour soak, fast-forward main
-after fetching, verify main CI, archive/journal and push final bookkeeping.
+## Final code and evidence verified
+
+Hardening commits acae720, 2beca02 and deaf254 are pushed. Actual Linux CI on
+deaf254 passed all 12 jobs, including make ci, Zenoh integration, BPF and ten
+privileged runtime checks:
+https://github.com/ra1mj/ESOP/actions/runs/40283639418
+
+The final-code Q4 soak passed 3,600,000 cycles, with 3,600,000 observed RTT samples,
+35,520 completed SDOs, eight explicitly outstanding requests and zero activated
+heap operations. All cyclic/DC/mailbox error counts are zero. The capture keeps
+100,000 of 22,084,638 records; 21,984,638 omitted records remain explicit while
+full-stream/state/event digests and cycle/error counts cover the whole run.
+Wire/state/event digests match the previous soak. On 2026-11-02 the offline report
+was regenerated against deaf254 and the versioned evidence/hash inventory updated.
+Hardware qualification remains false.
+
+Origin main was refreshed on 2026-11-02 and remains c7d43e5, unprotected and an
+ancestor of the feature branch. Next: commit evidence, fast-forward/push main,
+verify main CI, then archive/journal and push final bookkeeping.

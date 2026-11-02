@@ -17,7 +17,7 @@ implementation, commits, GitHub pushes and main integration.
 ## Acceptance
 
 - [x] Independent focused review findings resolved or disproved with evidence.
-- [ ] Relevant regression tests and Linux make ci pass on the final code.
+- [x] Relevant regression tests and Linux make ci pass on the final code.
 - [x] Specifications and public usage/limitations match the final implementation.
 - [ ] GitHub main contains the completed work without a force push.
 
