@@ -20,7 +20,7 @@ requested implementation, commit/push to main, and CI verification.
 - [x] Commands and parameters match the current CLI and Makefile.
 - [x] Simulation/replay examples use the same scenario, mode, cycles and paths.
 - [x] Current capabilities and evidence are distinguished from deferred hardware work.
-- [ ] Diff checks pass; commits are pushed to main and CI is checked.
+- [x] Diff checks pass; commits are pushed to main and CI is checked.
 
 This is a documentation-only task. No new tests or protocol/spec changes are
 required; existing source/contracts provide the authority for the wording.
@@ -34,3 +34,7 @@ build/readme-validation output directories, with identical scenario/state/event
 summaries and zero activated heap operations. Reviewed the Mermaid health input
 against the eBPF/MLG contract and kept the CLI read-only. Spec-sync review found
 no new API or implementation contract to record.
+
+Work commit 968008d is pushed to main. Its CI passed all 12 jobs:
+https://github.com/ra1mj/ESOP/actions/runs/41650938043
+The GitHub README blob matches the local file exactly.
