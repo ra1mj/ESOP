@@ -376,3 +376,66 @@ complete. Archive and journal commits contain only task/session bookkeeping.
 ### Next Steps
 
 - None - task complete
+
+
+## Session 67: README project homepage
+
+**Date**: 2026-11-03
+**Task**: README project homepage
+**Branch**: `main`
+
+### Summary
+
+Rewrote the Chinese README around current capabilities, runnable examples, architecture, validation and documentation links; link/command checks, simulation/replay and all CI jobs passed; pushed main.
+
+### Main Changes
+
+## Delivered
+
+Rewrote README.md as a concise Chinese project homepage: current Linux software
+master status, main-branch CI badge, capability table, runnable help/simulation/
+replay examples, workload overview, logical architecture diagram, grouped crate
+navigation, quality/evidence commands, documentation links and qualification
+boundaries. Historical register and eBPF fixture detail now points to existing
+specialized documentation. CLI remains explicitly read-only; observation health
+feeds the lifecycle input rather than claiming ownership of ProcBuf State.
+
+## Validation
+
+- Validated 44 links/anchors and seven Make targets; checked balanced code fences.
+- Checked CLI --help and matched simulation/replay scenario, mode, cycles and
+  capture paths.
+- Executed 10,000-cycle release simulation and exact replay in isolated
+  build/readme-validation directories. Scenario/state/event summaries matched;
+  both passed with zero activated heap operations and hardware_qualified=false.
+- git diff --check passed. No runtime code or public interface changed, and no
+  new tests were added for the documentation-only edit.
+- Reviewed spec sync; no new implementation contract required a spec update.
+
+Original user-owned paseo.json remains untracked and untouched.
+
+## Delivery
+
+Work commit968008d was pushed to main; all12 GitHub CI jobs passed:
+https://github.com/ra1mj/ESOP/actions/runs/41650938043
+
+GitHub README blob6e3f9eff888f123f05bfbbd3a3c98a9d7b8defa2 matches the local file.
+
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `968008d` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

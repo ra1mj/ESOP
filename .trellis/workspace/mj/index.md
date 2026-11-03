@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-2.md`
-- **Total Sessions**: 66
+- **Total Sessions**: 67
 - **Last Active**: 2026-11-03
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-2.md` | ~378 | Active |
+| `journal-2.md` | ~441 | Active |
 | `journal-1.md` | ~1969 | Archived |
 <!-- @@@/auto:active-documents -->
 
@@ -30,6 +30,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 67 | 2026-11-03 | README project homepage | `968008d` | `main` |
 | 66 | 2026-11-03 | Linux master hardening and main integration | `acae720`, `2beca02`, `deaf254`, `3751559` | `main` |
 | 65 | 2026-10-26 | Linux R0-R2 software master closure | `6efc82c`, `235a5b5`, `585de61` | `feat/linux-r0-r2-master` |
 | 64 | 2026-09-28 | Runtime diagnostics CLI and eBPF status | `4159e0a` | `main` |
