@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-from resource_contracts import SDO_RESOURCE_FIELDS, validate_sdo_resources
+from resource_contracts import SDO_RESOURCE_FIELDS, validate_sdo_resources, validate_mailbox_capabilities
 PRODUCT_INPUT_SCHEMA = "esop.product-build-input.v1"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 HEX_U16 = re.compile(r"^0x[0-9a-f]{4}$")
@@ -298,7 +298,7 @@ def validate_product_input(value: object) -> dict:
             "coe_sdo_information",
             "requesting_id",
             "source",
-        },
+        } | ({"mailbox_capabilities"} if isinstance(product["devices"], dict) and "mailbox_capabilities" in product["devices"] else set()),
         "product input devices",
     )
     for key in ("declared_slaves", "declared_axes", "declared_io_channels"):
@@ -328,6 +328,7 @@ def validate_product_input(value: object) -> dict:
         (entry["name"], entry["position"]) for entry in complete_access
     ] != [(entry["name"], entry["position"]) for entry in requesting_id]:
         raise ValueError("product input Requesting ID device identities must match")
+    validate_mailbox_capabilities(devices, "product input devices")
     require_nonempty_string(devices["source"], "product input devices.source")
 
     process_data = require_exact_object(
@@ -451,6 +452,7 @@ def build_report(product_input: object | None = None) -> dict:
             "declared_slaves": 0,
             "declared_axes": 0,
             "declared_io_channels": 0,
+            "mailbox_capabilities": [],
             "coe_complete_access": [],
             "coe_sdo_information": [],
             "requesting_id": [],

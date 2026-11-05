@@ -8,7 +8,7 @@ import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from resource_contracts import validate_sdo_resources
+from resource_contracts import validate_sdo_resources, validate_mailbox_capabilities
 
 
 SCHEMA = "esop.build.v1"
@@ -285,6 +285,11 @@ def validate_report(report: dict) -> None:
     ]
     if complete_identities != requesting_identities:
         fail("devices Requesting ID device identities must match")
+
+    try:
+        validate_mailbox_capabilities(devices, "devices")
+    except ValueError as error:
+        fail(str(error))
 
     process_data = require(report, "process_data", "report")
     for key in (

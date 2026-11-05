@@ -264,85 +264,6 @@ fn fill_load<const SLAVES: usize>(
     Ok(())
 }
 
-fn mapping<const SLAVES: usize, const DOMAINS: usize, const AXES: usize>(
-    p: &esop_product_config::StaticProductConfig<SLAVES, DOMAINS, AXES>,
-    position: usize,
-) -> Result<MappingTable<4, 3>, String> {
-    let slave = p.slaves[position];
-    let mut table = MappingTable::new();
-    let domain = p
-        .domains
-        .iter()
-        .find(|d| d.config.id == slave.domain_id)
-        .ok_or("missing slave Domain")?;
-    let mut spans = [(usize::MAX, 0usize); 2];
-    for pdo in p
-        .pdos
-        .iter()
-        .filter(|pdo| pdo.request.slave_position == slave.position)
-    {
-        let direction = usize::from(pdo.request.direction == PdoDirection::Tx);
-        spans[direction].0 = spans[direction].0.min(pdo.bit_offset);
-        spans[direction].1 = spans[direction]
-            .1
-            .max(pdo.bit_offset + pdo.request.bit_length as usize);
-    }
-    if spans
-        .iter()
-        .any(|(start, end)| *start == usize::MAX || start % 8 != 0 || end <= start)
-    {
-        return Err("invalid PDO span".into());
-    }
-    let lengths = spans.map(|(start, end)| (end - start).div_ceil(8) as u16);
-    for (index, start, length, control) in [
-        (
-            0,
-            slave.mailbox_config.send_address,
-            slave.mailbox_config.send_capacity,
-            0x26,
-        ),
-        (
-            1,
-            slave.mailbox_config.receive_address,
-            slave.mailbox_config.receive_capacity,
-            0x22,
-        ),
-        (2, 0x1400, lengths[0], 0x24),
-        (3, 0x1500, lengths[1], 0x20),
-    ] {
-        check(table.add_sync_manager(SyncManagerConfig {
-            index,
-            physical_start: start,
-            length,
-            control,
-            status: 0,
-            enable: true,
-        }))?;
-    }
-    for direction in 0..2 {
-        check(table.add_fmmu(FmmuConfig {
-            index: direction as u8,
-            logical_start: domain.config.logical_address + (spans[direction].0 / 8) as u32,
-            length: lengths[direction],
-            logical_start_bit: 0,
-            logical_end_bit: 7,
-            physical_start: if direction == 0 { 0x1400 } else { 0x1500 },
-            physical_start_bit: 0,
-            fmmu_type: if direction == 0 { 2 } else { 1 },
-            enable: true,
-        }))?;
-    }
-    if let Some(status) = slave.mapped_mailbox_status {
-        check(table.add_fmmu(status.fmmu))?;
-    }
-    for index in 0..4 {
-        if let Some(activation) = slave.op_only_outputs.activation_template(index) {
-            check(table.mark_op_only_output(index, activation))?;
-        }
-    }
-    Ok(table)
-}
-
 fn startup<P: ScenarioPort, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>(
     port: &mut P,
     product: &esop_product_config::StaticProductConfig<SLAVES, DOMAINS, AXES>,
@@ -528,7 +449,7 @@ where
         port.now_ns(),
         10_000_000_000,
         1_000_000,
-        &mapping(product, 0)?,
+        &check(product.build_mapping_for_slave::<4, 3>(product.slaves[0].position, &startup))?,
     ))?;
     for generation in 1..20000u16 {
         if startup.phase() == StartupPhase::Ready {
@@ -545,7 +466,10 @@ where
                 port.now_ns(),
                 10_000_000_000,
                 1_000_000,
-                &mapping(product, mapping_position)?,
+                &check(product.build_mapping_for_slave::<4, 3>(
+                    product.slaves[mapping_position].position,
+                    &startup,
+                ))?,
             ))?;
         }
         port.advance_to(port.now_ns() + 100_000)?;

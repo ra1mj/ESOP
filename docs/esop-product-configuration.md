@@ -63,14 +63,14 @@ identity/name、四类 `StateMachine/Timeout`、带 `Enable`/`OpOnly` 的有序
 SyncManager、`MBoxOut`/`MBoxIn` 的 `StartAddress`/`DefaultSize`/`ControlByte`、
 `Mailbox/CoE` 及其可选严格布尔 `CompleteAccess`/`SdoInfo` 属性、直接
 `Device/Info/IdentificationReg134` 布尔 capability、有序且直接位于 `Device` 下的重复 `Fmmu` usage、
-有序 `Device/Dc/OpMode`、RxPDO/TxPDO assignment，以及 byte-aligned PDO entry 的
+有序 `Device/Dc/OpMode`、RxPDO/TxPDO assignment，以及保留真实位宽的 PDO entry 的
 index/subindex/bit length/DataType。未提供 timeout 时使用版本化的 ETG.1020
 默认 profile。它明确拒绝：
 
 - 模块化设备、嵌套/错位/未知或超过 16 项的 FMMU 声明，以及 FMMU 寄存器/逻辑地址规则；
-- bit-packed 或嵌套 PDO entry；
+- 嵌套 PDO entry；
 - 零值、非法或纳秒换算溢出的 timeout，以及非 output SyncManager 的 `OpOnly`；
-- 缺失 CoE、缺半边/重复/禁用的邮箱 SyncManager、缺失物理字段、容量越界及地址
+- 声明 CoE 却没有邮箱、缺半边/重复/禁用的邮箱 SyncManager、缺失物理字段、容量越界及地址
   溢出或重叠；
 - 非法 `CompleteAccess`/`SdoInfo` 布尔值，或产品为未声明对应 capability 的 ESI 设备启用功能；
 - 空、重复、嵌套、错位或非法的 `IdentificationReg134`，以及产品为不支持该能力的设备配置 Requesting ID；
@@ -134,7 +134,7 @@ SDO Information 输出完整期望；构建报告入口重新校验条目数、�
 并提供外部期望配置 hash、当前 boot ID、已扫描的 `SlaveRecord` 和实时
 ProcBuf。激活按以下顺序 fail-closed：
 
-1. 校验 `esop.product-runtime.v1` 与 32-byte 配置 hash；
+1. 校验 `esop.product-runtime.v2` 与 32-byte 配置 hash；
 2. 逐从站校验 Requesting ID 的 `expected => supported` 不变量；
 3. 逐从站校验 Complete Access 的 `enabled => supported` 不变量；
 4. 逐从站校验 SDO Information 的 `enabled => supported`、禁用时空计划、启用时非空、固定容量、
@@ -178,7 +178,7 @@ position-keyed 扫描证据验证所有 DC 要求：显式 reference 合格时�
 继续 mailbox/FMMU/SyncManager/SII/AL；WKC、长度、generation、动作、deadline、AL 状态或
 值不匹配均锁存首错并保持 Topology 门关闭。未配置期望时不产生该线上序列。
 其后、首个普通 AL 转换动作前，Startup 对携带
-邮箱期望的 profile 精确读取 SII `0x001C..0x0020`，要求 CoE，并只比较 SII 可表示的
+邮箱期望的 profile 精确读取 SII `0x001C..0x0020`，按类型化能力决定是否要求 CoE，并只比较 SII 可表示的
 send/receive 地址和容量；轮询、超时、重试和 Status Bit 仍是运行期策略，不参与布局
 相等判定。该布局先暂存而不发布。随后，携带 SII 期望的 profile 进入独立
 `ReadingConfiguration` 阶段：从标准
@@ -203,7 +203,7 @@ schedule、frame plan、轴模式、策略和 PDO map。每轴 PDO 临时映射�
 32，cfggen 与运行时共享同一常量并在超限时拒绝。
 
 配置期可进一步调用 `PRODUCT_CONFIG.build_pdo_startup_plan::<OPS>(position)`：
-它按生成顺序为一个从站构建固定容量 CoE 计划，先清除 `0x1C10 + SM` 的
+它按声明能力为一个从站构建固定容量 CoE 计划。完整可配置映射先清除 `0x1C10 + SM` 的
 assignment count，再写该 SM 的 mapping 对象，最后发布 mapping index 列表和
 count，并返回固定站地址。核心 `PdoConfigController` 对每个写值执行 download
 和同对象 upload 回读，只有长度与字节完全一致才推进；分段 upload、代际、
@@ -307,3 +307,23 @@ Complete Access 分组、block transfer 或真实从站响应。上述证据不�
 接受映射、真实从站全周期 WKC 资格、实际线缆时间、WCET、DMA/cache 正确性、制动/机械适配、
 STO/FSoE 或功能安全。生成示例和构建报告必须保持
 `passed: false`，直到独立的目标构建、HIL、周期测量和发布审核提供证据。
+
+
+## 通用从站配置（运行时 v2）
+
+输入 JSON 继续使用 `esop.product.v1`。生成的 Rust 运行时合同升级为
+`esop.product-runtime.v2`，旧产物必须重新生成，旧运行时版本会在激活前被拒绝。
+
+从站能力由 `ProductMailboxCapability` 区分无邮箱、普通邮箱和 CoE。无 CoE
+从站不生成 SDO 工作；无邮箱从站仍会读取 SII 邮箱区并确认五个 WORD 全为零。
+物理邮箱元数据与 CoE 服务权限分开；访问无 CoE 从站会返回 `CoeUnavailable`。
+
+ESI 的 `PdoAssign`、`PdoConfig`、`PdoUpload` 和 PDO 的 `Fixed` 均严格解析，
+缺省为不支持。固定映射只核对；仅 Assignment 可写时只下载 Assignment；
+完整可配置时才下载映射。`Fixed` 始终禁止对应映射对象的下载。可读回的固定
+CoE 映射通过 SDO 精确核对，其余静态映射通过 SII 和 SM/FMMU 寄存器核对。
+
+PDO 保留位偏移，支持跨字节条目。同一 SM 内连续打包，不同 SM／从站方向
+按字节起始，尾部补齐位不属于 PDO，不映射到从站。聚合数据报覆盖完整字节，
+仍按精确 WKC 和完整响应提交。`build_mapping_for_slave(position, startup)`
+使用已验证 SII 中的物理地址与控制字节，生成真实起止位的 SM/FMMU 表。

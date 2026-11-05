@@ -184,7 +184,7 @@ robot_build_input.json
 ```
 
 `esop_product_config.rs` contains only static data and the public/re-exported
-`esop-product-config` API. Runtime activation checks `esop.product-runtime.v1`,
+`esop-product-config` API. Runtime activation checks `esop.product-runtime.v2`,
 the caller-expected 32-byte hash, exact ProcBuf v7 descriptor/header, exact
 observed online/configured topology, rebuilt Domain/PDO/datagram/WKC evidence,
 schedule/frame plans, drive ownership, product policies, and selected-mode
@@ -218,14 +218,15 @@ mutation. Static auxiliary images and empty-copy products retain their existing
 paths; a detached raw slice cannot authorize a shared-image output.
 
 Each generated slave carries four ESM transition timeout classes, one validated
-CoE mailbox pair, one bounded `OpOnlySyncManagerProfile`, and an ordered FMMU
+typed optional mailbox/CoE capability, one bounded `OpOnlySyncManagerProfile`, and an ordered FMMU
 usage profile with an explicit count plus a fixed 16-entry array. Only direct
 `Device/Fmmu` declarations are accepted; unknown, misplaced, empty, or excess
 declarations fail before staging. ESI `MBoxOut`
 maps to master-send/slave-receive and `MBoxIn` maps to
 master-receive/slave-send. Both SyncManagers must be enabled and provide
-`StartAddress`, `DefaultSize`, and `ControlByte`, while the Device must declare
-`Mailbox/CoE`. Missing, duplicate, overlapping, overflowing, undersized, or
+`StartAddress`, `DefaultSize`, and `ControlByte` when a mailbox pair exists.
+`Mailbox/CoE` is optional; CoE requires a complete pair. Incomplete, duplicate,
+overlapping, overflowing, undersized, or
 oversized mailbox ranges fail before publication. Timeout values are decimal
 milliseconds converted to checked nanoseconds; missing values use the named
 `ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1`. Mailbox data, timeout profiles, and
@@ -280,11 +281,12 @@ first Startup error, prevents PREOP/Ready, and keeps lifecycle Topology false.
 Profiles without an expectation retain the previous traffic shape.
 
 The core SII parser accepts only the exact five-word standard mailbox header,
-checks CoE support and the same address/capacity rules, and performs the same
+checks the selected protocol requirement and address/capacity rules, and performs the same
 slave-to-master direction conversion. It parses caller-owned words or a
 completed exact-range `SiiBlockReader`. A Startup profile may carry the
 generated expected mailbox; after identity verification and before any AL
-transition, Startup reads exactly SII words `0x001C..0x0020`, requires CoE,
+transition, Startup reads exactly SII words `0x001C..0x0020`, checks CoE only for
+a CoE profile,
 compares only the four physical address/capacity fields, and stages rather
 than publishes the expected runtime policy. The later SII category comparison
 must verify the generated MBoxIn SyncManager index, address, length, control
@@ -292,7 +294,8 @@ byte and enabled state, while ordered FMMU usage verifies whether the
 canonical direct Status Bit is permitted. Only then may Startup publish the
 complete position-keyed MailboxConfig. Runtime poll, timeout, retry and
 status-bit policy are not SII-header layout fields. Profiles without an expected mailbox and the
-legacy `start` API retain the identity-to-AL path.
+legacy `start` API retain the identity-to-AL path unless `with_no_mailbox()`
+explicitly requires all five mailbox words to be zero.
 
 The core also provides a fixed-capacity SII category stream contract.
 `SiiCategoryStreamReader<WORDS>` starts at standard word `0x0040` by default,
@@ -771,3 +774,94 @@ selected reference already published with measured topology evidence. Optional
 evidence stays `None`; a product-required slave without a measured path must
 fail before identity, and a partial physical write sequence must never be
 reported as a complete software batch.
+
+
+## Runtime v2 optional capabilities and physical bit layouts
+
+### 1. Scope / Trigger
+
+Generated v2 products support static PDO IO without CoE or without any mailbox.
+The product input schema remains v1; normalized product-config JSON is v2.
+Regenerate old runtime modules; the v1
+runtime tag is rejected before activation.
+
+### 2. Signatures
+
+- `ProductMailboxCapability::{None, MailboxOnly, Coe}` plus `mailbox()` and
+  `coe_mailbox()` distinguish physical transport from implemented CoE service.
+- `ProductPdoConfiguration::{Fixed, Assignment, Configurable}` and each
+  `ProductPdoConfig.fixed` constrain writes. `pdo_upload_supported` controls
+  verification of wholly fixed CoE products.
+- `PdoConfigPlan::append_mapping_verification` / `append_assignment_verification`
+  and `push_verification` add upload-only operations; `access()` accompanies
+  the compatibility `writes()` value slice.
+- `StartupSlaveProfile::with_no_mailbox` / `with_non_coe_mailbox` select SII
+  verification. Ordinary `with_expected_mailbox` retains the CoE requirement.
+- `StaticProductConfig::build_mapping_for_slave(position, startup)` rebuilds
+  SM/FMMU tables from complete verified SII physical defaults and generated
+  logical offsets. `StartupController::verified_sii_mapping` is immutable and
+  clears on restart/rescan together with the signature.
+
+### 3. Contracts
+
+ESI direct CoE `PdoAssign`, `PdoConfig`, `PdoUpload` and PDO `Fixed` are strict
+booleans, default false. Configurable mapping currently requires assignment
+support. Fixed assignments must retain the exact ESI default selection/order.
+All capabilities and fixed flags enter JSON/inventory, C/Rust and the config
+hash (which also binds the runtime schema). Build input/reports additionally
+carry a per-slave mailbox_capabilities list; old v1 inputs may omit it, which
+means unknown capability evidence. Present lists must match CoE record owners
+and reject CoE-only features on non-CoE slaves. Absent mailbox storage in Rust/C is canonical zero metadata, never a
+valid transport; normalized JSON uses null. Never pass inactive storage to a
+mailbox owner. No-CoE slaves create no SDO jobs or transport tokens. Empty
+configuration batches complete without I/O, including zero slot capacities.
+
+Fully configurable mapping keeps download plus exact upload readback. An
+assignment-only slave changes assignments but verifies mapping objects without
+writing them. Fixed CoE products with PdoUpload use uploads only; those without
+PdoUpload and non-CoE products use the complete SII signature and physical
+SM/FMMU readback. A per-PDO Fixed flag always prevents mapping downloads.
+
+Entries remain bit-packed within each SM. Each new SM and slave direction
+starts on a byte boundary; trailing bits are unowned padding, excluded from
+FMMUs. Aggregate Domain LWR/LRD covers those bytes, retaining exact per-slave
+WKC and complete-only input commit. No byte-aligned segment fast path is used.
+Physical addresses/control come from verified SII, never scene constants.
+FMMU logical/physical start bits and end bits reflect actual PDO lengths.
+
+### 4. Validation & Error Matrix
+
+| Rejected input | Result |
+| --- | --- |
+| CoE without pair; partial pair; malformed capability | Generator error before publication |
+| Changed fixed assignment; interleaved SM entries | Generator error before publication |
+| Non-CoE with SDO flags/write policy; inactive mailbox with active metadata | CapabilityMismatch |
+| SDO policy request for no-CoE station | CoeUnavailable |
+| Nonzero SII mailbox words for absent profile | UnexpectedMailbox; no verified mailbox |
+| Wrong immutable PDO upload / expired absolute deadline | Existing typed readback/timeout fault |
+| Missing verified SII, foreign identity, gaps/overlaps, short SM | ProductMappingError; no table publication |
+
+### 5. Good / Base / Bad Cases
+
+Good: a three-bit output followed by an eight-bit output occupies eleven bits
+in one two-byte SM; the input begins at bit 16 and the output FMMU ends at bit 2.
+Base: legacy writable simulation ESIs explicitly advertise all PDO capabilities
+and retain their old wire sequence after regeneration. Bad: interpreting a
+missing CoE element as permission to download mapping objects.
+
+### 6. Tests Required
+
+Core tests assert upload-only literal requests, mixed access, exact mismatch,
+original deadlines, transactional capacity rejection, empty batch and SII
+absence/protocol verification. Product tests assert write filtering, no-CoE
+empty jobs and SDO rejection, stale/unverified SII rejection and literal bit
+FMMU bytes. Generator tests assert zero-axis/no-mailbox IO, cross-byte offsets,
+byte-cover WKC and fixed assignment rejection. The full r0_r2 scenario uses the
+public mapping builder, while the existing wire/replay fixtures stay independent.
+
+### 7. Wrong vs Correct
+
+Wrong: infer CoE from nonzero mailbox capacities, use a valid-looking dummy
+mailbox for static IO, or round an eleven-bit FMMU up to sixteen mapped bits.
+Correct: branch on typed capability, verify absence or real SII metadata, and
+map exactly eleven bits while transporting their two covering bytes.

@@ -829,7 +829,7 @@ fn sdo_information_capability_policy_expectations_and_hashes_are_strict() {
     let fixture = Fixture::new();
     fixture.edit_esi(|xml| {
         xml.replace(
-            "<Mailbox><CoE/></Mailbox>",
+            "<Mailbox><CoE PdoAssign=\"1\" PdoConfig=\"1\" PdoUpload=\"1\"/></Mailbox>",
             "<Mailbox><CoE SdoInfo=\"true\"/></Mailbox>",
         )
     });
@@ -1180,15 +1180,72 @@ fn dc_descriptor_changes_esi_semantic_and_configuration_hashes() {
 }
 
 #[test]
-fn missing_coe_or_incomplete_mailbox_fails_before_publication() {
+fn pure_bit_io_without_mailbox_preserves_offsets_and_byte_cover_wkc() {
     let fixture = Fixture::new();
-    fixture.edit_esi(|xml| xml.replacen("<Mailbox><CoE/></Mailbox>", "", 1));
+    fixture.edit_product(|product| {
+        product["slaves"] = serde_json::json!([product["slaves"][2].clone()]);
+        product["slaves"][0]["position"] = 0.into();
+        product["slaves"][0]["domain_id"] = 0.into();
+        product["domains"] = serde_json::json!([product["domains"][1].clone()]);
+        product["domains"][0]["id"] = 0.into();
+        product["domains"][0]["process_image_offset"] = 0.into();
+        product["axes"] = serde_json::json!([]);
+        product["slave_copies"] = serde_json::json!([]);
+        product["procbuf"]["axes"] = 0.into();
+        product["procbuf"]["domains"] = 1.into();
+    });
+    fixture.edit_esi(|_| r##"<EtherCATInfo><Vendor><Id>#xe500</Id></Vendor><Descriptions><Devices><Device>
+<Type ProductCode="#x7010" RevisionNo="1">BitIO</Type><Name>Bit IO</Name>
+<Fmmu>Outputs</Fmmu><Fmmu>Inputs</Fmmu>
+<Sm StartAddress="#x1400" DefaultSize="2" ControlByte="#x24">Outputs</Sm>
+<Sm StartAddress="#x1500" DefaultSize="1" ControlByte="#x20">Inputs</Sm>
+<RxPdo Sm="0" Fixed="true"><Index>#x1601</Index>
+<Entry><Index>#x7000</Index><SubIndex>1</SubIndex><BitLen>3</BitLen><DataType>BIT3</DataType></Entry>
+<Entry><Index>#x7001</Index><SubIndex>1</SubIndex><BitLen>8</BitLen><DataType>USINT</DataType></Entry></RxPdo>
+<TxPdo Sm="1" Fixed="true"><Index>#x1a01</Index>
+<Entry><Index>#x6000</Index><SubIndex>1</SubIndex><BitLen>7</BitLen><DataType>BIT7</DataType></Entry></TxPdo>
+</Device></Devices></Descriptions></EtherCATInfo>"##.to_owned());
+    let output = fixture.output("bit-io");
+    generate(&fixture.product, &output).unwrap();
+    let product: Value =
+        serde_json::from_slice(&fs::read(output.join("product_config.json")).unwrap()).unwrap();
+    assert_eq!(product["slaves"][0]["mailbox_capability"], "none");
+    assert!(product["slaves"][0]["mailbox"].is_null());
+    assert_eq!(product["slaves"][0]["pdo_configuration"], "fixed");
+    assert_eq!(product["pdo_entries"][0]["bit_offset"], 0);
+    assert_eq!(product["pdo_entries"][1]["bit_offset"], 3);
+    assert_eq!(product["pdo_entries"][2]["bit_offset"], 16);
+    assert_eq!(product["pdo_entries"][2]["bit_length"], 7);
+    assert_eq!(product["pdo_entries"][0]["fixed"], true);
+    assert_eq!(product["datagrams"][0]["payload_len"], 2);
+    assert_eq!(product["datagrams"][1]["payload_len"], 1);
+    assert_eq!(product["datagrams"][0]["expected_wkc"], 1);
+    assert_eq!(product["datagrams"][1]["expected_wkc"], 1);
+    fixture.edit_product(|product| product["slaves"][0]["rx_pdos"] = serde_json::json!([]));
     assert!(
-        generate(&fixture.product, &fixture.output("missing-coe"))
+        generate(&fixture.product, &fixture.output("wrong-assignment"))
             .unwrap_err()
             .to_string()
-            .contains("does not declare Mailbox/CoE support")
+            .contains("fixed PDO assignment")
     );
+}
+
+#[test]
+fn non_coe_mailbox_is_supported_but_incomplete_mailbox_fails() {
+    let fixture = Fixture::new();
+    fixture.edit_esi(|xml| {
+        xml.replacen(
+            "<Mailbox><CoE PdoAssign=\"1\" PdoConfig=\"1\" PdoUpload=\"1\"/></Mailbox>",
+            "",
+            1,
+        )
+    });
+    let output = fixture.output("non-coe");
+    generate(&fixture.product, &output).unwrap();
+    let product: Value =
+        serde_json::from_slice(&fs::read(output.join("product_config.json")).unwrap()).unwrap();
+    assert_eq!(product["slaves"][2]["mailbox_capability"], "mailbox_only");
+    assert_eq!(product["slaves"][2]["pdo_configuration"], "fixed");
 
     let fixture = Fixture::new();
     fixture.edit_esi(|xml| xml.replacen(" StartAddress=\"#x1000\"", "", 1));

@@ -74,6 +74,7 @@ struct GeneratedPdo {
     slave_position: u16,
     assignment_index: HexU16,
     sync_manager: u8,
+    fixed: bool,
     object_index: HexU16,
     subindex: u8,
     direction: GeneratedDirection,
@@ -150,7 +151,10 @@ struct GeneratedSlave {
     coe_sdo_information_supported: bool,
     coe_sdo_information_enabled: bool,
     sdo_information_expectations: Vec<GeneratedSdoInformationExpectation>,
-    mailbox: GeneratedMailbox,
+    mailbox: Option<GeneratedMailbox>,
+    mailbox_capability: &'static str,
+    pdo_configuration: &'static str,
+    pdo_upload_supported: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     mapped_mailbox_status: Option<GeneratedMailboxMappedStatusBit>,
     sii_fmmu_count: u8,
@@ -194,7 +198,7 @@ struct GeneratedMailboxStatusBit {
     active_high: bool,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Serialize)]
 struct GeneratedMailbox {
     send_sync_manager: u8,
     send_address: u16,
@@ -297,7 +301,7 @@ struct CycleMetrics {
 struct ResolvedSlave {
     manifest: SlaveManifest,
     device: EsiDevice,
-    mailbox: EsiMailbox,
+    mailbox: Option<EsiMailbox>,
     rx_pdos: Vec<EsiPdo>,
     tx_pdos: Vec<EsiPdo>,
     sdo_information_expectations: Vec<GeneratedSdoInformationExpectation>,
@@ -438,13 +442,15 @@ fn build_artifacts(input: &Path) -> Result<GeneratedArtifacts> {
             let mut sii_fmmu_usages = [EsiFmmuUsage::Unused; MAX_SII_FMMU_USAGES];
             sii_fmmu_usages[..slave.device.fmmu_usages.len()]
                 .copy_from_slice(&slave.device.fmmu_usages);
-            let mailbox = GeneratedMailbox::from_esi(
-                slave.mailbox,
-                slave
-                    .device
-                    .fmmu_usages
-                    .contains(&EsiFmmuUsage::SyncManagerStatus),
-            );
+            let mailbox = slave.mailbox.map(|mailbox| {
+                GeneratedMailbox::from_esi(
+                    mailbox,
+                    slave
+                        .device
+                        .fmmu_usages
+                        .contains(&EsiFmmuUsage::SyncManagerStatus),
+                )
+            });
             Ok(GeneratedSlave {
                 name: slave.manifest.name.clone(),
                 kind: slave.manifest.kind,
@@ -472,6 +478,21 @@ fn build_artifacts(input: &Path) -> Result<GeneratedArtifacts> {
                 coe_sdo_information_enabled: slave.manifest.coe.sdo_information,
                 sdo_information_expectations: slave.sdo_information_expectations.clone(),
                 mailbox,
+                mailbox_capability: if slave.device.coe_supported {
+                    "coe"
+                } else if mailbox.is_some() {
+                    "mailbox_only"
+                } else {
+                    "none"
+                },
+                pdo_configuration: if slave.device.coe_pdo_config {
+                    "configurable"
+                } else if slave.device.coe_pdo_assign {
+                    "assignment"
+                } else {
+                    "fixed"
+                },
+                pdo_upload_supported: slave.device.coe_pdo_upload,
                 mapped_mailbox_status: mapped_mailbox_status.get(&slave.manifest.position).copied(),
                 sii_fmmu_count: slave.device.fmmu_usages.len() as u8,
                 sii_fmmu_usages,
@@ -512,7 +533,7 @@ fn build_artifacts(input: &Path) -> Result<GeneratedArtifacts> {
     let config_sha256 = sha256_json(&semantic)?;
 
     let product_config = json!({
-        "schema_version": "esop.product-config.v1",
+        "schema_version": "esop.product-config.v2",
         "config_sha256": config_sha256,
         "product": manifest.product,
         "cycle": manifest.cycle,
@@ -875,6 +896,23 @@ fn resolve_slaves(base: &Path, slaves: &[SlaveManifest]) -> Result<Vec<ResolvedS
         let selected_dc_mode = select_dc_mode(manifest, &device)?;
         let rx_pdos = select_pdos(&device.rx_pdos, &manifest.rx_pdos, &manifest.name, "Rx")?;
         let tx_pdos = select_pdos(&device.tx_pdos, &manifest.tx_pdos, &manifest.name, "Tx")?;
+        if !device.coe_pdo_assign {
+            for (available, selected) in [(&device.rx_pdos, &rx_pdos), (&device.tx_pdos, &tx_pdos)]
+            {
+                let assigned: Vec<_> = available
+                    .iter()
+                    .filter(|pdo| pdo.sync_manager.is_some_and(|sm| sm < 16))
+                    .map(|pdo| pdo.index)
+                    .collect();
+                let selected: Vec<_> = selected.iter().map(|pdo| pdo.index).collect();
+                if assigned != selected {
+                    return Err(GeneratorError::Invalid(format!(
+                        "slave {} fixed PDO assignment differs from ESI defaults",
+                        manifest.name
+                    )));
+                }
+            }
+        }
         validate_selected_entries(&manifest.name, GeneratedDirection::Rx, &rx_pdos)?;
         validate_selected_entries(&manifest.name, GeneratedDirection::Tx, &tx_pdos)?;
         let sdo_information_expectations = derive_sdo_information_expectations(
@@ -1007,17 +1045,27 @@ fn select_dc_mode(manifest: &SlaveManifest, device: &EsiDevice) -> Result<Option
         })
 }
 
-fn validate_product_mailbox(slave: &str, device: &EsiDevice) -> Result<EsiMailbox> {
-    if !device.coe_supported {
+fn validate_product_mailbox(slave: &str, device: &EsiDevice) -> Result<Option<EsiMailbox>> {
+    if device.coe_supported && device.mailbox.is_none() {
         return Err(GeneratorError::Invalid(format!(
-            "slave {slave} ESI does not declare Mailbox/CoE support"
+            "slave {slave} ESI declares CoE without a complete MBoxOut/MBoxIn pair"
         )));
     }
-    device.mailbox.ok_or_else(|| {
-        GeneratorError::Invalid(format!(
-            "slave {slave} ESI does not provide a complete MBoxOut/MBoxIn pair"
-        ))
-    })
+    if device.coe_pdo_config && !device.coe_pdo_assign {
+        return Err(GeneratorError::Invalid(format!(
+            "slave {slave} ESI PdoConfig requires PdoAssign for bounded remapping"
+        )));
+    }
+    if device.mailbox.is_none()
+        && device
+            .fmmu_usages
+            .contains(&EsiFmmuUsage::SyncManagerStatus)
+    {
+        return Err(GeneratorError::Invalid(format!(
+            "slave {slave} declares mailbox status without a mailbox"
+        )));
+    }
+    Ok(device.mailbox)
 }
 
 fn validate_op_only_outputs(
@@ -1179,7 +1227,13 @@ fn build_domain_plan(
                 })?;
             let logical_bit = (domain_bit_offset % 8) as u8;
             let status_bit = MailboxStatusBit::sync_manager_mailbox_full(
-                slave.mailbox.receive_sync_manager().index,
+                slave
+                    .mailbox
+                    .ok_or_else(|| {
+                        GeneratorError::Invalid("mailbox status requires a mailbox".to_owned())
+                    })?
+                    .receive_sync_manager()
+                    .index,
             );
             let binding = GeneratedMailboxMappedStatusBit {
                 domain_id: domain.id,
@@ -1484,6 +1538,8 @@ fn append_slave_pdos(
     pdos: &[EsiPdo],
 ) -> Result<()> {
     *bit_offset = bit_offset.div_ceil(8) * 8;
+    let mut previous_sm = None;
+    let mut completed_sms = BTreeSet::new();
     for pdo in pdos {
         let sync_manager = pdo.sync_manager.ok_or_else(|| {
             GeneratorError::Invalid(format!(
@@ -1491,6 +1547,16 @@ fn append_slave_pdos(
                 slave.manifest.name, pdo.index
             ))
         })?;
+        if previous_sm != Some(sync_manager) {
+            if !completed_sms.insert(sync_manager) {
+                return Err(GeneratorError::Invalid(format!(
+                    "slave {} has non-contiguous PDOs for SM {sync_manager}",
+                    slave.manifest.name
+                )));
+            }
+            *bit_offset = bit_offset.div_ceil(8) * 8;
+            previous_sm = Some(sync_manager);
+        }
         for entry in &pdo.entries {
             output.push(generated_pdo(
                 slave,
@@ -1505,12 +1571,8 @@ fn append_slave_pdos(
                 .ok_or_else(|| GeneratorError::Invalid("PDO bit offset overflows".to_owned()))?;
         }
     }
-    if *bit_offset % 8 != 0 {
-        return Err(GeneratorError::Invalid(format!(
-            "slave {} {:?} PDO selection is not byte-addressable",
-            slave.manifest.name, direction
-        )));
-    }
+    // Tail bits are unowned zero-filled process-image padding, never PDO entries.
+    *bit_offset = bit_offset.div_ceil(8) * 8;
     Ok(())
 }
 
@@ -1527,6 +1589,7 @@ fn generated_pdo(
         slave_position: slave.manifest.position,
         assignment_index: HexU16(pdo.index),
         sync_manager,
+        fixed: pdo.fixed,
         object_index: HexU16(entry.index),
         subindex: entry.subindex,
         direction,
@@ -1799,6 +1862,7 @@ fn semantic_identity(
         .map(|slave| (slave.esi_label.clone(), slave.esi_semantic_sha256.clone()))
         .collect::<BTreeMap<_, _>>();
     Ok(json!({
+        "runtime_schema": PRODUCT_RUNTIME_SCHEMA,
         "manifest": normalized_manifest,
         "esi_sources": esi_sources,
         "mapped_mailbox_status": slaves
@@ -1873,6 +1937,13 @@ fn robot_build_input(
             "declared_slaves": manifest.slaves.len(),
             "declared_axes": manifest.axes.len(),
             "declared_io_channels": manifest.procbuf.io_channels,
+            "mailbox_capabilities": slaves.iter().map(|slave| json!({
+                "name": slave.name,
+                "position": slave.position,
+                "capability": slave.mailbox_capability,
+                "pdo_configuration": slave.pdo_configuration,
+                "pdo_upload_supported": slave.pdo_upload_supported,
+            })).collect::<Vec<_>>(),
             "coe_complete_access": slaves
                 .iter()
                 .map(|slave| json!({
@@ -1950,11 +2021,11 @@ fn render_header(
         "#define ESOP_RUNTIME_SDO_REQUESTS {}u\n#define ESOP_MAX_SDO_OBJECT_BYTES {}u\n\n",
         manifest.capacities.runtime_sdo_requests, manifest.capacities.max_sdo_object_bytes,
     ));
-    header.push_str("typedef struct { const char *name; uint16_t position; uint16_t station_address; uint8_t domain_id; uint8_t kind; uint32_t vendor_id; uint32_t product_code; uint32_t revision; uint32_t serial; uint8_t has_serial; uint8_t dc_required; uint8_t dc_reference_clock; const char *dc_op_mode; uint8_t has_dc_op_mode; uint32_t dc_cycle_time0_ns; int32_t dc_shift_time0_ns; int32_t dc_shift_time1_ns; int16_t dc_sync1_cycle_factor; uint16_t dc_assign_activate; int16_t dc_sync0_cycle_factor; uint8_t has_dc_sync_timing; uint32_t dc_sync_cycle_time0_ns; uint32_t dc_sync_cycle_time1_ns; int32_t dc_sync_shift_time0_ns; uint16_t dc_sync_assign_activate; uint16_t mailbox_send_address; uint16_t mailbox_send_capacity; uint16_t mailbox_receive_address; uint16_t mailbox_receive_capacity; uint8_t mailbox_send_sync_manager; uint8_t mailbox_send_control_byte; uint8_t mailbox_receive_sync_manager; uint8_t mailbox_receive_control_byte; uint8_t has_mailbox_status_bit; uint16_t mailbox_status_bit_address; uint8_t mailbox_status_bit_mask; uint8_t mailbox_status_bit_active_high; uint8_t sii_sync_manager_count; uint16_t sii_enabled_sync_managers; uint8_t sii_fmmu_count; uint8_t sii_fmmu_usages[ESOP_SII_FMMU_CAPACITY]; uint8_t has_watchdog; uint8_t has_watchdog_divider; uint16_t watchdog_divider; uint8_t has_process_data_watchdog; uint16_t process_data_watchdog_intervals; uint8_t requesting_id_supported; uint8_t has_requesting_id; uint16_t requesting_id; uint8_t coe_complete_access_supported; uint8_t coe_complete_access_enabled; uint8_t coe_sdo_information_supported; uint8_t coe_sdo_information_enabled; uint32_t sdo_information_offset; uint32_t sdo_information_count; } esop_slave_config_t;\n");
+    header.push_str("typedef struct { const char *name; uint16_t position; uint16_t station_address; uint8_t domain_id; uint8_t kind; uint32_t vendor_id; uint32_t product_code; uint32_t revision; uint32_t serial; uint8_t has_serial; uint8_t dc_required; uint8_t dc_reference_clock; const char *dc_op_mode; uint8_t has_dc_op_mode; uint32_t dc_cycle_time0_ns; int32_t dc_shift_time0_ns; int32_t dc_shift_time1_ns; int16_t dc_sync1_cycle_factor; uint16_t dc_assign_activate; int16_t dc_sync0_cycle_factor; uint8_t has_dc_sync_timing; uint32_t dc_sync_cycle_time0_ns; uint32_t dc_sync_cycle_time1_ns; int32_t dc_sync_shift_time0_ns; uint16_t dc_sync_assign_activate; uint16_t mailbox_send_address; uint16_t mailbox_send_capacity; uint16_t mailbox_receive_address; uint16_t mailbox_receive_capacity; uint8_t mailbox_send_sync_manager; uint8_t mailbox_send_control_byte; uint8_t mailbox_receive_sync_manager; uint8_t mailbox_receive_control_byte; uint8_t has_mailbox_status_bit; uint16_t mailbox_status_bit_address; uint8_t mailbox_status_bit_mask; uint8_t mailbox_status_bit_active_high; uint8_t sii_sync_manager_count; uint16_t sii_enabled_sync_managers; uint8_t sii_fmmu_count; uint8_t sii_fmmu_usages[ESOP_SII_FMMU_CAPACITY]; uint8_t has_watchdog; uint8_t has_watchdog_divider; uint16_t watchdog_divider; uint8_t has_process_data_watchdog; uint16_t process_data_watchdog_intervals; uint8_t requesting_id_supported; uint8_t has_requesting_id; uint16_t requesting_id; uint8_t coe_complete_access_supported; uint8_t coe_complete_access_enabled; uint8_t coe_sdo_information_supported; uint8_t coe_sdo_information_enabled; uint32_t sdo_information_offset; uint32_t sdo_information_count; uint8_t mailbox_capability; uint8_t pdo_configuration; uint8_t pdo_upload_supported; } esop_slave_config_t;\n");
     header.push_str("typedef struct { uint16_t slave_position; uint16_t index; uint8_t subindex; uint16_t data_type; uint16_t bit_length; uint8_t required_access; } esop_sdo_information_expectation_t;\n");
     header.push_str("typedef struct { const char *name; uint8_t id; uint32_t logical_address; uint32_t image_offset; uint32_t image_bytes; uint32_t output_bytes; uint32_t input_bytes; uint32_t period_ticks; uint32_t phase_ticks; uint16_t expected_wkc; } esop_domain_config_t;\n");
     header.push_str("typedef struct { uint16_t slave_position; uint8_t present; uint8_t domain_id; uint32_t domain_bit_offset; uint32_t max_age_cycles; uint8_t fmmu_index; uint32_t logical_start; uint8_t logical_start_bit; uint8_t logical_end_bit; uint16_t physical_start; uint8_t physical_start_bit; uint8_t fmmu_type; uint8_t enable; } esop_mailbox_status_mapping_t;\n");
-    header.push_str("typedef struct { uint8_t domain_id; uint16_t slave_position; uint16_t assignment_index; uint8_t sync_manager; uint16_t object_index; uint8_t subindex; uint8_t direction; uint32_t bit_offset; uint8_t bit_length; uint8_t is_signed; } esop_pdo_config_t;\n");
+    header.push_str("typedef struct { uint8_t domain_id; uint16_t slave_position; uint16_t assignment_index; uint8_t sync_manager; uint16_t object_index; uint8_t subindex; uint8_t direction; uint32_t bit_offset; uint8_t bit_length; uint8_t is_signed; uint8_t fixed; } esop_pdo_config_t;\n");
     header.push_str("typedef struct { uint8_t domain_id; uint8_t command; uint8_t index; uint32_t logical_address; uint32_t image_offset; uint16_t payload_len; uint16_t expected_wkc; uint8_t input; } esop_datagram_config_t;\n");
     header.push_str("typedef struct { const char *name; uint32_t source_pdo_index; uint32_t target_pdo_index; uint32_t target_quality_pdo_index; uint8_t invalid_fill; } esop_slave_copy_config_t;\n");
     header.push_str("typedef struct { const char *name; uint8_t index; uint16_t slave_position; int8_t mode; double position_scale; double velocity_scale; double torque_scale; int32_t position_offset; double min_position; double max_position; double max_velocity; double max_torque; double max_position_step; } esop_axis_config_t;\n\n");
@@ -1990,10 +2061,11 @@ fn render_header(
     } else {
         let mut sdo_information_offset = 0usize;
         for slave in slaves {
+            let mailbox = slave.mailbox.unwrap_or_default();
             let dc_mode = slave.sii_dc_mode.as_ref();
             let dc_sync_timing = slave.dc_sync_timing;
             let watchdog = slave.watchdog;
-            let mailbox_status_bit = slave.mailbox.status_bit;
+            let mailbox_status_bit = mailbox.status_bit;
             let fmmu_initializer = format!(
                 "{{{}}}",
                 slave
@@ -2004,7 +2076,7 @@ fn render_header(
                     .join(", ")
             );
             header.push_str(&format!(
-                "  {{{}, {}u, UINT16_C(0x{:04x}), {}u, {}u, UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), {}u, {}u, {}u, {}, {}u, UINT32_C({}), INT32_C({}), INT32_C({}), INT16_C({}), UINT16_C(0x{:04x}), INT16_C({}), {}u, UINT32_C({}), UINT32_C({}), INT32_C({}), UINT16_C(0x{:04x}), UINT16_C(0x{:04x}), UINT16_C({}), UINT16_C(0x{:04x}), UINT16_C({}), {}u, UINT8_C(0x{:02x}), {}u, UINT8_C(0x{:02x}), {}u, UINT16_C(0x{:04x}), UINT8_C(0x{:02x}), {}u, {}u, UINT16_C(0x{:04x}), {}u, {}, {}u, {}u, UINT16_C({}), {}u, UINT16_C({}), {}u, {}u, UINT16_C(0x{:04x}), {}u, {}u, {}u, {}u, {}u, {}u}},\n",
+                "  {{{}, {}u, UINT16_C(0x{:04x}), {}u, {}u, UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), UINT32_C(0x{:08x}), {}u, {}u, {}u, {}, {}u, UINT32_C({}), INT32_C({}), INT32_C({}), INT16_C({}), UINT16_C(0x{:04x}), INT16_C({}), {}u, UINT32_C({}), UINT32_C({}), INT32_C({}), UINT16_C(0x{:04x}), UINT16_C(0x{:04x}), UINT16_C({}), UINT16_C(0x{:04x}), UINT16_C({}), {}u, UINT8_C(0x{:02x}), {}u, UINT8_C(0x{:02x}), {}u, UINT16_C(0x{:04x}), UINT8_C(0x{:02x}), {}u, {}u, UINT16_C(0x{:04x}), {}u, {}, {}u, {}u, UINT16_C({}), {}u, UINT16_C({}), {}u, {}u, UINT16_C(0x{:04x}), {}u, {}u, {}u, {}u, {}u, {}u, {}u, {}u, {}u}},\n",
                 c_string(&slave.name),
                 slave.position,
                 slave.station_address.0,
@@ -2030,14 +2102,14 @@ fn render_header(
                 dc_sync_timing.map_or(0, |timing| timing.cycle_time1_ns),
                 dc_sync_timing.map_or(0, |timing| timing.shift_time0_ns),
                 dc_sync_timing.map_or(0, |timing| timing.assign_activate),
-                slave.mailbox.send_address,
-                slave.mailbox.send_capacity,
-                slave.mailbox.receive_address,
-                slave.mailbox.receive_capacity,
-                slave.mailbox.send_sync_manager,
-                slave.mailbox.send_control_byte,
-                slave.mailbox.receive_sync_manager,
-                slave.mailbox.receive_control_byte,
+                mailbox.send_address,
+                mailbox.send_capacity,
+                mailbox.receive_address,
+                mailbox.receive_capacity,
+                mailbox.send_sync_manager,
+                mailbox.send_control_byte,
+                mailbox.receive_sync_manager,
+                mailbox.receive_control_byte,
                 u8::from(mailbox_status_bit.is_some()),
                 mailbox_status_bit.map_or(0, |status_bit| status_bit.address.0),
                 mailbox_status_bit.map_or(0, |status_bit| status_bit.mask),
@@ -2066,6 +2138,9 @@ fn render_header(
                 u8::from(slave.coe_sdo_information_enabled),
                 sdo_information_offset,
                 slave.sdo_information_expectations.len(),
+                match slave.mailbox_capability { "coe" => 2, "mailbox_only" => 1, _ => 0 },
+                match slave.pdo_configuration { "configurable" => 2, "assignment" => 1, _ => 0 },
+                u8::from(slave.pdo_upload_supported),
             ));
             sdo_information_offset += slave.sdo_information_expectations.len();
         }
@@ -2137,10 +2212,10 @@ fn render_header(
     header.push_str("};\n\nstatic const esop_pdo_config_t esop_pdos[ESOP_PDO_STORAGE_COUNT] = {\n");
     for pdo in pdos {
         header.push_str(&format!(
-            "  {{{}u, {}u, UINT16_C(0x{:04x}), {}u, UINT16_C(0x{:04x}), {}u, {}u, {}u, {}u, {}u}},\n",
+            "  {{{}u, {}u, UINT16_C(0x{:04x}), {}u, UINT16_C(0x{:04x}), {}u, {}u, {}u, {}u, {}u, {}u}},\n",
             pdo.domain_id, pdo.slave_position, pdo.assignment_index.0, pdo.sync_manager,
             pdo.object_index.0, pdo.subindex, pdo.direction.clone().code(), pdo.bit_offset,
-            pdo.bit_length, u8::from(pdo.signed),
+            pdo.bit_length, u8::from(pdo.signed), u8::from(pdo.fixed),
         ));
     }
     header.push_str("};\n\nstatic const esop_datagram_config_t esop_datagrams[ESOP_DATAGRAM_STORAGE_COUNT] = {\n");
@@ -2220,7 +2295,7 @@ use esop_product_config::{\n\
     OpOnlySyncManagerProfile, OperatingMode, PdoDirection,\n\
     PdoRegistrationRequest,\n\
     ProcBufDimensions, ProcBufLayoutDescriptor, ProductAxisConfig, ProductDatagramConfig,\n\
-    ProductDomainConfig, ProductMetadata, ProductPdoConfig, ProductSlaveConfig, ProductSlaveCopyConfig,\n\
+    ProductDomainConfig, ProductMetadata, ProductPdoConfig, ProductSlaveConfig, ProductSlaveCopyConfig, ProductMailboxCapability, ProductPdoConfiguration,\n\
     ProductSlaveKind, EscWatchdogConfig, SdoInformationExpectation,\n\
     SiiDcMode, SiiDcModeExpectation, SlaveIdentity, StaticProductConfig,\n\
 };\n\n",
@@ -2245,10 +2320,11 @@ use esop_product_config::{\n\
     ));
     for pdo in pdos {
         output.push_str(&format!(
-            "    ProductPdoConfig {{ domain_id: {}, assignment_index: 0x{:04x}, sync_manager: {}, bit_offset: {}, request: PdoRegistrationRequest::new({}, 0x{:04x}, {}, PdoDirection::{}, {}, {}) }},\n",
+            "    ProductPdoConfig {{ domain_id: {}, assignment_index: 0x{:04x}, sync_manager: {}, fixed: {}, bit_offset: {}, request: PdoRegistrationRequest::new({}, 0x{:04x}, {}, PdoDirection::{}, {}, {}) }},\n",
             pdo.domain_id,
             pdo.assignment_index.0,
             pdo.sync_manager,
+            pdo.fixed,
             pdo.bit_offset,
             pdo.slave_position,
             pdo.object_index.0,
@@ -2360,6 +2436,7 @@ use esop_product_config::{\n\
 
     output.push_str("    slaves: [\n");
     for (slave_index, slave) in slaves.iter().enumerate() {
+        let mailbox = slave.mailbox.unwrap_or_default();
         let mut op_only_activation = [0u8; esop_ethercat_core::MAX_ESC_SYNC_MANAGERS];
         let mut op_only_mask = 0u16;
         for sync_manager in &slave.op_only_outputs {
@@ -2421,21 +2498,23 @@ use esop_product_config::{\n\
         );
         let mut mailbox_config = format!(
             "MailboxConfig::new(0x{:04x}, {}, 0x{:04x}, {})",
-            slave.mailbox.send_address,
-            slave.mailbox.send_capacity,
-            slave.mailbox.receive_address,
-            slave.mailbox.receive_capacity,
+            mailbox.send_address,
+            mailbox.send_capacity,
+            mailbox.receive_address,
+            mailbox.receive_capacity,
         );
-        if slave.mailbox.send_sync_manager != 0 || slave.mailbox.receive_sync_manager != 1 {
+        if slave.mailbox.is_some()
+            && (mailbox.send_sync_manager != 0 || mailbox.receive_sync_manager != 1)
+        {
             mailbox_config.push_str(&format!(
                 ".with_sync_managers({}, {})",
-                slave.mailbox.send_sync_manager, slave.mailbox.receive_sync_manager,
+                mailbox.send_sync_manager, mailbox.receive_sync_manager,
             ));
         }
-        if slave.mailbox.status_bit.is_some() {
+        if mailbox.status_bit.is_some() {
             mailbox_config.push_str(&format!(
                 ".with_status_bit(MailboxStatusBit::sync_manager_mailbox_full({}))",
-                slave.mailbox.receive_sync_manager,
+                mailbox.receive_sync_manager,
             ));
         }
         let mapped_mailbox_status = slave.mapped_mailbox_status.map_or_else(
@@ -2458,7 +2537,7 @@ use esop_product_config::{\n\
             },
         );
         output.push_str(&format!(
-            "        ProductSlaveConfig {{ name: {}, position: {}, station_address: 0x{:04x}, domain_id: {}, kind: ProductSlaveKind::{}, identity: SlaveIdentity {{ vendor_id: 0x{:08x}, product_code: 0x{:08x}, revision: 0x{:08x}, serial: 0x{:08x} }}, dc_required: {}, dc_reference_clock: {}, sii_dc_mode: {}, dc_sync_timing: {}, watchdog: {}, transition_timeouts: AlTransitionTimeouts::new({}, {}, {}, {}), requesting_id_supported: {}, requesting_id: {}, coe_complete_access_supported: {}, coe_complete_access_enabled: {}, coe_sdo_information_supported: {}, coe_sdo_information_enabled: {}, sdo_information_expectations: &PRODUCT_SDO_INFORMATION_{}, mailbox_config: {}, mailbox_send_sync_manager: {}, mailbox_send_control_byte: 0x{:02x}, mailbox_receive_sync_manager: MailboxReceiveSyncManager::new({}, 0x{:04x}, {}, 0x{:02x}), mapped_mailbox_status: {}, op_only_outputs: OpOnlySyncManagerProfile::from_raw(0x{:04x}, [{}]), sii_sync_manager_count: {}, sii_enabled_sync_managers: 0x{:04x}, sii_fmmu_count: {}, sii_fmmu_usages: [{}] }},\n",
+            "        ProductSlaveConfig {{ name: {}, position: {}, station_address: 0x{:04x}, domain_id: {}, kind: ProductSlaveKind::{}, identity: SlaveIdentity {{ vendor_id: 0x{:08x}, product_code: 0x{:08x}, revision: 0x{:08x}, serial: 0x{:08x} }}, dc_required: {}, dc_reference_clock: {}, sii_dc_mode: {}, dc_sync_timing: {}, watchdog: {}, transition_timeouts: AlTransitionTimeouts::new({}, {}, {}, {}), requesting_id_supported: {}, requesting_id: {}, coe_complete_access_supported: {}, coe_complete_access_enabled: {}, coe_sdo_information_supported: {}, coe_sdo_information_enabled: {}, sdo_information_expectations: &PRODUCT_SDO_INFORMATION_{}, mailbox_capability: ProductMailboxCapability::{}, pdo_configuration: ProductPdoConfiguration::{}, pdo_upload_supported: {}, mailbox_config: {}, mailbox_send_sync_manager: {}, mailbox_send_control_byte: 0x{:02x}, mailbox_receive_sync_manager: MailboxReceiveSyncManager::new({}, 0x{:04x}, {}, 0x{:02x}), mapped_mailbox_status: {}, op_only_outputs: OpOnlySyncManagerProfile::from_raw(0x{:04x}, [{}]), sii_sync_manager_count: {}, sii_enabled_sync_managers: 0x{:04x}, sii_fmmu_count: {}, sii_fmmu_usages: [{}] }},\n",
             rust_string(&slave.name),
             slave.position,
             slave.station_address.0,
@@ -2484,13 +2563,16 @@ use esop_product_config::{\n\
             slave.coe_sdo_information_supported,
             slave.coe_sdo_information_enabled,
             slave_index,
+            match slave.mailbox_capability { "coe" => "Coe", "mailbox_only" => "MailboxOnly", _ => "None" },
+            match slave.pdo_configuration { "configurable" => "Configurable", "assignment" => "Assignment", _ => "Fixed" },
+            slave.pdo_upload_supported,
             mailbox_config,
-            slave.mailbox.send_sync_manager,
-            slave.mailbox.send_control_byte,
-            slave.mailbox.receive_sync_manager,
-            slave.mailbox.receive_address,
-            slave.mailbox.receive_capacity,
-            slave.mailbox.receive_control_byte,
+            mailbox.send_sync_manager,
+            mailbox.send_control_byte,
+            mailbox.receive_sync_manager,
+            mailbox.receive_address,
+            mailbox.receive_capacity,
+            mailbox.receive_control_byte,
             mapped_mailbox_status,
             op_only_mask,
             activation,

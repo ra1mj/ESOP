@@ -1,8 +1,9 @@
 //! Fixed-capacity CoE PDO assignment/mapping configuration.
 //!
-//! The plan is built before activation and contains only expedited SDO write
-//! values. The controller downloads each value and then uploads the same
-//! object for exact readback verification. It advances one mailbox transaction
+//! The plan is built before activation and contains expedited SDO values with
+//! an explicit write-and-verify or verification-only policy. The controller
+//! uploads every value for exact readback verification, downloading first only
+//! when the operation permits it. It advances one mailbox transaction
 //! at a time, so it can share the existing asynchronous mailbox budget without
 //! touching the cyclic PDO path.
 
@@ -60,8 +61,15 @@ impl PdoSdoWrite {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PdoConfigAccess {
+    WriteAndVerify,
+    VerifyOnly,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PdoConfigPlan<const OPS: usize> {
     writes: [PdoSdoWrite; OPS],
+    access: [PdoConfigAccess; OPS],
     count: usize,
 }
 
@@ -69,6 +77,7 @@ impl<const OPS: usize> PdoConfigPlan<OPS> {
     pub const fn new() -> Self {
         Self {
             writes: [PdoSdoWrite::EMPTY; OPS],
+            access: [PdoConfigAccess::WriteAndVerify; OPS],
             count: 0,
         }
     }
@@ -85,11 +94,32 @@ impl<const OPS: usize> PdoConfigPlan<OPS> {
         &self.writes[..self.count]
     }
 
+    /// Access policy for each value returned by `writes`, in the same order.
+    pub fn access(&self) -> &[PdoConfigAccess] {
+        &self.access[..self.count]
+    }
+
     pub fn push(&mut self, write: PdoSdoWrite) -> Result<(), PdoConfigPlanError> {
+        self.push_with_access(write, PdoConfigAccess::WriteAndVerify)
+    }
+
+    pub fn push_verification(&mut self, value: PdoSdoWrite) -> Result<(), PdoConfigPlanError> {
+        self.push_with_access(value, PdoConfigAccess::VerifyOnly)
+    }
+
+    fn push_with_access(
+        &mut self,
+        write: PdoSdoWrite,
+        access: PdoConfigAccess,
+    ) -> Result<(), PdoConfigPlanError> {
+        if write.data_len == 0 || usize::from(write.data_len) > MAX_PDO_SDO_DATA {
+            return Err(PdoConfigPlanError::DataLengthOutOfBounds);
+        }
         if self.count >= OPS {
             return Err(PdoConfigPlanError::CapacityExceeded);
         }
         self.writes[self.count] = write;
+        self.access[self.count] = access;
         self.count += 1;
         Ok(())
     }
@@ -101,6 +131,24 @@ impl<const OPS: usize> PdoConfigPlan<OPS> {
         mapping_index: u16,
         entries: &[PdoEntrySpec],
     ) -> Result<(), PdoConfigPlanError> {
+        self.append_mapping_with_access(mapping_index, entries, PdoConfigAccess::WriteAndVerify)
+    }
+
+    /// Verify a fixed mapping without clearing its count or downloading entries.
+    pub fn append_mapping_verification(
+        &mut self,
+        mapping_index: u16,
+        entries: &[PdoEntrySpec],
+    ) -> Result<(), PdoConfigPlanError> {
+        self.append_mapping_with_access(mapping_index, entries, PdoConfigAccess::VerifyOnly)
+    }
+
+    fn append_mapping_with_access(
+        &mut self,
+        mapping_index: u16,
+        entries: &[PdoEntrySpec],
+        access: PdoConfigAccess,
+    ) -> Result<(), PdoConfigPlanError> {
         if entries.len() > u8::MAX as usize {
             return Err(PdoConfigPlanError::CountOutOfBounds);
         }
@@ -110,24 +158,33 @@ impl<const OPS: usize> PdoConfigPlan<OPS> {
         {
             return Err(PdoConfigPlanError::InvalidBitLength);
         }
-        let required = entries.len().saturating_add(2);
+        let writable = access == PdoConfigAccess::WriteAndVerify;
+        let required = entries.len().saturating_add(1 + usize::from(writable));
         if self.count.saturating_add(required) > OPS {
             return Err(PdoConfigPlanError::CapacityExceeded);
         }
-        self.push(PdoSdoWrite::new(mapping_index, 0, &[0])?)?;
+        self.push_with_access(
+            PdoSdoWrite::new(
+                mapping_index,
+                0,
+                &[if writable { 0 } else { entries.len() as u8 }],
+            )?,
+            access,
+        )?;
         for (offset, entry) in entries.iter().enumerate() {
             let subindex =
                 u8::try_from(offset + 1).map_err(|_| PdoConfigPlanError::CountOutOfBounds)?;
             let packed = ((entry.index as u32) << 16)
                 | ((entry.subindex as u32) << 8)
                 | entry.bit_length as u32;
-            self.push(PdoSdoWrite::new(
-                mapping_index,
-                subindex,
-                &packed.to_le_bytes(),
-            )?)?;
+            self.push_with_access(
+                PdoSdoWrite::new(mapping_index, subindex, &packed.to_le_bytes())?,
+                access,
+            )?;
         }
-        self.push(PdoSdoWrite::new(mapping_index, 0, &[entries.len() as u8])?)?;
+        if writable {
+            self.push(PdoSdoWrite::new(mapping_index, 0, &[entries.len() as u8])?)?;
+        }
         Ok(())
     }
 
@@ -138,28 +195,69 @@ impl<const OPS: usize> PdoConfigPlan<OPS> {
         assignment_index: u16,
         mapping_indexes: &[u16],
     ) -> Result<(), PdoConfigPlanError> {
+        self.append_assignment_with_access(
+            assignment_index,
+            mapping_indexes,
+            PdoConfigAccess::WriteAndVerify,
+        )
+    }
+
+    /// Verify an immutable SM assignment using uploads only.
+    pub fn append_assignment_verification(
+        &mut self,
+        assignment_index: u16,
+        mapping_indexes: &[u16],
+    ) -> Result<(), PdoConfigPlanError> {
+        self.append_assignment_with_access(
+            assignment_index,
+            mapping_indexes,
+            PdoConfigAccess::VerifyOnly,
+        )
+    }
+
+    fn append_assignment_with_access(
+        &mut self,
+        assignment_index: u16,
+        mapping_indexes: &[u16],
+        access: PdoConfigAccess,
+    ) -> Result<(), PdoConfigPlanError> {
         if mapping_indexes.len() > u8::MAX as usize {
             return Err(PdoConfigPlanError::CountOutOfBounds);
         }
-        let required = mapping_indexes.len().saturating_add(2);
+        let writable = access == PdoConfigAccess::WriteAndVerify;
+        let required = mapping_indexes
+            .len()
+            .saturating_add(1 + usize::from(writable));
         if self.count.saturating_add(required) > OPS {
             return Err(PdoConfigPlanError::CapacityExceeded);
         }
-        self.push(PdoSdoWrite::new(assignment_index, 0, &[0])?)?;
+        self.push_with_access(
+            PdoSdoWrite::new(
+                assignment_index,
+                0,
+                &[if writable {
+                    0
+                } else {
+                    mapping_indexes.len() as u8
+                }],
+            )?,
+            access,
+        )?;
         for (offset, mapping_index) in mapping_indexes.iter().enumerate() {
             let subindex =
                 u8::try_from(offset + 1).map_err(|_| PdoConfigPlanError::CountOutOfBounds)?;
+            self.push_with_access(
+                PdoSdoWrite::new(assignment_index, subindex, &mapping_index.to_le_bytes())?,
+                access,
+            )?;
+        }
+        if writable {
             self.push(PdoSdoWrite::new(
                 assignment_index,
-                subindex,
-                &mapping_index.to_le_bytes(),
+                0,
+                &[mapping_indexes.len() as u8],
             )?)?;
         }
-        self.push(PdoSdoWrite::new(
-            assignment_index,
-            0,
-            &[mapping_indexes.len() as u8],
-        )?)?;
         Ok(())
     }
 }
@@ -261,11 +359,12 @@ impl<const JOBS: usize, const OPS: usize> PdoConfigBatchPlan<JOBS, OPS> {
     }
 
     pub fn validate(&self) -> Result<(), PdoConfigBatchPlanError> {
-        if self.is_empty() {
-            Err(PdoConfigBatchPlanError::Empty)
-        } else {
-            Ok(())
+        for job in self.jobs() {
+            job.mailbox_config
+                .validate()
+                .map_err(PdoConfigBatchPlanError::Mailbox)?;
         }
+        Ok(())
     }
 }
 
@@ -277,9 +376,13 @@ impl<const JOBS: usize, const OPS: usize> Default for PdoConfigBatchPlan<JOBS, O
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PdoConfigBatchPlanError {
+    /// Retained for source compatibility; an empty batch now completes without I/O.
     Empty,
+    Mailbox(crate::mailbox::MailboxConfigError),
     CapacityExceeded,
-    DuplicateStationAddress { station_address: u16 },
+    DuplicateStationAddress {
+        station_address: u16,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -478,6 +581,7 @@ impl<const OPS: usize> PdoConfigController<OPS> {
             self.phase = PdoConfigPhase::Complete;
             return Ok(());
         }
+        self.select_initial_step();
         self.start_current_transfer()?;
         self.phase = PdoConfigPhase::Sending;
         Ok(())
@@ -576,6 +680,7 @@ impl<const OPS: usize> PdoConfigController<OPS> {
                             self.phase = PdoConfigPhase::Complete;
                             Ok(PdoConfigProgress::Complete)
                         } else {
+                            self.select_initial_step();
                             if let Err(error) = self.start_current_transfer() {
                                 return self.fail(error);
                             }
@@ -612,6 +717,13 @@ impl<const OPS: usize> PdoConfigController<OPS> {
             return self.fail(PdoConfigError::ActionMismatch);
         }
         self.fail(PdoConfigError::Mailbox(error))
+    }
+
+    fn select_initial_step(&mut self) {
+        self.step = match self.plan.access()[self.operation_index] {
+            PdoConfigAccess::WriteAndVerify => PdoConfigStep::Download,
+            PdoConfigAccess::VerifyOnly => PdoConfigStep::VerifyUpload,
+        };
     }
 
     fn start_current_transfer(&mut self) -> Result<(), PdoConfigError> {
@@ -889,7 +1001,7 @@ impl<const JOBS: usize, const OPS: usize> PdoConfigBatch<JOBS, OPS> {
             return Err(PdoConfigBatchError::Busy);
         }
         plan.validate().map_err(PdoConfigBatchError::Plan)?;
-        let last_offset = u16::try_from(plan.count - 1)
+        let last_offset = u16::try_from(plan.count.saturating_sub(1))
             .map_err(|_| PdoConfigBatchError::GenerationOutOfBounds)?;
         base_generation
             .checked_add(last_offset)
@@ -1014,6 +1126,84 @@ mod tests {
         response[5] = action.sdo_subindex;
         response[6..6 + data.len()].copy_from_slice(data);
         response
+    }
+
+    #[test]
+    fn verification_only_mapping_and_assignment_never_download() {
+        let mut plan = PdoConfigPlan::<6>::new();
+        plan.append_mapping_verification(0x1600, &[PdoEntrySpec::new(0x7000, 1, 3)])
+            .unwrap();
+        plan.append_assignment_verification(0x1c12, &[0x1600])
+            .unwrap();
+        plan.push(PdoSdoWrite::new(0x2000, 0, &[7]).unwrap())
+            .unwrap();
+        let mut controller = PdoConfigController::<6>::new();
+        controller.start(plan, 0x1000, 9, 0, 100, 20).unwrap();
+        // Literal descriptors: count, 7000:01/3 bits, assignment count/index.
+        for expected in [&[1][..], &[3, 1, 0, 0x70], &[1], &[0, 0x16]] {
+            let action = controller.next_action(1).unwrap().unwrap();
+            assert_eq!(action.step, PdoConfigStep::VerifyUpload);
+            assert_eq!(action.payload()[2], 0x40);
+            controller
+                .accept(action, 9, &expedited_upload_response(action, expected), 2)
+                .unwrap();
+        }
+        let action = controller.next_action(3).unwrap().unwrap();
+        assert_eq!(action.step, PdoConfigStep::Download);
+        controller
+            .accept(action, 9, &download_response(action), 4)
+            .unwrap();
+        let action = controller.next_action(5).unwrap().unwrap();
+        assert_eq!(action.step, PdoConfigStep::VerifyUpload);
+        assert!(matches!(
+            controller.accept(action, 9, &expedited_upload_response(action, &[8]), 6),
+            Err(PdoConfigError::ReadbackValueMismatch {
+                expected: 7,
+                actual: 8,
+                ..
+            })
+        ));
+        assert_eq!(controller.phase(), PdoConfigPhase::Faulted);
+    }
+
+    #[test]
+    fn verification_builders_are_transactional_and_keep_original_deadline() {
+        let mut plan = PdoConfigPlan::<2>::new();
+        plan.append_assignment_verification(0x1c12, &[]).unwrap();
+        let before = plan;
+        assert_eq!(
+            plan.append_mapping_verification(0x1600, &[PdoEntrySpec::new(0x7000, 1, 1)]),
+            Err(PdoConfigPlanError::CapacityExceeded)
+        );
+        assert_eq!(plan, before);
+        assert_eq!(
+            plan.append_mapping_verification(0x1600, &[PdoEntrySpec::new(0x7000, 1, 0)]),
+            Err(PdoConfigPlanError::InvalidBitLength)
+        );
+        assert_eq!(plan, before);
+        let mut controller = PdoConfigController::<2>::new();
+        controller.start(plan, 0x1000, 1, 10, 20, 100).unwrap();
+        let action = controller.next_action(29).unwrap().unwrap();
+        assert_eq!(action.deadline_ns, 30);
+        assert_eq!(
+            controller.accept(action, 1, &expedited_upload_response(action, &[0]), 31),
+            Err(PdoConfigError::Timeout)
+        );
+    }
+
+    #[test]
+    fn empty_batch_completes_without_a_mailbox_or_generation_increment() {
+        let mut batch = PdoConfigBatch::<0, 0>::new();
+        batch
+            .start(PdoConfigBatchPlan::new(), u16::MAX, 0, 10, 1)
+            .unwrap();
+        assert_eq!(batch.phase(), PdoConfigBatchPhase::Complete);
+        assert_eq!(batch.current_mailbox_config(), None);
+        assert_eq!(batch.status().station_address, None);
+        assert_eq!(
+            batch.advance(20).unwrap().phase,
+            PdoConfigBatchPhase::Complete
+        );
     }
 
     #[test]
@@ -1425,7 +1615,7 @@ mod tests {
     fn batch_plan_rejects_duplicate_stations_and_capacity_transactionally() {
         let config = MailboxConfig::new(0x1000, 32, 0x1100, 32);
         let mut plan = PdoConfigBatchPlan::<1, 1>::new();
-        assert_eq!(plan.validate(), Err(PdoConfigBatchPlanError::Empty));
+        assert_eq!(plan.validate(), Ok(()));
         plan.push(PdoConfigJob::new(0x1001, one_write_plan(0x1C12, 0), config))
             .unwrap();
         assert_eq!(

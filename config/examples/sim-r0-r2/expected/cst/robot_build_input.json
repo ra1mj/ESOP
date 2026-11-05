@@ -1,5 +1,5 @@
 {
-  "config_sha256": "1dfe09243d6f9d33b8cd9ce979cac7163bb65cc428bb4d8c707100fc0798ea82",
+  "config_sha256": "61c7d87d1930f2fb403ebe3ee7abeefd853cb4e8fb8c5136b1ed7506026d1618",
   "cycle_budget": {
     "deadline_ns": 800000,
     "period_ns": 1000000,
@@ -141,6 +141,29 @@
     "declared_axes": 2,
     "declared_io_channels": 16,
     "declared_slaves": 3,
+    "mailbox_capabilities": [
+      {
+        "capability": "coe",
+        "name": "drive_left",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 0
+      },
+      {
+        "capability": "coe",
+        "name": "drive_right",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 1
+      },
+      {
+        "capability": "coe",
+        "name": "io_block",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 2
+      }
+    ],
     "requesting_id": [
       {
         "expected": "0x0041",

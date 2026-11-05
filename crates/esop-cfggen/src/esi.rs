@@ -29,6 +29,9 @@ pub struct EsiDevice {
     pub coe_supported: bool,
     pub coe_complete_access_supported: bool,
     pub coe_sdo_information_supported: bool,
+    pub coe_pdo_assign: bool,
+    pub coe_pdo_config: bool,
+    pub coe_pdo_upload: bool,
     pub requesting_id_supported: bool,
     pub dc_modes: Vec<EsiDcMode>,
     pub rx_pdos: Vec<EsiPdo>,
@@ -164,6 +167,7 @@ impl EsiMailbox {
 pub struct EsiPdo {
     pub index: u16,
     pub sync_manager: Option<u8>,
+    pub fixed: bool,
     pub entries: Vec<EsiEntry>,
 }
 
@@ -200,6 +204,9 @@ struct DeviceBuilder {
     coe_supported: bool,
     coe_complete_access_supported: bool,
     coe_sdo_information_supported: bool,
+    coe_pdo_assign: bool,
+    coe_pdo_config: bool,
+    coe_pdo_upload: bool,
     requesting_id_supported: Option<bool>,
     dc_modes: Vec<EsiDcMode>,
     rx_pdos: Vec<EsiPdo>,
@@ -237,6 +244,9 @@ impl DeviceBuilder {
             coe_supported: self.coe_supported,
             coe_complete_access_supported: self.coe_complete_access_supported,
             coe_sdo_information_supported: self.coe_sdo_information_supported,
+            coe_pdo_assign: self.coe_pdo_assign,
+            coe_pdo_config: self.coe_pdo_config,
+            coe_pdo_upload: self.coe_pdo_upload,
             requesting_id_supported: self.requesting_id_supported.unwrap_or(false),
             dc_modes: self.dc_modes,
             rx_pdos: self.rx_pdos,
@@ -390,6 +400,7 @@ struct PdoBuilder {
     direction: PdoDirection,
     index: Option<u16>,
     sync_manager: Option<u8>,
+    fixed: bool,
     entries: Vec<EsiEntry>,
 }
 
@@ -399,21 +410,12 @@ impl PdoBuilder {
         if self.entries.is_empty() {
             return Err(format!("PDO 0x{index:04x} has no entries"));
         }
-        let bits = self.entries.iter().try_fold(0usize, |total, entry| {
-            total
-                .checked_add(usize::from(entry.bit_length))
-                .ok_or_else(|| format!("PDO 0x{index:04x} bit length overflows"))
-        })?;
-        if bits % 8 != 0 {
-            return Err(format!(
-                "PDO 0x{index:04x} is not byte-addressable ({bits} bits)"
-            ));
-        }
         Ok((
             self.direction,
             EsiPdo {
                 index,
                 sync_manager: self.sync_manager,
+                fixed: self.fixed,
                 entries: self.entries,
             },
         ))
@@ -517,6 +519,7 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                             },
                             index: None,
                             sync_manager,
+                            fixed: bool_attribute(&start, "Fixed", path)?,
                             entries: Vec::new(),
                         });
                     }
@@ -617,6 +620,9 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                         device.coe_supported = true;
                         device.coe_complete_access_supported = capabilities.complete_access;
                         device.coe_sdo_information_supported = capabilities.sdo_information;
+                        device.coe_pdo_assign = capabilities.pdo_assign;
+                        device.coe_pdo_config = capabilities.pdo_config;
+                        device.coe_pdo_upload = capabilities.pdo_upload;
                     }
                     "IdentificationReg134"
                         if device.is_some()
@@ -651,6 +657,9 @@ fn parse_text(path: &Path, xml: &str) -> Result<EsiCatalog> {
                     device.coe_supported = true;
                     device.coe_complete_access_supported = capabilities.complete_access;
                     device.coe_sdo_information_supported = capabilities.sdo_information;
+                    device.coe_pdo_assign = capabilities.pdo_assign;
+                    device.coe_pdo_config = capabilities.pdo_config;
+                    device.coe_pdo_upload = capabilities.pdo_upload;
                 }
                 if name == "IdentificationReg134" {
                     return xml_error(path, "empty IdentificationReg134 is unsupported");
@@ -1134,6 +1143,20 @@ fn optional_u8_attribute(start: &BytesStart<'_>, name: &str, path: &Path) -> Res
 struct CoeCapabilities {
     complete_access: bool,
     sdo_information: bool,
+    pdo_assign: bool,
+    pdo_config: bool,
+    pdo_upload: bool,
+}
+
+fn bool_attribute(start: &BytesStart<'_>, name: &str, path: &Path) -> Result<bool> {
+    optional_attribute(start, name, path)?
+        .map(|value| parse_bool(&value))
+        .transpose()
+        .map(|value| value.unwrap_or(false))
+        .map_err(|detail| GeneratorError::Xml {
+            path: path.to_owned(),
+            detail: format!("invalid {name}: {detail}"),
+        })
 }
 
 fn parse_coe_capabilities(start: &BytesStart<'_>, path: &Path) -> Result<CoeCapabilities> {
@@ -1156,6 +1179,9 @@ fn parse_coe_capabilities(start: &BytesStart<'_>, path: &Path) -> Result<CoeCapa
     Ok(CoeCapabilities {
         complete_access,
         sdo_information,
+        pdo_assign: bool_attribute(start, "PdoAssign", path)?,
+        pdo_config: bool_attribute(start, "PdoConfig", path)?,
+        pdo_upload: bool_attribute(start, "PdoUpload", path)?,
     })
 }
 
@@ -1703,13 +1729,13 @@ mod tests {
     }
 
     #[test]
-    fn bit_packed_pdo_is_rejected() {
+    fn bit_packed_pdo_retains_real_entry_width() {
         let xml = r##"<EtherCATInfo><Vendor><Id>1</Id></Vendor><Descriptions><Devices><Device>
 <Type ProductCode="1" RevisionNo="1">IO</Type><Name>IO</Name>
 <RxPdo><Index>#x1600</Index><Entry><Index>#x7000</Index><SubIndex>1</SubIndex>
 <BitLen>1</BitLen><DataType>BOOL</DataType></Entry></RxPdo>
 </Device></Devices></Descriptions></EtherCATInfo>"##;
-        let error = parse_text(Path::new("fixture.xml"), xml).unwrap_err();
-        assert!(error.to_string().contains("not byte-addressable"));
+        let catalog = parse_text(Path::new("fixture.xml"), xml).unwrap();
+        assert_eq!(catalog.devices[0].rx_pdos[0].entries[0].bit_length, 1);
     }
 }

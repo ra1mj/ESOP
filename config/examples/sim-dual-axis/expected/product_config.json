@@ -48,7 +48,7 @@
     "max_sdo_object_bytes": 1024,
     "runtime_sdo_requests": 8
   },
-  "config_sha256": "64e4a0254de10ceab5e76cd3f63d4a488629ab2dd254aaf1b84e904bd1b39055",
+  "config_sha256": "819d9a29e6a6720deda648bc4c8e8381f3f79d2d34f075b5c0182edd8176d983",
   "cycle": {
     "base_period_ns": 1000000,
     "deadline_ns": 800000
@@ -169,6 +169,7 @@
       "bit_offset": 0,
       "direction": "rx",
       "domain_id": 0,
+      "fixed": false,
       "name": "Controlword",
       "object_index": "0x6040",
       "signed": false,
@@ -182,6 +183,7 @@
       "bit_offset": 16,
       "direction": "rx",
       "domain_id": 0,
+      "fixed": false,
       "name": "Mode of operation",
       "object_index": "0x6060",
       "signed": true,
@@ -195,6 +197,7 @@
       "bit_offset": 24,
       "direction": "rx",
       "domain_id": 0,
+      "fixed": false,
       "name": "Target position",
       "object_index": "0x607a",
       "signed": true,
@@ -208,6 +211,7 @@
       "bit_offset": 56,
       "direction": "rx",
       "domain_id": 0,
+      "fixed": false,
       "name": "Controlword",
       "object_index": "0x6040",
       "signed": false,
@@ -221,6 +225,7 @@
       "bit_offset": 72,
       "direction": "rx",
       "domain_id": 0,
+      "fixed": false,
       "name": "Mode of operation",
       "object_index": "0x6060",
       "signed": true,
@@ -234,6 +239,7 @@
       "bit_offset": 80,
       "direction": "rx",
       "domain_id": 0,
+      "fixed": false,
       "name": "Target position",
       "object_index": "0x607a",
       "signed": true,
@@ -247,6 +253,7 @@
       "bit_offset": 112,
       "direction": "tx",
       "domain_id": 0,
+      "fixed": false,
       "name": "Statusword",
       "object_index": "0x6041",
       "signed": false,
@@ -260,6 +267,7 @@
       "bit_offset": 128,
       "direction": "tx",
       "domain_id": 0,
+      "fixed": false,
       "name": "Mode display",
       "object_index": "0x6061",
       "signed": true,
@@ -273,6 +281,7 @@
       "bit_offset": 136,
       "direction": "tx",
       "domain_id": 0,
+      "fixed": false,
       "name": "Error code",
       "object_index": "0x603f",
       "signed": false,
@@ -286,6 +295,7 @@
       "bit_offset": 152,
       "direction": "tx",
       "domain_id": 0,
+      "fixed": false,
       "name": "Actual position",
       "object_index": "0x6064",
       "signed": true,
@@ -299,6 +309,7 @@
       "bit_offset": 184,
       "direction": "tx",
       "domain_id": 0,
+      "fixed": false,
       "name": "Statusword",
       "object_index": "0x6041",
       "signed": false,
@@ -312,6 +323,7 @@
       "bit_offset": 200,
       "direction": "tx",
       "domain_id": 0,
+      "fixed": false,
       "name": "Mode display",
       "object_index": "0x6061",
       "signed": true,
@@ -325,6 +337,7 @@
       "bit_offset": 208,
       "direction": "tx",
       "domain_id": 0,
+      "fixed": false,
       "name": "Error code",
       "object_index": "0x603f",
       "signed": false,
@@ -338,6 +351,7 @@
       "bit_offset": 224,
       "direction": "tx",
       "domain_id": 0,
+      "fixed": false,
       "name": "Actual position",
       "object_index": "0x6064",
       "signed": true,
@@ -351,6 +365,7 @@
       "bit_offset": 0,
       "direction": "rx",
       "domain_id": 1,
+      "fixed": false,
       "name": "Outputs",
       "object_index": "0x7000",
       "signed": false,
@@ -364,6 +379,7 @@
       "bit_offset": 16,
       "direction": "rx",
       "domain_id": 1,
+      "fixed": false,
       "name": "Drive position mirror",
       "object_index": "0x7010",
       "signed": true,
@@ -377,6 +393,7 @@
       "bit_offset": 48,
       "direction": "rx",
       "domain_id": 1,
+      "fixed": false,
       "name": "Drive position mirror quality",
       "object_index": "0x7011",
       "signed": false,
@@ -390,6 +407,7 @@
       "bit_offset": 56,
       "direction": "tx",
       "domain_id": 1,
+      "fixed": false,
       "name": "Inputs",
       "object_index": "0x6000",
       "signed": false,
@@ -413,7 +431,7 @@
     ],
     "hyperperiod_ticks": 4
   },
-  "schema_version": "esop.product-config.v1",
+  "schema_version": "esop.product-config.v2",
   "slave_copies": [
     {
       "invalid_fill": 0,
@@ -460,7 +478,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP simulated CiA 402 drive",
       "esi_label": "esop-sim-drive-v1",
-      "esi_semantic_sha256": "844555e09abdc58952c03cdfe24c4594f12f13ed066d608d12494fce91a6d9ad",
+      "esi_semantic_sha256": "3cb895f4b2ce6dfae4eb60da5d3072258f099df21fb56acc1b9c2d697c7c3061",
       "esi_type_name": "ESOP-SIM-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -478,6 +496,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 256,
         "domain_id": 0,
@@ -498,6 +517,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 0,
       "product_code": "0x00004020",
       "requesting_id": "0x0041",
@@ -631,7 +652,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP simulated CiA 402 drive",
       "esi_label": "esop-sim-drive-v1",
-      "esi_semantic_sha256": "844555e09abdc58952c03cdfe24c4594f12f13ed066d608d12494fce91a6d9ad",
+      "esi_semantic_sha256": "3cb895f4b2ce6dfae4eb60da5d3072258f099df21fb56acc1b9c2d697c7c3061",
       "esi_type_name": "ESOP-SIM-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -649,6 +670,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 257,
         "domain_id": 0,
@@ -669,6 +691,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 1,
       "product_code": "0x00004020",
       "requesting_id": "0x0042",
@@ -740,7 +764,7 @@
       "domain_id": 1,
       "esi_device_name": "ESOP simulated digital IO",
       "esi_label": "esop-sim-io-v1",
-      "esi_semantic_sha256": "50bb59dbbe0da72c0158449b6840eb5ff4ef62a7aa21a345d91126f6eccb4ccf",
+      "esi_semantic_sha256": "181ed923b30ffb3d289ace20dd04aa18294168957c694a10385f1d8356603c83",
       "esi_type_name": "ESOP-SIM-IO",
       "kind": "ethercat_io",
       "mailbox": {
@@ -753,8 +777,11 @@
         "send_control_byte": 38,
         "send_sync_manager": 0
       },
+      "mailbox_capability": "coe",
       "name": "io_block",
       "op_only_outputs": [],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 2,
       "product_code": "0x00007010",
       "requesting_id": null,

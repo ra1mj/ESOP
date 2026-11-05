@@ -254,6 +254,11 @@ impl SiiStandardMailbox {
         if !self.protocols.supports_coe() {
             return Err(SiiMailboxError::CoeUnsupported);
         }
+        self.mailbox_config()
+    }
+
+    /// Validate the physical pair without requiring a particular mailbox protocol.
+    pub fn mailbox_config(self) -> Result<MailboxConfig, SiiMailboxError> {
         let config = MailboxConfig::new(
             self.slave_receive_address,
             self.slave_receive_capacity,

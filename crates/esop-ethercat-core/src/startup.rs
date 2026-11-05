@@ -95,12 +95,20 @@ impl ExpectedSlave {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartupMailboxRequirement {
+    Coe,
+    Mailbox,
+    Absent,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StartupSlaveProfile {
     pub position: u16,
     pub dc_requirement: StartupDcRequirement,
     pub transition_timeouts: AlTransitionTimeouts,
     pub op_only_outputs: OpOnlySyncManagerProfile,
     pub expected_mailbox: Option<MailboxConfig>,
+    pub mailbox_requirement: StartupMailboxRequirement,
     pub expected_requesting_id: Option<u16>,
     pub expected_mailbox_receive_sync_manager: Option<MailboxReceiveSyncManager>,
     pub expected_sii: Option<SiiConfigurationSignature>,
@@ -114,6 +122,7 @@ impl StartupSlaveProfile {
         transition_timeouts: ETG1020_DEFAULT_TRANSITION_TIMEOUTS_V1,
         op_only_outputs: OpOnlySyncManagerProfile::EMPTY,
         expected_mailbox: None,
+        mailbox_requirement: StartupMailboxRequirement::Coe,
         expected_requesting_id: None,
         expected_mailbox_receive_sync_manager: None,
         expected_sii: None,
@@ -147,7 +156,26 @@ impl StartupSlaveProfile {
 
     pub const fn with_expected_mailbox(mut self, expected_mailbox: MailboxConfig) -> Self {
         self.expected_mailbox = Some(expected_mailbox);
+        self.mailbox_requirement = StartupMailboxRequirement::Coe;
         self
+    }
+
+    pub const fn with_non_coe_mailbox(mut self, expected_mailbox: MailboxConfig) -> Self {
+        self.expected_mailbox = Some(expected_mailbox);
+        self.mailbox_requirement = StartupMailboxRequirement::Mailbox;
+        self
+    }
+
+    pub const fn with_no_mailbox(mut self) -> Self {
+        self.expected_mailbox = None;
+        self.expected_mailbox_receive_sync_manager = None;
+        self.mailbox_requirement = StartupMailboxRequirement::Absent;
+        self
+    }
+
+    const fn reads_mailbox(&self) -> bool {
+        self.expected_mailbox.is_some()
+            || matches!(self.mailbox_requirement, StartupMailboxRequirement::Absent)
     }
 
     pub const fn with_expected_requesting_id(mut self, expected_requesting_id: u16) -> Self {
@@ -513,6 +541,7 @@ pub enum StartupProgress {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StartupError {
+    UnexpectedMailbox(u16),
     Busy,
     NotStarted,
     NoPendingAction,
@@ -688,6 +717,7 @@ pub struct StartupController<const MAX_SLAVES: usize> {
     verified_fmmu_registers: [Option<FmmuRegisterBank>; MAX_SLAVES],
     verified_sync_manager_registers: [Option<SyncManagerRegisterBank>; MAX_SLAVES],
     verified_sii: [Option<SiiConfigurationSignature>; MAX_SLAVES],
+    verified_sii_mapping: [Option<MappingTable<{ crate::MAX_ESC_SYNC_MANAGERS }, 0>>; MAX_SLAVES],
     verified_dc_modes: [Option<SiiDcMode>; MAX_SLAVES],
     selected_reference_clock: Option<StartupReferenceClock>,
     dc_topology: Option<DcTopology<MAX_SLAVES>>,
@@ -735,6 +765,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             verified_fmmu_registers: [None; MAX_SLAVES],
             verified_sync_manager_registers: [None; MAX_SLAVES],
             verified_sii: [None; MAX_SLAVES],
+            verified_sii_mapping: [None; MAX_SLAVES],
             verified_dc_modes: [None; MAX_SLAVES],
             selected_reference_clock: None,
             dc_topology: None,
@@ -843,6 +874,19 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             .iter()
             .position(|record| record.position == position)
             .and_then(|index| self.verified_sii[index])
+    }
+
+    /// Physical SM defaults from the complete, signature-verified SII image.
+    /// Kept separately from the observed ESC registers, which may be unconfigured.
+    pub fn verified_sii_mapping(
+        &self,
+        position: u16,
+    ) -> Option<&MappingTable<{ crate::MAX_ESC_SYNC_MANAGERS }, 0>> {
+        self.table
+            .records()
+            .iter()
+            .position(|record| record.position == position)
+            .and_then(|index| self.verified_sii_mapping[index].as_ref())
     }
 
     pub fn verified_fmmu_registers(&self, position: u16) -> Option<FmmuRegisterBank> {
@@ -1458,6 +1502,9 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
                     });
                 }
                 if let Some(mailbox) = profile.expected_mailbox {
+                    if profile.mailbox_requirement == StartupMailboxRequirement::Absent {
+                        return Err(StartupError::UnexpectedMailbox(profile.position));
+                    }
                     if let Err(error) = mailbox.validate() {
                         return Err(StartupError::InvalidMailboxProfile {
                             position: profile.position,
@@ -1543,6 +1590,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.verified_fmmu_registers = [None; MAX_SLAVES];
         self.verified_sync_manager_registers = [None; MAX_SLAVES];
         self.verified_sii = [None; MAX_SLAVES];
+        self.verified_sii_mapping = [None; MAX_SLAVES];
         self.verified_dc_modes = [None; MAX_SLAVES];
         self.selected_reference_clock = None;
         self.dc_topology = None;
@@ -2165,6 +2213,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         self.verified_fmmu_registers = [None; MAX_SLAVES];
         self.verified_sync_manager_registers = [None; MAX_SLAVES];
         self.verified_sii = [None; MAX_SLAVES];
+        self.verified_sii_mapping = [None; MAX_SLAVES];
         self.verified_dc_modes = [None; MAX_SLAVES];
         self.selected_reference_clock = None;
         self.dc_topology = None;
@@ -2490,7 +2539,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             self.phase = StartupPhase::ReadingRequestingId;
             return Ok(StartupProgress::IdentityVerified(self.current_index));
         }
-        if profile.expected_mailbox.is_some() {
+        if profile.reads_mailbox() {
             self.phase = StartupPhase::ReadingMailbox;
             return Ok(StartupProgress::IdentityVerified(self.current_index));
         }
@@ -2529,7 +2578,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             });
         }
         self.verified_requesting_ids[self.current_index] = Some(observed);
-        if profile.expected_mailbox.is_some() {
+        if profile.reads_mailbox() {
             self.phase = StartupPhase::ReadingMailbox;
             return Ok(StartupProgress::RequestingIdVerified(self.current_index));
         }
@@ -2557,27 +2606,42 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             .get(self.current_index)
             .copied()
             .ok_or(StartupError::ExpectedCountMismatch)?;
-        let expected = self
-            .profile_for_position(record.position)?
-            .expected_mailbox
-            .ok_or(StartupError::NoPendingAction)?;
+        let profile = self.profile_for_position(record.position)?;
         let descriptor = match SiiStandardMailbox::from_completed_block(&self.sii_mailbox) {
             Ok(descriptor) => descriptor,
             Err(error) => return self.fail(StartupError::SiiMailbox(error)),
         };
-        let observed = match descriptor.coe_mailbox_config() {
-            Ok(config) => config,
-            Err(error) => return self.fail(StartupError::SiiMailbox(error)),
-        };
-        if !expected.has_same_layout(observed) {
-            return self.fail(StartupError::MailboxMismatch {
-                position: record.position,
-                expected,
-                observed,
-            });
+        if profile.mailbox_requirement == StartupMailboxRequirement::Absent {
+            if descriptor.slave_receive_address != 0
+                || descriptor.slave_receive_capacity != 0
+                || descriptor.slave_send_address != 0
+                || descriptor.slave_send_capacity != 0
+                || descriptor.protocols.bits() != 0
+            {
+                return self.fail(StartupError::UnexpectedMailbox(record.position));
+            }
+            self.staged_mailbox = None;
+        } else {
+            let expected = profile
+                .expected_mailbox
+                .ok_or(StartupError::NoPendingAction)?;
+            let observed = match if profile.mailbox_requirement == StartupMailboxRequirement::Coe {
+                descriptor.coe_mailbox_config()
+            } else {
+                descriptor.mailbox_config()
+            } {
+                Ok(config) => config,
+                Err(error) => return self.fail(StartupError::SiiMailbox(error)),
+            };
+            if !expected.has_same_layout(observed) {
+                return self.fail(StartupError::MailboxMismatch {
+                    position: record.position,
+                    expected,
+                    observed,
+                });
+            }
+            self.staged_mailbox = Some(expected);
         }
-        self.staged_mailbox = Some(expected);
-        let profile = self.profile_for_position(record.position)?;
         if profile.expected_sii.is_some() || profile.expected_mailbox_receive_sync_manager.is_some()
         {
             self.phase = StartupPhase::ReadingFmmuRegisters;
@@ -2763,6 +2827,7 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
         }
         self.verified_mailboxes[self.current_index] = self.staged_mailbox.take();
         self.verified_sii[self.current_index] = observed_sii;
+        self.verified_sii_mapping[self.current_index] = observed_sii.map(|_| *candidate.mapping());
         self.verified_dc_modes[self.current_index] = observed_dc_mode;
         self.verified_fmmu_registers[self.current_index] = observed_fmmu_registers;
         self.verified_sync_manager_registers[self.current_index] = observed_sync_manager_registers;
@@ -4304,6 +4369,8 @@ mod tests {
         );
         assert_eq!(startup.verified_sii(0), Some(signatures[0]));
         assert_eq!(startup.verified_sii(1), None);
+        assert!(startup.verified_sii_mapping(0).is_some());
+        assert!(startup.verified_sii_mapping(1).is_none());
         assert_eq!(
             accept_al_state(&mut startup, EthercatState::Op, now_ns),
             StartupProgress::SlaveReady(0)
@@ -4340,6 +4407,8 @@ mod tests {
         assert_eq!(startup.phase(), StartupPhase::Scanning);
         assert_eq!(startup.verified_sii(0), None);
         assert_eq!(startup.verified_sii(1), None);
+        assert!(startup.verified_sii_mapping(0).is_none());
+        assert!(startup.verified_sii_mapping(1).is_none());
         assert_eq!(startup.verified_fmmu_registers(0), None);
         assert_eq!(startup.verified_sync_manager_registers(0), None);
     }
@@ -5099,6 +5168,36 @@ mod tests {
                 observed: 0x1000,
             })
         );
+    }
+
+    #[test]
+    fn absent_and_non_coe_mailboxes_are_verified_from_exact_sii_words() {
+        let mailbox = MailboxConfig::new(0x1000, 64, 0x1100, 64);
+        let mut non_coe = prepared_mailbox_verification(mailbox);
+        non_coe.profiles[0] = StartupSlaveProfile::new(0).with_non_coe_mailbox(mailbox);
+        accept_mailbox_words(&mut non_coe, [0x1000, 64, 0x1100, 64, 0x08], &mut 1).unwrap();
+        assert_eq!(non_coe.verified_mailbox(0), Some(mailbox));
+
+        let mut absent = prepared_mailbox_verification(mailbox);
+        absent.profiles[0] = StartupSlaveProfile::new(0).with_no_mailbox();
+        accept_mailbox_words(&mut absent, [0; 5], &mut 1).unwrap();
+        assert_eq!(absent.verified_mailbox(0), None);
+        assert_eq!(absent.phase(), StartupPhase::TransitioningAl);
+
+        for words in [
+            [0x1000, 64, 0x1100, 64, 4],
+            [0, 0, 0, 0, 4],
+            [0, 1, 0, 0, 0],
+        ] {
+            let mut mismatch = prepared_mailbox_verification(mailbox);
+            mismatch.profiles[0] = StartupSlaveProfile::new(0).with_no_mailbox();
+            assert_eq!(
+                accept_mailbox_words(&mut mismatch, words, &mut 1),
+                Err(StartupError::UnexpectedMailbox(0))
+            );
+            assert_eq!(mismatch.verified_mailbox(0), None);
+            assert_eq!(mismatch.phase(), StartupPhase::Faulted);
+        }
     }
 
     #[test]

@@ -148,6 +148,30 @@ def product_input() -> dict:
 
 
 class RobotBuildReportTests(unittest.TestCase):
+    def test_mailbox_capabilities_are_typed_and_cross_checked(self):
+        product = product_input()
+        entries = [
+            {"name": item["name"], "position": item["position"],
+             "capability": "coe" if index < 2 else "none",
+             "pdo_configuration": "configurable" if index < 2 else "fixed",
+             "pdo_upload_supported": index < 2}
+            for index, item in enumerate(product["devices"]["coe_complete_access"])
+        ]
+        product["devices"]["mailbox_capabilities"] = entries
+        report = build_report(product)
+        self.assertEqual(report["devices"]["mailbox_capabilities"], entries)
+        validate_report(report)
+        for field, value in [("capability", "unknown"), ("pdo_configuration", "configurable"),
+                             ("pdo_upload_supported", True), ("position", 42)]:
+            forged = copy.deepcopy(product)
+            forged["devices"]["mailbox_capabilities"][2][field] = value
+            with self.assertRaises(ValueError):
+                build_report(forged)
+        forged = copy.deepcopy(product)
+        forged["devices"]["mailbox_capabilities"].pop()
+        with self.assertRaises(ValueError):
+            build_report(forged)
+
     def test_sdo_capacity_evidence_is_bounded_and_projected_without_qualification(self):
         product = product_input()
         expected = {

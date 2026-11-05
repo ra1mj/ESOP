@@ -1,5 +1,5 @@
 {
-  "config_sha256": "c8283294a6154e614164260276df93db5e4a9c31468fb78a008b4e73b71f98ad",
+  "config_sha256": "b243d07bed9e7caefb3457be64f9dbe294d01d75c1cec77f9bd55ec308582e4f",
   "devices": [
     {
       "coe_complete_access_enabled": true,
@@ -20,7 +20,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP simulated CiA 402 drive",
       "esi_label": "esop-sim-drive-v1",
-      "esi_semantic_sha256": "1e79b13cfc2effacdd16c8ed18a9051a31c096374056d001f0dd65af4af5f1d7",
+      "esi_semantic_sha256": "eb7e3eeaa242d32b649b3ce6c00f6f42f8ec95053e8ce6eb6c6dd87156d2737a",
       "esi_type_name": "ESOP-SIM-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -38,6 +38,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 448,
         "domain_id": 0,
@@ -58,6 +59,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 0,
       "product_code": "0x00004020",
       "requesting_id": "0x0041",
@@ -223,7 +226,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP simulated CiA 402 drive",
       "esi_label": "esop-sim-drive-v1",
-      "esi_semantic_sha256": "1e79b13cfc2effacdd16c8ed18a9051a31c096374056d001f0dd65af4af5f1d7",
+      "esi_semantic_sha256": "eb7e3eeaa242d32b649b3ce6c00f6f42f8ec95053e8ce6eb6c6dd87156d2737a",
       "esi_type_name": "ESOP-SIM-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -241,6 +244,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 449,
         "domain_id": 0,
@@ -261,6 +265,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 1,
       "product_code": "0x00004020",
       "requesting_id": "0x0042",
@@ -332,7 +338,7 @@
       "domain_id": 1,
       "esi_device_name": "ESOP simulated digital IO",
       "esi_label": "esop-sim-io-v1",
-      "esi_semantic_sha256": "50bb59dbbe0da72c0158449b6840eb5ff4ef62a7aa21a345d91126f6eccb4ccf",
+      "esi_semantic_sha256": "181ed923b30ffb3d289ace20dd04aa18294168957c694a10385f1d8356603c83",
       "esi_type_name": "ESOP-SIM-IO",
       "kind": "ethercat_io",
       "mailbox": {
@@ -345,8 +351,11 @@
         "send_control_byte": 38,
         "send_sync_manager": 0
       },
+      "mailbox_capability": "coe",
       "name": "io_block",
       "op_only_outputs": [],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 2,
       "product_code": "0x00007010",
       "requesting_id": null,

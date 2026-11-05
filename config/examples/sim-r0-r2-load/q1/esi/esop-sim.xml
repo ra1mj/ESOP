@@ -20,7 +20,7 @@
         <Sm Enable="1" OpOnly="true">Outputs</Sm>
         <Sm Enable="1">Inputs</Sm>
         <Mailbox>
-          <CoE CompleteAccess="true" SdoInfo="true" />
+          <CoE PdoAssign="1" PdoConfig="1" PdoUpload="1" CompleteAccess="true" SdoInfo="true" />
         </Mailbox>
         <Dc>
           <OpMode>
@@ -141,7 +141,7 @@
         <Sm Enable="1" OpOnly="true">Outputs</Sm>
         <Sm Enable="1">Inputs</Sm>
         <Mailbox>
-          <CoE CompleteAccess="true" SdoInfo="true" />
+          <CoE PdoAssign="1" PdoConfig="1" PdoUpload="1" CompleteAccess="true" SdoInfo="true" />
         </Mailbox>
         <Dc>
           <OpMode>
@@ -275,7 +275,7 @@
         <Sm Enable="1">Outputs</Sm>
         <Sm Enable="1">Inputs</Sm>
         <Mailbox>
-          <CoE />
+          <CoE PdoAssign="1" PdoConfig="1" PdoUpload="1" />
         </Mailbox>
         <RxPdo Sm="2">
           <Index>#x1601</Index>

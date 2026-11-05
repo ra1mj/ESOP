@@ -1,5 +1,5 @@
 {
-  "config_sha256": "d095fd49ee16bee25882a204e0c28ca8e02072e5f178fc820fef7efc3c9e2820",
+  "config_sha256": "50be3747e4c0e0165c384048b9471b72ae4c258920a28d62e88a8b5500a91a1a",
   "cycle_budget": {
     "deadline_ns": 400000,
     "period_ns": 500000,
@@ -234,6 +234,127 @@
     "declared_axes": 16,
     "declared_io_channels": 16,
     "declared_slaves": 17,
+    "mailbox_capabilities": [
+      {
+        "capability": "coe",
+        "name": "drive_00",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 0
+      },
+      {
+        "capability": "coe",
+        "name": "drive_01",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 1
+      },
+      {
+        "capability": "coe",
+        "name": "drive_02",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 2
+      },
+      {
+        "capability": "coe",
+        "name": "drive_03",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 3
+      },
+      {
+        "capability": "coe",
+        "name": "drive_04",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 4
+      },
+      {
+        "capability": "coe",
+        "name": "drive_05",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 5
+      },
+      {
+        "capability": "coe",
+        "name": "drive_06",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 6
+      },
+      {
+        "capability": "coe",
+        "name": "drive_07",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 7
+      },
+      {
+        "capability": "coe",
+        "name": "drive_08",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 8
+      },
+      {
+        "capability": "coe",
+        "name": "drive_09",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 9
+      },
+      {
+        "capability": "coe",
+        "name": "drive_10",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 10
+      },
+      {
+        "capability": "coe",
+        "name": "drive_11",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 11
+      },
+      {
+        "capability": "coe",
+        "name": "drive_12",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 12
+      },
+      {
+        "capability": "coe",
+        "name": "drive_13",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 13
+      },
+      {
+        "capability": "coe",
+        "name": "drive_14",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 14
+      },
+      {
+        "capability": "coe",
+        "name": "drive_15",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 15
+      },
+      {
+        "capability": "coe",
+        "name": "io_block",
+        "pdo_configuration": "configurable",
+        "pdo_upload_supported": true,
+        "position": 16
+      }
+    ],
     "requesting_id": [
       {
         "expected": "0x0041",

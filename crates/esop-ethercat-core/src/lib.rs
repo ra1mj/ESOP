@@ -129,10 +129,10 @@ pub use op_only::{
 };
 pub use pdo::{PdoDirection, PdoEntry, PdoError, PdoLayout};
 pub use pdo_config::{
-    MAX_PDO_SDO_DATA, PdoConfigAction, PdoConfigBatch, PdoConfigBatchError, PdoConfigBatchPhase,
-    PdoConfigBatchPlan, PdoConfigBatchPlanError, PdoConfigBatchStatus, PdoConfigController,
-    PdoConfigError, PdoConfigJob, PdoConfigPhase, PdoConfigPlan, PdoConfigPlanError,
-    PdoConfigProgress, PdoConfigStep, PdoEntrySpec, PdoSdoWrite,
+    MAX_PDO_SDO_DATA, PdoConfigAccess, PdoConfigAction, PdoConfigBatch, PdoConfigBatchError,
+    PdoConfigBatchPhase, PdoConfigBatchPlan, PdoConfigBatchPlanError, PdoConfigBatchStatus,
+    PdoConfigController, PdoConfigError, PdoConfigJob, PdoConfigPhase, PdoConfigPlan,
+    PdoConfigPlanError, PdoConfigProgress, PdoConfigStep, PdoEntrySpec, PdoSdoWrite,
 };
 pub use plan::{DatagramPlan, FramePlan, FramePlanSet, FramePlanSetError, PlanError};
 pub use port::{EthercatDmaTxPort, EthercatPort, LinkState, PortError, RxPoll};
@@ -253,7 +253,8 @@ pub use startup::{
     ExpectedSlave, STARTUP_SII_IMAGE_BYTE_CAPACITY, STARTUP_SII_IMAGE_WORD_CAPACITY,
     STARTUP_SII_PDO_ENTRY_CAPACITY, StartupAction, StartupAlFault, StartupConfig,
     StartupConfigurationServices, StartupController, StartupDcRequirement, StartupError,
-    StartupPhase, StartupProgress, StartupReferenceClock, StartupSlaveProfile,
+    StartupMailboxRequirement, StartupPhase, StartupProgress, StartupReferenceClock,
+    StartupSlaveProfile,
 };
 pub use state_request::{
     StateRequestConfig, StateRequestController, StateRequestError, StateRequestHandle,

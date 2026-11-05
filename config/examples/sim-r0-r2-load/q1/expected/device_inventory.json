@@ -1,5 +1,5 @@
 {
-  "config_sha256": "00c8ed4f28d4385e61fee38ff9118ebc86bc7bc29003278622aceb013f09bcc5",
+  "config_sha256": "ea82ff01de0e6cbf46097791443b705242b28c218a16915618cb944bf5721c90",
   "devices": [
     {
       "coe_complete_access_enabled": false,
@@ -20,7 +20,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive with digital IO",
       "esi_label": "esop-load-drive-io-v1",
-      "esi_semantic_sha256": "2f3f1328d4b5dcb8ff6df1d303a52a16de804f2d59c543791189af8ff7cf24c7",
+      "esi_semantic_sha256": "a0b28dae5e5ad910dda802149aa68d735db57a8cf5715868b9e5eafcdd86ff88",
       "esi_type_name": "ESOP-SIM-LOAD-402-IO",
       "kind": "cia402_drive",
       "mailbox": {
@@ -38,6 +38,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7200,
         "domain_id": 0,
@@ -58,6 +59,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 0,
       "product_code": "0x00004023",
       "requesting_id": "0x0041",
@@ -134,7 +137,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -152,6 +155,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7201,
         "domain_id": 0,
@@ -172,6 +176,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 1,
       "product_code": "0x00004022",
       "requesting_id": "0x0042",
@@ -248,7 +254,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -266,6 +272,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7202,
         "domain_id": 0,
@@ -286,6 +293,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 2,
       "product_code": "0x00004022",
       "requesting_id": "0x0043",
@@ -362,7 +371,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -380,6 +389,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7203,
         "domain_id": 0,
@@ -400,6 +410,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 3,
       "product_code": "0x00004022",
       "requesting_id": "0x0044",
@@ -476,7 +488,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -494,6 +506,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7204,
         "domain_id": 0,
@@ -514,6 +527,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 4,
       "product_code": "0x00004022",
       "requesting_id": "0x0045",
@@ -590,7 +605,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -608,6 +623,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7205,
         "domain_id": 0,
@@ -628,6 +644,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 5,
       "product_code": "0x00004022",
       "requesting_id": "0x0046",
@@ -704,7 +722,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -722,6 +740,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7206,
         "domain_id": 0,
@@ -742,6 +761,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 6,
       "product_code": "0x00004022",
       "requesting_id": "0x0047",
@@ -818,7 +839,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -836,6 +857,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7207,
         "domain_id": 0,
@@ -856,6 +878,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 7,
       "product_code": "0x00004022",
       "requesting_id": "0x0048",
@@ -932,7 +956,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -950,6 +974,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7208,
         "domain_id": 0,
@@ -970,6 +995,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 8,
       "product_code": "0x00004022",
       "requesting_id": "0x0049",
@@ -1046,7 +1073,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -1064,6 +1091,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7209,
         "domain_id": 0,
@@ -1084,6 +1112,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 9,
       "product_code": "0x00004022",
       "requesting_id": "0x004a",
@@ -1160,7 +1190,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -1178,6 +1208,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7210,
         "domain_id": 0,
@@ -1198,6 +1229,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 10,
       "product_code": "0x00004022",
       "requesting_id": "0x004b",
@@ -1274,7 +1307,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -1292,6 +1325,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7211,
         "domain_id": 0,
@@ -1312,6 +1346,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 11,
       "product_code": "0x00004022",
       "requesting_id": "0x004c",
@@ -1388,7 +1424,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -1406,6 +1442,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7212,
         "domain_id": 0,
@@ -1426,6 +1463,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 12,
       "product_code": "0x00004022",
       "requesting_id": "0x004d",
@@ -1502,7 +1541,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -1520,6 +1559,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7213,
         "domain_id": 0,
@@ -1540,6 +1580,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 13,
       "product_code": "0x00004022",
       "requesting_id": "0x004e",
@@ -1616,7 +1658,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -1634,6 +1676,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7214,
         "domain_id": 0,
@@ -1654,6 +1697,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 14,
       "product_code": "0x00004022",
       "requesting_id": "0x004f",
@@ -1730,7 +1775,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -1748,6 +1793,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7215,
         "domain_id": 0,
@@ -1768,6 +1814,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 15,
       "product_code": "0x00004022",
       "requesting_id": "0x0050",
@@ -1844,7 +1892,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -1862,6 +1910,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7216,
         "domain_id": 0,
@@ -1882,6 +1931,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 16,
       "product_code": "0x00004022",
       "requesting_id": "0x0051",
@@ -1958,7 +2009,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -1976,6 +2027,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7217,
         "domain_id": 0,
@@ -1996,6 +2048,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 17,
       "product_code": "0x00004022",
       "requesting_id": "0x0052",
@@ -2072,7 +2126,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -2090,6 +2144,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7218,
         "domain_id": 0,
@@ -2110,6 +2165,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 18,
       "product_code": "0x00004022",
       "requesting_id": "0x0053",
@@ -2186,7 +2243,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -2204,6 +2261,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7219,
         "domain_id": 0,
@@ -2224,6 +2282,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 19,
       "product_code": "0x00004022",
       "requesting_id": "0x0054",
@@ -2300,7 +2360,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -2318,6 +2378,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7220,
         "domain_id": 0,
@@ -2338,6 +2399,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 20,
       "product_code": "0x00004022",
       "requesting_id": "0x0055",
@@ -2414,7 +2477,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -2432,6 +2495,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7221,
         "domain_id": 0,
@@ -2452,6 +2516,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 21,
       "product_code": "0x00004022",
       "requesting_id": "0x0056",
@@ -2528,7 +2594,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -2546,6 +2612,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7222,
         "domain_id": 0,
@@ -2566,6 +2633,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 22,
       "product_code": "0x00004022",
       "requesting_id": "0x0057",
@@ -2642,7 +2711,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -2660,6 +2729,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7223,
         "domain_id": 0,
@@ -2680,6 +2750,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 23,
       "product_code": "0x00004022",
       "requesting_id": "0x0058",
@@ -2756,7 +2828,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -2774,6 +2846,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7224,
         "domain_id": 0,
@@ -2794,6 +2867,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 24,
       "product_code": "0x00004022",
       "requesting_id": "0x0059",
@@ -2870,7 +2945,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -2888,6 +2963,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7225,
         "domain_id": 0,
@@ -2908,6 +2984,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 25,
       "product_code": "0x00004022",
       "requesting_id": "0x005a",
@@ -2984,7 +3062,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -3002,6 +3080,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7226,
         "domain_id": 0,
@@ -3022,6 +3101,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 26,
       "product_code": "0x00004022",
       "requesting_id": "0x005b",
@@ -3098,7 +3179,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -3116,6 +3197,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7227,
         "domain_id": 0,
@@ -3136,6 +3218,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 27,
       "product_code": "0x00004022",
       "requesting_id": "0x005c",
@@ -3212,7 +3296,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -3230,6 +3314,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7228,
         "domain_id": 0,
@@ -3250,6 +3335,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 28,
       "product_code": "0x00004022",
       "requesting_id": "0x005d",
@@ -3326,7 +3413,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -3344,6 +3431,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7229,
         "domain_id": 0,
@@ -3364,6 +3452,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 29,
       "product_code": "0x00004022",
       "requesting_id": "0x005e",
@@ -3440,7 +3530,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -3458,6 +3548,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7230,
         "domain_id": 0,
@@ -3478,6 +3569,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 30,
       "product_code": "0x00004022",
       "requesting_id": "0x005f",
@@ -3554,7 +3647,7 @@
       "domain_id": 0,
       "esi_device_name": "ESOP benchmark CiA 402 drive",
       "esi_label": "esop-load-drive-v1",
-      "esi_semantic_sha256": "a9430f1c2ec4fe2ec9397d72b3edeb3021dd06eff37a6132bc69eb082c748f64",
+      "esi_semantic_sha256": "4799943bf8bc31a06757527bfd9cc0f4cd59475a30df34db1a333920ab021722",
       "esi_type_name": "ESOP-SIM-LOAD-402",
       "kind": "cia402_drive",
       "mailbox": {
@@ -3572,6 +3665,7 @@
           "mask": 8
         }
       },
+      "mailbox_capability": "coe",
       "mapped_mailbox_status": {
         "domain_bit_offset": 7231,
         "domain_id": 0,
@@ -3592,6 +3686,8 @@
           "index": 2
         }
       ],
+      "pdo_configuration": "configurable",
+      "pdo_upload_supported": true,
       "position": 31,
       "product_code": "0x00004022",
       "requesting_id": "0x0060",

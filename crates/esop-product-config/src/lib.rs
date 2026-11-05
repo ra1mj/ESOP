@@ -6,6 +6,8 @@
 //! Domain, schedule, frame-plan and CiA 402 map through the owning runtime
 //! crates, then returns the complete frozen result as one value.
 
+mod mapping;
+
 pub use esop_ethercat_core::wire::Command;
 pub use esop_ethercat_core::{
     AlTransitionTimeouts, CanopenDataType, DcSyncPlan, DcSyncPlanEntry, DcSyncPlanError,
@@ -33,7 +35,7 @@ pub use esop_procbuf::{
 };
 pub use esop_profile_cia402::{Cia402PdoError, Cia402PdoMap, OperatingMode};
 
-pub const PRODUCT_RUNTIME_SCHEMA: &str = "esop.product-runtime.v1";
+pub const PRODUCT_RUNTIME_SCHEMA: &str = "esop.product-runtime.v2";
 pub const CONFIG_SHA256_BYTES: usize = 32;
 pub const MAX_PRODUCT_AXIS_PDOS: usize = 32;
 pub const MAX_PRODUCT_PDO_ENTRIES_PER_DOMAIN: usize = 512;
@@ -59,6 +61,21 @@ pub enum ProductSlaveKind {
     EthercatIo,
 }
 
+/// Protocol support is independent of whether the slave exposes process data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductMailboxCapability {
+    None,
+    MailboxOnly,
+    Coe,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductPdoConfiguration {
+    Fixed,
+    Assignment,
+    Configurable,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProductSlaveConfig {
     pub name: &'static str,
@@ -80,6 +97,10 @@ pub struct ProductSlaveConfig {
     pub coe_sdo_information_supported: bool,
     pub coe_sdo_information_enabled: bool,
     pub sdo_information_expectations: &'static [SdoInformationExpectation],
+    pub mailbox_capability: ProductMailboxCapability,
+    pub pdo_configuration: ProductPdoConfiguration,
+    pub pdo_upload_supported: bool,
+    /// Inactive when `mailbox_capability` is None; must be the canonical empty value.
     pub mailbox_config: MailboxConfig,
     pub mailbox_send_sync_manager: u8,
     pub mailbox_send_control_byte: u8,
@@ -90,6 +111,24 @@ pub struct ProductSlaveConfig {
     pub sii_enabled_sync_managers: u16,
     pub sii_fmmu_count: u8,
     pub sii_fmmu_usages: [SiiFmmuUsage; MAX_SII_FMMU_USAGES],
+}
+
+impl ProductSlaveConfig {
+    pub const fn mailbox(&self) -> Option<MailboxConfig> {
+        match self.mailbox_capability {
+            ProductMailboxCapability::None => None,
+            ProductMailboxCapability::MailboxOnly | ProductMailboxCapability::Coe => {
+                Some(self.mailbox_config)
+            }
+        }
+    }
+
+    pub const fn coe_mailbox(&self) -> Option<MailboxConfig> {
+        match self.mailbox_capability {
+            ProductMailboxCapability::Coe => Some(self.mailbox_config),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -109,6 +148,7 @@ fn validate_requesting_id(slave: ProductSlaveConfig) -> Result<(), ProductReques
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProductSdoAccessPolicyError {
     UnknownSlave { position: u16 },
+    CoeUnavailable { position: u16 },
     CompleteAccessEnabledWithoutSupport { position: u16 },
 }
 
@@ -269,6 +309,7 @@ pub enum ProductMailboxStatusMappingError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProductMailboxPolicyError {
+    CapabilityMismatch,
     ReceiveSyncManager(MailboxReceiveSyncManagerError),
     InvalidFmmuCount(u8),
     InvalidSyncManagerCount(u8),
@@ -394,6 +435,8 @@ pub struct ProductPdoConfig {
     pub domain_id: u8,
     pub assignment_index: u16,
     pub sync_manager: u8,
+    /// ESI Fixed metadata overrides a slave's configurable mapping capability.
+    pub fixed: bool,
     pub bit_offset: usize,
     pub request: PdoRegistrationRequest,
 }
@@ -451,6 +494,7 @@ impl<const OPS: usize> ProductPdoStartupPlan<OPS> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProductPdoPlanError {
+    MailboxPolicy(ProductMailboxPolicyError),
     UnknownSlave {
         position: u16,
     },
@@ -471,10 +515,26 @@ pub enum ProductPdoPlanError {
         expected: PdoDirection,
         actual: PdoDirection,
     },
+    MappingFixedMismatch {
+        mapping_index: u16,
+    },
     PdoCapacityExceeded {
         position: u16,
     },
     Plan(PdoConfigPlanError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductMappingError {
+    UnknownSlave(u16),
+    UnverifiedSii(u16),
+    IdentityMismatch(u16),
+    UnknownDomain(u8),
+    InvalidPdoLayout(u16),
+    SyncManagerTooSmall(u8),
+    MailboxMismatch(u8),
+    Mapping(esop_ethercat_core::MappingError),
+    Startup(ProductStartupError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -527,6 +587,7 @@ struct ProductPdoMappingGroup {
     mapping_index: u16,
     sync_manager: u8,
     direction: PdoDirection,
+    fixed: bool,
 }
 
 impl ProductPdoMappingGroup {
@@ -534,12 +595,38 @@ impl ProductPdoMappingGroup {
         mapping_index: 0,
         sync_manager: 0,
         direction: PdoDirection::Rx,
+        fixed: false,
     };
 }
 
 fn validate_generated_mailbox_policy(
     slave: ProductSlaveConfig,
 ) -> Result<(), ProductMailboxPolicyError> {
+    if slave.mailbox_capability != ProductMailboxCapability::Coe
+        && (slave.coe_complete_access_supported
+            || slave.coe_complete_access_enabled
+            || slave.coe_sdo_information_supported
+            || slave.coe_sdo_information_enabled
+            || !slave.sdo_information_expectations.is_empty()
+            || slave.pdo_configuration != ProductPdoConfiguration::Fixed
+            || slave.pdo_upload_supported)
+    {
+        return Err(ProductMailboxPolicyError::CapabilityMismatch);
+    }
+    if slave.mailbox_capability == ProductMailboxCapability::None {
+        if slave.mailbox_config != MailboxConfig::new(0, 0, 0, 0)
+            || slave.mailbox_send_sync_manager != 0
+            || slave.mailbox_send_control_byte != 0
+            || slave.mailbox_receive_sync_manager != MailboxReceiveSyncManager::new(0, 0, 0, 0)
+            || slave.mapped_mailbox_status.is_some()
+            || slave
+                .sii_fmmu_usages
+                .contains(&SiiFmmuUsage::SyncManagerStatus)
+        {
+            return Err(ProductMailboxPolicyError::CapabilityMismatch);
+        }
+        return Ok(());
+    }
     slave
         .mailbox_receive_sync_manager
         .validate_for(slave.mailbox_config)
@@ -601,6 +688,9 @@ fn validate_generated_mailbox_policy(
 fn validate_mailbox_transport_binding(
     slave: ProductSlaveConfig,
 ) -> Result<(), ProductMailboxPolicyError> {
+    if slave.mailbox().is_none() {
+        return Ok(());
+    }
     for (direction, expected, actual) in [
         (
             MailboxDirection::Send,
@@ -892,6 +982,11 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
             .ok_or(ProductSdoAccessPolicyError::UnknownSlave {
                 position: slave_position,
             })?;
+        if slave.coe_mailbox().is_none() {
+            return Err(ProductSdoAccessPolicyError::CoeUnavailable {
+                position: slave_position,
+            });
+        }
         validated_sdo_access_policy(slave)
     }
 
@@ -1049,7 +1144,9 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                     error,
                 });
             }
-            if let Err(error) = slave.mailbox_config.validate() {
+            if let Some(config) = slave.mailbox()
+                && let Err(error) = config.validate()
+            {
                 return Err(ProductStartupError::InvalidMailboxConfig {
                     position: slave.position,
                     error,
@@ -1100,9 +1197,17 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                 .with_dc_requirement(dc_requirement)
                 .with_transition_timeouts(slave.transition_timeouts)
                 .with_op_only_outputs(slave.op_only_outputs)
-                .with_expected_mailbox(slave.mailbox_config)
-                .with_expected_mailbox_receive_sync_manager(slave.mailbox_receive_sync_manager)
                 .with_expected_sii(expected_sii);
+            if let Some(config) = slave.mailbox() {
+                profile = if slave.mailbox_capability == ProductMailboxCapability::Coe {
+                    profile.with_expected_mailbox(config)
+                } else {
+                    profile.with_non_coe_mailbox(config)
+                }
+                .with_expected_mailbox_receive_sync_manager(slave.mailbox_receive_sync_manager);
+            } else {
+                profile = profile.with_no_mailbox();
+            }
             if let Some(requesting_id) = slave.requesting_id {
                 profile = profile.with_expected_requesting_id(requesting_id);
             }
@@ -1301,12 +1406,14 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
         &self,
     ) -> Result<PdoConfigBatchPlan<JOBS, OPS>, ProductPdoBatchError> {
         for slave in self.slaves.iter().copied() {
-            slave.mailbox_config.validate().map_err(|error| {
-                ProductPdoBatchError::InvalidMailboxConfig {
-                    position: slave.position,
-                    error,
-                }
-            })?;
+            if let Some(config) = slave.mailbox() {
+                config
+                    .validate()
+                    .map_err(|error| ProductPdoBatchError::InvalidMailboxConfig {
+                        position: slave.position,
+                        error,
+                    })?;
+            }
             validate_generated_mailbox_policy(slave).map_err(|error| {
                 ProductPdoBatchError::MailboxPolicy {
                     position: slave.position,
@@ -1323,6 +1430,15 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
     ) -> Result<PdoConfigBatchPlan<JOBS, OPS>, ProductPdoBatchError> {
         let mut batch = PdoConfigBatchPlan::new();
         for slave in self.slaves {
+            validate_generated_mailbox_policy(slave).map_err(|error| {
+                ProductPdoBatchError::MailboxPolicy {
+                    position: slave.position,
+                    error,
+                }
+            })?;
+            if slave.coe_mailbox().is_none() {
+                continue;
+            }
             let mailbox_config = mailbox_for(slave)?;
             mailbox_config.validate().map_err(|error| {
                 ProductPdoBatchError::InvalidMailboxConfig {
@@ -1368,6 +1484,7 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                 position: slave_position,
             })?;
 
+        validate_generated_mailbox_policy(*slave).map_err(ProductPdoPlanError::MailboxPolicy)?;
         let mut groups = [ProductPdoMappingGroup::EMPTY; MAX_PRODUCT_PDO_ENTRIES_PER_DOMAIN];
         let mut group_count = 0;
         for (pdo_index, pdo) in self.pdos.iter().copied().enumerate() {
@@ -1401,6 +1518,11 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                         actual: pdo.request.direction,
                     });
                 }
+                if group.fixed != pdo.fixed {
+                    return Err(ProductPdoPlanError::MappingFixedMismatch {
+                        mapping_index: pdo.assignment_index,
+                    });
+                }
                 continue;
             }
             if group_count == groups.len() {
@@ -1412,8 +1534,20 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                 mapping_index: pdo.assignment_index,
                 sync_manager: pdo.sync_manager,
                 direction: pdo.request.direction,
+                fixed: pdo.fixed,
             };
             group_count += 1;
+        }
+
+        // These slaves are verified against SII and the physical SM/FMMU readback.
+        if slave.coe_mailbox().is_none()
+            || (slave.pdo_configuration == ProductPdoConfiguration::Fixed
+                && !slave.pdo_upload_supported)
+        {
+            return Ok(ProductPdoStartupPlan {
+                station_address: slave.station_address,
+                plan: PdoConfigPlan::new(),
+            });
         }
 
         let mut plan = PdoConfigPlan::new();
@@ -1441,10 +1575,14 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
             }
             processed_sync_managers[sync_manager] = true;
             let assignment_index = 0x1C10u16 + u16::from(group.sync_manager);
-            plan.push(
-                PdoSdoWrite::new(assignment_index, 0, &[0]).map_err(ProductPdoPlanError::Plan)?,
-            )
-            .map_err(ProductPdoPlanError::Plan)?;
+            let writable_assignment = slave.pdo_configuration != ProductPdoConfiguration::Fixed;
+            if writable_assignment {
+                plan.push(
+                    PdoSdoWrite::new(assignment_index, 0, &[0])
+                        .map_err(ProductPdoPlanError::Plan)?,
+                )
+                .map_err(ProductPdoPlanError::Plan)?;
+            }
 
             let mut mapping_count = 0;
             for mapping in groups[..group_count]
@@ -1468,12 +1606,26 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
                     );
                     entry_count += 1;
                 }
-                plan.append_mapping(mapping.mapping_index, &entries[..entry_count])
-                    .map_err(ProductPdoPlanError::Plan)?;
+                if slave.pdo_configuration == ProductPdoConfiguration::Configurable
+                    && !mapping.fixed
+                {
+                    plan.append_mapping(mapping.mapping_index, &entries[..entry_count])
+                } else {
+                    plan.append_mapping_verification(mapping.mapping_index, &entries[..entry_count])
+                }
+                .map_err(ProductPdoPlanError::Plan)?;
                 mapping_indexes[mapping_count] = mapping.mapping_index;
                 mapping_count += 1;
             }
 
+            if !writable_assignment {
+                plan.append_assignment_verification(
+                    assignment_index,
+                    &mapping_indexes[..mapping_count],
+                )
+                .map_err(ProductPdoPlanError::Plan)?;
+                continue;
+            }
             for (offset, mapping_index) in mapping_indexes[..mapping_count].iter().enumerate() {
                 let subindex = u8::try_from(offset + 1)
                     .map_err(|_| ProductPdoPlanError::Plan(PdoConfigPlanError::CountOutOfBounds))?;
@@ -2022,6 +2174,12 @@ impl<'a, const SLAVES: usize, const DOMAINS: usize, const AXES: usize>
 
     fn validate_sdo_access_policies(&self) -> Result<(), ProductActivationError> {
         for slave in self.slaves.iter().copied() {
+            validate_generated_mailbox_policy(slave).map_err(|error| {
+                ProductActivationError::MailboxPolicy {
+                    position: slave.position,
+                    error,
+                }
+            })?;
             validated_sdo_access_policy(slave).map_err(ProductActivationError::SdoAccessPolicy)?;
         }
         Ok(())
@@ -2305,6 +2463,7 @@ mod tests {
     ) -> ProductPdoConfig {
         ProductPdoConfig {
             domain_id: 0,
+            fixed: false,
             assignment_index: if matches!(direction, PdoDirection::Rx) {
                 0x1600
             } else {
@@ -2358,6 +2517,9 @@ mod tests {
                 coe_sdo_information_supported: false,
                 coe_sdo_information_enabled: false,
                 sdo_information_expectations: &[],
+                mailbox_capability: ProductMailboxCapability::Coe,
+                pdo_configuration: ProductPdoConfiguration::Configurable,
+                pdo_upload_supported: true,
                 mailbox_config: MailboxConfig::new(0x1000, 32, 0x1100, 32),
                 mailbox_send_sync_manager: 0,
                 mailbox_send_control_byte: 0x26,
@@ -2438,6 +2600,196 @@ mod tests {
                 .validate_for(OperatingMode::Csp)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn physical_mapping_uses_sii_addresses_and_real_bit_ends() {
+        use esop_ethercat_core::SyncManagerConfig;
+        let mut product = config();
+        product.slaves[0].mailbox_capability = ProductMailboxCapability::None;
+        let pdos = [
+            ProductPdoConfig {
+                sync_manager: 0,
+                ..pdo(0x7000, PdoDirection::Rx, 0, 3, false)
+            },
+            ProductPdoConfig {
+                sync_manager: 0,
+                ..pdo(0x7001, PdoDirection::Rx, 3, 8, false)
+            },
+            ProductPdoConfig {
+                sync_manager: 1,
+                ..pdo(0x6000, PdoDirection::Tx, 16, 7, false)
+            },
+        ];
+        product.pdos = &pdos;
+        let mut physical = MappingTable::<16, 0>::new();
+        physical
+            .add_sync_manager(SyncManagerConfig {
+                index: 0,
+                physical_start: 0x2345,
+                length: 2,
+                control: 0x24,
+                status: 0,
+                enable: true,
+            })
+            .unwrap();
+        physical
+            .add_sync_manager(SyncManagerConfig {
+                index: 1,
+                physical_start: 0x3456,
+                length: 1,
+                control: 0x20,
+                status: 0,
+                enable: true,
+            })
+            .unwrap();
+        let mapping = product
+            .build_mapping_from_sii::<2, 2>(product.slaves[0], &physical)
+            .unwrap();
+        let mut bytes = [0; 16];
+        mapping.fmmus()[0].encode(&mut bytes).unwrap();
+        // Eleven bits at 0x1000, physically at 0x2345; the five tail bits are unmapped.
+        assert_eq!(
+            bytes,
+            [0, 0x10, 0, 0, 2, 0, 0, 2, 0x45, 0x23, 0, 2, 1, 0, 0, 0]
+        );
+        mapping.fmmus()[1].encode(&mut bytes).unwrap();
+        assert_eq!(
+            bytes,
+            [2, 0x10, 0, 0, 1, 0, 0, 6, 0x56, 0x34, 0, 1, 1, 0, 0, 0]
+        );
+        assert_eq!(mapping.sync_managers()[0].length, 2);
+        assert!(matches!(
+            product.build_mapping_for_slave::<2, 2>(0, &StartupController::new(0x1000)),
+            Err(ProductMappingError::UnverifiedSii(0))
+        ));
+        let mut gap = pdos;
+        gap[1].bit_offset = 4;
+        product.pdos = &gap;
+        assert_eq!(
+            product.build_mapping_from_sii::<2, 2>(product.slaves[0], &physical),
+            Err(ProductMappingError::InvalidPdoLayout(0))
+        );
+        let mut too_wide = pdos;
+        too_wide[1].request.bit_length = 16;
+        product.pdos = &too_wide;
+        assert_eq!(
+            product.build_mapping_from_sii::<2, 2>(product.slaves[0], &physical),
+            Err(ProductMappingError::SyncManagerTooSmall(0))
+        );
+    }
+
+    #[test]
+    fn fixed_and_assignment_only_plans_never_write_immutable_objects() {
+        use esop_ethercat_core::PdoConfigAccess;
+        let mut product = config();
+        product.slaves[0].pdo_configuration = ProductPdoConfiguration::Fixed;
+        let plan = product.build_pdo_startup_plan::<64>(0).unwrap().into_plan();
+        assert!(!plan.is_empty());
+        assert!(
+            plan.access()
+                .iter()
+                .all(|access| *access == PdoConfigAccess::VerifyOnly)
+        );
+        product.slaves[0].pdo_configuration = ProductPdoConfiguration::Assignment;
+        let plan = product.build_pdo_startup_plan::<64>(0).unwrap().into_plan();
+        assert!(
+            plan.writes()
+                .iter()
+                .zip(plan.access())
+                .all(|(value, access)| {
+                    if value.index < 0x1c10 {
+                        *access == PdoConfigAccess::VerifyOnly
+                    } else {
+                        *access == PdoConfigAccess::WriteAndVerify
+                    }
+                })
+        );
+        let mut pdos = PDOS;
+        for pdo in &mut pdos {
+            pdo.fixed = true;
+        }
+        product.pdos = &pdos;
+        product.slaves[0].pdo_configuration = ProductPdoConfiguration::Configurable;
+        let plan = product.build_pdo_startup_plan::<64>(0).unwrap().into_plan();
+        assert!(
+            plan.writes()
+                .iter()
+                .zip(plan.access())
+                .filter(|(value, _)| value.index < 0x1c10)
+                .all(|(_, access)| *access == PdoConfigAccess::VerifyOnly)
+        );
+        let mut inconsistent = pdos;
+        inconsistent[0].fixed = false;
+        product.pdos = &inconsistent;
+        assert!(matches!(
+            product.build_pdo_startup_plan::<64>(0),
+            Err(ProductPdoPlanError::MappingFixedMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn non_coe_slaves_use_sii_verification_and_never_create_sdo_jobs() {
+        let mut product = config();
+        let slave = &mut product.slaves[0];
+        slave.mailbox_capability = ProductMailboxCapability::MailboxOnly;
+        slave.pdo_configuration = ProductPdoConfiguration::Fixed;
+        slave.pdo_upload_supported = false;
+        assert!(
+            product
+                .build_generated_pdo_configuration_batch::<0, 0>()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            product
+                .build_pdo_configuration_batch::<0, 0>(&[])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            product
+                .build_pdo_startup_plan::<0>(0)
+                .unwrap()
+                .plan()
+                .is_empty()
+        );
+        assert_eq!(
+            product.sdo_access_policy(0),
+            Err(ProductSdoAccessPolicyError::CoeUnavailable { position: 0 })
+        );
+        assert_eq!(
+            product.startup_profiles().unwrap()[0].mailbox_requirement,
+            esop_ethercat_core::StartupMailboxRequirement::Mailbox
+        );
+        let slave = &mut product.slaves[0];
+        slave.mailbox_capability = ProductMailboxCapability::None;
+        slave.mailbox_config = MailboxConfig::new(0, 0, 0, 0);
+        slave.mailbox_send_sync_manager = 0;
+        slave.mailbox_send_control_byte = 0;
+        slave.mailbox_receive_sync_manager = MailboxReceiveSyncManager::new(0, 0, 0, 0);
+        let profiles = product.startup_profiles().unwrap();
+        assert_eq!(
+            profiles[0].mailbox_requirement,
+            esop_ethercat_core::StartupMailboxRequirement::Absent
+        );
+        assert_eq!(profiles[0].expected_mailbox, None);
+        assert!(
+            product
+                .build_generated_pdo_configuration_batch::<0, 0>()
+                .unwrap()
+                .is_empty()
+        );
+        let procbuf = ProcBuf::<1, 0, 1, 8>::new(7, 11);
+        assert!(activate(&product, &[observed()], &procbuf).is_ok());
+        product.slaves[0].pdo_configuration = ProductPdoConfiguration::Configurable;
+        assert!(matches!(
+            product.startup_profiles(),
+            Err(ProductStartupError::MailboxPolicy {
+                error: ProductMailboxPolicyError::CapabilityMismatch,
+                ..
+            })
+        ));
     }
 
     #[test]
