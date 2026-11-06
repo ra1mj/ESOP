@@ -385,7 +385,7 @@ configured PREOP，故障保留首错且不自动重试。
 Topology lifecycle gate；重配置活动/锁存故障同样关闭该 gate。重扫完成只恢复新核验的 topology
 evidence，重配置完成只恢复目标 PREOP/configured evidence；两者都不会绕过 drive、DC、
 Domain、command age、CiA 402 或 motion permit 门槛，也不会自动重试、重扫或回到 OP。带非空
-`OpOnly` 输出规则的普通运行时状态变更继续拒绝；有界 OpOnly 顺序当前只由重配置协调器拥有。
+`OpOnly` 输出规则已接入普通运行时状态请求：AL 切换前禁用并读回，观测 OP 后启用并读回，所有动作共用原绝对期限及同一控制请求槽。完成仍不授予运动许可。
 统一恢复观察层现以 `ExplicitRecoveryStatus`、`ExplicitRecoveryResult` 和
 `ExplicitRecoveryFault` 无损包装三类权威状态，并通过固定容量
 `ExplicitRecoveryDiagnostics` 对 Submitted/Progress/Completed/Faulted 变化去重记录，环满只增加

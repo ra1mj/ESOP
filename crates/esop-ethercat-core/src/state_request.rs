@@ -11,7 +11,56 @@ use crate::al::{
 use crate::control::{
     ControlError, ControlRequestPool, MAX_CONTROL_PAYLOAD, RequestHandle, RequestState,
 };
+use crate::op_only::{
+    OpOnlySyncManagerAction, OpOnlySyncManagerController, OpOnlySyncManagerError,
+    OpOnlySyncManagerProfile, OpOnlySyncManagerProgress,
+};
 use crate::slave::{AlStatus, EthercatState, next_state};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StateRequestAction {
+    Al(AlAction),
+    OpOnly(OpOnlySyncManagerAction),
+}
+
+impl StateRequestAction {
+    pub const fn deadline_ns(self) -> u64 {
+        match self {
+            Self::Al(action) => action.deadline_ns,
+            Self::OpOnly(action) => action.deadline_ns,
+        }
+    }
+
+    pub(crate) fn matches_request(self, request: &crate::control::ControlRequest) -> bool {
+        match self {
+            Self::Al(action) => request.matches_action(
+                action.datagram_index,
+                action.generation,
+                action.address,
+                action.operation,
+                action.payload(),
+                action.datagram_len(),
+                action.deadline_ns,
+            ),
+            Self::OpOnly(action) => request.matches_action(
+                action.datagram_index,
+                action.generation,
+                action.address,
+                action.operation,
+                action.payload(),
+                action.datagram_len(),
+                action.deadline_ns,
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransitionStage {
+    Al,
+    Disable,
+    Enable,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StateRequestHandle {
@@ -67,6 +116,7 @@ pub struct StateRequestResult {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StateRequestProgress {
+    OpOnly(OpOnlySyncManagerProgress),
     ControlWritten,
     Polling,
     StepReached(StateRequestObservation),
@@ -78,7 +128,7 @@ impl StateRequestProgress {
         match self {
             Self::StepReached(observation) => Some(observation),
             Self::Complete(result) => Some(result.observation),
-            Self::ControlWritten | Self::Polling => None,
+            Self::ControlWritten | Self::Polling | Self::OpOnly(_) => None,
         }
     }
 }
@@ -113,6 +163,7 @@ pub enum StateRequestError {
     RetainedResultMismatch(u16),
     Control(ControlError),
     Al(AlError),
+    OpOnly(OpOnlySyncManagerError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -143,6 +194,10 @@ pub struct StateRequestController {
     transition_timeouts: AlTransitionTimeouts,
     error_acknowledge_policy: AlErrorAcknowledgePolicy,
     al: AlTransitionController,
+    op_only: OpOnlySyncManagerController,
+    op_only_profile: OpOnlySyncManagerProfile,
+    transition_stage: TransitionStage,
+    step_deadline_ns: u64,
     latest_observation: Option<StateRequestObservation>,
     observation_pending: bool,
     result: Option<StateRequestResult>,
@@ -165,6 +220,10 @@ impl StateRequestController {
             transition_timeouts: AlTransitionTimeouts::uniform(1),
             error_acknowledge_policy: AlErrorAcknowledgePolicy::Disabled,
             al: AlTransitionController::new(),
+            op_only: OpOnlySyncManagerController::new(),
+            op_only_profile: OpOnlySyncManagerProfile::EMPTY,
+            transition_stage: TransitionStage::Al,
+            step_deadline_ns: 0,
             latest_observation: None,
             observation_pending: false,
             result: None,
@@ -181,7 +240,17 @@ impl StateRequestController {
     }
 
     pub const fn pending(&self) -> Option<AlAction> {
-        self.al.pending()
+        match self.transition_stage {
+            TransitionStage::Al => self.al.pending(),
+            _ => None,
+        }
+    }
+
+    pub fn control_pending(&self) -> Option<StateRequestAction> {
+        match self.transition_stage {
+            TransitionStage::Al => self.al.pending().map(StateRequestAction::Al),
+            _ => self.op_only.pending().map(StateRequestAction::OpOnly),
+        }
     }
 
     pub const fn last_error(&self) -> Option<StateRequestError> {
@@ -220,7 +289,15 @@ impl StateRequestController {
         &mut self,
         config: StateRequestConfig,
     ) -> Result<StateRequestHandle, StateRequestError> {
-        self.start_inner(config, false)
+        self.start_inner(config, false, OpOnlySyncManagerProfile::EMPTY)
+    }
+
+    pub fn start_with_op_only(
+        &mut self,
+        config: StateRequestConfig,
+        profile: OpOnlySyncManagerProfile,
+    ) -> Result<StateRequestHandle, StateRequestError> {
+        self.start_inner(config, false, profile)
     }
 
     /// Start a bounded request that lowers SAFEOP/OP directly to PREOP.
@@ -232,13 +309,14 @@ impl StateRequestController {
         &mut self,
         config: StateRequestConfig,
     ) -> Result<StateRequestHandle, StateRequestError> {
-        self.start_inner(config, true)
+        self.start_inner(config, true, OpOnlySyncManagerProfile::EMPTY)
     }
 
     fn start_inner(
         &mut self,
         config: StateRequestConfig,
         direct_preop: bool,
+        profile: OpOnlySyncManagerProfile,
     ) -> Result<StateRequestHandle, StateRequestError> {
         match self.phase {
             StateRequestPhase::Transitioning => return Err(StateRequestError::Busy),
@@ -246,12 +324,31 @@ impl StateRequestController {
             StateRequestPhase::Idle | StateRequestPhase::Complete => {}
         }
         validate_config(config)?;
+        profile
+            .validate()
+            .map_err(|error| StateRequestError::OpOnly(OpOnlySyncManagerError::Profile(error)))?;
 
         let handle = StateRequestHandle {
             sequence: self.next_sequence,
         };
-        let al = prepare_al(config, config.observed_status, config.now_ns, direct_preop)?;
-        let immediate_complete = al.phase() == AlPhase::Complete;
+        let (al, step_deadline_ns) =
+            prepare_al(config, config.observed_status, config.now_ns, direct_preop)?;
+        let al_complete = al.phase() == AlPhase::Complete;
+        let immediate_complete = al_complete && profile.is_empty();
+        let enabled = al_complete && config.requested_state == EthercatState::Op;
+        let mut op_only = OpOnlySyncManagerController::new();
+        if !profile.is_empty() {
+            op_only
+                .start(
+                    config.station_address,
+                    config.generation,
+                    step_deadline_ns,
+                    config.request_timeout_ns,
+                    profile,
+                    enabled,
+                )
+                .map_err(StateRequestError::OpOnly)?;
+        }
 
         self.phase = if immediate_complete {
             StateRequestPhase::Complete
@@ -270,23 +367,52 @@ impl StateRequestController {
         self.transition_timeouts = config.transition_timeouts;
         self.error_acknowledge_policy = config.error_acknowledge_policy;
         self.al = al;
+        self.op_only = op_only;
+        self.op_only_profile = profile;
+        self.step_deadline_ns = step_deadline_ns;
+        self.transition_stage = if profile.is_empty() {
+            TransitionStage::Al
+        } else if enabled {
+            TransitionStage::Enable
+        } else {
+            TransitionStage::Disable
+        };
         self.latest_observation = None;
         self.observation_pending = false;
         self.result = None;
         self.last_error = None;
 
-        if immediate_complete {
+        if al_complete {
             let observation = self.observation(config.now_ns);
             self.latest_observation = Some(observation);
-            self.result = Some(StateRequestResult {
-                observation,
-                completed_at_ns: config.now_ns,
-            });
+            if immediate_complete {
+                self.result = Some(StateRequestResult {
+                    observation,
+                    completed_at_ns: config.now_ns,
+                });
+            }
         }
         Ok(handle)
     }
 
     pub fn next_action(&mut self, now_ns: u64) -> Result<Option<AlAction>, StateRequestError> {
+        if self.transition_stage != TransitionStage::Al
+            && self.phase == StateRequestPhase::Transitioning
+        {
+            return Err(StateRequestError::OpOnlyUnsupported(self.position));
+        }
+        self.next_control_action(now_ns).map(|action| {
+            action.and_then(|action| match action {
+                StateRequestAction::Al(action) => Some(action),
+                StateRequestAction::OpOnly(_) => None,
+            })
+        })
+    }
+
+    pub fn next_control_action(
+        &mut self,
+        now_ns: u64,
+    ) -> Result<Option<StateRequestAction>, StateRequestError> {
         match self.phase {
             StateRequestPhase::Idle => return Err(StateRequestError::ResultNotReady),
             StateRequestPhase::Complete => return Ok(None),
@@ -295,8 +421,15 @@ impl StateRequestController {
             }
             StateRequestPhase::Transitioning => {}
         }
+        if self.transition_stage != TransitionStage::Al {
+            return self
+                .op_only
+                .next_action(now_ns)
+                .map(|action| action.map(StateRequestAction::OpOnly))
+                .map_err(|error| self.fail(StateRequestError::OpOnly(error)));
+        }
         match self.al.next_action(now_ns) {
-            Ok(action) => Ok(action),
+            Ok(action) => Ok(action.map(StateRequestAction::Al)),
             Err(error) => Err(self.fail(StateRequestError::Al(error))),
         }
     }
@@ -305,7 +438,12 @@ impl StateRequestController {
         &mut self,
         pool: &mut ControlRequestPool<REQUESTS>,
     ) -> Result<RequestHandle, StateRequestError> {
-        match self.al.enqueue_pending(pool) {
+        let result = if self.transition_stage == TransitionStage::Al {
+            self.al.enqueue_pending(pool)
+        } else {
+            self.op_only.enqueue_pending(pool)
+        };
+        match result {
             Ok(handle) => Ok(handle),
             Err(error) => Err(self.fail(StateRequestError::Control(error))),
         }
@@ -319,7 +457,7 @@ impl StateRequestController {
         working_counter: u16,
         now_ns: u64,
     ) -> Result<StateRequestProgress, StateRequestError> {
-        if self.phase != StateRequestPhase::Transitioning || self.al.pending() != Some(action) {
+        if self.phase != StateRequestPhase::Transitioning || self.pending() != Some(action) {
             return Err(self.fail(StateRequestError::ActionMismatch));
         }
 
@@ -350,6 +488,25 @@ impl StateRequestController {
             AlProgress::Reached(_) => {
                 let observation = self.record_observation(now_ns);
                 if observation.observed_status.state == self.requested_state {
+                    if self.requested_state == EthercatState::Op && !self.op_only_profile.is_empty()
+                    {
+                        if now_ns >= self.step_deadline_ns {
+                            return Err(self
+                                .fail(StateRequestError::OpOnly(OpOnlySyncManagerError::Timeout)));
+                        }
+                        self.op_only
+                            .start(
+                                self.station_address,
+                                self.generation,
+                                self.step_deadline_ns,
+                                self.request_timeout_ns,
+                                self.op_only_profile,
+                                true,
+                            )
+                            .map_err(|error| self.fail(StateRequestError::OpOnly(error)))?;
+                        self.transition_stage = TransitionStage::Enable;
+                        return Ok(StateRequestProgress::StepReached(observation));
+                    }
                     let result = StateRequestResult {
                         observation,
                         completed_at_ns: now_ns,
@@ -372,6 +529,16 @@ impl StateRequestController {
         handle: RequestHandle,
         now_ns: u64,
     ) -> Result<StateRequestProgress, StateRequestError> {
+        if self.transition_stage != TransitionStage::Al {
+            if self.phase != StateRequestPhase::Transitioning {
+                return Err(self.fail(StateRequestError::ActionMismatch));
+            }
+            let progress = self
+                .op_only
+                .accept_completed(pool, handle, now_ns)
+                .map_err(|error| self.fail(StateRequestError::OpOnly(error)))?;
+            return self.finish_op_only(progress, now_ns);
+        }
         let action = match self.pending() {
             Some(action) => action,
             None => return Err(self.fail(StateRequestError::ActionMismatch)),
@@ -438,12 +605,85 @@ impl StateRequestController {
         )
     }
 
+    pub fn accept_control(
+        &mut self,
+        action: StateRequestAction,
+        generation: u16,
+        payload: &[u8],
+        working_counter: u16,
+        now_ns: u64,
+    ) -> Result<StateRequestProgress, StateRequestError> {
+        if self.phase != StateRequestPhase::Transitioning || self.control_pending() != Some(action)
+        {
+            return Err(self.fail(StateRequestError::ActionMismatch));
+        }
+        match action {
+            StateRequestAction::Al(action) => {
+                self.accept(action, generation, payload, working_counter, now_ns)
+            }
+            StateRequestAction::OpOnly(action) => {
+                let progress = self
+                    .op_only
+                    .accept(action, generation, payload, working_counter, now_ns)
+                    .map_err(|error| self.fail(StateRequestError::OpOnly(error)))?;
+                self.finish_op_only(progress, now_ns)
+            }
+        }
+    }
+
+    pub fn timeout_control(
+        &mut self,
+        action: StateRequestAction,
+        now_ns: u64,
+    ) -> Result<StateRequestProgress, StateRequestError> {
+        if self.phase != StateRequestPhase::Transitioning || self.control_pending() != Some(action)
+        {
+            return Err(self.fail(StateRequestError::ActionMismatch));
+        }
+        match action {
+            StateRequestAction::Al(action) => self.timeout(action, now_ns),
+            StateRequestAction::OpOnly(action) => {
+                let error = self
+                    .op_only
+                    .timeout(action, now_ns)
+                    .err()
+                    .unwrap_or(OpOnlySyncManagerError::Timeout);
+                Err(self.fail(StateRequestError::OpOnly(error)))
+            }
+        }
+    }
+
+    fn finish_op_only(
+        &mut self,
+        progress: OpOnlySyncManagerProgress,
+        now_ns: u64,
+    ) -> Result<StateRequestProgress, StateRequestError> {
+        if progress != OpOnlySyncManagerProgress::Complete {
+            return Ok(StateRequestProgress::OpOnly(progress));
+        }
+        if self.transition_stage == TransitionStage::Disable && self.al.phase() != AlPhase::Complete
+        {
+            self.transition_stage = TransitionStage::Al;
+            return Ok(StateRequestProgress::OpOnly(progress));
+        }
+        let observation = self
+            .latest_observation
+            .ok_or_else(|| self.fail(StateRequestError::ActionMismatch))?;
+        let result = StateRequestResult {
+            observation,
+            completed_at_ns: now_ns,
+        };
+        self.phase = StateRequestPhase::Complete;
+        self.result = Some(result);
+        Ok(StateRequestProgress::Complete(result))
+    }
+
     pub fn timeout(
         &mut self,
         action: AlAction,
         now_ns: u64,
     ) -> Result<StateRequestProgress, StateRequestError> {
-        if self.phase != StateRequestPhase::Transitioning || self.al.pending() != Some(action) {
+        if self.phase != StateRequestPhase::Transitioning || self.pending() != Some(action) {
             return Err(self.fail(StateRequestError::ActionMismatch));
         }
         let error = match self.al.timeout(action.token, now_ns) {
@@ -494,8 +734,9 @@ impl StateRequestController {
             error_acknowledge_policy: self.error_acknowledge_policy,
         };
         match prepare_al(config, self.observed_status, now_ns, false) {
-            Ok(al) => {
+            Ok((al, deadline)) => {
                 self.al = al;
+                self.step_deadline_ns = deadline;
                 Ok(())
             }
             Err(error) => Err(self.fail(error)),
@@ -561,7 +802,7 @@ fn prepare_al(
     observed_status: AlStatus,
     now_ns: u64,
     direct_preop: bool,
-) -> Result<AlTransitionController, StateRequestError> {
+) -> Result<(AlTransitionController, u64), StateRequestError> {
     let expected_state = if direct_preop {
         if config.requested_state != EthercatState::PreOp
             || !matches!(
@@ -604,7 +845,7 @@ fn prepare_al(
         al.start_with_status(request, observed_status, config.error_acknowledge_policy)
     }
     .map_err(StateRequestError::Al)?;
-    Ok(al)
+    Ok((al, now_ns.saturating_add(transition_timeout_ns)))
 }
 
 impl Default for StateRequestController {
@@ -619,6 +860,167 @@ mod tests {
     use crate::slave::AL_ERROR_FLAG;
 
     const TIMEOUTS: AlTransitionTimeouts = AlTransitionTimeouts::new(300, 1_000, 500, 200);
+
+    fn op_only_profile() -> OpOnlySyncManagerProfile {
+        let mut profile = OpOnlySyncManagerProfile::new();
+        profile.add(2, 0x09).unwrap();
+        profile
+    }
+
+    fn finish_op_only_pair(
+        controller: &mut StateRequestController,
+        enabled: bool,
+        now: u64,
+    ) -> StateRequestProgress {
+        let action = controller.next_control_action(now).unwrap().unwrap();
+        let StateRequestAction::OpOnly(write) = action else {
+            panic!("expected SM write");
+        };
+        assert_eq!(write.enabled, enabled);
+        assert_eq!(write.payload(), &[u8::from(enabled)]);
+        assert_eq!(
+            write.address,
+            crate::registers::fixed_address(0x1003, 0x0816)
+        );
+        controller
+            .accept_control(action, 7, &[], 1, now + 1)
+            .unwrap();
+        let action = controller.next_control_action(now + 2).unwrap().unwrap();
+        let StateRequestAction::OpOnly(read) = action else {
+            panic!("expected SM readback");
+        };
+        assert_eq!(read.read_len, 1);
+        controller
+            .accept_control(action, 7, &[u8::from(enabled)], 1, now + 3)
+            .unwrap()
+    }
+
+    #[test]
+    fn op_only_disables_before_al_and_enables_only_after_verified_op() {
+        let mut controller = StateRequestController::new();
+        let handle = controller
+            .start_with_op_only(
+                config(EthercatState::Init, EthercatState::Op, 0, 2_000),
+                op_only_profile(),
+            )
+            .unwrap();
+        assert_eq!(
+            controller.next_action(1),
+            Err(StateRequestError::OpOnlyUnsupported(3))
+        );
+        assert_eq!(controller.phase(), StateRequestPhase::Transitioning);
+        finish_op_only_pair(&mut controller, false, 1);
+        finish_step(&mut controller, EthercatState::PreOp, 5);
+        finish_step(&mut controller, EthercatState::SafeOp, 9);
+        assert!(matches!(
+            finish_step(&mut controller, EthercatState::Op, 13),
+            StateRequestProgress::StepReached(_)
+        ));
+        assert_eq!(
+            controller.result(handle),
+            Err(StateRequestError::ResultNotReady)
+        );
+        let observation = controller.latest_observation().unwrap();
+        assert_eq!(observation.observed_status.state, EthercatState::Op);
+        let StateRequestProgress::Complete(result) = finish_op_only_pair(&mut controller, true, 17)
+        else {
+            panic!("expected completion after SM verification");
+        };
+        assert_eq!(result.observation, observation);
+        assert_eq!(result.completed_at_ns, 20);
+
+        let next = controller
+            .start_with_op_only(
+                config(EthercatState::Op, EthercatState::SafeOp, 30, 2_000),
+                op_only_profile(),
+            )
+            .unwrap();
+        assert_eq!(
+            controller.result(handle),
+            Err(StateRequestError::InvalidHandle)
+        );
+        finish_op_only_pair(&mut controller, false, 31);
+        assert!(matches!(
+            finish_step(&mut controller, EthercatState::SafeOp, 35),
+            StateRequestProgress::Complete(_)
+        ));
+        assert_eq!(
+            controller
+                .result(next)
+                .unwrap()
+                .observation
+                .observed_status
+                .state,
+            EthercatState::SafeOp
+        );
+    }
+
+    #[test]
+    fn op_only_same_state_still_verifies_activation_and_readback_failure_latches() {
+        let mut controller = StateRequestController::new();
+        let handle = controller
+            .start_with_op_only(
+                config(EthercatState::Op, EthercatState::Op, 0, 500),
+                op_only_profile(),
+            )
+            .unwrap();
+        assert_eq!(
+            controller.result(handle),
+            Err(StateRequestError::ResultNotReady)
+        );
+        assert!(matches!(
+            finish_op_only_pair(&mut controller, true, 1),
+            StateRequestProgress::Complete(_)
+        ));
+        let mut controller = StateRequestController::new();
+        controller
+            .start_with_op_only(
+                config(EthercatState::Op, EthercatState::SafeOp, 0, 500),
+                op_only_profile(),
+            )
+            .unwrap();
+        let write = controller.next_control_action(1).unwrap().unwrap();
+        controller.accept_control(write, 7, &[], 1, 2).unwrap();
+        let read = controller.next_control_action(3).unwrap().unwrap();
+        let error = StateRequestError::OpOnly(OpOnlySyncManagerError::ReadbackMismatch);
+        assert_eq!(
+            controller.accept_control(read, 7, &[0x08], 1, 4),
+            Err(error)
+        );
+        assert_eq!(controller.phase(), StateRequestPhase::Faulted);
+        assert_eq!(controller.next_control_action(5), Err(error));
+        assert_eq!(
+            controller.start(config(EthercatState::Op, EthercatState::SafeOp, 5, 500)),
+            Err(StateRequestError::FaultLatched)
+        );
+        assert_eq!(controller.timeout_control(write, 500), Err(error));
+    }
+
+    #[test]
+    fn op_only_and_al_share_the_original_step_deadline() {
+        let mut controller = StateRequestController::new();
+        controller
+            .start_with_op_only(
+                config(EthercatState::SafeOp, EthercatState::Op, 0, 10),
+                op_only_profile(),
+            )
+            .unwrap();
+        finish_op_only_pair(&mut controller, false, 1);
+        finish_step(&mut controller, EthercatState::Op, 5);
+        let action = controller.next_control_action(9).unwrap().unwrap();
+        assert_eq!(action.deadline_ns(), 10);
+        controller.accept_control(action, 7, &[], 1, 10).unwrap();
+        assert_eq!(
+            controller.next_control_action(11),
+            Err(StateRequestError::OpOnly(OpOnlySyncManagerError::Timeout))
+        );
+        assert_eq!(controller.phase(), StateRequestPhase::Faulted);
+        assert!(
+            controller
+                .result(controller.active_handle().unwrap())
+                .is_err()
+        );
+    }
 
     fn config(
         current: EthercatState,

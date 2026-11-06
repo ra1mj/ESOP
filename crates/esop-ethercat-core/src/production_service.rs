@@ -1740,18 +1740,8 @@ impl ScheduledProductionServiceScheduler {
             ScheduledProductionServiceKind::StateRequest => services
                 .state_request
                 .as_deref()
-                .and_then(StateRequestController::pending)
-                .is_some_and(|action| {
-                    request.matches_action(
-                        action.datagram_index,
-                        action.generation,
-                        action.address,
-                        action.operation,
-                        action.payload(),
-                        action.datagram_len(),
-                        action.deadline_ns,
-                    )
-                }),
+                .and_then(StateRequestController::control_pending)
+                .is_some_and(|action| action.matches_request(request)),
             ScheduledProductionServiceKind::SlaveMonitor => services
                 .slave_monitor
                 .as_deref()
@@ -2416,7 +2406,7 @@ impl ScheduledProductionServiceScheduler {
                     .state_request
                     .as_deref_mut()
                     .ok_or(ControlError::InvalidState)?;
-                let action = match controller.next_action(now_ns) {
+                let action = match controller.next_control_action(now_ns) {
                     Ok(action) => action,
                     Err(error) => {
                         return Ok(ScheduledProductionEnqueueOutcome {
@@ -2428,8 +2418,8 @@ impl ScheduledProductionServiceScheduler {
                 let Some(action) = action else {
                     return Ok(ScheduledProductionEnqueueOutcome::EMPTY);
                 };
-                if action.deadline_ns <= now_ns {
-                    return Ok(match controller.timeout(action, now_ns) {
+                if action.deadline_ns() <= now_ns {
+                    return Ok(match controller.timeout_control(action, now_ns) {
                         Ok(progress) => ScheduledProductionEnqueueOutcome {
                             progress: Some(ScheduledProductionServiceProgress::StateRequest(
                                 progress,
@@ -3322,6 +3312,98 @@ mod tests {
             );
         }
         controls.release(request).unwrap();
+    }
+
+    #[test]
+    fn state_request_routes_op_only_through_the_same_control_slot_and_exact_readback() {
+        for invalid_enable_readback in [false, true] {
+            let mut profile = crate::OpOnlySyncManagerProfile::new();
+            profile.add(2, 0x09).unwrap();
+            let mut controller = StateRequestController::new();
+            let handle = controller
+                .start_with_op_only(state_request_config(7), profile)
+                .unwrap();
+            let mut scheduler = ScheduledProductionServiceScheduler::new();
+            let mut controls = ControlRequestPool::<1>::new();
+            let mut frame = [0; MAX_ETHERNET_FRAME_LEN];
+            for (step, (register, response)) in [
+                (0x0816, &[0][..]),
+                (0x0816, &[0][..]),
+                (0x0120, &[8, 0][..]),
+                (0x0130, &[8, 0, 0, 0, 0, 0][..]),
+                (0x0816, &[1][..]),
+                (0x0816, &[if invalid_enable_readback { 0 } else { 1 }][..]),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let now_ns = step as u64 * 2 + 1;
+                let request = {
+                    let mut services =
+                        ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+                            .with_state_request(&mut controller);
+                    scheduler.refresh_selection(&services);
+                    scheduler
+                        .enqueue_due(now_ns, &mut controls, &mut services)
+                        .unwrap()
+                        .request
+                        .unwrap()
+                };
+                scheduler.request = Some(request);
+                let services = ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+                    .with_state_request(&mut controller);
+                scheduler
+                    .ensure_request_matches(&controls, &services)
+                    .unwrap();
+                assert_eq!(controls.in_use(), 1);
+                let address = crate::registers::fixed_address(0x1000, register);
+                assert_eq!(controls.get(request).unwrap().address, address);
+                controls
+                    .get_mut(request)
+                    .unwrap()
+                    .build_frame(&mut frame, [0xff; 6], [2; 6])
+                    .unwrap();
+                controls.complete(request, 7, address, response, 1).unwrap();
+                let mut services =
+                    ScheduledProductionServices::<0, 0, 0>::new(None, None, None, None)
+                        .with_state_request(&mut controller);
+                let progress = scheduler.consume_terminal(
+                    &mut controls,
+                    &mut services,
+                    request,
+                    now_ns + 1,
+                    step as u64,
+                );
+                if invalid_enable_readback && step == 5 {
+                    assert_eq!(
+                        progress,
+                        Err(ScheduledProductionServiceFault::StateRequest(
+                            StateRequestError::OpOnly(
+                                crate::OpOnlySyncManagerError::ReadbackMismatch
+                            )
+                        ))
+                    );
+                } else {
+                    assert!(progress.is_ok());
+                }
+                scheduler.request = None;
+                assert_eq!(controls.in_use(), 0);
+                if step < 5 {
+                    assert_eq!(
+                        controller.result(handle),
+                        Err(StateRequestError::ResultNotReady)
+                    );
+                }
+            }
+            assert_eq!(
+                controller.phase(),
+                if invalid_enable_readback {
+                    StateRequestPhase::Faulted
+                } else {
+                    StateRequestPhase::Complete
+                }
+            );
+        }
     }
 
     #[test]

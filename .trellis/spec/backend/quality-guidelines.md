@@ -55,8 +55,9 @@ clang, bpftool, kernel BTF, and a Linux BPF-capable host.
   after startup/configuration/DC and before mailbox/register diagnostics, retain
   an in-flight request without retransmission, reconcile verified observations
   with the real master cycle, and keep a fault selected until explicit recovery.
-  Reject runtime state changes for non-empty OpOnly output profiles until the
-  shared bounded OpOnly sequence exists. Follow
+  Bind non-empty OpOnly profiles to the shared bounded SM/AL sequence; disable
+  and verify before AL, enable and verify after OP, keeping the original step
+  deadline. Use composite control actions through the same pool. Follow
   [EtherCAT Runtime State Requests](./ethercat-state-requests.md).
 - Route explicit topology verification through
   `StartupController::start_rescan`. Validate the retained plan and future

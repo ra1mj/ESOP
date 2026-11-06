@@ -1191,26 +1191,26 @@ impl<const MAX_SLAVES: usize> StartupController<MAX_SLAVES> {
             .find(|profile| profile.position == position)
             .copied()
             .ok_or(StateRequestError::UnknownPosition(position))?;
-        if target != record.al_status.state && !profile.op_only_outputs.is_empty() {
-            return Err(StateRequestError::OpOnlyUnsupported(position));
-        }
         let error_acknowledge_policy = if self.device_emulation[index] {
             AlErrorAcknowledgePolicy::Disabled
         } else {
             AlErrorAcknowledgePolicy::Enabled
         };
-        controller.start(StateRequestConfig {
-            position,
-            station_address: record.station_address,
-            observed_status: record.al_status,
-            requested_state: target,
-            generation,
-            now_ns,
-            deadline_ns,
-            request_timeout_ns: self.config.request_timeout_ns,
-            transition_timeouts: profile.transition_timeouts,
-            error_acknowledge_policy,
-        })
+        controller.start_with_op_only(
+            StateRequestConfig {
+                position,
+                station_address: record.station_address,
+                observed_status: record.al_status,
+                requested_state: target,
+                generation,
+                now_ns,
+                deadline_ns,
+                request_timeout_ns: self.config.request_timeout_ns,
+                transition_timeouts: profile.transition_timeouts,
+                error_acknowledge_policy,
+            },
+            profile.op_only_outputs,
+        )
     }
 
     pub fn validate_state_request_status(
@@ -5114,14 +5114,18 @@ mod tests {
     }
 
     #[test]
-    fn runtime_state_request_rejects_op_only_and_reconciles_verified_observations() {
+    fn runtime_state_request_binds_op_only_and_reconciles_verified_observations() {
         let profile = op_only_profile(0, AlTransitionTimeouts::uniform(1_000));
         let startup = prepared_runtime_state_request(EthercatState::Op, profile, false);
         let mut controller = StateRequestController::new();
-        assert_eq!(
-            startup.start_state_request(&mut controller, 0, EthercatState::SafeOp, 13, 10, 1_000,),
-            Err(StateRequestError::OpOnlyUnsupported(0))
-        );
+        startup
+            .start_state_request(&mut controller, 0, EthercatState::SafeOp, 13, 10, 1_000)
+            .unwrap();
+        assert!(matches!(
+            controller.next_control_action(11).unwrap(),
+            Some(crate::StateRequestAction::OpOnly(_))
+        ));
+        let mut controller = StateRequestController::new();
 
         let profile = StartupSlaveProfile::new(0);
         let mut startup = prepared_runtime_state_request(EthercatState::Op, profile, false);

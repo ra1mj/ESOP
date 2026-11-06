@@ -257,9 +257,9 @@ pub use startup::{
     StartupSlaveProfile,
 };
 pub use state_request::{
-    StateRequestConfig, StateRequestController, StateRequestError, StateRequestHandle,
-    StateRequestObservation, StateRequestPhase, StateRequestProgress, StateRequestResult,
-    StateRequestStatus,
+    StateRequestAction, StateRequestConfig, StateRequestController, StateRequestError,
+    StateRequestHandle, StateRequestObservation, StateRequestPhase, StateRequestProgress,
+    StateRequestResult, StateRequestStatus,
 };
 pub use sync_manager_discovery::{
     SyncManagerRegisterBank, SyncManagerRegisterDescriptor, SyncManagerRegisterDiscoveryAction,

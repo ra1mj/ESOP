@@ -13,6 +13,9 @@ separate operations.
 ```rust
 StateRequestController::new()
 controller.start(StateRequestConfig { .. })
+controller.start_with_op_only(StateRequestConfig { .. }, profile)
+controller.next_control_action(now_ns) // StateRequestAction::{Al, OpOnly}
+controller.accept_control(action, generation, payload, wkc, now_ns)
 controller.start_direct_preop(StateRequestConfig { requested_state: EthercatState::PreOp, .. })
 controller.status(handle)
 controller.result(handle)
@@ -27,7 +30,8 @@ transition-timeout profile, and the Device Emulation acknowledgement policy.
 ## 3. Contracts
 
 - The controller owns one operation, one stable nonzero handle, one inner
-  `AlTransitionController`, and fixed-size progress/result/fault evidence.
+  `AlTransitionController`, one existing `OpOnlySyncManagerController`, and
+  fixed-size progress/result/fault evidence.
 - Multi-step requests start exactly one legal `next_state` step at a time and
   publish the next step only after an exact verified AL status response.
 - `start_direct_preop` is reserved for the verified single-slave
@@ -38,8 +42,19 @@ transition-timeout profile, and the Device Emulation acknowledgement policy.
   deadline. Each wire request uses the lesser of request timeout and step time.
 - `StartupController` is the verified context authority. It admits only Ready,
   online, configured retained records and supplies station/status/profile data.
-- Non-empty OpOnly output profiles reject real runtime state changes. Startup's
-  existing private OpOnly sequence must not be copied or bypassed.
+- Startup binds its retained OpOnly profile to `start_with_op_only`. Disable and
+  exactly read back every OpOnly output before AL traversal; after verified OP,
+  enable and exactly read back every output before Complete. Same-state requests
+  still verify the appropriate activation. Both controllers share the original
+  step deadline and overall absolute deadline; preparing AL before SM work does
+  not grant a new budget after the SM response.
+- Keep ordinary `start`, `next_action`, `accept`, and `timeout` source-compatible
+  for AL-only callers. Composite work uses `next_control_action`, `control_pending`,
+  `accept_control`, and `timeout_control`; the old AL-only next_action adapter
+  returns OpOnlyUnsupported without mutation while SM work is required.
+  enqueue_pending/accept_completed and the production scheduler handle both.
+- AL observations retain the time of the actual AL read. A later SM readback
+  cannot refresh AL age; the result carries its separate completion time.
 - Production priority is Startup, PDO/Watchdog/Mapping/DC configuration,
   State Request, Mailbox, then diagnostic Register Request. Domain/DC transport
   runs before the selected service slot.
@@ -64,7 +79,8 @@ transition-timeout profile, and the Device Emulation acknowledgement policy.
 | Unknown or illegal ESM path | `InvalidTransition` |
 | Invalid timeout profile | `InvalidTransitionTimeouts` |
 | Startup not Ready / record absent / offline / unconfigured | typed retained-context error |
-| Non-empty OpOnly output rules for a real state change | `OpOnlyUnsupported(position)` |
+| AL-only action adapter while OpOnly work is required | `OpOnlyUnsupported(position)`; use composite API |
+| OpOnly generation/WKC/length/readback/deadline failure | latched `OpOnly(...)`; no Complete |
 | Frozen request differs from AL action or pool request | `ActionMismatch` |
 | Generation, WKC, payload, deadline, timeout, or AL status failure | latched `Al(...)` or `Control(...)` |
 | Retained station/status changes before the next action | latched retained-state mismatch |
@@ -86,9 +102,13 @@ transition-timeout profile, and the Device Emulation acknowledgement policy.
   deadlines, action/generation/WKC mismatch, AL error acknowledgement, stale
   handles, result reuse, and latched first faults.
 - Startup tests: Ready/online/configured context, unknown position, profile
-  timeout, Device Emulation policy, OpOnly rejection, retained station/status,
+  timeout, Device Emulation policy, retained OpOnly binding, station/status,
   and successful cycle-bound reconciliation.
-- Scheduler tests: fixed priority, no in-flight preemption, exact frozen-action
+- Composite tests: INIT→OP and OP→SAFEOP ordering, same-state verification,
+  immutable AL observation age, shared absolute deadline, exact reserved-bit
+  readback, first fault and stale handles.
+- Scheduler tests: one-slot AL/OpOnly sequence, readback failure, fixed priority,
+  no in-flight preemption, exact frozen-action
   matching, terminal consumption, and persistent fault selection.
 - Linux integration: assert LRW/FRMW precede FPWR/FPRD, delay one response over
   a cycle boundary, assert no retransmission and one control slot, then verify
