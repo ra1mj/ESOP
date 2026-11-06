@@ -41,3 +41,10 @@ SDO transport tokens). Ready.bind borrows the immutable active plan and mutable
 controllers, with the external domain storage, into MasterRuntime. Keep the
 production scheduler and ScheduledProductionCycleOwner. Pure IO also needs an
 explicit disabled DC path; never treat WKC 0 as a measured clock.
+
+Increment 2 commit e6192c3 is pushed; Linux CI run 42149931883 passed all jobs.
+Next prerequisite adds explicit disabled DC with dc_requested=false, no owned
+index/frame/sample and preserved Unknown lock state. Generic control/Domain
+cycle provenance and lifecycle shape validation share one TX ordering validator.
+Core/lifecycle all-feature tests and Clippy pass; optional_dc public tests cover
+no extra frames, control completion, missing input and zero-WKC rejection.

@@ -2720,6 +2720,7 @@ struct DcSyncWindowState {
 }
 
 pub struct DcCyclicSync {
+    enabled: bool,
     config: DcCyclicConfig,
     bus_transit_count: Option<u16>,
     monitor: DcMonitor,
@@ -2737,6 +2738,7 @@ pub struct DcCyclicSync {
 impl DcCyclicSync {
     pub const fn new(config: DcCyclicConfig, monitor: DcMonitor) -> Self {
         Self {
+            enabled: true,
             config,
             bus_transit_count: None,
             monitor,
@@ -2752,6 +2754,18 @@ impl DcCyclicSync {
         }
     }
 
+    /// A product with no DC requirement owns no DC datagram and publishes no sample.
+    pub const fn disabled() -> Self {
+        let mut sync = Self::new(DcCyclicConfig::new(0, 0, 0), DcMonitor::new(0, 0, 1, 1));
+        sync.enabled = false;
+        sync.config.expected_wkc = 0;
+        sync
+    }
+
+    pub const fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
     /// Construct with the same frozen physical transit count as the master.
     pub const fn new_with_bus_transit_count(
         config: DcCyclicConfig,
@@ -2764,6 +2778,9 @@ impl DcCyclicSync {
     }
 
     pub fn with_sync_window(mut self, config: DcSyncWindowConfig) -> Result<Self, DcCyclicError> {
+        if !self.enabled {
+            return Err(DcCyclicError::InvalidConfiguration);
+        }
         config.validate()?;
         if config.datagram_index == self.config.datagram_index {
             return Err(DcCyclicError::DuplicateDatagramIndex);
@@ -2807,11 +2824,12 @@ impl DcCyclicSync {
     }
 
     pub fn uses_datagram_index(&self, index: u8) -> bool {
-        self.config.datagram_index == index
-            || self
-                .sync_window
-                .as_ref()
-                .is_some_and(|window| window.config.datagram_index == index)
+        self.enabled
+            && (self.config.datagram_index == index
+                || self
+                    .sync_window
+                    .as_ref()
+                    .is_some_and(|window| window.config.datagram_index == index))
     }
 
     pub const fn pending_generation(&self) -> Option<u16> {
@@ -2838,7 +2856,8 @@ impl DcCyclicSync {
     }
 
     pub fn is_locked(&self) -> bool {
-        self.monitor.is_locked()
+        self.enabled
+            && self.monitor.is_locked()
             && self
                 .sync_window
                 .as_ref()
@@ -2877,7 +2896,7 @@ impl DcCyclicSync {
         application_time_ns: u64,
         process_image: &mut [u8],
     ) -> Result<(), DcCyclicError> {
-        if self.config.expected_wkc == 0 {
+        if !self.enabled || self.config.expected_wkc == 0 {
             return self.fail(DcCyclicError::InvalidConfiguration);
         }
         if let Some(window) = &self.sync_window {
@@ -2963,6 +2982,9 @@ impl DcCyclicSync {
     /// by the master. A missing sample must not keep the next prepare busy or
     /// allow the previous cycle's lock to count as current evidence.
     pub fn finish_receive(&mut self, cycle: u64, generation: u16) -> Result<(), DcCyclicError> {
+        if !self.enabled {
+            return Ok(());
+        }
         if self.pending_generation() == Some(generation) {
             return self.fail(DcCyclicError::MissingResponse);
         }

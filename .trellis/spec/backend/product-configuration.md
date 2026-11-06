@@ -795,6 +795,9 @@ runtime tag is rejected before activation.
 - `PdoConfigPlan::append_mapping_verification` / `append_assignment_verification`
   and `push_verification` add upload-only operations; `access()` accompanies
   the compatibility `writes()` value slice.
+- `DcCyclicSync::disabled()` explicitly suppresses DC for a product without a
+  DC requirement. `is_enabled()` and service report `dc_requested` distinguish
+  absence from a requested sample.
 - `StartupSlaveProfile::with_no_mailbox` / `with_non_coe_mailbox` select SII
   verification. Ordinary `with_expected_mailbox` retains the CoE requirement.
 - `StaticProductConfig::build_mapping_for_slave(position, startup)` rebuilds
@@ -826,6 +829,13 @@ Entries remain bit-packed within each SM. Each new SM and slave direction
 starts on a byte boundary; trailing bits are unowned padding, excluded from
 FMMUs. Aggregate Domain LWR/LRD covers those bytes, retaining exact per-slave
 WKC and complete-only input commit. No byte-aligned segment fast path is used.
+An explicitly disabled DC owner claims no indices, sends no frames, retains
+Unknown lock state and zero samples. Closing an RX cycle has no outstanding DC
+obligation but does not manufacture a clock sample. Ordinary enabled DC with
+expected WKC zero still fails; it cannot implicitly select this mode. Shared
+service TX ordering checks use dc_requested/dc_sent and reject invented DC
+success. Control/PDO validation and receive provenance stay unchanged.
+
 Physical addresses/control come from verified SII, never scene constants.
 FMMU logical/physical start bits and end bits reflect actual PDO lengths.
 
@@ -839,6 +849,7 @@ FMMU logical/physical start bits and end bits reflect actual PDO lengths.
 | SDO policy request for no-CoE station | CoeUnavailable |
 | Nonzero SII mailbox words for absent profile | UnexpectedMailbox; no verified mailbox |
 | Wrong immutable PDO upload / expired absolute deadline | Existing typed readback/timeout fault |
+| Enabled DC with expected WKC zero | InvalidConfiguration, never inferred disabled |
 | Missing verified SII, foreign identity, gaps/overlaps, short SM | ProductMappingError; no table publication |
 
 ### 5. Good / Base / Bad Cases
@@ -858,6 +869,8 @@ empty jobs and SDO rejection, stale/unverified SII rejection and literal bit
 FMMU bytes. Generator tests assert zero-axis/no-mailbox IO, cross-byte offsets,
 byte-cover WKC and fixed assignment rejection. The full r0_r2 scenario uses the
 public mapping builder, while the existing wire/replay fixtures stay independent.
+Optional-DC public tests assert no DC TX, zero samples/Unknown state, ordinary
+FPRD completion and continued rejection of missing PDO inputs.
 
 ### 7. Wrong vs Correct
 

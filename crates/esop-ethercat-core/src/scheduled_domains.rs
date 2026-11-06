@@ -206,10 +206,22 @@ pub enum ScheduledServiceTxFailure<E> {
 /// terminal immediately; its service must consume and release that request.
 #[derive(Debug)]
 pub struct ScheduledServiceTxReport<E> {
+    pub dc_requested: bool,
     pub dc_sent: bool,
     pub control_sent: bool,
     pub failure: Option<ScheduledServiceTxFailure<E>>,
     pub post_tx_deadline_met: bool,
+}
+
+impl<E> ScheduledServiceTxReport<E> {
+    pub fn transmission_order_valid(&self) -> bool {
+        let dc_done = !self.dc_requested || self.dc_sent;
+        (!self.dc_sent || self.dc_requested)
+            && (self.failure.is_some() || dc_done)
+            && (!self.control_sent || dc_done)
+            && !matches!(self.failure, Some(ScheduledServiceTxFailure::Dc(_)) if self.dc_sent || !self.dc_requested)
+            && !matches!(self.failure, Some(ScheduledServiceTxFailure::Control(_)) if !dc_done || self.control_sent)
+    }
 }
 
 /// Even an RX port error returns a cycle report tied to the real master
@@ -277,17 +289,7 @@ impl<E, const DOMAINS: usize> ScheduledMailboxCycleReport<E, DOMAINS> {
         self.request == self.tx.request
             && !(self.receive.mailbox_progress.is_some() && self.request.is_some())
             && !(self.post_receive_deadline_met && !service.post_tx_deadline_met)
-            && (service.failure.is_some() || service.dc_sent)
-            && (!service.control_sent || service.dc_sent)
-            && !matches!(
-                service.failure,
-                Some(ScheduledServiceTxFailure::Dc(_)) if service.dc_sent
-            )
-            && !matches!(
-                service.failure,
-                Some(ScheduledServiceTxFailure::Control(_))
-                    if !service.dc_sent || service.control_sent
-            )
+            && service.transmission_order_valid()
     }
 }
 
@@ -350,20 +352,7 @@ impl<E, const DOMAINS: usize> ScheduledControlCycleReport<E, DOMAINS> {
         if self.post_receive_deadline_met && !service.post_tx_deadline_met {
             return false;
         }
-        if service.failure.is_none() && !service.dc_sent {
-            return false;
-        }
-        if service.control_sent && !service.dc_sent {
-            return false;
-        }
-        if matches!(
-            service.failure,
-            Some(ScheduledServiceTxFailure::Dc(_)) if service.dc_sent
-        ) || matches!(
-            service.failure,
-            Some(ScheduledServiceTxFailure::Control(_))
-                if !service.dc_sent || service.control_sent
-        ) {
+        if !service.transmission_order_valid() {
             return false;
         }
 
@@ -1052,27 +1041,32 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
             return Err(ScheduledServiceTxError::ControlIndexConflict(index));
         }
         let mut dc_plan = FramePlan::<2>::new();
-        dc_plan
-            .push(dc.datagram_plan())
-            .map_err(|_| ScheduledServiceTxError::Dc(DcCyclicError::InvalidConfiguration))?;
-        if let Some(sync_window) = dc.sync_window_datagram_plan() {
+        if dc.is_enabled() {
             dc_plan
-                .push(sync_window)
+                .push(dc.datagram_plan())
                 .map_err(|_| ScheduledServiceTxError::Dc(DcCyclicError::InvalidConfiguration))?;
+            if let Some(sync_window) = dc.sync_window_datagram_plan() {
+                dc_plan.push(sync_window).map_err(|_| {
+                    ScheduledServiceTxError::Dc(DcCyclicError::InvalidConfiguration)
+                })?;
+            }
+            dc.prepare(generation, application_time_ns, dc_image)
+                .map_err(ScheduledServiceTxError::Dc)?;
         }
-        dc.prepare(generation, application_time_ns, dc_image)
-            .map_err(ScheduledServiceTxError::Dc)?;
         master.reap_expired_rx_before_tx(now_ns);
 
         let mut report = ScheduledServiceTxReport {
+            dc_requested: dc.is_enabled(),
             dc_sent: false,
             control_sent: false,
             failure: None,
             post_tx_deadline_met: false,
         };
-        match submit_dc_frame(master, port, generation, rx_deadline_ns, &dc_plan, dc_image) {
-            Ok(()) => report.dc_sent = true,
-            Err(error) => report.failure = Some(ScheduledServiceTxFailure::Dc(error)),
+        if dc.is_enabled() {
+            match submit_dc_frame(master, port, generation, rx_deadline_ns, &dc_plan, dc_image) {
+                Ok(()) => report.dc_sent = true,
+                Err(error) => report.failure = Some(ScheduledServiceTxFailure::Dc(error)),
+            }
         }
         if report.failure.is_none() && port.now_ns() >= cycle_deadline_ns {
             report.failure = Some(ScheduledServiceTxFailure::Deadline);
@@ -1146,6 +1140,9 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
     }
 
     fn dc_domain_index_conflict(&self, dc: &DcCyclicSync) -> Option<u8> {
+        if !dc.is_enabled() {
+            return None;
+        }
         let reference = dc.datagram_plan().index;
         if self.index_owner[reference as usize] != 0 {
             return Some(reference);
@@ -1171,7 +1168,7 @@ impl<'a, const DOMAINS: usize, const SLOTS: usize> ScheduledDomainBank<'a, DOMAI
         if let Some(index) = self.dc_domain_index_conflict(dc) {
             return Err(ScheduledReceiveError::DcIndexConflict(index));
         }
-        if dc.pending_generation() != Some(generation) {
+        if dc.is_enabled() && dc.pending_generation() != Some(generation) {
             return Err(ScheduledReceiveError::DcGenerationMismatch);
         }
         let cycle = master.cycle_number().wrapping_add(1);

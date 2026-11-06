@@ -30,9 +30,8 @@ use esop_ethercat_core::{
     CycleReport, DcCyclicSync, Domain, EthercatMaster, EthercatPort, FramePlan, FramePlanSet,
     ScheduleTable, ScheduledControlCycleReport, ScheduledDomainBank, ScheduledMailboxCycleReport,
     ScheduledProcessInputs, ScheduledProcessTxReport, ScheduledProductionServiceCycleReport,
-    ScheduledReceiveReport, ScheduledServiceTxFailure, ScheduledSlaveCopyError, SlaveCopyPlanSet,
-    SlaveCopyProcessImage, SlaveCopyPublication, SlaveCopyPublishedImage, SlaveMonitorQuality,
-    wire::Command,
+    ScheduledReceiveReport, ScheduledSlaveCopyError, SlaveCopyPlanSet, SlaveCopyProcessImage,
+    SlaveCopyPublication, SlaveCopyPublishedImage, SlaveMonitorQuality, wire::Command,
 };
 use esop_procbuf::{CommandPage, HeaderError, ProcBuf, StatePage, StatePublishError};
 use esop_profile_cia402::{
@@ -1974,17 +1973,7 @@ impl<
         let service_shape_invalid = cycle.request != cycle.tx.request
             || (cycle.receive.mailbox_progress.is_some() && cycle.request.is_some())
             || (cycle.post_receive_deadline_met && !service.post_tx_deadline_met)
-            || (service.failure.is_none() && !service.dc_sent)
-            || (service.control_sent && !service.dc_sent)
-            || matches!(
-                service.failure,
-                Some(ScheduledServiceTxFailure::Dc(_)) if service.dc_sent
-            )
-            || matches!(
-                service.failure,
-                Some(ScheduledServiceTxFailure::Control(_))
-                    if !service.dc_sent || service.control_sent
-            );
+            || !service.transmission_order_valid();
         if service_shape_invalid {
             return Err(StopCycleError::ServiceCycleMismatch);
         }
